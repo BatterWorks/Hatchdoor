@@ -213,6 +213,7 @@ body {
   border-radius: 7px;
   background: #fffef8;
   padding: 0.18rem 0.3rem;
+  font-size: 16px;
 }
 
 .note-content {
@@ -596,6 +597,7 @@ body {
   border-radius: 9px;
   padding: 0.55rem 0.65rem;
   background: #fffef8;
+  font-size: 16px;
 }
 
 .search-toggle {
