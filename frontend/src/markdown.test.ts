@@ -31,6 +31,31 @@ Hello`;
     expect(parsed.properties.tags).toEqual(["alpha", "beta"]);
     expect(parsed.body).toBe("Hello");
   });
+
+  it("keeps markdown content when leading hr is not frontmatter", () => {
+    const input = `---
+This is just note text
+---
+
+# Title`;
+
+    const parsed = parseFrontmatter(input);
+    expect(parsed.properties).toEqual({});
+    expect(parsed.body).toBe(input);
+  });
+
+  it("accepts keys with spaces and dots", () => {
+    const input = `---
+publish date: 2026-02-08
+build.version: "1.2.3"
+---
+Body`;
+
+    const parsed = parseFrontmatter(input);
+    expect(parsed.properties["publish date"]).toBe("2026-02-08");
+    expect(parsed.properties["build.version"]).toBe("1.2.3");
+    expect(parsed.body).toBe("Body");
+  });
 });
 
 describe("normalizeTags", () => {

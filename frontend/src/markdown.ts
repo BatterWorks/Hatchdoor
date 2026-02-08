@@ -36,6 +36,9 @@ export function parseFrontmatter(input: string): {
   }
 
   const header = lines.slice(1, end);
+  if (!looksLikeFrontmatterHeader(header)) {
+    return { properties: {}, body: input };
+  }
   const body = lines.slice(end + 1).join("\n");
   const properties: Record<string, FrontmatterValue> = {};
   let listKey: string | null = null;
@@ -58,13 +61,17 @@ export function parseFrontmatter(input: string): {
       continue;
     }
 
-    const keyMatch = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    const keyMatch = line.match(/^([^:\n][^:\n]*?)\s*:\s*(.*)$/);
     if (!keyMatch) {
       listKey = null;
       continue;
     }
 
-    const key = keyMatch[1];
+    const key = normalizeKey(keyMatch[1]);
+    if (!key) {
+      listKey = null;
+      continue;
+    }
     const rawValue = keyMatch[2].trim();
     if (!rawValue) {
       properties[key] = [];
@@ -100,6 +107,54 @@ function parseScalar(value: string): string {
     return trimmed.slice(1, -1).trim();
   }
   return trimmed;
+}
+
+function normalizeKey(rawKey: string): string {
+  const trimmed = rawKey.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function looksLikeFrontmatterHeader(lines: string[]): boolean {
+  if (lines.length === 0) {
+    return false;
+  }
+
+  let hasProperty = false;
+  let listAllowed = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) {
+      continue;
+    }
+
+    if (/^\s*-\s+/.test(line)) {
+      if (!listAllowed) {
+        return false;
+      }
+      hasProperty = true;
+      continue;
+    }
+
+    if (/^[^:\n][^:\n]*\s*:/.test(trimmed)) {
+      hasProperty = true;
+      listAllowed = /:\s*$/.test(trimmed);
+      continue;
+    }
+
+    return false;
+  }
+
+  return hasProperty;
 }
 
 export function normalizeTags(value: FrontmatterValue | undefined): string[] {
