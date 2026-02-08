@@ -41,4 +41,42 @@ export default defineConfig({
     setupFiles: "./src/test/setup.ts",
     css: true,
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) {
+            return;
+          }
+
+          if (
+            id.includes("/react/") ||
+            id.includes("/react-dom/") ||
+            id.includes("/react-router")
+          ) {
+            return "react-vendor";
+          }
+
+          if (
+            id.includes("/react-markdown/") ||
+            id.includes("/remark-") ||
+            id.includes("/rehype-") ||
+            id.includes("/micromark") ||
+            id.includes("/mdast-") ||
+            id.includes("/hast-") ||
+            id.includes("/unified/") ||
+            id.includes("/unist-") ||
+            id.includes("/vfile")
+          ) {
+            return "markdown-vendor";
+          }
+
+          if (id.includes("/katex/")) {
+            return "katex-vendor";
+          }
+
+        },
+      },
+    },
+  },
 });
