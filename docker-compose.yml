@@ -1,0 +1,13 @@
+services:
+  hatchdoor:
+    image: 192.168.31.233:5000/hatchdoor:latest
+    container_name: hatchdoor
+    env_file:
+      - .env
+    environment:
+      VAULT_PATH: /data/vault
+    ports:
+      - "42824:42824"
+    volumes:
+      - ${HOST_VAULT_PATH:-./vault}:/data/vault
+    restart: unless-stopped

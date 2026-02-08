@@ -1,0 +1,14 @@
+.git
+.gitignore
+.env
+.env.*
+
+target
+tmp
+
+frontend/node_modules
+frontend/dist
+
+README.md
+docs
+AGENTS.md
