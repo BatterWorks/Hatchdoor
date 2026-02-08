@@ -10,19 +10,18 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use dotenvy::dotenv;
 use tower_http::services::ServeDir;
 
-use crate::render::{markdown_to_html, render_note_page};
+use crate::render::{markdown_to_html, render_app_page, render_explorer_html};
 use crate::vault::VaultIndex;
 use crate::wikilink::{escape_html, rewrite_wikilinks};
 
 #[derive(Debug, Clone)]
 struct AppConfig {
     vault_path: PathBuf,
-    home_note: String,
     host: String,
     port: u16,
 }
@@ -30,14 +29,12 @@ struct AppConfig {
 impl AppConfig {
     fn from_env() -> Result<Self, String> {
         let vault_path = env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
-        let home_note = env::var("HOME_NOTE").unwrap_or_else(|_| "Home".to_string());
         let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let port_raw = env::var("PORT").unwrap_or_else(|_| "42824".to_string());
         let port = parse_port(&port_raw)?;
 
         Ok(Self {
             vault_path: PathBuf::from(vault_path),
-            home_note,
             host,
             port,
         })
@@ -59,7 +56,6 @@ fn parse_port(input: &str) -> Result<u16, String> {
 #[derive(Clone)]
 struct AppState {
     index: Arc<VaultIndex>,
-    home_slug: String,
 }
 
 #[tokio::main]
@@ -79,21 +75,8 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let home_slug = index
-        .resolve_wikilink(&config.home_note)
-        .map(|n| n.slug.clone())
-        .unwrap_or_else(|| {
-            eprintln!(
-                "Home note '{}' not found in vault {}",
-                config.home_note,
-                index.root().display()
-            );
-            std::process::exit(1);
-        });
-
     let state = AppState {
         index: Arc::new(index),
-        home_slug,
     };
 
     let app = Router::new()
@@ -122,8 +105,11 @@ async fn main() {
     });
 }
 
-async fn root_handler(State(state): State<AppState>) -> Redirect {
-    Redirect::to(&format!("/n/{}", state.home_slug))
+async fn root_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let explorer = render_explorer_html(&state.index.explorer_tree(), None);
+    let body = "<h1>Notes Explorer</h1><p>Select any note from the left panel.</p>";
+    let page = render_app_page("Hatchdoor Explorer", &explorer, body);
+    (StatusCode::OK, Html(page))
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -137,25 +123,30 @@ async fn note_handler(
     match state.index.read_note_by_slug(&slug) {
         Ok(Some(note)) => {
             let rewritten = rewrite_wikilinks(&note.content, &state.index);
-            let body = markdown_to_html(&rewritten);
-            let page = render_note_page(&note.title, &body);
+            let rendered_note = markdown_to_html(&rewritten);
+            let explorer = render_explorer_html(&state.index.explorer_tree(), Some(&note.slug));
+            let body =
+                format!("<p class=\"toolbar\"><a href=\"/\">Close note</a></p>{rendered_note}");
+            let page = render_app_page(&note.title, &explorer, &body);
             (StatusCode::OK, Html(page)).into_response()
         }
         Ok(None) => {
             let safe_slug = escape_html(&slug);
             let body = format!(
-                "<h1>Not Found</h1><p>No note exists for slug: <code>{safe_slug}</code></p>"
+                "<h1>Not Found</h1><p>No note exists for slug: <code>{safe_slug}</code></p><p class=\"toolbar\"><a href=\"/\">Back to explorer</a></p>"
             );
-            let page = render_note_page("Not Found", &body);
+            let explorer = render_explorer_html(&state.index.explorer_tree(), None);
+            let page = render_app_page("Not Found", &explorer, &body);
             (StatusCode::NOT_FOUND, Html(page)).into_response()
         }
         Err(e) => {
             let safe_slug = escape_html(&slug);
             let body = format!(
-                "<h1>Error</h1><p>Failed reading note <code>{safe_slug}</code>: {}</p>",
+                "<h1>Error</h1><p>Failed reading note <code>{safe_slug}</code>: {}</p><p class=\"toolbar\"><a href=\"/\">Back to explorer</a></p>",
                 escape_html(&e.to_string())
             );
-            let page = render_note_page("Error", &body);
+            let explorer = render_explorer_html(&state.index.explorer_tree(), None);
+            let page = render_app_page("Error", &explorer, &body);
             (StatusCode::INTERNAL_SERVER_ERROR, Html(page)).into_response()
         }
     }
@@ -180,7 +171,6 @@ mod tests {
     fn socket_addr_builds_expected_address() {
         let cfg = AppConfig {
             vault_path: PathBuf::from("./vault"),
-            home_note: "Home".to_string(),
             host: "0.0.0.0".to_string(),
             port: 42824,
         };
