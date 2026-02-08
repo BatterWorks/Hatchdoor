@@ -1,23 +1,20 @@
-mod render;
 mod vault;
-mod wikilink;
 
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
+use axum::{Json, Router};
 use dotenvy::dotenv;
-use tower_http::services::ServeDir;
+use serde::{Deserialize, Serialize};
+use tower_http::services::{ServeDir, ServeFile};
 
-use crate::render::{markdown_to_html, render_app_page, render_explorer_html};
-use crate::vault::{ExplorerFolder, VaultIndex};
-use crate::wikilink::{escape_html, rewrite_wikilinks};
+use crate::vault::{ExplorerFolder, Note, VaultIndex};
 
 #[derive(Debug, Clone)]
 struct AppConfig {
@@ -59,6 +56,26 @@ struct AppState {
     explorer_tree: Arc<ExplorerFolder>,
 }
 
+#[derive(Debug, Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct NoteResponse {
+    note: Note,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveQuery {
+    target: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolveResponse {
+    slug: Option<String>,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -82,10 +99,23 @@ async fn main() {
     };
 
     let app = Router::new()
-        .route("/", get(root_handler))
         .route("/health", get(health_handler))
-        .route("/n/{slug}", get(note_handler))
-        .nest_service("/assets", ServeDir::new("static"))
+        .route("/api/tree", get(tree_handler))
+        .route("/api/note/{slug}", get(note_handler))
+        .route("/api/resolve", get(resolve_handler))
+        .route("/", get(spa_index_handler))
+        .route("/n/{slug}", get(spa_index_handler))
+        .route_service(
+            "/manifest.webmanifest",
+            ServeFile::new("frontend/dist/manifest.webmanifest"),
+        )
+        .route_service(
+            "/registerSW.js",
+            ServeFile::new("frontend/dist/registerSW.js"),
+        )
+        .route_service("/sw.js", ServeFile::new("frontend/dist/sw.js"))
+        .nest_service("/assets", ServeDir::new("frontend/dist/assets"))
+        .fallback_service(ServeDir::new("frontend/dist"))
         .with_state(state);
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
@@ -107,15 +137,12 @@ async fn main() {
     });
 }
 
-async fn root_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let explorer = render_explorer_html(&state.explorer_tree, None);
-    let body = "<h1>Notes Explorer</h1><p>Select any note from the left panel.</p>";
-    let page = render_app_page("Hatchdoor Explorer", &explorer, body);
-    (StatusCode::OK, Html(page))
-}
-
 async fn health_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
+    Json((*state.explorer_tree).clone())
 }
 
 async fn note_handler(
@@ -123,34 +150,47 @@ async fn note_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     match state.index.read_note_by_slug(&slug) {
-        Ok(Some(note)) => {
-            let rewritten = rewrite_wikilinks(&note.content, &state.index);
-            let rendered_note = markdown_to_html(&rewritten);
-            let explorer = render_explorer_html(&state.explorer_tree, Some(&note.slug));
-            let body =
-                format!("<p class=\"toolbar\"><a href=\"/\">Close note</a></p>{rendered_note}");
-            let page = render_app_page(&note.title, &explorer, &body);
-            (StatusCode::OK, Html(page)).into_response()
-        }
-        Ok(None) => {
-            let safe_slug = escape_html(&slug);
-            let body = format!(
-                "<h1>Not Found</h1><p>No note exists for slug: <code>{safe_slug}</code></p><p class=\"toolbar\"><a href=\"/\">Back to explorer</a></p>"
-            );
-            let explorer = render_explorer_html(&state.explorer_tree, None);
-            let page = render_app_page("Not Found", &explorer, &body);
-            (StatusCode::NOT_FOUND, Html(page)).into_response()
-        }
-        Err(e) => {
-            let safe_slug = escape_html(&slug);
-            let body = format!(
-                "<h1>Error</h1><p>Failed reading note <code>{safe_slug}</code>: {}</p><p class=\"toolbar\"><a href=\"/\">Back to explorer</a></p>",
-                escape_html(&e.to_string())
-            );
-            let explorer = render_explorer_html(&state.explorer_tree, None);
-            let page = render_app_page("Error", &explorer, &body);
-            (StatusCode::INTERNAL_SERVER_ERROR, Html(page)).into_response()
-        }
+        Ok(Some(note)) => (StatusCode::OK, Json(NoteResponse { note })).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Note not found: {slug}"),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed reading note {slug}: {e}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn resolve_handler(
+    Query(query): Query<ResolveQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let slug = state
+        .index
+        .resolve_wikilink(&query.target)
+        .map(|entry| entry.slug.clone());
+
+    Json(ResolveResponse { slug })
+}
+
+async fn spa_index_handler() -> impl IntoResponse {
+    match std::fs::read_to_string("frontend/dist/index.html") {
+        Ok(html) => (StatusCode::OK, Html(html)).into_response(),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Html(
+                "<h1>Frontend not built</h1><p>Run <code>cd frontend && npm install && npm run build</code>, then restart the server.</p>"
+                    .to_string(),
+            ),
+        )
+            .into_response(),
     }
 }
 
