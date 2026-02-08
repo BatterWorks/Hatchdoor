@@ -3,6 +3,7 @@ import {
   isValidElement,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -728,6 +729,14 @@ function FolderTree({
   currentPath: string;
 }) {
   const currentSlug = pathToNoteSlug(currentPath);
+  const [manuallyExpandedFolders, setManuallyExpandedFolders] = useState<
+    Record<string, boolean>
+  >({});
+
+  const activePathFolders = useMemo(
+    () => collectAncestorFolderPaths(root, currentSlug),
+    [currentSlug, root],
+  );
 
   return (
     <ul className="tree root-tree">
@@ -736,7 +745,12 @@ function FolderTree({
           key={`folder-${folder.name}`}
           folder={folder}
           currentPath={currentPath}
-          currentSlug={currentSlug}
+          folderPath={folder.name}
+          expandedFolders={manuallyExpandedFolders}
+          activePathFolders={activePathFolders}
+          onToggleFolder={(path, open) =>
+            setManuallyExpandedFolders((prev) => ({ ...prev, [path]: open }))
+          }
         />
       ))}
       {root.notes.map((note) => (
@@ -749,17 +763,32 @@ function FolderTree({
 function FolderNode({
   folder,
   currentPath,
-  currentSlug,
+  folderPath,
+  expandedFolders,
+  activePathFolders,
+  onToggleFolder,
 }: {
   folder: ExplorerFolder;
   currentPath: string;
-  currentSlug: string | null;
+  folderPath: string;
+  expandedFolders: Record<string, boolean>;
+  activePathFolders: Set<string>;
+  onToggleFolder: (path: string, open: boolean) => void;
 }) {
-  const shouldOpen = folderContainsSlug(folder, currentSlug);
+  const shouldOpen =
+    expandedFolders[folderPath] ?? activePathFolders.has(folderPath);
 
   return (
     <li className="folder-item">
-      <details open={shouldOpen}>
+      <details
+        open={shouldOpen}
+        onToggle={(event) =>
+          onToggleFolder(
+            folderPath,
+            (event.currentTarget as HTMLDetailsElement).open,
+          )
+        }
+      >
         <summary>{folder.name}</summary>
         <ul className="tree">
           {folder.folders.map((child) => (
@@ -767,7 +796,10 @@ function FolderNode({
               key={`${folder.name}-${child.name}`}
               folder={child}
               currentPath={currentPath}
-              currentSlug={currentSlug}
+              folderPath={`${folderPath}/${child.name}`}
+              expandedFolders={expandedFolders}
+              activePathFolders={activePathFolders}
+              onToggleFolder={onToggleFolder}
             />
           ))}
           {folder.notes.map((note) => (
@@ -788,19 +820,37 @@ function pathToNoteSlug(pathname: string): string | null {
   return decodeURIComponent(match[1]);
 }
 
-function folderContainsSlug(
-  folder: ExplorerFolder,
+function collectAncestorFolderPaths(
+  root: ExplorerFolder,
   slug: string | null,
-): boolean {
+): Set<string> {
+  const paths = new Set<string>();
   if (!slug) {
+    return paths;
+  }
+
+  const visit = (folder: ExplorerFolder, folderPath: string): boolean => {
+    if (folder.notes.some((note) => note.slug === slug)) {
+      paths.add(folderPath);
+      return true;
+    }
+
+    for (const child of folder.folders) {
+      const childPath = `${folderPath}/${child.name}`;
+      if (visit(child, childPath)) {
+        paths.add(folderPath);
+        return true;
+      }
+    }
+
     return false;
+  };
+
+  for (const folder of root.folders) {
+    visit(folder, folder.name);
   }
 
-  if (folder.notes.some((note) => note.slug === slug)) {
-    return true;
-  }
-
-  return folder.folders.some((child) => folderContainsSlug(child, slug));
+  return paths;
 }
 
 function NoteNode({
