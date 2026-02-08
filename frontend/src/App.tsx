@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import {
+  Children,
+  isValidElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import {
   NavLink,
@@ -28,7 +37,20 @@ type ExplorerNote = {
 type Note = {
   title: string;
   slug: string;
+  relative_path: string;
   content: string;
+};
+
+type ActiveNoteMeta = {
+  title: string;
+  slug: string;
+  relativePath: string;
+};
+
+type ReadPrefs = {
+  fontSize: number;
+  lineHeight: number;
+  maxWidth: number;
 };
 
 type ResolveBatchResponse = {
@@ -46,12 +68,31 @@ type MermaidApi = {
   render: (id: string, chart: string) => Promise<{ svg: string }>;
 };
 
+const SIDEBAR_WIDTH_KEY = "hatchdoor.sidebarWidth";
+const DRAWER_OPEN_KEY = "hatchdoor.drawerOpen";
+const READER_PREFS_KEY = "hatchdoor.readerPrefs";
+
 function App() {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
   const [treeError, setTreeError] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
+    return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
+  });
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() =>
+    getStoredNumber(SIDEBAR_WIDTH_KEY, 320, 240, 520),
+  );
+  const [readPrefs, setReadPrefs] = useState<ReadPrefs>(() => {
+    return getStoredReaderPrefs();
+  });
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const [activeNote, setActiveNote] = useState<ActiveNoteMeta | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
+  const isMobile = useIsMobile(920);
+  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
+    null,
+  );
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -86,44 +127,303 @@ function App() {
     };
   }, [loadTree]);
 
-  return (
-    <div className="app-layout">
-      <aside className="explorer-pane">
-        <header className="explorer-header">
-          <h1>Hatchdoor</h1>
-          <p>Vault Explorer</p>
-          <div className="explorer-actions">
-            <button className="close-note" onClick={() => navigate("/")}>
-              Close Note
-            </button>
-            <button className="close-note" onClick={() => void loadTree()}>
-              Refresh
-            </button>
-          </div>
-        </header>
-        {loadingTree ? <p>Loading explorer…</p> : null}
-        {treeError ? <p className="error">{treeError}</p> : null}
-        {tree ? (
-          <FolderTree root={tree} currentPath={location.pathname} />
-        ) : null}
-      </aside>
+  useEffect(() => {
+    window.localStorage.setItem(
+      DRAWER_OPEN_KEY,
+      drawerOpen && isMobile ? "1" : "0",
+    );
+  }, [drawerOpen, isMobile]);
 
-      <main className="note-pane">
-        <Routes>
-          <Route path="/" element={<EmptyState />} />
-          <Route path="/n/:slug" element={<NotePage />} />
-        </Routes>
-      </main>
+  useEffect(() => {
+    window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem(READER_PREFS_KEY, JSON.stringify(readPrefs));
+  }, [readPrefs]);
+
+  useEffect(() => {
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) {
+      setDrawerOpen(false);
+    }
+  }, [location.pathname, isMobile]);
+
+  useEffect(() => {
+    if (location.pathname === "/") {
+      setActiveNote(null);
+    }
+  }, [location.pathname]);
+
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      const state = resizingRef.current;
+      if (!state) {
+        return;
+      }
+      const delta = event.clientX - state.startX;
+      const next = clamp(state.startWidth + delta, 240, 520);
+      setSidebarWidth(next);
+    };
+
+    const onPointerUp = () => {
+      resizingRef.current = null;
+      document.body.classList.remove("resizing");
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, []);
+
+  const treeIsStale = Boolean(tree && treeError);
+
+  return (
+    <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
+      <header className="app-topbar">
+        <div className="topbar-left">
+          {isMobile ? (
+            <button
+              className="icon-button"
+              onClick={() => setDrawerOpen((prev) => !prev)}
+              aria-label="Toggle explorer"
+            >
+              ☰
+            </button>
+          ) : null}
+          <div>
+            <h1>Hatchdoor</h1>
+            <p className="topbar-subtitle">
+              {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
+            </p>
+          </div>
+        </div>
+
+        <div className="topbar-center">
+          {!isOnline ? <StatusBadge tone="error" text="Offline" /> : null}
+          {treeIsStale ? <StatusBadge tone="warn" text="Tree Stale" /> : null}
+        </div>
+
+        <div className="topbar-right">
+          <button className="close-note" onClick={() => navigate(-1)}>
+            Back
+          </button>
+          <button className="close-note" onClick={() => navigate("/")}>
+            Close
+          </button>
+        </div>
+      </header>
+
+      <div
+        className="app-layout"
+        style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
+      >
+        <aside className="explorer-pane" data-open={drawerOpen}>
+          <header className="explorer-header">
+            <p>Vault Explorer</p>
+            <div className="explorer-actions">
+              <button className="close-note" onClick={() => void loadTree()}>
+                Refresh
+              </button>
+            </div>
+          </header>
+
+          {loadingTree ? <ExplorerSkeleton /> : null}
+          {!loadingTree && treeError && !tree ? (
+            <StateBlock
+              title="Explorer Unavailable"
+              description={treeError}
+              actionLabel="Retry"
+              onAction={() => void loadTree()}
+            />
+          ) : null}
+          {tree ? (
+            <FolderTree root={tree} currentPath={location.pathname} />
+          ) : null}
+        </aside>
+
+        {!isMobile ? (
+          <div
+            className="sidebar-resizer"
+            role="separator"
+            aria-orientation="vertical"
+            onPointerDown={(event) => {
+              resizingRef.current = {
+                startX: event.clientX,
+                startWidth: sidebarWidth,
+              };
+              document.body.classList.add("resizing");
+            }}
+          />
+        ) : null}
+
+        <main
+          className="note-pane"
+          style={
+            {
+              "--reader-font-size": `${readPrefs.fontSize}px`,
+              "--reader-line-height": String(readPrefs.lineHeight),
+              "--reader-max-width": `${readPrefs.maxWidth}px`,
+            } as CSSProperties
+          }
+        >
+          <ReaderToolbar prefs={readPrefs} onChange={setReadPrefs} />
+          <Routes>
+            <Route path="/" element={<EmptyState />} />
+            <Route
+              path="/n/:slug"
+              element={<NotePage onActiveNoteChange={setActiveNote} />}
+            />
+          </Routes>
+        </main>
+      </div>
+
+      {isMobile && drawerOpen ? (
+        <button
+          className="drawer-backdrop"
+          aria-label="Close explorer"
+          onClick={() => setDrawerOpen(false)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function StatusBadge({ tone, text }: { tone: "warn" | "error"; text: string }) {
+  return <span className={`status-badge ${tone}`}>{text}</span>;
+}
+
+function ReaderToolbar({
+  prefs,
+  onChange,
+}: {
+  prefs: ReadPrefs;
+  onChange: (next: ReadPrefs) => void;
+}) {
+  return (
+    <div className="reader-toolbar">
+      <label>
+        Size
+        <select
+          value={prefs.fontSize}
+          onChange={(e) =>
+            onChange({ ...prefs, fontSize: Number(e.target.value) })
+          }
+        >
+          {[15, 16, 18, 20].map((size) => (
+            <option key={size} value={size}>
+              {size}px
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        Line
+        <select
+          value={prefs.lineHeight}
+          onChange={(e) =>
+            onChange({ ...prefs, lineHeight: Number(e.target.value) })
+          }
+        >
+          {[1.4, 1.55, 1.7, 1.85].map((lineHeight) => (
+            <option key={lineHeight} value={lineHeight}>
+              {lineHeight}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <label>
+        Width
+        <select
+          value={prefs.maxWidth}
+          onChange={(e) =>
+            onChange({ ...prefs, maxWidth: Number(e.target.value) })
+          }
+        >
+          {[720, 860, 980].map((width) => (
+            <option key={width} value={width}>
+              {width}px
+            </option>
+          ))}
+        </select>
+      </label>
     </div>
   );
 }
 
 function EmptyState() {
   return (
-    <section>
-      <h2>Notes Explorer</h2>
-      <p>Select any note from the left panel to open it.</p>
+    <StateBlock
+      title="Notes Explorer"
+      description="Select any note from the explorer to start reading."
+    />
+  );
+}
+
+function StateBlock({
+  title,
+  description,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <section className="state-block">
+      <h2>{title}</h2>
+      <p>{description}</p>
+      {actionLabel && onAction ? (
+        <button className="close-note" onClick={onAction}>
+          {actionLabel}
+        </button>
+      ) : null}
     </section>
+  );
+}
+
+function ExplorerSkeleton() {
+  return (
+    <div className="skeleton-list" aria-hidden="true">
+      {Array.from({ length: 8 }).map((_, idx) => (
+        <div
+          key={idx}
+          className="skeleton-line"
+          style={{ width: `${72 - idx * 5}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function NoteSkeleton() {
+  return (
+    <div className="skeleton-list" aria-hidden="true">
+      <div className="skeleton-line" style={{ width: "45%" }} />
+      <div className="skeleton-line" style={{ width: "90%" }} />
+      <div className="skeleton-line" style={{ width: "84%" }} />
+      <div className="skeleton-line" style={{ width: "88%" }} />
+      <div className="skeleton-line" style={{ width: "72%" }} />
+    </div>
   );
 }
 
@@ -201,41 +501,51 @@ function NoteNode({
   );
 }
 
-function NotePage() {
+function NotePage({
+  onActiveNoteChange,
+}: {
+  onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
+}) {
   const params = useParams<{ slug: string }>();
   const slug = params.slug ?? "";
   const [note, setNote] = useState<Note | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadNote = useCallback(async () => {
-    setError(null);
-    try {
-      const res = await fetch(`/api/note/${encodeURIComponent(slug)}`);
-      if (!res.ok) {
-        throw new Error(`Failed loading note: ${res.status}`);
+  const loadNote = useCallback(
+    async (hardReload: boolean) => {
+      setError(null);
+      if (hardReload) {
+        setNote(null);
       }
-      const json = (await res.json()) as { note: Note };
-      setNote(json.note);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Unknown note loading error",
-      );
-    }
-  }, [slug]);
+
+      try {
+        const res = await fetch(`/api/note/${encodeURIComponent(slug)}`);
+        if (!res.ok) {
+          throw new Error(`Failed loading note: ${res.status}`);
+        }
+        const json = (await res.json()) as { note: Note };
+        setNote(json.note);
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Unknown note loading error",
+        );
+      }
+    },
+    [slug],
+  );
 
   useEffect(() => {
     void (async () => {
       setLoading(true);
-      setNote(null);
-      await loadNote();
+      await loadNote(true);
       setLoading(false);
     })();
   }, [loadNote]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
-      void loadNote();
+      void loadNote(false);
     }, 10_000);
 
     return () => {
@@ -243,32 +553,62 @@ function NotePage() {
     };
   }, [loadNote]);
 
+  useEffect(() => {
+    if (!note) {
+      onActiveNoteChange(null);
+      return;
+    }
+
+    onActiveNoteChange({
+      title: note.title,
+      slug: note.slug,
+      relativePath: note.relative_path,
+    });
+  }, [note, onActiveNoteChange]);
+
   const markdown = useResolvedWikilinks(note?.content ?? "");
 
   if (loading) {
-    return <p>Loading note…</p>;
+    return <NoteSkeleton />;
   }
-  if (error) {
-    return <p className="error">{error}</p>;
+  if (error && !note) {
+    return (
+      <StateBlock
+        title="Note Unavailable"
+        description={error}
+        actionLabel="Retry"
+        onAction={() => void loadNote(true)}
+      />
+    );
   }
   if (!note) {
-    return <p className="error">Note not found.</p>;
+    return (
+      <StateBlock title="Not Found" description="This note no longer exists." />
+    );
   }
 
   return (
-    <article>
+    <article className="note-content">
       <h2>{note.title}</h2>
+      {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
           code(props) {
             const { children, className } = props;
+            const content = String(children).replace(/\n$/, "");
             const match = /language-(\w+)/.exec(className || "");
+
             if (match?.[1] === "mermaid") {
-              return <MermaidDiagram chart={String(children).trim()} />;
+              return <MermaidDiagram chart={content} />;
             }
-            return <code className={className}>{children}</code>;
+
+            if (!match) {
+              return <code className={className}>{children}</code>;
+            }
+
+            return <CodeBlock language={match[1]} content={content} />;
           },
           a(props) {
             const { href, children } = props;
@@ -283,6 +623,9 @@ function NotePage() {
               );
             }
             return <a href={href}>{children}</a>;
+          },
+          blockquote(props) {
+            return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
           },
         }}
       >
@@ -357,6 +700,94 @@ function useResolvedWikilinks(markdown: string): string {
 
   return resolved;
 }
+
+function CalloutOrQuote({ children }: { children: ReactNode }) {
+  const nodes = Children.toArray(children);
+  const firstContentIndex = nodes.findIndex(
+    (node) => !(typeof node === "string" && node.trim().length === 0),
+  );
+
+  if (firstContentIndex === -1) {
+    return <blockquote>{children}</blockquote>;
+  }
+
+  const first = nodes[firstContentIndex];
+
+  if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
+    const firstText = flattenText(first.props.children).trim();
+    const match = firstText.match(/^\[!(\w+)\]\s*(.*)$/);
+
+    if (match) {
+      const kind = match[1].toLowerCase();
+      const title = match[2] || kind[0].toUpperCase() + kind.slice(1);
+      const bodyNodes = nodes
+        .slice(firstContentIndex + 1)
+        .filter(
+          (node) => !(typeof node === "string" && node.trim().length === 0),
+        );
+
+      return (
+        <div className={`callout callout-${kind}`}>
+          <div className="callout-title">{title}</div>
+          <div className="callout-body">{bodyNodes}</div>
+        </div>
+      );
+    }
+  }
+
+  return <blockquote>{children}</blockquote>;
+}
+
+function flattenText(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+  if (!node) {
+    return "";
+  }
+  if (Array.isArray(node)) {
+    return node.map(flattenText).join("");
+  }
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return flattenText(node.props.children);
+  }
+  return "";
+}
+
+function CodeBlock({
+  language,
+  content,
+}: {
+  language: string;
+  content: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  }, [content]);
+
+  return (
+    <div className="code-block">
+      <div className="code-block-head">
+        <span className="code-lang">{language}</span>
+        <button className="close-note" onClick={() => void onCopy()}>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre>
+        <code>{content}</code>
+      </pre>
+    </div>
+  );
+}
+
 function MermaidDiagram({ chart }: { chart: string }) {
   const [svg, setSvg] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -396,6 +827,68 @@ function MermaidDiagram({ chart }: { chart: string }) {
   }
 
   return <div className="mermaid" dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+
+function useIsMobile(maxWidth: number): boolean {
+  const [isMobile, setIsMobile] = useState(
+    () => window.matchMedia(`(max-width: ${maxWidth}px)`).matches,
+  );
+
+  useEffect(() => {
+    const query = window.matchMedia(`(max-width: ${maxWidth}px)`);
+    const onChange = (event: MediaQueryListEvent) => setIsMobile(event.matches);
+
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, [maxWidth]);
+
+  return isMobile;
+}
+
+function getStoredNumber(
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const raw = window.localStorage.getItem(key);
+  const value = raw ? Number(raw) : fallback;
+  if (Number.isNaN(value)) {
+    return fallback;
+  }
+  return clamp(value, min, max);
+}
+
+function getStoredReaderPrefs(): ReadPrefs {
+  const fallback: ReadPrefs = {
+    fontSize: 16,
+    lineHeight: 1.65,
+    maxWidth: 860,
+  };
+
+  try {
+    const raw = window.localStorage.getItem(READER_PREFS_KEY);
+    if (!raw) {
+      return fallback;
+    }
+
+    const parsed = JSON.parse(raw) as Partial<ReadPrefs>;
+    return {
+      fontSize: clamp(Number(parsed.fontSize ?? fallback.fontSize), 14, 22),
+      lineHeight: clamp(
+        Number(parsed.lineHeight ?? fallback.lineHeight),
+        1.3,
+        2.0,
+      ),
+      maxWidth: clamp(Number(parsed.maxWidth ?? fallback.maxWidth), 640, 1200),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
 export default App;

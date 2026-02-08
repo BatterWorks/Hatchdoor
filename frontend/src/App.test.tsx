@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -6,6 +6,7 @@ import App from "./App";
 import { escapeMarkdownLabel } from "./markdown";
 
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
 });
 
@@ -28,7 +29,9 @@ describe("App", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Notes Explorer")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Notes Explorer" }),
+    ).toBeInTheDocument();
   });
 
   it("renders tree error state", async () => {
@@ -68,6 +71,7 @@ describe("App", () => {
               note: {
                 title: "Home",
                 slug: "home",
+                relative_path: "Home",
                 content: "# Home\\n\\nHello",
               },
             }),
@@ -119,6 +123,7 @@ describe("App", () => {
               note: {
                 title: "Home",
                 slug: "home",
+                relative_path: "Home",
                 content: "Missing [[Nope|Alias Label]]",
               },
             }),
@@ -154,5 +159,62 @@ describe("App", () => {
 
   it("escapes markdown control chars in wikilink labels", () => {
     expect(escapeMarkdownLabel("a]b(c) *x*")).toBe("a\\]b\\(c\\) \\*x\\*");
+  });
+
+  it("renders callout blocks and code copy controls", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: `> [!warning] Heads up
+>
+> Callout body
+
+\`\`\`ts
+const x = 1
+\`\`\``,
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Heads up")).toBeInTheDocument();
+    expect(await screen.findByText("Callout body")).toBeInTheDocument();
+    expect(await screen.findByText("ts")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Copy" }),
+    ).toBeInTheDocument();
   });
 });

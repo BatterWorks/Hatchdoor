@@ -19,6 +19,7 @@ pub struct NoteEntry {
 pub struct Note {
     pub title: String,
     pub slug: String,
+    pub relative_path: String,
     pub content: String,
 }
 
@@ -143,6 +144,7 @@ impl VaultIndex {
         Ok(Some(Note {
             title: entry.title.clone(),
             slug: entry.slug.clone(),
+            relative_path: entry.relative_path.clone(),
             content,
         }))
     }
@@ -399,6 +401,7 @@ mod tests {
             .expect("read success")
             .expect("note exists");
         assert_eq!(note.title, "Home");
+        assert_eq!(note.relative_path, "Home");
         assert_eq!(note.content, "hello");
 
         let missing = vault.read_note_by_slug("missing").expect("read success");
