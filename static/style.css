@@ -1,0 +1,45 @@
+:root {
+  color-scheme: light;
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Palatino, serif;
+  background: #f4f2ec;
+  color: #1f1f1f;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at top right, #f7f4e7, #ece8da 60%, #ddd7c8);
+}
+
+main {
+  max-width: 760px;
+  margin: 2rem auto;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #d3ccb8;
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 12px 24px rgba(53, 45, 28, 0.08);
+}
+
+h1, h2, h3 {
+  line-height: 1.2;
+}
+
+a {
+  color: #154f68;
+}
+
+a:hover {
+  color: #0c3342;
+}
+
+.broken-link {
+  color: #7a1e1e;
+  border-bottom: 1px dashed #7a1e1e;
+  cursor: not-allowed;
+}
+
+.meta {
+  font-size: 0.9rem;
+  color: #5e5a50;
+}
