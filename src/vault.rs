@@ -24,6 +24,7 @@ pub struct VaultIndex {
     root: PathBuf,
     by_slug: HashMap<String, NoteEntry>,
     by_title: HashMap<String, String>,
+    by_path_title: HashMap<String, String>,
 }
 
 impl VaultIndex {
@@ -31,6 +32,8 @@ impl VaultIndex {
         let root = root.as_ref().to_path_buf();
         let mut by_slug = HashMap::new();
         let mut by_title = HashMap::new();
+        let mut by_path_title = HashMap::new();
+        let mut markdown_paths = Vec::new();
 
         for entry in WalkDir::new(&root) {
             let entry = entry.map_err(io::Error::other)?;
@@ -41,12 +44,20 @@ impl VaultIndex {
             {
                 continue;
             }
+            markdown_paths.push(path.to_path_buf());
+        }
 
+        markdown_paths.sort();
+
+        for path in markdown_paths {
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Untitled")
                 .to_string();
+
+            let relative_without_ext =
+                relative_note_path_without_ext(&root, &path).unwrap_or_else(|| stem.clone());
 
             let mut slug = slugify(&stem);
             if slug.is_empty() {
@@ -60,7 +71,10 @@ impl VaultIndex {
                 path: path.to_path_buf(),
             };
 
-            by_title.insert(normalize_title(&stem), slug.clone());
+            by_title
+                .entry(normalize_title(&stem))
+                .or_insert_with(|| slug.clone());
+            by_path_title.insert(normalize_title(&relative_without_ext), slug.clone());
             by_slug.insert(slug, note);
         }
 
@@ -68,6 +82,7 @@ impl VaultIndex {
             root,
             by_slug,
             by_title,
+            by_path_title,
         })
     }
 
@@ -80,11 +95,16 @@ impl VaultIndex {
     }
 
     pub fn resolve_wikilink(&self, raw_target: &str) -> Option<&NoteEntry> {
-        let normalized_target = strip_md_extension(raw_target.trim());
+        let normalized_target = normalize_link_target(raw_target);
+
+        if let Some(slug) = self.by_path_title.get(&normalize_title(&normalized_target)) {
+            return self.by_slug.get(slug);
+        }
+
         let base = normalized_target
             .rsplit('/')
             .next()
-            .unwrap_or(normalized_target);
+            .unwrap_or(&normalized_target);
 
         if let Some(slug) = self.by_title.get(&normalize_title(base)) {
             return self.by_slug.get(slug);
@@ -135,6 +155,10 @@ pub fn strip_md_extension(input: &str) -> &str {
     input.strip_suffix(".md").unwrap_or(input)
 }
 
+pub fn normalize_link_target(input: &str) -> String {
+    strip_md_extension(input.trim()).replace('\\', "/")
+}
+
 pub fn slugify(input: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
@@ -166,6 +190,12 @@ pub fn slugify(input: &str) -> String {
     out
 }
 
+fn relative_note_path_without_ext(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    let as_string = relative.to_str()?.replace('\\', "/");
+    Some(strip_md_extension(&as_string).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +216,14 @@ mod tests {
     #[test]
     fn slugify_reduces_symbols_to_clean_slug() {
         assert_eq!(slugify("  My Great_Note!!  "), "my-great-note");
+    }
+
+    #[test]
+    fn normalize_link_target_strips_md_and_normalizes_separators() {
+        assert_eq!(
+            normalize_link_target(r"Folder\My Note.md"),
+            "Folder/My Note"
+        );
     }
 
     #[test]
@@ -221,6 +259,32 @@ mod tests {
         let vault = VaultIndex::build(dir.path()).expect("build vault");
         assert!(vault.find_by_slug("note").is_some());
         assert!(vault.find_by_slug("note-2").is_some());
+    }
+
+    #[test]
+    fn resolve_wikilink_duplicate_title_uses_deterministic_first_path() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir(dir.path().join("b")).expect("create dir b");
+        fs::create_dir(dir.path().join("a")).expect("create dir a");
+        fs::write(dir.path().join("b").join("Note.md"), "b").expect("write b");
+        fs::write(dir.path().join("a").join("Note.md"), "a").expect("write a");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let resolved = vault.resolve_wikilink("Note").expect("note exists");
+        assert_eq!(resolved.path, dir.path().join("a").join("Note.md"));
+    }
+
+    #[test]
+    fn resolve_wikilink_supports_folder_qualified_targets() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir(dir.path().join("folder")).expect("create folder");
+        fs::write(dir.path().join("folder").join("Doc.md"), "content").expect("write doc");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let resolved = vault
+            .resolve_wikilink("folder/Doc")
+            .expect("folder-qualified match");
+        assert_eq!(resolved.path, dir.path().join("folder").join("Doc.md"));
     }
 
     #[test]

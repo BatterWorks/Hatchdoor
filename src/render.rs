@@ -1,4 +1,7 @@
+use ammonia::Builder;
 use pulldown_cmark::{Options, Parser, html};
+
+use crate::wikilink::escape_html;
 
 pub fn markdown_to_html(markdown: &str) -> String {
     let mut options = Options::empty();
@@ -9,17 +12,19 @@ pub fn markdown_to_html(markdown: &str) -> String {
     let parser = Parser::new_ext(markdown, options);
     let mut output = String::new();
     html::push_html(&mut output, parser);
-    output
+    // Vault content can contain raw HTML; sanitize before returning to avoid XSS sinks.
+    Builder::default().clean(&output).to_string()
 }
 
 pub fn render_note_page(title: &str, body_html: &str) -> String {
+    let safe_title = escape_html(title);
     format!(
         r#"<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{title}</title>
+    <title>{safe_title}</title>
     <link rel="stylesheet" href="/assets/style.css" />
   </head>
   <body>
@@ -43,10 +48,23 @@ mod tests {
     }
 
     #[test]
+    fn markdown_to_html_sanitizes_raw_script() {
+        let out = markdown_to_html(r#"<script>alert("xss")</script>"#);
+        assert!(!out.contains("<script>"));
+    }
+
+    #[test]
     fn render_note_page_includes_title_and_body() {
         let html = render_note_page("Title", "<p>Body</p>");
         assert!(html.contains("<title>Title</title>"));
         assert!(html.contains("<p>Body</p>"));
         assert!(html.contains("/assets/style.css"));
+    }
+
+    #[test]
+    fn render_note_page_escapes_title() {
+        let html = render_note_page(r#"Bad </title><script>alert(1)</script>"#, "<p>Body</p>");
+        assert!(!html.contains("</title><script>"));
+        assert!(html.contains("&lt;/title&gt;"));
     }
 }
