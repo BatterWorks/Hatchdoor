@@ -98,6 +98,22 @@
   gap: 0.45rem;
 }
 
+.recent-notes {
+  margin: 0 0 0.9rem;
+  border: 1px solid #e4dcc9;
+  background: #fbf8ef;
+  border-radius: 10px;
+  padding: 0.55rem 0.65rem;
+}
+
+.recent-notes-title {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #696150;
+}
+
 .sidebar-resizer {
   cursor: col-resize;
   background: linear-gradient(to right, #ddd4bf, #eee7d5);
@@ -354,6 +370,102 @@
   z-index: 20;
 }
 
+.search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(26, 22, 16, 0.5);
+  display: grid;
+  place-items: start center;
+  padding: 8vh 1rem 1rem;
+}
+
+.search-panel {
+  width: min(48rem, 100%);
+  max-height: 84vh;
+  overflow: auto;
+  border: 1px solid #d3ccb8;
+  border-radius: 14px;
+  background: #fffdf7;
+  box-shadow: 0 20px 36px rgba(24, 19, 11, 0.18);
+  padding: 0.9rem;
+}
+
+.search-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+.search-header h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.search-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cfc6b1;
+  border-radius: 9px;
+  padding: 0.55rem 0.65rem;
+  background: #fffef8;
+}
+
+.search-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.6rem 0 0.55rem;
+  font-size: 0.84rem;
+  color: #555043;
+}
+
+.search-results {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.search-result {
+  width: 100%;
+  text-align: left;
+  border: 1px solid #dfd6c2;
+  background: #fff;
+  border-radius: 9px;
+  padding: 0.5rem 0.55rem;
+  cursor: pointer;
+}
+
+.search-main {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.7rem;
+  align-items: baseline;
+}
+
+.search-main span {
+  font-size: 0.8rem;
+  color: #706856;
+}
+
+.search-kind {
+  display: inline-block;
+  margin-top: 0.15rem;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #5e5645;
+}
+
+.search-snippet {
+  margin: 0.35rem 0 0;
+  font-size: 0.84rem;
+  color: #3f3a2f;
+}
+
 body.resizing {
   user-select: none;
   cursor: col-resize;
@@ -396,6 +508,20 @@ body.resizing {
     transition: transform 180ms ease;
     z-index: 30;
     border-right: 1px solid #d3ccb8;
+    background: #fff;
+  }
+
+  .search-overlay {
+    padding: 0;
+    place-items: stretch;
+  }
+
+  .search-panel {
+    max-height: none;
+    width: 100%;
+    border-radius: 0;
+    border: 0;
+    padding: 0.9rem;
   }
 
   .explorer-pane[data-open="true"] {

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,15 @@ pub struct ExplorerFolder {
 pub struct ExplorerNote {
     pub title: String,
     pub slug: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SearchHit {
+    pub title: String,
+    pub slug: String,
+    pub relative_path: String,
+    pub match_kind: String,
+    pub snippet: Option<String>,
 }
 
 impl VaultIndex {
@@ -181,6 +191,83 @@ impl VaultIndex {
         root.build("Vault")
     }
 
+    pub fn search(&self, query: &str, include_content: bool, limit: usize) -> Vec<SearchHit> {
+        let normalized_query = normalize_title(query);
+        if normalized_query.is_empty() || limit == 0 {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        let mut seen = HashSet::new();
+
+        for slug in &self.ordered_slugs {
+            let Some(note) = self.by_slug.get(slug) else {
+                continue;
+            };
+
+            let normalized_title = normalize_title(&note.title);
+            let normalized_path = normalize_title(&note.relative_path);
+
+            let match_kind = if normalized_title.contains(&normalized_query) {
+                Some("title")
+            } else if normalized_path.contains(&normalized_query) {
+                Some("path")
+            } else {
+                None
+            };
+
+            if let Some(kind) = match_kind {
+                seen.insert(note.slug.clone());
+                results.push(SearchHit {
+                    title: note.title.clone(),
+                    slug: note.slug.clone(),
+                    relative_path: note.relative_path.clone(),
+                    match_kind: kind.to_string(),
+                    snippet: None,
+                });
+                if results.len() >= limit {
+                    return results;
+                }
+            }
+        }
+
+        if !include_content {
+            return results;
+        }
+
+        for slug in &self.ordered_slugs {
+            if results.len() >= limit {
+                break;
+            }
+
+            let Some(note) = self.by_slug.get(slug) else {
+                continue;
+            };
+
+            if seen.contains(&note.slug) {
+                continue;
+            }
+
+            let Ok(content) = fs::read_to_string(&note.path) else {
+                continue;
+            };
+
+            let Some(snippet) = content_snippet(&content, &normalized_query) else {
+                continue;
+            };
+
+            results.push(SearchHit {
+                title: note.title.clone(),
+                slug: note.slug.clone(),
+                relative_path: note.relative_path.clone(),
+                match_kind: "content".to_string(),
+                snippet: Some(snippet),
+            });
+        }
+
+        results
+    }
+
     #[cfg(test)]
     pub fn total_notes(&self) -> usize {
         self.by_slug.len()
@@ -282,6 +369,21 @@ fn relative_note_path_without_ext(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let as_string = relative.to_str()?.replace('\\', "/");
     Some(strip_md_extension(&as_string).to_string())
+}
+
+fn content_snippet(content: &str, normalized_query: &str) -> Option<String> {
+    content
+        .lines()
+        .find(|line| normalize_title(line).contains(normalized_query))
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.chars().count() > 180 {
+                let shortened: String = trimmed.chars().take(177).collect();
+                format!("{shortened}...")
+            } else {
+                trimmed.to_string()
+            }
+        })
 }
 
 #[cfg(test)]
@@ -414,6 +516,38 @@ mod tests {
 
         let missing = vault.read_note_by_slug("missing").expect("read success");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn search_finds_title_and_path_matches() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("Projects")).expect("create dir");
+        fs::write(dir.path().join("Projects").join("Plan.md"), "alpha").expect("write plan");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let by_title = vault.search("plan", false, 10);
+        assert_eq!(by_title.len(), 1);
+        assert_eq!(by_title[0].match_kind, "title");
+
+        let by_path = vault.search("projects", false, 10);
+        assert_eq!(by_path.len(), 1);
+        assert_eq!(by_path[0].match_kind, "path");
+    }
+
+    #[test]
+    fn search_content_extension_returns_snippet() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("Home.md"),
+            "Line 1\nSecret token here\nLine 3",
+        )
+        .expect("write note");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let hits = vault.search("token", true, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].match_kind, "content");
+        assert_eq!(hits[0].snippet.as_deref(), Some("Secret token here"));
     }
 
     #[test]
