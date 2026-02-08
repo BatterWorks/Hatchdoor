@@ -417,6 +417,25 @@ const x = 1
       expect(block).not.toBeNull();
       expect(block?.textContent).toContain("const x = 1");
     });
+    const writeTextMock = vi.fn().mockRejectedValue(new Error("unavailable"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+    const execCommandMock = vi.fn((command: string) => command === "copy");
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommandMock,
+    });
+    const copyButton = screen.getByRole("button", { name: "Copy" });
+    fireEvent.click(copyButton);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Copied" }),
+      ).toBeInTheDocument(),
+    );
+    expect(writeTextMock).toHaveBeenCalledWith("const x = 1");
+    expect(execCommandMock).toHaveBeenCalledWith("copy");
     expect(document.querySelector(".note-content > pre")).toBeNull();
   });
 
