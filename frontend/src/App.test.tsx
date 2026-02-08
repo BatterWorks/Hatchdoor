@@ -472,4 +472,137 @@ const x = 1
       expect(collapsible).not.toHaveAttribute("open");
     });
   });
+
+  it("renders frontmatter as compact properties instead of markdown body", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: `---
+tags: [type/reference, status/active]
+created: 2026-02-08
+---
+
+# Home
+Body`,
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Show" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+
+    expect(await screen.findByText("tags")).toBeInTheDocument();
+    expect(await screen.findByText("#type/reference")).toBeInTheDocument();
+    expect(await screen.findByText("created")).toBeInTheDocument();
+    expect(await screen.findByText("2026-02-08")).toBeInTheDocument();
+    expect(screen.queryByText(/^---$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/tags:\s*\[/)).not.toBeInTheDocument();
+  });
+
+  it("opens search filtered by tag when clicking tag chip", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: `---
+tags: [type/reference]
+---
+
+# Home
+Body`,
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/search")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      });
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Show" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "#type/reference" }),
+    );
+
+    const input = await screen.findByPlaceholderText(
+      "Search notes (title, path, content)",
+    );
+    expect(input).toHaveValue("type/reference");
+    const includeContent = screen.getByRole("checkbox");
+    expect(includeContent).toBeChecked();
+    await waitFor(() => {
+      const called = fetchMock.mock.calls.some((call) =>
+        String(call[0]).includes("/api/search?q=type%2Freference&content=1"),
+      );
+      expect(called).toBe(true);
+    });
+  });
 });

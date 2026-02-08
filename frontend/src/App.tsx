@@ -24,7 +24,13 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "./App.css";
-import { escapeMarkdownLabel, parseWikilinkTarget } from "./markdown";
+import {
+  escapeMarkdownLabel,
+  normalizeTags,
+  parseFrontmatter,
+  parseWikilinkTarget,
+  type FrontmatterValue,
+} from "./markdown";
 
 type ExplorerFolder = {
   name: string;
@@ -91,6 +97,7 @@ const SIDEBAR_WIDTH_KEY = "hatchdoor.sidebarWidth";
 const DRAWER_OPEN_KEY = "hatchdoor.drawerOpen";
 const READER_PREFS_KEY = "hatchdoor.readerPrefs";
 const RECENT_NOTES_KEY = "hatchdoor.recentNotes";
+const NOTE_PROPERTIES_COLLAPSED_KEY = "hatchdoor.notePropertiesCollapsed";
 
 function App() {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
@@ -325,6 +332,11 @@ function App() {
   }, []);
 
   const treeIsStale = Boolean(tree && treeError);
+  const openSearchForTag = useCallback((tag: string) => {
+    setSearchQuery(tag);
+    setSearchIncludeContent(true);
+    setSearchOpen(true);
+  }, []);
 
   return (
     <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
@@ -475,7 +487,12 @@ function App() {
             <Route path="/" element={<EmptyState />} />
             <Route
               path="/n/:slug"
-              element={<NotePage onActiveNoteChange={setActiveNote} />}
+              element={
+                <NotePage
+                  onActiveNoteChange={setActiveNote}
+                  onTagSelect={openSearchForTag}
+                />
+              }
             />
           </Routes>
         </main>
@@ -963,14 +980,21 @@ function NoteNode({
 
 function NotePage({
   onActiveNoteChange,
+  onTagSelect,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
+  onTagSelect: (tag: string) => void;
 }) {
   const params = useParams<{ slug: string }>();
   const slug = params.slug ?? "";
   const [note, setNote] = useState<Note | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
+    () => {
+      return window.localStorage.getItem(NOTE_PROPERTIES_COLLAPSED_KEY) !== "0";
+    },
+  );
 
   const loadNote = useCallback(
     async (hardReload: boolean) => {
@@ -1026,7 +1050,15 @@ function NotePage({
     });
   }, [note, onActiveNoteChange]);
 
-  const markdown = useResolvedWikilinks(note?.content ?? "");
+  useEffect(() => {
+    window.localStorage.setItem(
+      NOTE_PROPERTIES_COLLAPSED_KEY,
+      propertiesCollapsed ? "1" : "0",
+    );
+  }, [propertiesCollapsed]);
+
+  const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
+  const markdown = useResolvedWikilinks(parsed.body);
 
   if (loading) {
     return <NoteSkeleton />;
@@ -1051,6 +1083,12 @@ function NotePage({
     <article className="note-content">
       <h2>{note.title}</h2>
       {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
+      <NoteProperties
+        properties={parsed.properties}
+        collapsed={propertiesCollapsed}
+        onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
+        onTagSelect={onTagSelect}
+      />
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
@@ -1102,6 +1140,94 @@ function NotePage({
         {markdown}
       </ReactMarkdown>
     </article>
+  );
+}
+
+function NoteProperties({
+  properties,
+  collapsed,
+  onToggleCollapsed,
+  onTagSelect,
+}: {
+  properties: Record<string, FrontmatterValue>;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+  onTagSelect: (tag: string) => void;
+}) {
+  const entries = Object.entries(properties);
+  if (entries.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="note-properties" data-collapsed={collapsed}>
+      <header className="note-properties-head">
+        <h3>Properties</h3>
+        <UiButton
+          className="close-note"
+          onClick={onToggleCollapsed}
+          aria-expanded={!collapsed}
+          aria-controls="note-properties-grid"
+        >
+          {collapsed ? "Show" : "Hide"}
+        </UiButton>
+      </header>
+
+      {!collapsed ? (
+        <dl id="note-properties-grid" className="note-properties-grid">
+          {entries.map(([key, value]) => (
+            <div key={key} className="note-property-row">
+              <dt>{key}</dt>
+              <dd>
+                {key === "tags" ? (
+                  <TagChips
+                    tags={normalizeTags(value)}
+                    onSelect={onTagSelect}
+                  />
+                ) : (
+                  <PropertyValue value={value} />
+                )}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+    </section>
+  );
+}
+
+function PropertyValue({ value }: { value: FrontmatterValue }) {
+  if (Array.isArray(value)) {
+    return <span>{value.join(", ")}</span>;
+  }
+  return <span>{value}</span>;
+}
+
+function TagChips({
+  tags,
+  onSelect,
+}: {
+  tags: string[];
+  onSelect: (tag: string) => void;
+}) {
+  if (tags.length === 0) {
+    return <span>None</span>;
+  }
+
+  return (
+    <div className="tag-chip-list">
+      {tags.map((tag) => (
+        <button
+          type="button"
+          key={tag}
+          className="tag-chip"
+          onClick={() => onSelect(tag)}
+          title={`Search tag: ${tag}`}
+        >
+          #{tag}
+        </button>
+      ))}
+    </div>
   );
 }
 
