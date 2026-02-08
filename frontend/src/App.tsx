@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import {
   NavLink,
@@ -11,8 +11,8 @@ import {
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
-import mermaid from "mermaid";
 import "./App.css";
+import { escapeMarkdownLabel, parseWikilinkTarget } from "./markdown";
 
 type ExplorerFolder = {
   name: string;
@@ -31,6 +31,21 @@ type Note = {
   content: string;
 };
 
+type ResolveBatchResponse = {
+  results: Array<{
+    target: string;
+    slug: string | null;
+  }>;
+};
+
+type MermaidApi = {
+  initialize: (config: {
+    startOnLoad: boolean;
+    securityLevel: "strict";
+  }) => void;
+  render: (id: string, chart: string) => Promise<{ svg: string }>;
+};
+
 function App() {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
@@ -38,25 +53,38 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
 
+  const loadTree = useCallback(async () => {
+    setTreeError(null);
+    try {
+      const res = await fetch("/api/tree");
+      if (!res.ok) {
+        throw new Error(`Failed loading tree: ${res.status}`);
+      }
+      setTree((await res.json()) as ExplorerFolder);
+    } catch (err) {
+      setTreeError(
+        err instanceof Error ? err.message : "Unknown tree loading error",
+      );
+    }
+  }, []);
+
   useEffect(() => {
     void (async () => {
       setLoadingTree(true);
-      setTreeError(null);
-      try {
-        const res = await fetch("/api/tree");
-        if (!res.ok) {
-          throw new Error(`Failed loading tree: ${res.status}`);
-        }
-        setTree((await res.json()) as ExplorerFolder);
-      } catch (err) {
-        setTreeError(
-          err instanceof Error ? err.message : "Unknown tree loading error",
-        );
-      } finally {
-        setLoadingTree(false);
-      }
+      await loadTree();
+      setLoadingTree(false);
     })();
-  }, []);
+  }, [loadTree]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadTree();
+    }, 10_000);
+
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [loadTree]);
 
   return (
     <div className="app-layout">
@@ -64,9 +92,14 @@ function App() {
         <header className="explorer-header">
           <h1>Hatchdoor</h1>
           <p>Vault Explorer</p>
-          <button className="close-note" onClick={() => navigate("/")}>
-            Close Note
-          </button>
+          <div className="explorer-actions">
+            <button className="close-note" onClick={() => navigate("/")}>
+              Close Note
+            </button>
+            <button className="close-note" onClick={() => void loadTree()}>
+              Refresh
+            </button>
+          </div>
         </header>
         {loadingTree ? <p>Loading explorer…</p> : null}
         {treeError ? <p className="error">{treeError}</p> : null}
@@ -175,27 +208,40 @@ function NotePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const loadNote = useCallback(async () => {
+    setError(null);
+    try {
+      const res = await fetch(`/api/note/${encodeURIComponent(slug)}`);
+      if (!res.ok) {
+        throw new Error(`Failed loading note: ${res.status}`);
+      }
+      const json = (await res.json()) as { note: Note };
+      setNote(json.note);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Unknown note loading error",
+      );
+    }
+  }, [slug]);
+
   useEffect(() => {
     void (async () => {
       setLoading(true);
-      setError(null);
       setNote(null);
-      try {
-        const res = await fetch(`/api/note/${encodeURIComponent(slug)}`);
-        if (!res.ok) {
-          throw new Error(`Failed loading note: ${res.status}`);
-        }
-        const json = (await res.json()) as { note: Note };
-        setNote(json.note);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Unknown note loading error",
-        );
-      } finally {
-        setLoading(false);
-      }
+      await loadNote();
+      setLoading(false);
     })();
-  }, [slug]);
+  }, [loadNote]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadNote();
+    }, 10_000);
+
+    return () => {
+      window.clearInterval(id);
+    };
+  }, [loadNote]);
 
   const markdown = useResolvedWikilinks(note?.content ?? "");
 
@@ -224,6 +270,20 @@ function NotePage() {
             }
             return <code className={className}>{children}</code>;
           },
+          a(props) {
+            const { href, children } = props;
+            if (typeof href === "string" && href.startsWith("/__missing__/")) {
+              const target = decodeURIComponent(
+                href.replace("/__missing__/", ""),
+              );
+              return (
+                <span className="broken-link" title={`Missing: ${target}`}>
+                  {children}
+                </span>
+              );
+            }
+            return <a href={href}>{children}</a>;
+          },
         }}
       >
         {markdown}
@@ -236,12 +296,12 @@ function useResolvedWikilinks(markdown: string): string {
   const [resolved, setResolved] = useState(markdown);
 
   useEffect(() => {
+    let cancelled = false;
+
     if (!markdown) {
       queueMicrotask(() => setResolved(""));
       return;
     }
-
-    let cancelled = false;
 
     void (async () => {
       const matches = [...markdown.matchAll(/\[\[([^\]]+)\]\]/g)];
@@ -251,33 +311,37 @@ function useResolvedWikilinks(markdown: string): string {
       const uniqueTargets = [...new Set(rawTargets)];
 
       const map = new Map<string, string | null>();
-      await Promise.all(
-        uniqueTargets.map(async (target) => {
-          try {
-            const res = await fetch(
-              `/api/resolve?target=${encodeURIComponent(target)}`,
-            );
-            if (!res.ok) {
-              map.set(target, null);
-              return;
+
+      if (uniqueTargets.length > 0) {
+        try {
+          const res = await fetch("/api/resolve-batch", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ targets: uniqueTargets }),
+          });
+
+          if (res.ok) {
+            const json = (await res.json()) as ResolveBatchResponse;
+            for (const result of json.results) {
+              map.set(result.target, result.slug);
             }
-            const json = (await res.json()) as { slug: string | null };
-            map.set(target, json.slug);
-          } catch {
-            map.set(target, null);
           }
-        }),
-      );
+        } catch {
+          // Leave unresolved values as null fallback.
+        }
+      }
 
       const rewritten = markdown.replace(
         /\[\[([^\]]+)\]\]/g,
         (_whole, body: string) => {
           const parsed = parseWikilinkTarget(body);
-          const slug = map.get(parsed.target);
+          const slug = map.get(parsed.target) ?? null;
           if (slug) {
-            return `[${parsed.label}](/n/${slug})`;
+            return `[${escapeMarkdownLabel(parsed.label)}](/n/${slug})`;
           }
-          return `**${parsed.label}**`;
+          return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
         },
       );
 
@@ -291,31 +355,24 @@ function useResolvedWikilinks(markdown: string): string {
     };
   }, [markdown]);
 
-  return useMemo(() => resolved, [resolved]);
+  return resolved;
 }
-
-function parseWikilinkTarget(body: string): { target: string; label: string } {
-  const [targetRaw, aliasRaw] = body.split("|", 2);
-  const target = (targetRaw || "").trim();
-  const label = (aliasRaw || "").trim() || target;
-  return { target, label };
-}
-
 function MermaidDiagram({ chart }: { chart: string }) {
   const [svg, setSvg] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
-  }, []);
-
-  useEffect(() => {
     let mounted = true;
-    const id = `m-${Math.random().toString(36).slice(2)}`;
 
     void (async () => {
       try {
-        const { svg: rendered } = await mermaid.render(id, chart);
+        const mermaidModule = (await import("mermaid")) as {
+          default: MermaidApi;
+        };
+        const api = mermaidModule.default;
+        api.initialize({ startOnLoad: false, securityLevel: "strict" });
+        const id = `m-${Math.random().toString(36).slice(2)}`;
+        const { svg: rendered } = await api.render(id, chart);
         if (mounted) {
           setSvg(rendered);
           setError(null);
