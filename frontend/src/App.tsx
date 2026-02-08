@@ -1,53 +1,62 @@
-import { useEffect, useMemo, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import { NavLink, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
-import mermaid from 'mermaid'
-import './App.css'
+import { useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import {
+  NavLink,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import mermaid from "mermaid";
+import "./App.css";
 
 type ExplorerFolder = {
-  name: string
-  folders: ExplorerFolder[]
-  notes: ExplorerNote[]
-}
+  name: string;
+  folders: ExplorerFolder[];
+  notes: ExplorerNote[];
+};
 
 type ExplorerNote = {
-  title: string
-  slug: string
-}
+  title: string;
+  slug: string;
+};
 
 type Note = {
-  title: string
-  slug: string
-  content: string
-}
+  title: string;
+  slug: string;
+  content: string;
+};
 
 function App() {
-  const [tree, setTree] = useState<ExplorerFolder | null>(null)
-  const [loadingTree, setLoadingTree] = useState(true)
-  const [treeError, setTreeError] = useState<string | null>(null)
-  const location = useLocation()
-  const navigate = useNavigate()
+  const [tree, setTree] = useState<ExplorerFolder | null>(null);
+  const [loadingTree, setLoadingTree] = useState(true);
+  const [treeError, setTreeError] = useState<string | null>(null);
+  const location = useLocation();
+  const navigate = useNavigate();
 
   useEffect(() => {
     void (async () => {
-      setLoadingTree(true)
-      setTreeError(null)
+      setLoadingTree(true);
+      setTreeError(null);
       try {
-        const res = await fetch('/api/tree')
+        const res = await fetch("/api/tree");
         if (!res.ok) {
-          throw new Error(`Failed loading tree: ${res.status}`)
+          throw new Error(`Failed loading tree: ${res.status}`);
         }
-        setTree((await res.json()) as ExplorerFolder)
+        setTree((await res.json()) as ExplorerFolder);
       } catch (err) {
-        setTreeError(err instanceof Error ? err.message : 'Unknown tree loading error')
+        setTreeError(
+          err instanceof Error ? err.message : "Unknown tree loading error",
+        );
       } finally {
-        setLoadingTree(false)
+        setLoadingTree(false);
       }
-    })()
-  }, [])
+    })();
+  }, []);
 
   return (
     <div className="app-layout">
@@ -55,11 +64,15 @@ function App() {
         <header className="explorer-header">
           <h1>Hatchdoor</h1>
           <p>Vault Explorer</p>
-          <button className="close-note" onClick={() => navigate('/')}>Close Note</button>
+          <button className="close-note" onClick={() => navigate("/")}>
+            Close Note
+          </button>
         </header>
         {loadingTree ? <p>Loading explorer…</p> : null}
         {treeError ? <p className="error">{treeError}</p> : null}
-        {tree ? <FolderTree root={tree} currentPath={location.pathname} /> : null}
+        {tree ? (
+          <FolderTree root={tree} currentPath={location.pathname} />
+        ) : null}
       </aside>
 
       <main className="note-pane">
@@ -69,7 +82,7 @@ function App() {
         </Routes>
       </main>
     </div>
-  )
+  );
 }
 
 function EmptyState() {
@@ -78,30 +91,50 @@ function EmptyState() {
       <h2>Notes Explorer</h2>
       <p>Select any note from the left panel to open it.</p>
     </section>
-  )
+  );
 }
 
-function FolderTree({ root, currentPath }: { root: ExplorerFolder; currentPath: string }) {
+function FolderTree({
+  root,
+  currentPath,
+}: {
+  root: ExplorerFolder;
+  currentPath: string;
+}) {
   return (
     <ul className="tree root-tree">
       {root.folders.map((folder) => (
-        <FolderNode key={`folder-${folder.name}`} folder={folder} currentPath={currentPath} />
+        <FolderNode
+          key={`folder-${folder.name}`}
+          folder={folder}
+          currentPath={currentPath}
+        />
       ))}
       {root.notes.map((note) => (
         <NoteNode key={note.slug} note={note} currentPath={currentPath} />
       ))}
     </ul>
-  )
+  );
 }
 
-function FolderNode({ folder, currentPath }: { folder: ExplorerFolder; currentPath: string }) {
+function FolderNode({
+  folder,
+  currentPath,
+}: {
+  folder: ExplorerFolder;
+  currentPath: string;
+}) {
   return (
     <li className="folder-item">
       <details open>
         <summary>{folder.name}</summary>
         <ul className="tree">
           {folder.folders.map((child) => (
-            <FolderNode key={`${folder.name}-${child.name}`} folder={child} currentPath={currentPath} />
+            <FolderNode
+              key={`${folder.name}-${child.name}`}
+              folder={child}
+              currentPath={currentPath}
+            />
           ))}
           {folder.notes.map((note) => (
             <NoteNode key={note.slug} note={note} currentPath={currentPath} />
@@ -109,56 +142,71 @@ function FolderNode({ folder, currentPath }: { folder: ExplorerFolder; currentPa
         </ul>
       </details>
     </li>
-  )
+  );
 }
 
-function NoteNode({ note, currentPath }: { note: ExplorerNote; currentPath: string }) {
+function NoteNode({
+  note,
+  currentPath,
+}: {
+  note: ExplorerNote;
+  currentPath: string;
+}) {
   return (
     <li className="note-item">
-      <NavLink className={currentPath === `/n/${note.slug}` ? 'note-link active-note' : 'note-link'} to={`/n/${note.slug}`}>
+      <NavLink
+        className={
+          currentPath === `/n/${note.slug}`
+            ? "note-link active-note"
+            : "note-link"
+        }
+        to={`/n/${note.slug}`}
+      >
         {note.title}
       </NavLink>
     </li>
-  )
+  );
 }
 
 function NotePage() {
-  const params = useParams<{ slug: string }>()
-  const slug = params.slug ?? ''
-  const [note, setNote] = useState<Note | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const params = useParams<{ slug: string }>();
+  const slug = params.slug ?? "";
+  const [note, setNote] = useState<Note | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void (async () => {
-      setLoading(true)
-      setError(null)
-      setNote(null)
+      setLoading(true);
+      setError(null);
+      setNote(null);
       try {
-        const res = await fetch(`/api/note/${encodeURIComponent(slug)}`)
+        const res = await fetch(`/api/note/${encodeURIComponent(slug)}`);
         if (!res.ok) {
-          throw new Error(`Failed loading note: ${res.status}`)
+          throw new Error(`Failed loading note: ${res.status}`);
         }
-        const json = (await res.json()) as { note: Note }
-        setNote(json.note)
+        const json = (await res.json()) as { note: Note };
+        setNote(json.note);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unknown note loading error')
+        setError(
+          err instanceof Error ? err.message : "Unknown note loading error",
+        );
       } finally {
-        setLoading(false)
+        setLoading(false);
       }
-    })()
-  }, [slug])
+    })();
+  }, [slug]);
 
-  const markdown = useResolvedWikilinks(note?.content ?? '')
+  const markdown = useResolvedWikilinks(note?.content ?? "");
 
   if (loading) {
-    return <p>Loading note…</p>
+    return <p>Loading note…</p>;
   }
   if (error) {
-    return <p className="error">{error}</p>
+    return <p className="error">{error}</p>;
   }
   if (!note) {
-    return <p className="error">Note not found.</p>
+    return <p className="error">Note not found.</p>;
   }
 
   return (
@@ -169,121 +217,128 @@ function NotePage() {
         rehypePlugins={[rehypeKatex]}
         components={{
           code(props) {
-            const { children, className } = props
-            const match = /language-(\w+)/.exec(className || '')
-            if (match?.[1] === 'mermaid') {
-              return <MermaidDiagram chart={String(children).trim()} />
+            const { children, className } = props;
+            const match = /language-(\w+)/.exec(className || "");
+            if (match?.[1] === "mermaid") {
+              return <MermaidDiagram chart={String(children).trim()} />;
             }
-            return <code className={className}>{children}</code>
+            return <code className={className}>{children}</code>;
           },
         }}
       >
         {markdown}
       </ReactMarkdown>
     </article>
-  )
+  );
 }
 
 function useResolvedWikilinks(markdown: string): string {
-  const [resolved, setResolved] = useState(markdown)
+  const [resolved, setResolved] = useState(markdown);
 
   useEffect(() => {
     if (!markdown) {
-      queueMicrotask(() => setResolved(''))
-      return
+      queueMicrotask(() => setResolved(""));
+      return;
     }
 
-    let cancelled = false
+    let cancelled = false;
 
     void (async () => {
-      const matches = [...markdown.matchAll(/\[\[([^\]]+)\]\]/g)]
+      const matches = [...markdown.matchAll(/\[\[([^\]]+)\]\]/g)];
       const rawTargets = matches
         .map((m) => parseWikilinkTarget(m[1]).target)
-        .filter((target) => target.length > 0)
-      const uniqueTargets = [...new Set(rawTargets)]
+        .filter((target) => target.length > 0);
+      const uniqueTargets = [...new Set(rawTargets)];
 
-      const map = new Map<string, string | null>()
+      const map = new Map<string, string | null>();
       await Promise.all(
         uniqueTargets.map(async (target) => {
           try {
-            const res = await fetch(`/api/resolve?target=${encodeURIComponent(target)}`)
+            const res = await fetch(
+              `/api/resolve?target=${encodeURIComponent(target)}`,
+            );
             if (!res.ok) {
-              map.set(target, null)
-              return
+              map.set(target, null);
+              return;
             }
-            const json = (await res.json()) as { slug: string | null }
-            map.set(target, json.slug)
+            const json = (await res.json()) as { slug: string | null };
+            map.set(target, json.slug);
           } catch {
-            map.set(target, null)
+            map.set(target, null);
           }
         }),
-      )
+      );
 
-      const rewritten = markdown.replace(/\[\[([^\]]+)\]\]/g, (_whole, body: string) => {
-        const parsed = parseWikilinkTarget(body)
-        const slug = map.get(parsed.target)
-        if (slug) {
-          return `[${parsed.label}](/n/${slug})`
-        }
-        return `**${parsed.label}**`
-      })
+      const rewritten = markdown.replace(
+        /\[\[([^\]]+)\]\]/g,
+        (_whole, body: string) => {
+          const parsed = parseWikilinkTarget(body);
+          const slug = map.get(parsed.target);
+          if (slug) {
+            return `[${parsed.label}](/n/${slug})`;
+          }
+          return `**${parsed.label}**`;
+        },
+      );
 
       if (!cancelled) {
-        setResolved(rewritten)
+        setResolved(rewritten);
       }
-    })()
+    })();
 
     return () => {
-      cancelled = true
-    }
-  }, [markdown])
+      cancelled = true;
+    };
+  }, [markdown]);
 
-  return useMemo(() => resolved, [resolved])
+  return useMemo(() => resolved, [resolved]);
 }
 
 function parseWikilinkTarget(body: string): { target: string; label: string } {
-  const [targetRaw, aliasRaw] = body.split('|', 2)
-  const target = (targetRaw || '').trim()
-  const label = (aliasRaw || '').trim() || target
-  return { target, label }
+  const [targetRaw, aliasRaw] = body.split("|", 2);
+  const target = (targetRaw || "").trim();
+  const label = (aliasRaw || "").trim() || target;
+  return { target, label };
 }
 
 function MermaidDiagram({ chart }: { chart: string }) {
-  const [svg, setSvg] = useState<string>('')
-  const [error, setError] = useState<string | null>(null)
+  const [svg, setSvg] = useState<string>("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' })
-  }, [])
+    mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
+  }, []);
 
   useEffect(() => {
-    let mounted = true
-    const id = `m-${Math.random().toString(36).slice(2)}`
+    let mounted = true;
+    const id = `m-${Math.random().toString(36).slice(2)}`;
 
     void (async () => {
       try {
-        const { svg: rendered } = await mermaid.render(id, chart)
+        const { svg: rendered } = await mermaid.render(id, chart);
         if (mounted) {
-          setSvg(rendered)
-          setError(null)
+          setSvg(rendered);
+          setError(null);
         }
       } catch (err) {
         if (mounted) {
-          setError(err instanceof Error ? err.message : 'Invalid mermaid diagram')
+          setError(
+            err instanceof Error ? err.message : "Invalid mermaid diagram",
+          );
         }
       }
-    })()
+    })();
 
     return () => {
-      mounted = false
-    }
-  }, [chart])
+      mounted = false;
+    };
+  }, [chart]);
 
   if (error) {
-    return <pre className="error">Mermaid error: {error}</pre>
+    return <pre className="error">Mermaid error: {error}</pre>;
   }
 
-  return <div className="mermaid" dangerouslySetInnerHTML={{ __html: svg }} />
+  return <div className="mermaid" dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 
-export default App
+export default App;
