@@ -1,0 +1,120 @@
+.app-layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  min-height: 100vh;
+}
+
+.explorer-pane {
+  border-right: 1px solid #d3ccb8;
+  background: rgba(255, 255, 255, 0.82);
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.explorer-header h1 {
+  margin: 0;
+  font-size: 1.25rem;
+}
+
+.explorer-header p {
+  margin: 0.35rem 0 0.75rem;
+  color: #5e5a50;
+}
+
+.close-note {
+  border: 1px solid #c8bfaa;
+  background: #fff8ea;
+  color: #3b3524;
+  border-radius: 8px;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+}
+
+.tree {
+  list-style: none;
+  margin: 0;
+  padding-left: 1rem;
+}
+
+.root-tree {
+  padding-left: 0;
+}
+
+.folder-item {
+  margin: 0.1rem 0;
+}
+
+.folder-item summary {
+  cursor: pointer;
+}
+
+.note-item {
+  margin: 0.14rem 0;
+}
+
+.note-link {
+  text-decoration: none;
+}
+
+.active-note {
+  font-weight: 700;
+  text-decoration: underline;
+}
+
+.note-pane {
+  margin: 2rem;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid #d3ccb8;
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 12px 24px rgba(53, 45, 28, 0.08);
+}
+
+.note-pane pre {
+  overflow: auto;
+  background: #f3efe3;
+  border: 1px solid #ddd4bf;
+  border-radius: 8px;
+  padding: 0.8rem;
+}
+
+.note-pane code {
+  background: #f3efe3;
+  padding: 0.1rem 0.25rem;
+  border-radius: 4px;
+}
+
+.note-pane blockquote {
+  border-left: 4px solid #b4a47d;
+  margin: 0.8rem 0;
+  padding: 0.2rem 0.8rem;
+  background: #f9f5ea;
+}
+
+.mermaid {
+  overflow: auto;
+  border: 1px solid #ddd4bf;
+  border-radius: 8px;
+  padding: 0.5rem;
+  background: #fff;
+}
+
+.error {
+  color: #8a1c1c;
+}
+
+@media (max-width: 920px) {
+  .app-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .explorer-pane {
+    border-right: 0;
+    border-bottom: 1px solid #d3ccb8;
+    max-height: 42vh;
+  }
+
+  .note-pane {
+    margin: 1rem;
+  }
+}

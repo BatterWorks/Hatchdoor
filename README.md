@@ -1,15 +1,21 @@
 # Hatchdoor
 
-Read-only web frontend for an Obsidian vault. The app runs in Rust, serves HTML directly, and supports Obsidian wikilinks:
+Rust backend + React/Vite frontend for browsing an Obsidian vault in read-only mode.
 
-- `[[Note Name]]`
-- `[[Note Name|Alias]]`
+## Features
+
+- Explorer tree from vault folders/files
+- Open notes via route (`/n/:slug`)
+- Obsidian wikilinks (`[[Note]]`, `[[Note|Alias]]`) resolved through backend API
+- Markdown rendering with:
+  - GFM (tables, task lists, strikethrough)
+  - Math (`remark-math` + KaTeX)
+  - Mermaid fenced code blocks
+- PWA build output (manifest + service worker via Vite PWA)
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set values as needed.
-
-Default values are:
+Copy `.env.example` to `.env`:
 
 - `VAULT_PATH=./vault`
 - `HOST=0.0.0.0`
@@ -17,18 +23,42 @@ Default values are:
 
 ## Run
 
+### 1) Build frontend
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+### 2) Run backend
+
 ```bash
 cargo run
 ```
 
-Then open `http://localhost:42824`.
+Open `http://localhost:42824`.
 
-## Routes
+## API
 
-- `/` renders the explorer with no note selected
-- `/n/:slug` renders a note page
-- `/assets/style.css` serves static styles
-- `/health` returns `ok`
+- `GET /api/tree` -> explorer tree JSON
+- `GET /api/note/:slug` -> note JSON (`title`, `slug`, `content`)
+- `GET /api/resolve?target=...` -> wikilink resolution (`slug` or `null`)
+- `GET /health` -> `ok`
+
+## Frontend Dev Mode
+
+```bash
+# terminal 1
+cargo run
+
+# terminal 2
+cd frontend
+npm run dev
+```
+
+Vite dev server proxies `/api` and `/health` to `http://127.0.0.1:42824`.
 
 ## Quality checks
 
@@ -37,4 +67,7 @@ cargo fmt --all --check
 cargo check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+
+cd frontend
+npm run build
 ```
