@@ -205,6 +205,15 @@
   font-weight: 700;
 }
 
+.callout-collapsible > .callout-title {
+  cursor: pointer;
+  list-style: none;
+}
+
+.callout-collapsible > .callout-title::-webkit-details-marker {
+  display: none;
+}
+
 .callout-body {
   padding: 0.45rem 0.7rem;
   background: #f8f4e8;
