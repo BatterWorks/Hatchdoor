@@ -47,6 +47,24 @@ cargo run
 
 Open `http://localhost:42824`.
 
+## Docker
+
+Build image:
+
+```bash
+docker build -t hatchdoor:latest .
+```
+
+Run with Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+Compose uses `.env` via `env_file` for container runtime variables.
+Use `HOST_VAULT_PATH` in `.env` for the host vault directory.
+The container always uses `VAULT_PATH=/data/vault`.
+
 ## API
 
 - `GET /api/tree` -> explorer tree JSON
