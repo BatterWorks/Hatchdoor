@@ -1,5 +1,6 @@
 use ammonia::Builder;
 use pulldown_cmark::{Options, Parser, html};
+use std::collections::HashSet;
 
 use crate::vault::ExplorerFolder;
 use crate::wikilink::escape_html;
@@ -14,7 +15,16 @@ pub fn markdown_to_html(markdown: &str) -> String {
     let mut output = String::new();
     html::push_html(&mut output, parser);
     // Vault content can contain raw HTML; sanitize before returning to avoid XSS sinks.
-    Builder::default().clean(&output).to_string()
+    // Keep `class` and `title` on spans so broken wikilinks retain visual/tooltip cues.
+    let mut span_attrs = HashSet::new();
+    span_attrs.insert("title");
+    let mut span_classes = HashSet::new();
+    span_classes.insert("broken-link");
+    Builder::default()
+        .add_tag_attributes("span", span_attrs)
+        .add_allowed_classes("span", span_classes)
+        .clean(&output)
+        .to_string()
 }
 
 pub fn render_app_page(title: &str, explorer_html: &str, body_html: &str) -> String {
@@ -100,6 +110,14 @@ mod tests {
     fn markdown_to_html_sanitizes_raw_script() {
         let out = markdown_to_html(r#"<script>alert("xss")</script>"#);
         assert!(!out.contains("<script>"));
+    }
+
+    #[test]
+    fn markdown_to_html_preserves_broken_link_span_attributes() {
+        let out =
+            markdown_to_html(r#"<span class="broken-link" title="Missing: Note">Missing</span>"#);
+        assert!(out.contains("class=\"broken-link\""));
+        assert!(out.contains("title=\"Missing: Note\""));
     }
 
     #[test]

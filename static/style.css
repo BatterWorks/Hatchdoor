@@ -88,6 +88,12 @@ a:hover {
   cursor: not-allowed;
 }
 
+span[title^="Missing:"] {
+  color: #7a1e1e;
+  border-bottom: 1px dashed #7a1e1e;
+  cursor: not-allowed;
+}
+
 .toolbar {
   margin-top: 0;
 }
