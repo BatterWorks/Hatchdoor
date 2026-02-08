@@ -6,7 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type ButtonHTMLAttributes,
   type CSSProperties,
+  type HTMLAttributes,
   type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -114,6 +116,7 @@ function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -190,6 +193,7 @@ function App() {
     if (isMobile) {
       setDrawerOpen(false);
     }
+    setMobileMenuOpen(false);
   }, [location.pathname, isMobile]);
 
   useEffect(() => {
@@ -327,13 +331,13 @@ function App() {
       <header className="app-topbar">
         <div className="topbar-left">
           {isMobile ? (
-            <button
+            <UiButton
               className="icon-button"
               onClick={() => setDrawerOpen((prev) => !prev)}
               aria-label="Toggle explorer"
             >
               ☰
-            </button>
+            </UiButton>
           ) : null}
           <div>
             <h1>Hatchdoor</h1>
@@ -349,18 +353,61 @@ function App() {
         </div>
 
         <div className="topbar-right">
-          <button className="close-note" onClick={() => setSearchOpen(true)}>
+          <UiButton className="close-note" onClick={() => setSearchOpen(true)}>
             Search
-          </button>
-          <button className="close-note" onClick={() => navigate(-1)}>
-            Back
-          </button>
-          <button className="close-note" onClick={() => navigate(1)}>
-            Forward
-          </button>
-          <button className="close-note" onClick={() => navigate("/")}>
-            Close
-          </button>
+          </UiButton>
+          {isMobile ? (
+            <>
+              <UiButton className="close-note" onClick={() => navigate(-1)}>
+                Back
+              </UiButton>
+              <UiButton
+                className="close-note"
+                onClick={() => setMobileMenuOpen((prev) => !prev)}
+                aria-haspopup="menu"
+                aria-expanded={mobileMenuOpen}
+                aria-label="More actions"
+              >
+                ...
+              </UiButton>
+              {mobileMenuOpen ? (
+                <div className="topbar-menu" role="menu">
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      navigate(1);
+                    }}
+                  >
+                    Forward
+                  </UiButton>
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      setMobileMenuOpen(false);
+                      navigate("/");
+                    }}
+                  >
+                    Close
+                  </UiButton>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <UiButton className="close-note" onClick={() => navigate(-1)}>
+                Back
+              </UiButton>
+              <UiButton className="close-note" onClick={() => navigate(1)}>
+                Forward
+              </UiButton>
+              <UiButton className="close-note" onClick={() => navigate("/")}>
+                Close
+              </UiButton>
+            </>
+          )}
         </div>
       </header>
 
@@ -372,9 +419,9 @@ function App() {
           <header className="explorer-header">
             <p>Vault Explorer</p>
             <div className="explorer-actions">
-              <button className="close-note" onClick={() => void loadTree()}>
+              <UiButton className="close-note" onClick={() => void loadTree()}>
                 Refresh
-              </button>
+              </UiButton>
             </div>
           </header>
 
@@ -464,8 +511,44 @@ function App() {
   );
 }
 
+function UiButton({
+  className,
+  children,
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button className={`ui-button ${className ?? ""}`.trim()} {...props}>
+      {children}
+    </button>
+  );
+}
+
+function UiPanel({
+  className,
+  children,
+  ...props
+}: HTMLAttributes<HTMLElement>) {
+  return (
+    <section className={`ui-panel ${className ?? ""}`.trim()} {...props}>
+      {children}
+    </section>
+  );
+}
+
+function UiToolbar({
+  className,
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`ui-toolbar ${className ?? ""}`.trim()}>{children}</div>
+  );
+}
+
 function StatusBadge({ tone, text }: { tone: "warn" | "error"; text: string }) {
-  return <span className={`status-badge ${tone}`}>{text}</span>;
+  return <span className={`ui-badge status-badge ${tone}`}>{text}</span>;
 }
 
 function ReaderToolbar({
@@ -476,7 +559,7 @@ function ReaderToolbar({
   onChange: (next: ReadPrefs) => void;
 }) {
   return (
-    <div className="reader-toolbar">
+    <UiToolbar className="reader-toolbar">
       <label>
         Size
         <select
@@ -524,7 +607,7 @@ function ReaderToolbar({
           ))}
         </select>
       </label>
-    </div>
+    </UiToolbar>
   );
 }
 
@@ -549,15 +632,15 @@ function StateBlock({
   onAction?: () => void;
 }) {
   return (
-    <section className="state-block">
+    <UiPanel className="state-block ui-empty-state">
       <h2>{title}</h2>
       <p>{description}</p>
       {actionLabel && onAction ? (
-        <button className="close-note" onClick={onAction}>
+        <UiButton className="close-note" onClick={onAction}>
           {actionLabel}
-        </button>
+        </UiButton>
       ) : null}
-    </section>
+    </UiPanel>
   );
 }
 
@@ -601,7 +684,7 @@ function RecentNotesList({
   }
 
   return (
-    <section className="recent-notes" data-testid="recent-notes">
+    <UiPanel className="recent-notes" data-testid="recent-notes">
       <p className="recent-notes-title">Recent Notes</p>
       <ul className="tree root-tree">
         {notes.map((note) => (
@@ -614,13 +697,14 @@ function RecentNotesList({
               }
               to={`/n/${note.slug}`}
               onClick={onNavigate}
+              title={`${note.relativePath}.md`}
             >
               {note.title}
             </NavLink>
           </li>
         ))}
       </ul>
-    </section>
+    </UiPanel>
   );
 }
 
@@ -660,15 +744,15 @@ function SearchDialog({
         }
       }}
     >
-      <section
+      <UiPanel
         className="search-panel"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="search-header">
           <h2>Search</h2>
-          <button className="close-note" onClick={onClose}>
+          <UiButton className="close-note" onClick={onClose}>
             Close
-          </button>
+          </UiButton>
         </header>
 
         <input
@@ -700,7 +784,7 @@ function SearchDialog({
         <ul className="search-results">
           {results.map((result) => (
             <li key={`${result.slug}-${result.match_kind}`}>
-              <button
+              <UiButton
                 className="search-result"
                 onClick={() => onSelect(result.slug)}
               >
@@ -712,11 +796,11 @@ function SearchDialog({
                 {result.snippet ? (
                   <p className="search-snippet">{result.snippet}</p>
                 ) : null}
-              </button>
+              </UiButton>
             </li>
           ))}
         </ul>
-      </section>
+      </UiPanel>
     </div>
   );
 }
@@ -869,6 +953,7 @@ function NoteNode({
             : "note-link"
         }
         to={`/n/${note.slug}`}
+        title={`${note.title}.md`}
       >
         {note.title}
       </NavLink>
@@ -1175,9 +1260,9 @@ function CodeBlock({
     <div className="code-block">
       <div className="code-block-head">
         <span className="code-lang">{language}</span>
-        <button className="close-note" onClick={() => void onCopy()}>
+        <UiButton className="close-note" onClick={() => void onCopy()}>
           {copied ? "Copied" : "Copy"}
-        </button>
+        </UiButton>
       </div>
       <pre>
         <code>{content}</code>
