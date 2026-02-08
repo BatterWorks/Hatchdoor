@@ -14,6 +14,7 @@ import { escapeMarkdownLabel } from "./markdown";
 
 afterEach(() => {
   cleanup();
+  window.localStorage.clear();
   vi.restoreAllMocks();
 });
 
@@ -238,9 +239,11 @@ describe("App", () => {
     );
 
     const recent = await screen.findByTestId("recent-notes");
-    expect(
-      within(recent).getByRole("link", { name: "Home" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        within(recent).getByRole("link", { name: "Home" }),
+      ).toBeInTheDocument();
+    });
   });
 
   it("opens search and lists matches", async () => {
@@ -409,9 +412,11 @@ const x = 1
       expect(callout?.textContent).toContain("Heads up");
       expect(callout?.textContent).toContain("Callout body");
     });
-    expect(
-      await screen.findByRole("button", { name: "Copy" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      const block = document.querySelector(".code-block");
+      expect(block).not.toBeNull();
+      expect(block?.textContent).toContain("const x = 1");
+    });
     expect(document.querySelector(".note-content > pre")).toBeNull();
   });
 

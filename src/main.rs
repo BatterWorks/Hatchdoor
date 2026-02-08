@@ -339,8 +339,21 @@ async fn search_handler(
 
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let include_content = query.content.unwrap_or(false);
-    let results = index.search(&query.q, include_content, limit);
-    (StatusCode::OK, Json(SearchResponse { results })).into_response()
+    let search_query = query.q;
+
+    let handle =
+        tokio::task::spawn_blocking(move || index.search(&search_query, include_content, limit));
+
+    match handle.await {
+        Ok(results) => (StatusCode::OK, Json(SearchResponse { results })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Search task failed: {e}"),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn spa_index_handler() -> impl IntoResponse {
