@@ -15,6 +15,9 @@ use dotenvy::dotenv;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 use crate::vault::{ExplorerFolder, Note, SearchHit, VaultIndex};
 
@@ -132,14 +135,15 @@ struct SearchResponse {
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+    init_logging();
 
     let config = AppConfig::from_env().unwrap_or_else(|e| {
-        eprintln!("Configuration error: {e}");
+        error!("Configuration error: {e}");
         std::process::exit(1);
     });
 
     let cache = build_cache(&config.vault_path).unwrap_or_else(|e| {
-        eprintln!(
+        error!(
             "Failed to index vault at {}: {e}",
             config.vault_path.display()
         );
@@ -173,28 +177,52 @@ async fn main() {
         .route_service("/sw.js", ServeFile::new("frontend/dist/sw.js"))
         .nest_service("/assets", ServeDir::new("frontend/dist/assets"))
         .fallback_service(ServeDir::new("frontend/dist"))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().include_headers(false))
+                .on_response(DefaultOnResponse::new().include_headers(false)),
+        )
         .with_state(state);
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
-        eprintln!("Address error: {e}");
+        error!("Address error: {e}");
         std::process::exit(1);
     });
 
-    println!("Hatchdoor listening on http://{addr}");
+    info!(
+        host = %config.host,
+        port = config.port,
+        refresh_seconds = config.refresh_seconds,
+        vault_path = %config.vault_path.display(),
+        "Hatchdoor starting"
+    );
+    info!("Hatchdoor listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| {
-            eprintln!("Failed to bind: {e}");
+            error!("Failed to bind: {e}");
             std::process::exit(1);
         });
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
-        eprintln!("Server error: {e}");
+        error!("Server error: {e}");
         std::process::exit(1);
     });
 }
 
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn"));
+
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .compact()
+        .init();
+}
+
 fn build_cache(vault_path: &PathBuf) -> Result<VaultCache, String> {
+    debug!(vault_path = %vault_path.display(), "Building vault cache");
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
     let explorer_tree = index.explorer_tree();
 
@@ -231,15 +259,36 @@ async fn refresh_if_needed(
 
     match build_cache(&state.vault_path) {
         Ok(cache) => {
+            if force {
+                info!(
+                    force_refresh = true,
+                    vault_path = %state.vault_path.display(),
+                    "Vault cache refreshed"
+                );
+            } else {
+                debug!(
+                    force_refresh = false,
+                    vault_path = %state.vault_path.display(),
+                    "Vault cache refreshed"
+                );
+            }
             *guard = cache;
             Ok(())
         }
-        Err(error) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Vault refresh failed: {error}"),
-            }),
-        )),
+        Err(error) => {
+            error!(
+                force_refresh = force,
+                vault_path = %state.vault_path.display(),
+                error = %error,
+                "Vault refresh failed"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Vault refresh failed: {error}"),
+                }),
+            ))
+        }
     }
 }
 
@@ -265,13 +314,16 @@ async fn note_handler(
 
     match index.read_note_by_slug(&slug) {
         Ok(Some(note)) => (StatusCode::OK, Json(NoteResponse { note })).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Note not found: {slug}"),
-            }),
-        )
-            .into_response(),
+        Ok(None) => {
+            warn!(slug = %slug, "Note not found");
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Note not found: {slug}"),
+                }),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -340,6 +392,10 @@ async fn search_handler(
     let limit = query.limit.unwrap_or(25).clamp(1, 100);
     let include_content = query.content.unwrap_or(false);
     let search_query = query.q;
+    debug!(
+        query_len = search_query.len(),
+        include_content, limit, "Executing search"
+    );
 
     let handle =
         tokio::task::spawn_blocking(move || index.search(&search_query, include_content, limit));
