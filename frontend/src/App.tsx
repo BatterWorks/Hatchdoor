@@ -595,6 +595,16 @@ function NotePage({
         remarkPlugins={[remarkGfm, remarkMath]}
         rehypePlugins={[rehypeKatex]}
         components={{
+          pre(props) {
+            const first = Children.toArray(props.children)[0];
+            if (
+              isValidElement<{ className?: string }>(first) &&
+              first.type !== "code"
+            ) {
+              return first;
+            }
+            return <pre>{props.children}</pre>;
+          },
           code(props) {
             const { children, className } = props;
             const content = String(children).replace(/\n$/, "");
@@ -715,16 +725,29 @@ function CalloutOrQuote({ children }: { children: ReactNode }) {
 
   if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
     const firstText = flattenText(first.props.children).trim();
-    const match = firstText.match(/^\[!(\w+)\]\s*(.*)$/);
+    const match = firstText.match(/^\[!([A-Za-z0-9_]+)\]([+-])?\s*(.*)$/);
 
     if (match) {
       const kind = match[1].toLowerCase();
-      const title = match[2] || kind[0].toUpperCase() + kind.slice(1);
+      const fold = match[2] ?? null;
+      const title = match[3] || kind[0].toUpperCase() + kind.slice(1);
       const bodyNodes = nodes
         .slice(firstContentIndex + 1)
         .filter(
           (node) => !(typeof node === "string" && node.trim().length === 0),
         );
+
+      if (fold) {
+        return (
+          <details
+            className={`callout callout-${kind} callout-collapsible`}
+            open={fold === "+"}
+          >
+            <summary className="callout-title">{title}</summary>
+            <div className="callout-body">{bodyNodes}</div>
+          </details>
+        );
+      }
 
       return (
         <div className={`callout callout-${kind}`}>

@@ -216,5 +216,57 @@ const x = 1
     expect(
       await screen.findByRole("button", { name: "Copy" }),
     ).toBeInTheDocument();
+    expect(document.querySelector(".note-content > pre")).toBeNull();
+  });
+
+  it("renders collapsible callouts from obsidian marker syntax", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: `> [!warning]- Hidden details
+>
+> Secret text`,
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Hidden details")).toBeInTheDocument();
+    const collapsible = document.querySelector(".callout-collapsible");
+    expect(collapsible).not.toBeNull();
+    expect(collapsible).not.toHaveAttribute("open");
   });
 });

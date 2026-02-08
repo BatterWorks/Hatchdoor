@@ -93,16 +93,24 @@ impl VaultIndex {
             by_title
                 .entry(normalize_title(&stem))
                 .or_insert_with(|| slug.clone());
-            by_path_title.insert(normalize_title(&relative_without_ext), slug.clone());
-            by_slug.insert(slug, note);
-            ordered_slugs.push(relative_without_ext);
+            by_path_title
+                .entry(normalize_title(&relative_without_ext))
+                .or_insert_with(|| slug.clone());
+            by_slug.insert(slug.clone(), note);
+            ordered_slugs.push(slug);
         }
 
-        ordered_slugs.sort();
-        let ordered_slugs = ordered_slugs
-            .into_iter()
-            .filter_map(|relative| by_path_title.get(&normalize_title(&relative)).cloned())
-            .collect();
+        ordered_slugs.sort_by(|left_slug, right_slug| {
+            let left = by_slug
+                .get(left_slug)
+                .map(|entry| entry.relative_path.as_str())
+                .unwrap_or("");
+            let right = by_slug
+                .get(right_slug)
+                .map(|entry| entry.relative_path.as_str())
+                .unwrap_or("");
+            left.cmp(right)
+        });
 
         Ok(Self {
             by_slug,
@@ -406,5 +414,19 @@ mod tests {
 
         let missing = vault.read_note_by_slug("missing").expect("read success");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn explorer_tree_keeps_notes_with_case_only_path_differences() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(dir.path().join("Foo.md"), "upper").expect("write upper");
+        fs::write(dir.path().join("foo.md"), "lower").expect("write lower");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let tree = vault.explorer_tree();
+
+        assert_eq!(tree.notes.len(), 2);
+        assert_eq!(tree.notes[0].title, "Foo");
+        assert_eq!(tree.notes[1].title, "foo");
     }
 }
