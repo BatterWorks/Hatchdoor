@@ -17,7 +17,7 @@ use tower_http::services::ServeDir;
 
 use crate::render::{markdown_to_html, render_note_page};
 use crate::vault::VaultIndex;
-use crate::wikilink::rewrite_wikilinks;
+use crate::wikilink::{escape_html, rewrite_wikilinks};
 
 #[derive(Debug, Clone)]
 struct AppConfig {
@@ -142,15 +142,18 @@ async fn note_handler(
             (StatusCode::OK, Html(page)).into_response()
         }
         Ok(None) => {
-            let body =
-                format!("<h1>Not Found</h1><p>No note exists for slug: <code>{slug}</code></p>");
+            let safe_slug = escape_html(&slug);
+            let body = format!(
+                "<h1>Not Found</h1><p>No note exists for slug: <code>{safe_slug}</code></p>"
+            );
             let page = render_note_page("Not Found", &body);
             (StatusCode::NOT_FOUND, Html(page)).into_response()
         }
         Err(e) => {
+            let safe_slug = escape_html(&slug);
             let body = format!(
-                "<h1>Error</h1><p>Failed reading note <code>{slug}</code>: {}</p>",
-                wikilink::escape_html(&e.to_string())
+                "<h1>Error</h1><p>Failed reading note <code>{safe_slug}</code>: {}</p>",
+                escape_html(&e.to_string())
             );
             let page = render_note_page("Error", &body);
             (StatusCode::INTERNAL_SERVER_ERROR, Html(page)).into_response()
