@@ -16,7 +16,7 @@ use dotenvy::dotenv;
 use tower_http::services::ServeDir;
 
 use crate::render::{markdown_to_html, render_app_page, render_explorer_html};
-use crate::vault::VaultIndex;
+use crate::vault::{ExplorerFolder, VaultIndex};
 use crate::wikilink::{escape_html, rewrite_wikilinks};
 
 #[derive(Debug, Clone)]
@@ -56,6 +56,7 @@ fn parse_port(input: &str) -> Result<u16, String> {
 #[derive(Clone)]
 struct AppState {
     index: Arc<VaultIndex>,
+    explorer_tree: Arc<ExplorerFolder>,
 }
 
 #[tokio::main]
@@ -76,6 +77,7 @@ async fn main() {
     });
 
     let state = AppState {
+        explorer_tree: Arc::new(index.explorer_tree()),
         index: Arc::new(index),
     };
 
@@ -106,7 +108,7 @@ async fn main() {
 }
 
 async fn root_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let explorer = render_explorer_html(&state.index.explorer_tree(), None);
+    let explorer = render_explorer_html(&state.explorer_tree, None);
     let body = "<h1>Notes Explorer</h1><p>Select any note from the left panel.</p>";
     let page = render_app_page("Hatchdoor Explorer", &explorer, body);
     (StatusCode::OK, Html(page))
@@ -124,7 +126,7 @@ async fn note_handler(
         Ok(Some(note)) => {
             let rewritten = rewrite_wikilinks(&note.content, &state.index);
             let rendered_note = markdown_to_html(&rewritten);
-            let explorer = render_explorer_html(&state.index.explorer_tree(), Some(&note.slug));
+            let explorer = render_explorer_html(&state.explorer_tree, Some(&note.slug));
             let body =
                 format!("<p class=\"toolbar\"><a href=\"/\">Close note</a></p>{rendered_note}");
             let page = render_app_page(&note.title, &explorer, &body);
@@ -135,7 +137,7 @@ async fn note_handler(
             let body = format!(
                 "<h1>Not Found</h1><p>No note exists for slug: <code>{safe_slug}</code></p><p class=\"toolbar\"><a href=\"/\">Back to explorer</a></p>"
             );
-            let explorer = render_explorer_html(&state.index.explorer_tree(), None);
+            let explorer = render_explorer_html(&state.explorer_tree, None);
             let page = render_app_page("Not Found", &explorer, &body);
             (StatusCode::NOT_FOUND, Html(page)).into_response()
         }
@@ -145,7 +147,7 @@ async fn note_handler(
                 "<h1>Error</h1><p>Failed reading note <code>{safe_slug}</code>: {}</p><p class=\"toolbar\"><a href=\"/\">Back to explorer</a></p>",
                 escape_html(&e.to_string())
             );
-            let explorer = render_explorer_html(&state.index.explorer_tree(), None);
+            let explorer = render_explorer_html(&state.explorer_tree, None);
             let page = render_app_page("Error", &explorer, &body);
             (StatusCode::INTERNAL_SERVER_ERROR, Html(page)).into_response()
         }
