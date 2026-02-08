@@ -21,6 +21,11 @@
   color: #5e5a50;
 }
 
+.explorer-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .close-note {
   border: 1px solid #c8bfaa;
   background: #fff8ea;
@@ -101,6 +106,12 @@
 
 .error {
   color: #8a1c1c;
+}
+
+.broken-link {
+  color: #7a1e1e;
+  border-bottom: 1px dashed #7a1e1e;
+  cursor: not-allowed;
 }
 
 @media (max-width: 920px) {
