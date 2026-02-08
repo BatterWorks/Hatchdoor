@@ -21,6 +21,9 @@ body {
 
 .app-shell {
   min-height: 100vh;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: clip;
 }
 
 .app-topbar {
@@ -109,7 +112,7 @@ body {
 .app-layout {
   --sidebar-width: 320px;
   display: grid;
-  grid-template-columns: var(--sidebar-width) 10px 1fr;
+  grid-template-columns: var(--sidebar-width) 10px minmax(0, 1fr);
   min-height: calc(100vh - 61px);
   min-width: 0;
 }
@@ -174,8 +177,11 @@ body {
   border-radius: var(--radius-lg);
   padding: 1rem 1.15rem;
   box-shadow: var(--shadow-panel);
+  max-width: 100%;
+  box-sizing: border-box;
   min-width: 0;
   overflow-x: hidden;
+  width: auto;
 }
 
 .reader-toolbar {
@@ -209,11 +215,24 @@ body {
 }
 
 .note-content {
-  max-width: var(--reader-max-width);
+  width: min(100%, var(--reader-max-width));
+  max-width: 100%;
   margin: 0 auto;
   font-size: var(--reader-font-size);
   line-height: var(--reader-line-height);
   min-width: 0;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.note-content > * {
+  max-width: 100%;
+}
+
+.note-content :is(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .note-content h2 {
@@ -221,6 +240,7 @@ body {
 }
 
 .note-pane pre {
+  width: 100%;
   max-width: 100%;
   overflow: auto;
   background: #f3efe3;
@@ -242,6 +262,17 @@ body {
   border-radius: 10px;
   overflow: hidden;
   max-width: 100%;
+  width: 100%;
+}
+
+.code-block pre {
+  margin: 0;
+}
+
+.note-content :not(pre) > code {
+  white-space: break-spaces;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .code-block-head {
@@ -569,7 +600,7 @@ body.resizing {
   }
 
   .app-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     min-height: calc(100vh - 86px);
   }
 
@@ -611,6 +642,11 @@ body.resizing {
   .note-pane {
     margin: 0.8rem;
     padding: 0.8rem;
+  }
+
+  .note-content {
+    width: 100%;
+    max-width: 100%;
   }
 
   .sidebar-resizer {
