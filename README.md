@@ -23,8 +23,10 @@ Copy `.env.example` to `.env`:
 - `HOST=0.0.0.0`
 - `PORT=42824`
 - `VAULT_REFRESH_SECONDS=2`
+- `RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn`
 
 `VAULT_REFRESH_SECONDS` controls how often API requests may trigger a fresh vault scan.
+`RUST_LOG` controls structured backend log verbosity.
 
 ## Run
 
