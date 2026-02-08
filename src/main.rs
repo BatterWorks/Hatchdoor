@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 
-use crate::vault::{ExplorerFolder, Note, VaultIndex};
+use crate::vault::{ExplorerFolder, Note, SearchHit, VaultIndex};
 
 #[derive(Debug, Clone)]
 struct AppConfig {
@@ -117,6 +117,18 @@ struct RefreshResponse {
     refreshed: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    q: String,
+    content: Option<bool>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct SearchResponse {
+    results: Vec<SearchHit>,
+}
+
 #[tokio::main]
 async fn main() {
     dotenv().ok();
@@ -146,6 +158,7 @@ async fn main() {
         .route("/api/note/{slug}", get(note_handler))
         .route("/api/resolve", get(resolve_handler))
         .route("/api/resolve-batch", post(resolve_batch_handler))
+        .route("/api/search", get(search_handler))
         .route("/api/refresh", post(refresh_handler))
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
@@ -313,6 +326,21 @@ async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
     }
+}
+
+async fn search_handler(
+    Query(query): Query<SearchQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let (index, _tree) = match snapshot(&state).await {
+        Ok(s) => s,
+        Err(err) => return err.into_response(),
+    };
+
+    let limit = query.limit.unwrap_or(25).clamp(1, 100);
+    let include_content = query.content.unwrap_or(false);
+    let results = index.search(&query.q, include_content, limit);
+    (StatusCode::OK, Json(SearchResponse { results })).into_response()
 }
 
 async fn spa_index_handler() -> impl IntoResponse {

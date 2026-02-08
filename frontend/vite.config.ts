@@ -74,7 +74,6 @@ export default defineConfig({
           if (id.includes("/katex/")) {
             return "katex-vendor";
           }
-
         },
       },
     },

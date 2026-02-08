@@ -47,6 +47,10 @@ type ActiveNoteMeta = {
   relativePath: string;
 };
 
+type RecentNote = ActiveNoteMeta & {
+  viewedAt: number;
+};
+
 type ReadPrefs = {
   fontSize: number;
   lineHeight: number;
@@ -60,6 +64,18 @@ type ResolveBatchResponse = {
   }>;
 };
 
+type SearchResult = {
+  title: string;
+  slug: string;
+  relative_path: string;
+  match_kind: string;
+  snippet: string | null;
+};
+
+type SearchResponse = {
+  results: SearchResult[];
+};
+
 type MermaidApi = {
   initialize: (config: {
     startOnLoad: boolean;
@@ -71,6 +87,7 @@ type MermaidApi = {
 const SIDEBAR_WIDTH_KEY = "hatchdoor.sidebarWidth";
 const DRAWER_OPEN_KEY = "hatchdoor.drawerOpen";
 const READER_PREFS_KEY = "hatchdoor.readerPrefs";
+const RECENT_NOTES_KEY = "hatchdoor.recentNotes";
 
 function App() {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
@@ -87,12 +104,22 @@ function App() {
   });
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [activeNote, setActiveNote] = useState<ActiveNoteMeta | null>(null);
+  const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
+    getStoredRecentNotes(),
+  );
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchIncludeContent, setSearchIncludeContent] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
   );
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -143,6 +170,10 @@ function App() {
   }, [readPrefs]);
 
   useEffect(() => {
+    window.localStorage.setItem(RECENT_NOTES_KEY, JSON.stringify(recentNotes));
+  }, [recentNotes]);
+
+  useEffect(() => {
     const onOnline = () => setIsOnline(true);
     const onOffline = () => setIsOnline(false);
 
@@ -165,6 +196,103 @@ function App() {
       setActiveNote(null);
     }
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!activeNote) {
+      return;
+    }
+
+    setRecentNotes((prev) => {
+      const withoutCurrent = prev.filter(
+        (item) => item.slug !== activeNote.slug,
+      );
+      const next: RecentNote[] = [
+        { ...activeNote, viewedAt: Date.now() },
+        ...withoutCurrent,
+      ].slice(0, 12);
+      return next;
+    });
+  }, [activeNote]);
+
+  useEffect(() => {
+    if (!searchOpen) {
+      return;
+    }
+    const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    return () => window.clearTimeout(id);
+  }, [searchOpen]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+        return;
+      }
+
+      if (event.key === "/" && !isEditableTarget(event.target)) {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!searchOpen) {
+      return;
+    }
+
+    const query = searchQuery.trim();
+    if (query.length < 2) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+
+    const id = window.setTimeout(() => {
+      void (async () => {
+        setSearchLoading(true);
+        setSearchError(null);
+        try {
+          const params = new URLSearchParams({
+            q: query,
+            content: searchIncludeContent ? "1" : "0",
+            limit: "30",
+          });
+          const res = await fetch(`/api/search?${params.toString()}`);
+          if (!res.ok) {
+            throw new Error(`Search failed: ${res.status}`);
+          }
+          const json = (await res.json()) as SearchResponse;
+          if (!cancelled) {
+            setSearchResults(json.results);
+          }
+        } catch (error) {
+          if (!cancelled) {
+            setSearchResults([]);
+            setSearchError(
+              error instanceof Error ? error.message : "Unknown search error",
+            );
+          }
+        } finally {
+          if (!cancelled) {
+            setSearchLoading(false);
+          }
+        }
+      })();
+    }, 150);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(id);
+    };
+  }, [searchIncludeContent, searchOpen, searchQuery]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -220,8 +348,14 @@ function App() {
         </div>
 
         <div className="topbar-right">
+          <button className="close-note" onClick={() => setSearchOpen(true)}>
+            Search
+          </button>
           <button className="close-note" onClick={() => navigate(-1)}>
             Back
+          </button>
+          <button className="close-note" onClick={() => navigate(1)}>
+            Forward
           </button>
           <button className="close-note" onClick={() => navigate("/")}>
             Close
@@ -242,6 +376,12 @@ function App() {
               </button>
             </div>
           </header>
+
+          <RecentNotesList
+            notes={recentNotes}
+            currentPath={location.pathname}
+            onNavigate={() => setDrawerOpen(false)}
+          />
 
           {loadingTree ? <ExplorerSkeleton /> : null}
           {!loadingTree && treeError && !tree ? (
@@ -298,6 +438,25 @@ function App() {
           className="drawer-backdrop"
           aria-label="Close explorer"
           onClick={() => setDrawerOpen(false)}
+        />
+      ) : null}
+
+      {searchOpen ? (
+        <SearchDialog
+          query={searchQuery}
+          includeContent={searchIncludeContent}
+          loading={searchLoading}
+          error={searchError}
+          results={searchResults}
+          inputRef={searchInputRef}
+          onClose={() => setSearchOpen(false)}
+          onQueryChange={setSearchQuery}
+          onIncludeContentChange={setSearchIncludeContent}
+          onSelect={(slug) => {
+            setSearchOpen(false);
+            setSearchQuery("");
+            navigate(`/n/${slug}`);
+          }}
         />
       ) : null}
     </div>
@@ -427,6 +586,140 @@ function NoteSkeleton() {
   );
 }
 
+function RecentNotesList({
+  notes,
+  currentPath,
+  onNavigate,
+}: {
+  notes: RecentNote[];
+  currentPath: string;
+  onNavigate: () => void;
+}) {
+  if (notes.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="recent-notes" data-testid="recent-notes">
+      <p className="recent-notes-title">Recent Notes</p>
+      <ul className="tree root-tree">
+        {notes.map((note) => (
+          <li key={note.slug} className="note-item">
+            <NavLink
+              className={
+                currentPath === `/n/${note.slug}`
+                  ? "note-link active-note"
+                  : "note-link"
+              }
+              to={`/n/${note.slug}`}
+              onClick={onNavigate}
+            >
+              {note.title}
+            </NavLink>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function SearchDialog({
+  query,
+  includeContent,
+  loading,
+  error,
+  results,
+  inputRef,
+  onClose,
+  onQueryChange,
+  onIncludeContentChange,
+  onSelect,
+}: {
+  query: string;
+  includeContent: boolean;
+  loading: boolean;
+  error: string | null;
+  results: SearchResult[];
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  onClose: () => void;
+  onQueryChange: (value: string) => void;
+  onIncludeContentChange: (value: boolean) => void;
+  onSelect: (slug: string) => void;
+}) {
+  return (
+    <div
+      className="search-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Search notes"
+      onClick={onClose}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          onClose();
+        }
+      }}
+    >
+      <section
+        className="search-panel"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="search-header">
+          <h2>Search</h2>
+          <button className="close-note" onClick={onClose}>
+            Close
+          </button>
+        </header>
+
+        <input
+          ref={inputRef}
+          className="search-input"
+          placeholder="Search notes (title, path, content)"
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+        />
+
+        <label className="search-toggle">
+          <input
+            type="checkbox"
+            checked={includeContent}
+            onChange={(event) => onIncludeContentChange(event.target.checked)}
+          />
+          Include content matches
+        </label>
+
+        {loading ? <p>Searching…</p> : null}
+        {error ? <p className="error">{error}</p> : null}
+        {!loading &&
+        !error &&
+        query.trim().length >= 2 &&
+        results.length === 0 ? (
+          <p>No matching notes.</p>
+        ) : null}
+
+        <ul className="search-results">
+          {results.map((result) => (
+            <li key={`${result.slug}-${result.match_kind}`}>
+              <button
+                className="search-result"
+                onClick={() => onSelect(result.slug)}
+              >
+                <div className="search-main">
+                  <strong>{result.title}</strong>
+                  <span>{result.relative_path}.md</span>
+                </div>
+                <span className="search-kind">{result.match_kind}</span>
+                {result.snippet ? (
+                  <p className="search-snippet">{result.snippet}</p>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+    </div>
+  );
+}
+
 function FolderTree({
   root,
   currentPath,
@@ -434,6 +727,8 @@ function FolderTree({
   root: ExplorerFolder;
   currentPath: string;
 }) {
+  const currentSlug = pathToNoteSlug(currentPath);
+
   return (
     <ul className="tree root-tree">
       {root.folders.map((folder) => (
@@ -441,6 +736,7 @@ function FolderTree({
           key={`folder-${folder.name}`}
           folder={folder}
           currentPath={currentPath}
+          currentSlug={currentSlug}
         />
       ))}
       {root.notes.map((note) => (
@@ -453,13 +749,17 @@ function FolderTree({
 function FolderNode({
   folder,
   currentPath,
+  currentSlug,
 }: {
   folder: ExplorerFolder;
   currentPath: string;
+  currentSlug: string | null;
 }) {
+  const shouldOpen = folderContainsSlug(folder, currentSlug);
+
   return (
     <li className="folder-item">
-      <details open>
+      <details open={shouldOpen}>
         <summary>{folder.name}</summary>
         <ul className="tree">
           {folder.folders.map((child) => (
@@ -467,6 +767,7 @@ function FolderNode({
               key={`${folder.name}-${child.name}`}
               folder={child}
               currentPath={currentPath}
+              currentSlug={currentSlug}
             />
           ))}
           {folder.notes.map((note) => (
@@ -476,6 +777,30 @@ function FolderNode({
       </details>
     </li>
   );
+}
+
+function pathToNoteSlug(pathname: string): string | null {
+  const match = pathname.match(/^\/n\/([^/]+)$/);
+  if (!match) {
+    return null;
+  }
+
+  return decodeURIComponent(match[1]);
+}
+
+function folderContainsSlug(
+  folder: ExplorerFolder,
+  slug: string | null,
+): boolean {
+  if (!slug) {
+    return false;
+  }
+
+  if (folder.notes.some((note) => note.slug === slug)) {
+    return true;
+  }
+
+  return folder.folders.some((child) => folderContainsSlug(child, slug));
 }
 
 function NoteNode({
@@ -908,6 +1233,47 @@ function getStoredReaderPrefs(): ReadPrefs {
   } catch {
     return fallback;
   }
+}
+
+function getStoredRecentNotes(): RecentNote[] {
+  try {
+    const raw = window.localStorage.getItem(RECENT_NOTES_KEY);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as Partial<RecentNote>[];
+    return parsed
+      .filter(
+        (item) =>
+          typeof item.slug === "string" &&
+          typeof item.title === "string" &&
+          typeof item.relativePath === "string" &&
+          typeof item.viewedAt === "number",
+      )
+      .slice(0, 12)
+      .map((item) => ({
+        slug: item.slug as string,
+        title: item.title as string,
+        relativePath: item.relativePath as string,
+        viewedAt: item.viewedAt as number,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {
