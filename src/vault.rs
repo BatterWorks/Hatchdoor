@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -10,6 +11,7 @@ pub struct NoteEntry {
     pub title: String,
     pub slug: String,
     pub path: PathBuf,
+    pub relative_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,10 +23,23 @@ pub struct Note {
 
 #[derive(Debug, Clone)]
 pub struct VaultIndex {
-    root: PathBuf,
     by_slug: HashMap<String, NoteEntry>,
     by_title: HashMap<String, String>,
     by_path_title: HashMap<String, String>,
+    ordered_slugs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerFolder {
+    pub name: String,
+    pub folders: Vec<ExplorerFolder>,
+    pub notes: Vec<ExplorerNote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplorerNote {
+    pub title: String,
+    pub slug: String,
 }
 
 impl VaultIndex {
@@ -33,6 +48,7 @@ impl VaultIndex {
         let mut by_slug = HashMap::new();
         let mut by_title = HashMap::new();
         let mut by_path_title = HashMap::new();
+        let mut ordered_slugs = Vec::new();
         let mut markdown_paths = Vec::new();
 
         for entry in WalkDir::new(&root) {
@@ -69,6 +85,7 @@ impl VaultIndex {
                 title: stem.clone(),
                 slug: slug.clone(),
                 path: path.to_path_buf(),
+                relative_path: relative_without_ext.clone(),
             };
 
             by_title
@@ -76,18 +93,21 @@ impl VaultIndex {
                 .or_insert_with(|| slug.clone());
             by_path_title.insert(normalize_title(&relative_without_ext), slug.clone());
             by_slug.insert(slug, note);
+            ordered_slugs.push(relative_without_ext);
         }
 
+        ordered_slugs.sort();
+        let ordered_slugs = ordered_slugs
+            .into_iter()
+            .filter_map(|relative| by_path_title.get(&normalize_title(&relative)).cloned())
+            .collect();
+
         Ok(Self {
-            root,
             by_slug,
             by_title,
             by_path_title,
+            ordered_slugs,
         })
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn find_by_slug(&self, slug: &str) -> Option<&NoteEntry> {
@@ -126,9 +146,66 @@ impl VaultIndex {
         }))
     }
 
+    pub fn explorer_tree(&self) -> ExplorerFolder {
+        let mut root = FolderBuilder::default();
+
+        for slug in &self.ordered_slugs {
+            let Some(note) = self.by_slug.get(slug) else {
+                continue;
+            };
+            let mut segments: Vec<&str> = note.relative_path.split('/').collect();
+            if segments.is_empty() {
+                continue;
+            }
+            segments.pop();
+            root.insert_note(
+                &segments,
+                ExplorerNote {
+                    title: note.title.clone(),
+                    slug: note.slug.clone(),
+                },
+            );
+        }
+
+        root.build("Vault")
+    }
+
     #[cfg(test)]
     pub fn total_notes(&self) -> usize {
         self.by_slug.len()
+    }
+}
+
+#[derive(Default)]
+struct FolderBuilder {
+    folders: BTreeMap<String, FolderBuilder>,
+    notes: Vec<ExplorerNote>,
+}
+
+impl FolderBuilder {
+    fn insert_note(&mut self, folders: &[&str], note: ExplorerNote) {
+        if folders.is_empty() {
+            self.notes.push(note);
+            return;
+        }
+
+        let head = folders[0].to_string();
+        self.folders
+            .entry(head)
+            .or_default()
+            .insert_note(&folders[1..], note);
+    }
+
+    fn build(self, name: &str) -> ExplorerFolder {
+        ExplorerFolder {
+            name: name.to_string(),
+            folders: self
+                .folders
+                .into_iter()
+                .map(|(folder_name, builder)| builder.build(&folder_name))
+                .collect(),
+            notes: self.notes,
+        }
     }
 }
 
@@ -235,6 +312,8 @@ mod tests {
         let vault = VaultIndex::build(dir.path()).expect("build vault");
         assert_eq!(vault.total_notes(), 1);
         assert!(vault.resolve_wikilink("Home").is_some());
+        let found = vault.find_by_slug("home").expect("home by slug");
+        assert_eq!(found.relative_path, "Home");
     }
 
     #[test]
@@ -285,6 +364,27 @@ mod tests {
             .resolve_wikilink("folder/Doc")
             .expect("folder-qualified match");
         assert_eq!(resolved.path, dir.path().join("folder").join("Doc.md"));
+    }
+
+    #[test]
+    fn explorer_tree_preserves_folder_structure() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("projects/rust")).expect("create nested folders");
+        fs::write(dir.path().join("Home.md"), "home").expect("write home");
+        fs::write(dir.path().join("projects").join("Plan.md"), "plan").expect("write plan");
+        fs::write(dir.path().join("projects/rust").join("Notes.md"), "notes").expect("write notes");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let tree = vault.explorer_tree();
+
+        assert_eq!(tree.name, "Vault");
+        assert_eq!(tree.notes.len(), 1);
+        assert_eq!(tree.notes[0].title, "Home");
+        assert_eq!(tree.folders.len(), 1);
+        assert_eq!(tree.folders[0].name, "projects");
+        assert_eq!(tree.folders[0].notes[0].title, "Plan");
+        assert_eq!(tree.folders[0].folders[0].name, "rust");
+        assert_eq!(tree.folders[0].folders[0].notes[0].title, "Notes");
     }
 
     #[test]
