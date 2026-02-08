@@ -274,7 +274,7 @@ function App() {
         try {
           const params = new URLSearchParams({
             q: query,
-            content: searchIncludeContent ? "1" : "0",
+            content: String(searchIncludeContent),
             limit: "30",
           });
           const res = await fetch(`/api/search?${params.toString()}`);

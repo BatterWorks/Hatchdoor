@@ -600,7 +600,7 @@ Body`,
     expect(includeContent).toBeChecked();
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
-        String(call[0]).includes("/api/search?q=type%2Freference&content=1"),
+        String(call[0]).includes("/api/search?q=type%2Freference&content=true"),
       );
       expect(called).toBe(true);
     });
