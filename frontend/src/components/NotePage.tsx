@@ -110,7 +110,7 @@ export function NotePage({
   }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
-  const markdown = useResolvedWikilinks(parsed.body);
+  const markdown = useResolvedWikilinks(parsed.body, note?.relative_path ?? "");
 
   if (loading) {
     return <NoteSkeleton />;
@@ -184,8 +184,29 @@ export function NotePage({
             }
             return <a href={href}>{children}</a>;
           },
+          img(props) {
+            const source =
+              typeof props.src === "string"
+                ? resolveAssetHref(props.src, note.relative_path)
+                : props.src;
+            return (
+              <img
+                src={source}
+                alt={props.alt ?? ""}
+                loading="lazy"
+                decoding="async"
+              />
+            );
+          },
           blockquote(props) {
             return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+          },
+          table(props) {
+            return (
+              <div className="table-wrap">
+                <table>{props.children}</table>
+              </div>
+            );
           },
         }}
       >
@@ -283,7 +304,10 @@ function TagChips({
   );
 }
 
-function useResolvedWikilinks(markdown: string): string {
+function useResolvedWikilinks(
+  markdown: string,
+  noteRelativePath: string,
+): string {
   const [resolved, setResolved] = useState(markdown);
 
   useEffect(() => {
@@ -295,9 +319,10 @@ function useResolvedWikilinks(markdown: string): string {
     }
 
     void (async () => {
-      const matches = [...markdown.matchAll(/\[\[([^\]]+)\]\]/g)];
+      const matches = [...markdown.matchAll(/(!?)\[\[([^\]]+)\]\]/g)];
       const rawTargets = matches
-        .map((m) => parseWikilinkTarget(m[1]).target)
+        .filter((m) => m[1] !== "!")
+        .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
 
@@ -325,9 +350,15 @@ function useResolvedWikilinks(markdown: string): string {
       }
 
       const rewritten = markdown.replace(
-        /\[\[([^\]]+)\]\]/g,
-        (_whole, body: string) => {
+        /(!?)\[\[([^\]]+)\]\]/g,
+        (_whole, bang: string, body: string) => {
           const parsed = parseWikilinkTarget(body);
+
+          if (bang === "!") {
+            const source = resolveAssetHref(parsed.target, noteRelativePath);
+            return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
+          }
+
           const slug = map.get(parsed.target) ?? null;
           if (slug) {
             return `[${escapeMarkdownLabel(parsed.label)}](/n/${slug})`;
@@ -344,9 +375,80 @@ function useResolvedWikilinks(markdown: string): string {
     return () => {
       cancelled = true;
     };
-  }, [markdown]);
+  }, [markdown, noteRelativePath]);
 
   return resolved;
+}
+
+function resolveAssetHref(rawTarget: string, noteRelativePath: string): string {
+  if (/^(https?:|data:|blob:)/i.test(rawTarget) || rawTarget.startsWith("/")) {
+    return rawTarget;
+  }
+
+  const [pathPart, suffix] = splitPathSuffix(rawTarget);
+  const noteDir = dirname(noteRelativePath);
+  const normalized = normalizeRelativePath(noteDir, pathPart);
+
+  if (!normalized) {
+    return rawTarget;
+  }
+
+  const encoded = normalized.split("/").map(encodeURIComponent).join("/");
+  return `/vault-assets/${encoded}${suffix}`;
+}
+
+function splitPathSuffix(input: string): [string, string] {
+  const markerIndex = input.search(/[?#]/);
+  if (markerIndex < 0) {
+    return [input, ""];
+  }
+  return [input.slice(0, markerIndex), input.slice(markerIndex)];
+}
+
+function dirname(relativePath: string): string {
+  const parts = relativePath.split("/").filter((part) => part.length > 0);
+  parts.pop();
+  return parts.join("/");
+}
+
+function normalizeRelativePath(baseDir: string, target: string): string {
+  const targetParts = target.replace(/\\/g, "/").split("/");
+  const initial = baseDir ? baseDir.split("/").filter(Boolean) : [];
+  const stack = [...initial];
+
+  for (const part of targetParts) {
+    if (!part || part === ".") {
+      continue;
+    }
+    if (part === "..") {
+      if (stack.length > 0) {
+        stack.pop();
+      }
+      continue;
+    }
+    stack.push(part);
+  }
+
+  return stack.join("/");
+}
+
+let mermaidModulePromise: Promise<MermaidApi> | null = null;
+let mermaidInitialized = false;
+
+async function getMermaidApi(): Promise<MermaidApi> {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import("mermaid").then(
+      (mod) => (mod as { default: MermaidApi }).default,
+    );
+  }
+
+  const api = await mermaidModulePromise;
+  if (!mermaidInitialized) {
+    api.initialize({ startOnLoad: false, securityLevel: "strict" });
+    mermaidInitialized = true;
+  }
+
+  return api;
 }
 
 function CalloutOrQuote({ children }: { children: ReactNode }) {
@@ -483,11 +585,7 @@ function MermaidDiagram({ chart }: { chart: string }) {
 
     void (async () => {
       try {
-        const mermaidModule = (await import("mermaid")) as {
-          default: MermaidApi;
-        };
-        const api = mermaidModule.default;
-        api.initialize({ startOnLoad: false, securityLevel: "strict" });
+        const api = await getMermaidApi();
         const id = `m-${Math.random().toString(36).slice(2)}`;
         const { svg: rendered } = await api.render(id, chart);
         if (mounted) {

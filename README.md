@@ -72,6 +72,7 @@ The container always uses `VAULT_PATH=/data/vault`.
 - `GET /api/resolve?target=...` -> single wikilink resolution (`slug` or `null`)
 - `POST /api/resolve-batch` -> batch wikilink resolution
 - `POST /api/refresh` -> force vault reindex
+- `GET /vault-assets/*path` -> image assets from vault (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`)
 - `GET /health` -> `ok`
 
 ## Frontend Dev Mode
