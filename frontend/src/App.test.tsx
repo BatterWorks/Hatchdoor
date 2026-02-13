@@ -624,4 +624,165 @@ Body`,
       expect(called).toBe(true);
     });
   });
+
+  it("renders note-local markdown images via vault-assets path", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Atlas", slug: "atlas" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/atlas")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Atlas",
+                slug: "atlas",
+                relative_path: "Notes/40-reference/Homelab Atlas",
+                content: "![Stack](Media-stack.png)",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/atlas"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const image = await screen.findByRole("img", { name: "Stack" });
+    expect(image).toHaveAttribute(
+      "src",
+      "/vault-assets/Notes/40-reference/Media-stack.png",
+    );
+  });
+
+  it("renders note-local obsidian image embeds via vault-assets path", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Atlas", slug: "atlas" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/atlas")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Atlas",
+                slug: "atlas",
+                relative_path: "Notes/40-reference/Homelab Atlas",
+                content: "![[Media-stack.png]]",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/atlas"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const image = await screen.findByRole("img", { name: "Media-stack.png" });
+    expect(image).toHaveAttribute(
+      "src",
+      "/vault-assets/Notes/40-reference/Media-stack.png",
+    );
+  });
+
+  it("renders multiple mermaid blocks in a single note", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Atlas", slug: "atlas" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/atlas")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Atlas",
+                slug: "atlas",
+                relative_path: "Notes/40-reference/Homelab Atlas",
+                content: [
+                  "# Atlas",
+                  "",
+                  "```mermaid",
+                  "graph TD",
+                  "A-->B",
+                  "```",
+                  "",
+                  "```mermaid",
+                  "flowchart LR",
+                  "X-->Y",
+                  "```",
+                ].join("\n"),
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/atlas"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { name: "Atlas" });
+    await waitFor(() => {
+      expect(document.querySelectorAll(".mermaid")).toHaveLength(2);
+    });
+  });
 });

@@ -232,6 +232,48 @@ body {
   max-width: 100%;
 }
 
+.note-content img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.9rem auto;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-soft);
+  background: #fff;
+}
+
+.note-content .table-wrap {
+  width: 100%;
+  max-width: 100%;
+  margin: 0.9rem 0;
+  overflow-x: auto;
+  border: 1px solid var(--color-border-soft);
+  border-radius: 8px;
+}
+
+.note-content table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.note-content th,
+.note-content td {
+  border: 1px solid var(--color-border-soft);
+  padding: 0.45rem 0.55rem;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.note-content th {
+  background: #f2ebd9;
+  font-weight: 700;
+}
+
+.note-content tr:nth-child(even) td {
+  background: #fdfbf4;
+}
+
 .note-content :is(p, li, blockquote, h1, h2, h3, h4, h5, h6) {
   overflow-wrap: anywhere;
   word-break: break-word;
