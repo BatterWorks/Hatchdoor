@@ -515,42 +515,119 @@ fn sort_slug_links(links: &mut [String], by_slug: &HashMap<String, NoteEntry>) {
 }
 
 fn extract_wikilink_targets(content: &str) -> Vec<String> {
-    let bytes = content.as_bytes();
-    let mut idx = 0usize;
     let mut targets = Vec::new();
+    let mut fenced_marker: Option<(u8, usize)> = None;
 
-    while idx + 1 < bytes.len() {
-        if bytes[idx] == b'[' && bytes[idx + 1] == b'[' {
-            let is_embed = idx > 0 && bytes[idx - 1] == b'!';
-            let mut end = idx + 2;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
 
-            while end + 1 < bytes.len() {
-                if bytes[end] == b']' && bytes[end + 1] == b']' {
-                    break;
-                }
-                end += 1;
+        if let Some((marker, min_len)) = fenced_marker {
+            if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
+                && close_marker == marker
+                && close_len >= min_len
+            {
+                fenced_marker = None;
             }
-
-            if end + 1 >= bytes.len() {
-                break;
-            }
-
-            if !is_embed {
-                let body = &content[idx + 2..end];
-                let target = parse_wikilink_target(body);
-                if !target.is_empty() {
-                    targets.push(target);
-                }
-            }
-
-            idx = end + 2;
             continue;
         }
 
-        idx += 1;
+        if let Some(marker) = parse_fence_marker(trimmed) {
+            fenced_marker = Some(marker);
+            continue;
+        }
+
+        let no_inline_code = strip_inline_code_segments(line);
+        extract_line_wikilink_targets(&no_inline_code, &mut targets);
     }
 
     targets
+}
+
+fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>) {
+    let bytes = line.as_bytes();
+    let mut idx = 0usize;
+
+    while idx + 1 < bytes.len() {
+        if bytes[idx] != b'[' || bytes[idx + 1] != b'[' {
+            idx += 1;
+            continue;
+        }
+
+        let is_embed = idx > 0 && bytes[idx - 1] == b'!';
+        let mut end = idx + 2;
+
+        while end + 1 < bytes.len() {
+            if bytes[end] == b']' && bytes[end + 1] == b']' {
+                break;
+            }
+            end += 1;
+        }
+
+        if end + 1 >= bytes.len() {
+            break;
+        }
+
+        if !is_embed {
+            let body = &line[idx + 2..end];
+            let target = parse_wikilink_target(body);
+            if !target.is_empty() {
+                targets.push(target);
+            }
+        }
+
+        idx = end + 2;
+    }
+}
+
+fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
+    let bytes = trimmed_line.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let marker = bytes[0];
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+
+    let mut len = 1usize;
+    while len < bytes.len() && bytes[len] == marker {
+        len += 1;
+    }
+
+    if len >= 3 { Some((marker, len)) } else { None }
+}
+
+fn strip_inline_code_segments(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut idx = 0usize;
+    let mut inline_marker_len = 0usize;
+
+    while idx < chars.len() {
+        if chars[idx] == '`' {
+            let mut marker_len = 1usize;
+            while idx + marker_len < chars.len() && chars[idx + marker_len] == '`' {
+                marker_len += 1;
+            }
+
+            if inline_marker_len == 0 {
+                inline_marker_len = marker_len;
+            } else if marker_len == inline_marker_len {
+                inline_marker_len = 0;
+            }
+
+            idx += marker_len;
+            continue;
+        }
+
+        if inline_marker_len == 0 {
+            out.push(chars[idx]);
+        }
+        idx += 1;
+    }
+
+    out
 }
 
 fn parse_wikilink_target(body: &str) -> String {
@@ -800,5 +877,35 @@ mod tests {
         assert_eq!(guide_links.backlinks.len(), 1);
         assert_eq!(guide_links.backlinks[0].slug, "home");
         assert!(vault.note_links("missing").is_none());
+    }
+
+    #[test]
+    fn note_links_ignore_wikilinks_in_fenced_and_inline_code() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("Home.md"),
+            [
+                "```md",
+                "[[Plan]]",
+                "```",
+                "",
+                "Inline `[[Plan]]` sample.",
+                "",
+                "Real [[Guide]] link.",
+            ]
+            .join("\n"),
+        )
+        .expect("write home");
+        fs::write(dir.path().join("Plan.md"), "Plan body").expect("write plan");
+        fs::write(dir.path().join("Guide.md"), "Guide body").expect("write guide");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let home_links = vault.note_links("home").expect("home links");
+
+        assert_eq!(home_links.outgoing.len(), 1);
+        assert_eq!(home_links.outgoing[0].slug, "guide");
+
+        let plan_links = vault.note_links("plan").expect("plan links");
+        assert!(plan_links.backlinks.is_empty());
     }
 }

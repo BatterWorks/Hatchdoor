@@ -40,7 +40,7 @@ import {
   extractMarkdownHeadings,
   type NoteHeading,
 } from "../noteHeadings";
-import { isNoteEqual } from "../stateCompare";
+import { isNoteEqual, isNoteLinksEqual } from "../stateCompare";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 
 export function NotePage({
@@ -99,7 +99,9 @@ export function NotePage({
         throw new Error(`Failed loading note links: ${res.status}`);
       }
       const json = (await res.json()) as NoteLinksResponse;
-      setNoteLinks(json.links);
+      setNoteLinks((prev) =>
+        isNoteLinksEqual(prev, json.links) ? prev : json.links,
+      );
     } catch {
       setNoteLinks(null);
     }
