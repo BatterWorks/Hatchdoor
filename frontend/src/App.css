@@ -575,7 +575,7 @@ body {
 
 .folder-item summary {
   display: grid;
-  grid-template-columns: 0.62rem minmax(0, 1fr);
+  grid-template-columns: 0.9rem minmax(0, 1fr);
   align-items: center;
   cursor: pointer;
   min-height: 28px;
@@ -595,7 +595,7 @@ body {
 .folder-item summary::before {
   content: "▸";
   display: inline-block;
-  font-size: 0.62rem;
+  font-size: 0.86rem;
   color: #9a9890;
   transform-origin: 45% 52%;
   transition: transform 120ms ease;
