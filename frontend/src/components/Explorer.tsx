@@ -16,12 +16,13 @@ export function RecentNotesList({
   if (notes.length === 0) {
     return null;
   }
+  const recent = notes.slice(0, 5);
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
       <p className="recent-notes-title">Recent Notes</p>
       <ul className="tree root-tree">
-        {notes.map((note) => (
+        {recent.map((note) => (
           <li key={note.slug} className="note-item">
             <NavLink
               className={
@@ -33,7 +34,7 @@ export function RecentNotesList({
               onClick={onNavigate}
               title={`${note.relativePath}.md`}
             >
-              {note.title}
+              <span className="note-label">{note.title}</span>
             </NavLink>
           </li>
         ))}
@@ -110,7 +111,9 @@ function FolderNode({
           )
         }
       >
-        <summary>{folder.name}</summary>
+        <summary title={folderPath}>
+          <span className="folder-label">{folder.name}</span>
+        </summary>
         <ul className="tree">
           {folder.folders.map((child) => (
             <FolderNode
@@ -150,7 +153,7 @@ function NoteNode({
         to={`/n/${note.slug}`}
         title={`${note.title}.md`}
       >
-        {note.title}
+        <span className="note-label">{note.title}</span>
       </NavLink>
     </li>
   );

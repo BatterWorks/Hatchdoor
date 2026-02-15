@@ -134,7 +134,7 @@ export function NotePage({
 
   return (
     <article className="note-content">
-      <h2>{note.title}</h2>
+      <h2 className="note-page-title">{note.title}</h2>
       {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
       <NoteProperties
         properties={parsed.properties}
