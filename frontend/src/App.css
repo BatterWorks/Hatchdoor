@@ -362,6 +362,8 @@ body {
   text-align: left;
   vertical-align: top;
   white-space: nowrap;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 .note-content th {
@@ -1014,6 +1016,11 @@ body.resizing {
   .note-content {
     width: 100%;
     line-height: 1.6;
+  }
+
+  .note-content .table-wrap table {
+    width: max-content;
+    min-width: 100%;
   }
 
   .folder-item summary,
