@@ -294,7 +294,11 @@ describe("App", () => {
     );
     fireEvent.change(input, { target: { value: "plan" } });
 
-    expect(await screen.findByText("Projects/Plan.md")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        (_value, element) => element?.textContent === "Projects/Plan.md",
+      ),
+    ).toBeInTheDocument();
     expect(await screen.findByText("title")).toBeInTheDocument();
   });
 

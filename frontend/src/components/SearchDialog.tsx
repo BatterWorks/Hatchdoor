@@ -1,6 +1,6 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 
-import type { SearchResult } from "../types";
+import type { SearchResult, SearchSelection } from "../types";
 import { UiButton, UiPanel } from "./ui";
 
 export function SearchDialog({
@@ -24,8 +24,10 @@ export function SearchDialog({
   onClose: () => void;
   onQueryChange: (value: string) => void;
   onIncludeContentChange: (value: boolean) => void;
-  onSelect: (slug: string) => void;
+  onSelect: (selection: SearchSelection) => void;
 }) {
+  const trimmedQuery = query.trim();
+
   return (
     <div
       className="search-overlay"
@@ -81,15 +83,30 @@ export function SearchDialog({
             <li key={`${result.slug}-${result.match_kind}`}>
               <UiButton
                 className="search-result"
-                onClick={() => onSelect(result.slug)}
+                onClick={() =>
+                  onSelect({
+                    slug: result.slug,
+                    query: trimmedQuery,
+                    matchKind: result.match_kind,
+                  })
+                }
               >
                 <div className="search-main">
-                  <strong>{result.title}</strong>
-                  <span>{result.relative_path}.md</span>
+                  <strong>
+                    {highlightMatches(result.title, trimmedQuery)}
+                  </strong>
+                  <span>
+                    {highlightMatches(
+                      `${result.relative_path}.md`,
+                      trimmedQuery,
+                    )}
+                  </span>
                 </div>
                 <span className="search-kind">{result.match_kind}</span>
                 {result.snippet ? (
-                  <p className="search-snippet">{result.snippet}</p>
+                  <p className="search-snippet">
+                    {highlightMatches(result.snippet, trimmedQuery)}
+                  </p>
                 ) : null}
               </UiButton>
             </li>
@@ -98,4 +115,33 @@ export function SearchDialog({
       </UiPanel>
     </div>
   );
+}
+
+function highlightMatches(text: string, query: string): ReactNode {
+  if (!query) {
+    return text;
+  }
+
+  const escaped = escapeRegExp(query);
+  const regex = new RegExp(`(${escaped})`, "ig");
+  const parts = text.split(regex);
+
+  if (parts.length <= 1) {
+    return text;
+  }
+
+  const queryLower = query.toLowerCase();
+  return parts.map((part, index) =>
+    part.toLowerCase() === queryLower ? (
+      <mark key={`${part}-${index}`} className="search-match">
+        {part}
+      </mark>
+    ) : (
+      <span key={`${part}-${index}`}>{part}</span>
+    ),
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

@@ -8,6 +8,7 @@ import {
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import "./App.css";
+import "./noteEnhancements.css";
 import { FolderTree, RecentNotesList } from "./components/Explorer";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
@@ -29,6 +30,9 @@ import type {
 const SIDEBAR_WIDTH_KEY = "hatchdoor.sidebarWidth";
 const DRAWER_OPEN_KEY = "hatchdoor.drawerOpen";
 const RECENT_NOTES_KEY = "hatchdoor.recentNotes";
+const EXPANDED_FOLDERS_KEY = "hatchdoor.expandedFolders";
+const EXPLORER_SCROLL_TOP_KEY = "hatchdoor.explorerScrollTop";
+const LAST_NOTE_KEY = "hatchdoor.lastNote";
 const NOTE_PROPERTIES_COLLAPSED_KEY = "hatchdoor.notePropertiesCollapsed";
 
 function App() {
@@ -46,6 +50,9 @@ function App() {
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
+  const [expandedFolders, setExpandedFolders] = useState<
+    Record<string, boolean>
+  >(() => getStoredExpandedFolders());
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
@@ -60,6 +67,9 @@ function App() {
     null,
   );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const explorerPaneRef = useRef<HTMLElement | null>(null);
+  const restoredExplorerScrollRef = useRef(false);
+  const restoredLastNoteRef = useRef(false);
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -113,6 +123,13 @@ function App() {
   }, [recentNotes]);
 
   useEffect(() => {
+    window.localStorage.setItem(
+      EXPANDED_FOLDERS_KEY,
+      JSON.stringify(expandedFolders),
+    );
+  }, [expandedFolders]);
+
+  useEffect(() => {
     const onOnline = () => setIsOnline(true);
     const onOffline = () => setIsOnline(false);
 
@@ -153,6 +170,25 @@ function App() {
       return next;
     });
   }, [activeNote]);
+
+  useEffect(() => {
+    if (!activeNote) {
+      return;
+    }
+    window.localStorage.setItem(LAST_NOTE_KEY, activeNote.slug);
+  }, [activeNote]);
+
+  useEffect(() => {
+    if (restoredLastNoteRef.current || location.pathname !== "/") {
+      return;
+    }
+    restoredLastNoteRef.current = true;
+    const lastSlug = getStoredString(LAST_NOTE_KEY);
+    if (!lastSlug) {
+      return;
+    }
+    navigate(`/n/${encodeURIComponent(lastSlug)}`, { replace: true });
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     if (!searchOpen) {
@@ -258,6 +294,19 @@ function App() {
       window.removeEventListener("pointerup", onPointerUp);
     };
   }, []);
+
+  useEffect(() => {
+    if (restoredExplorerScrollRef.current || !tree) {
+      return;
+    }
+    const container = explorerPaneRef.current;
+    if (!container) {
+      return;
+    }
+    const stored = getStoredNumber(EXPLORER_SCROLL_TOP_KEY, 0, 0, 1_000_000);
+    container.scrollTop = stored;
+    restoredExplorerScrollRef.current = true;
+  }, [tree]);
 
   const treeIsStale = Boolean(tree && treeError);
   const openSearchForTag = useCallback((tag: string) => {
@@ -412,7 +461,18 @@ function App() {
         className="app-layout"
         style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
       >
-        <aside className="explorer-pane" data-open={drawerOpen}>
+        <aside
+          ref={explorerPaneRef}
+          className="explorer-pane"
+          data-open={drawerOpen}
+          onScroll={(event) => {
+            const current = event.currentTarget.scrollTop;
+            window.localStorage.setItem(
+              EXPLORER_SCROLL_TOP_KEY,
+              String(current),
+            );
+          }}
+        >
           <header className="explorer-header">
             <p>Vault Explorer</p>
             <div className="explorer-actions">
@@ -438,7 +498,12 @@ function App() {
             />
           ) : null}
           {tree ? (
-            <FolderTree root={tree} currentPath={location.pathname} />
+            <FolderTree
+              root={tree}
+              currentPath={location.pathname}
+              expandedFolders={expandedFolders}
+              onExpandedFoldersChange={setExpandedFolders}
+            />
           ) : null}
         </aside>
 
@@ -493,10 +558,18 @@ function App() {
           onClose={() => setSearchOpen(false)}
           onQueryChange={setSearchQuery}
           onIncludeContentChange={setSearchIncludeContent}
-          onSelect={(slug) => {
+          onSelect={(selection) => {
             setSearchOpen(false);
             setSearchQuery("");
-            navigate(`/n/${slug}`);
+            const params = new URLSearchParams();
+            if (selection.query) {
+              params.set("q", selection.query);
+            }
+            if (selection.matchKind) {
+              params.set("m", selection.matchKind);
+            }
+            const suffix = params.toString();
+            navigate(`/n/${selection.slug}${suffix ? `?${suffix}` : ""}`);
           }}
         />
       ) : null}
@@ -568,6 +641,34 @@ function getStoredRecentNotes(): RecentNote[] {
   } catch {
     return [];
   }
+}
+
+function getStoredExpandedFolders(): Record<string, boolean> {
+  try {
+    const raw = window.localStorage.getItem(EXPANDED_FOLDERS_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const result: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key.length > 0 && typeof value === "boolean") {
+        result[key] = value;
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function getStoredString(key: string): string | null {
+  const raw = window.localStorage.getItem(key);
+  if (!raw) {
+    return null;
+  }
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function isEditableTarget(target: EventTarget | null): boolean {

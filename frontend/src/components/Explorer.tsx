@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
 import type { ExplorerFolder, ExplorerNote, RecentNote } from "../types";
 import { UiPanel } from "./ui";
@@ -46,15 +46,15 @@ export function RecentNotesList({
 export function FolderTree({
   root,
   currentPath,
+  expandedFolders,
+  onExpandedFoldersChange,
 }: {
   root: ExplorerFolder;
   currentPath: string;
+  expandedFolders: Record<string, boolean>;
+  onExpandedFoldersChange: (expanded: Record<string, boolean>) => void;
 }) {
   const currentSlug = pathToNoteSlug(currentPath);
-  const [manuallyExpandedFolders, setManuallyExpandedFolders] = useState<
-    Record<string, boolean>
-  >({});
-
   const activePathFolders = useMemo(
     () => collectAncestorFolderPaths(root, currentSlug),
     [currentSlug, root],
@@ -68,10 +68,10 @@ export function FolderTree({
           folder={folder}
           currentPath={currentPath}
           folderPath={folder.name}
-          expandedFolders={manuallyExpandedFolders}
+          expandedFolders={expandedFolders}
           activePathFolders={activePathFolders}
           onToggleFolder={(path, open) =>
-            setManuallyExpandedFolders((prev) => ({ ...prev, [path]: open }))
+            onExpandedFoldersChange({ ...expandedFolders, [path]: open })
           }
         />
       ))}
@@ -98,7 +98,7 @@ function FolderNode({
   onToggleFolder: (path: string, open: boolean) => void;
 }) {
   const shouldOpen =
-    expandedFolders[folderPath] ?? activePathFolders.has(folderPath);
+    activePathFolders.has(folderPath) || expandedFolders[folderPath] === true;
 
   return (
     <li className="folder-item">
