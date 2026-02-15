@@ -106,6 +106,9 @@ describe("App enhancements", () => {
       </MemoryRouter>,
     );
 
+    const linksPanel = await screen.findByLabelText("Note links");
+    expect(linksPanel).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByText("Links"));
     expect(await screen.findByText("Outgoing")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Plan" })).toBeInTheDocument();
     expect((await screen.findAllByText("On this page")).length).toBeGreaterThan(
