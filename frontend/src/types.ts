@@ -16,6 +16,21 @@ export type Note = {
   content: string;
 };
 
+export type NoteLink = {
+  title: string;
+  slug: string;
+  relative_path: string;
+};
+
+export type NoteLinks = {
+  outgoing: NoteLink[];
+  backlinks: NoteLink[];
+};
+
+export type NoteLinksResponse = {
+  links: NoteLinks;
+};
+
 export type ActiveNoteMeta = {
   title: string;
   slug: string;
@@ -45,6 +60,12 @@ export type SearchResult = {
   relative_path: string;
   match_kind: string;
   snippet: string | null;
+};
+
+export type SearchSelection = {
+  slug: string;
+  query: string;
+  matchKind: string;
 };
 
 export type SearchResponse = {

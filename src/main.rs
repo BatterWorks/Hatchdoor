@@ -19,7 +19,7 @@ use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use crate::vault::{ExplorerFolder, Note, SearchHit, VaultIndex};
+use crate::vault::{ExplorerFolder, Note, NoteLinks, SearchHit, VaultIndex};
 
 #[derive(Debug, Clone)]
 struct AppConfig {
@@ -87,6 +87,11 @@ struct ErrorResponse {
 #[derive(Debug, Serialize)]
 struct NoteResponse {
     note: Note,
+}
+
+#[derive(Debug, Serialize)]
+struct NoteLinksResponse {
+    links: NoteLinks,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +165,7 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/api/tree", get(tree_handler))
         .route("/api/note/{slug}", get(note_handler))
+        .route("/api/note/{slug}/links", get(note_links_handler))
         .route("/api/resolve", get(resolve_handler))
         .route("/api/resolve-batch", post(resolve_batch_handler))
         .route("/api/search", get(search_handler))
@@ -329,6 +335,27 @@ async fn note_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
                 error: format!("Failed reading note {slug}: {e}"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn note_links_handler(
+    Path(slug): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let (index, _tree) = match snapshot(&state).await {
+        Ok(s) => s,
+        Err(err) => return err.into_response(),
+    };
+
+    match index.note_links(&slug) {
+        Some(links) => (StatusCode::OK, Json(NoteLinksResponse { links })).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Note not found: {slug}"),
             }),
         )
             .into_response(),

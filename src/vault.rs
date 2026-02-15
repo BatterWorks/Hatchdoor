@@ -30,6 +30,8 @@ pub struct VaultIndex {
     by_title: HashMap<String, String>,
     by_path_title: HashMap<String, String>,
     ordered_slugs: Vec<String>,
+    outgoing_by_slug: HashMap<String, Vec<String>>,
+    backlinks_by_slug: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -52,6 +54,19 @@ pub struct SearchHit {
     pub relative_path: String,
     pub match_kind: String,
     pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteLink {
+    pub title: String,
+    pub slug: String,
+    pub relative_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteLinks {
+    pub outgoing: Vec<NoteLink>,
+    pub backlinks: Vec<NoteLink>,
 }
 
 impl VaultIndex {
@@ -122,11 +137,16 @@ impl VaultIndex {
             left.cmp(right)
         });
 
+        let (outgoing_by_slug, backlinks_by_slug) =
+            build_link_graph(&by_slug, &by_title, &by_path_title, &ordered_slugs);
+
         Ok(Self {
             by_slug,
             by_title,
             by_path_title,
             ordered_slugs,
+            outgoing_by_slug,
+            backlinks_by_slug,
         })
     }
 
@@ -268,6 +288,41 @@ impl VaultIndex {
         results
     }
 
+    pub fn note_links(&self, slug: &str) -> Option<NoteLinks> {
+        if !self.by_slug.contains_key(slug) {
+            return None;
+        }
+
+        let outgoing = self
+            .outgoing_by_slug
+            .get(slug)
+            .map(|links| self.map_slugs_to_links(links))
+            .unwrap_or_default();
+        let backlinks = self
+            .backlinks_by_slug
+            .get(slug)
+            .map(|links| self.map_slugs_to_links(links))
+            .unwrap_or_default();
+
+        Some(NoteLinks {
+            outgoing,
+            backlinks,
+        })
+    }
+
+    fn map_slugs_to_links(&self, slugs: &[String]) -> Vec<NoteLink> {
+        slugs
+            .iter()
+            .filter_map(|item_slug| {
+                self.by_slug.get(item_slug).map(|entry| NoteLink {
+                    title: entry.title.clone(),
+                    slug: entry.slug.clone(),
+                    relative_path: entry.relative_path.clone(),
+                })
+            })
+            .collect()
+    }
+
     #[cfg(test)]
     pub fn total_notes(&self) -> usize {
         self.by_slug.len()
@@ -384,6 +439,162 @@ fn content_snippet(content: &str, normalized_query: &str) -> Option<String> {
                 trimmed.to_string()
             }
         })
+}
+
+fn build_link_graph(
+    by_slug: &HashMap<String, NoteEntry>,
+    by_title: &HashMap<String, String>,
+    by_path_title: &HashMap<String, String>,
+    ordered_slugs: &[String],
+) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
+    let mut outgoing_by_slug: HashMap<String, Vec<String>> = HashMap::new();
+    let mut backlinks_by_slug: HashMap<String, Vec<String>> = HashMap::new();
+
+    for slug in ordered_slugs {
+        outgoing_by_slug.insert(slug.clone(), Vec::new());
+        backlinks_by_slug.insert(slug.clone(), Vec::new());
+    }
+
+    for slug in ordered_slugs {
+        let Some(note) = by_slug.get(slug) else {
+            continue;
+        };
+
+        let Ok(content) = fs::read_to_string(&note.path) else {
+            continue;
+        };
+
+        let mut seen = HashSet::new();
+        let mut outgoing = Vec::new();
+
+        for target in extract_wikilink_targets(&content) {
+            let Some(resolved_slug) =
+                resolve_target_slug(&target, by_slug, by_title, by_path_title)
+            else {
+                continue;
+            };
+
+            if resolved_slug == note.slug || !seen.insert(resolved_slug.clone()) {
+                continue;
+            }
+
+            outgoing.push(resolved_slug.clone());
+            backlinks_by_slug
+                .entry(resolved_slug)
+                .or_default()
+                .push(note.slug.clone());
+        }
+
+        outgoing_by_slug.insert(note.slug.clone(), outgoing);
+    }
+
+    for links in outgoing_by_slug.values_mut() {
+        sort_slug_links(links, by_slug);
+    }
+    for links in backlinks_by_slug.values_mut() {
+        links.sort();
+        links.dedup();
+        sort_slug_links(links, by_slug);
+    }
+
+    (outgoing_by_slug, backlinks_by_slug)
+}
+
+fn sort_slug_links(links: &mut [String], by_slug: &HashMap<String, NoteEntry>) {
+    links.sort_by(|left, right| {
+        let left_path = by_slug
+            .get(left)
+            .map(|entry| entry.relative_path.as_str())
+            .unwrap_or("");
+        let right_path = by_slug
+            .get(right)
+            .map(|entry| entry.relative_path.as_str())
+            .unwrap_or("");
+        left_path.cmp(right_path)
+    });
+}
+
+fn extract_wikilink_targets(content: &str) -> Vec<String> {
+    let bytes = content.as_bytes();
+    let mut idx = 0usize;
+    let mut targets = Vec::new();
+
+    while idx + 1 < bytes.len() {
+        if bytes[idx] == b'[' && bytes[idx + 1] == b'[' {
+            let is_embed = idx > 0 && bytes[idx - 1] == b'!';
+            let mut end = idx + 2;
+
+            while end + 1 < bytes.len() {
+                if bytes[end] == b']' && bytes[end + 1] == b']' {
+                    break;
+                }
+                end += 1;
+            }
+
+            if end + 1 >= bytes.len() {
+                break;
+            }
+
+            if !is_embed {
+                let body = &content[idx + 2..end];
+                let target = parse_wikilink_target(body);
+                if !target.is_empty() {
+                    targets.push(target);
+                }
+            }
+
+            idx = end + 2;
+            continue;
+        }
+
+        idx += 1;
+    }
+
+    targets
+}
+
+fn parse_wikilink_target(body: &str) -> String {
+    let before_alias = body.split('|').next().unwrap_or(body).trim();
+    let before_heading = before_alias
+        .split('#')
+        .next()
+        .unwrap_or(before_alias)
+        .trim();
+    before_heading
+        .split('^')
+        .next()
+        .unwrap_or(before_heading)
+        .trim()
+        .to_string()
+}
+
+fn resolve_target_slug(
+    raw_target: &str,
+    by_slug: &HashMap<String, NoteEntry>,
+    by_title: &HashMap<String, String>,
+    by_path_title: &HashMap<String, String>,
+) -> Option<String> {
+    let normalized_target = normalize_link_target(raw_target);
+
+    if let Some(slug) = by_path_title.get(&normalize_title(&normalized_target)) {
+        return Some(slug.clone());
+    }
+
+    let base = normalized_target
+        .rsplit('/')
+        .next()
+        .unwrap_or(&normalized_target);
+
+    if let Some(slug) = by_title.get(&normalize_title(base)) {
+        return Some(slug.clone());
+    }
+
+    let slug = slugify(base);
+    if by_slug.contains_key(&slug) {
+        return Some(slug);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -562,5 +773,32 @@ mod tests {
         assert_eq!(tree.notes.len(), 2);
         assert_eq!(tree.notes[0].title, "Foo");
         assert_eq!(tree.notes[1].title, "foo");
+    }
+
+    #[test]
+    fn note_links_returns_outgoing_and_backlinks() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("Home.md"),
+            "[[Plan]]\n[[Docs/Guide]]\n![[Image.png]]",
+        )
+        .expect("write home");
+        fs::write(dir.path().join("Plan.md"), "[[Home]]").expect("write plan");
+        fs::create_dir_all(dir.path().join("Docs")).expect("create docs dir");
+        fs::write(dir.path().join("Docs/Guide.md"), "Guide body").expect("write guide");
+
+        let vault = VaultIndex::build(dir.path()).expect("build vault");
+        let home_links = vault.note_links("home").expect("home links");
+
+        assert_eq!(home_links.outgoing.len(), 2);
+        assert_eq!(home_links.outgoing[0].slug, "guide");
+        assert_eq!(home_links.outgoing[1].slug, "plan");
+        assert_eq!(home_links.backlinks.len(), 1);
+        assert_eq!(home_links.backlinks[0].slug, "plan");
+
+        let guide_links = vault.note_links("guide").expect("guide links");
+        assert_eq!(guide_links.backlinks.len(), 1);
+        assert_eq!(guide_links.backlinks[0].slug, "home");
+        assert!(vault.note_links("missing").is_none());
     }
 }

@@ -4,11 +4,13 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
+import { createElement } from "react";
 import ReactMarkdown from "react-markdown";
-import { useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -24,8 +26,20 @@ import type {
   ActiveNoteMeta,
   MermaidApi,
   Note,
+  NoteLinks,
+  NoteLinksResponse,
   ResolveBatchResponse,
 } from "../types";
+import {
+  applySearchHighlights,
+  normalizeSearchQuery,
+  setActiveSearchHit as setActiveSearchHitClass,
+} from "../noteSearch";
+import {
+  assignHeadingId,
+  extractMarkdownHeadings,
+  type NoteHeading,
+} from "../noteHeadings";
 import { isNoteEqual } from "../stateCompare";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 
@@ -39,8 +53,10 @@ export function NotePage({
   propertiesCollapsedStorageKey: string;
 }) {
   const params = useParams<{ slug: string }>();
+  const location = useLocation();
   const slug = params.slug ?? "";
   const [note, setNote] = useState<Note | null>(null);
+  const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
@@ -48,6 +64,10 @@ export function NotePage({
       return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
     },
   );
+  const [searchHitCount, setSearchHitCount] = useState(0);
+  const [activeSearchHit, setActiveSearchHit] = useState(0);
+  const noteBodyRef = useRef<HTMLDivElement | null>(null);
+  const searchHitsRef = useRef<HTMLSpanElement[]>([]);
 
   const loadNote = useCallback(
     async (hardReload: boolean) => {
@@ -72,23 +92,38 @@ export function NotePage({
     [slug],
   );
 
+  const loadNoteLinks = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/note/${encodeURIComponent(slug)}/links`);
+      if (!res.ok) {
+        throw new Error(`Failed loading note links: ${res.status}`);
+      }
+      const json = (await res.json()) as NoteLinksResponse;
+      setNoteLinks(json.links);
+    } catch {
+      setNoteLinks(null);
+    }
+  }, [slug]);
+
   useEffect(() => {
     void (async () => {
       setLoading(true);
       await loadNote(true);
+      await loadNoteLinks();
       setLoading(false);
     })();
-  }, [loadNote]);
+  }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
       void loadNote(false);
+      void loadNoteLinks();
     }, 10_000);
 
     return () => {
       window.clearInterval(id);
     };
-  }, [loadNote]);
+  }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
     if (!note) {
@@ -119,6 +154,38 @@ export function NotePage({
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
   const markdown = useResolvedWikilinks(parsed.body, note?.relative_path ?? "");
+  const searchQuery = useMemo(
+    () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
+    [location.search],
+  );
+  const tocHeadings = useMemo(
+    () => extractMarkdownHeadings(parsed.body),
+    [parsed.body],
+  );
+
+  useEffect(() => {
+    const root = noteBodyRef.current;
+    if (!root) {
+      return;
+    }
+
+    const hits = applySearchHighlights(root, searchQuery);
+    searchHitsRef.current = hits;
+    setSearchHitCount(hits.length);
+    setActiveSearchHit(0);
+
+    if (hits.length > 0) {
+      setActiveSearchHitClass(hits, 0);
+      scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
+    }
+  }, [searchQuery, markdown, note?.slug]);
+
+  useEffect(() => {
+    if (searchHitsRef.current.length === 0) {
+      return;
+    }
+    setActiveSearchHitClass(searchHitsRef.current, activeSearchHit);
+  }, [activeSearchHit]);
 
   if (loading) {
     return <NoteSkeleton />;
@@ -139,88 +206,133 @@ export function NotePage({
     );
   }
 
+  const headingCounts = new Map<string, number>();
+
   return (
-    <article className="note-content">
-      <h2 className="note-page-title">{note.title}</h2>
-      {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
-      <NoteProperties
-        properties={parsed.properties}
-        collapsed={propertiesCollapsed}
-        onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
-        onTagSelect={onTagSelect}
-      />
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
-        components={{
-          pre(props) {
-            const first = Children.toArray(props.children)[0];
-            if (
-              isValidElement<{ className?: string }>(first) &&
-              first.type !== "code"
-            ) {
-              return first;
-            }
-            return <pre>{props.children}</pre>;
-          },
-          code(props) {
-            const { children, className } = props;
-            const content = String(children).replace(/\n$/, "");
-            const match = /language-(\w+)/.exec(className || "");
+    <div className="note-page-layout">
+      <article className="note-content">
+        <h2 className="note-page-title">{note.title}</h2>
+        {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
+        {searchHitCount > 0 ? (
+          <SearchHitNavigator
+            totalHits={searchHitCount}
+            activeHit={activeSearchHit}
+            onSelect={(nextIndex) => {
+              setActiveSearchHit(nextIndex);
+              const target = searchHitsRef.current[nextIndex];
+              scrollElementIntoView(target, {
+                block: "center",
+                inline: "nearest",
+              });
+            }}
+          />
+        ) : null}
+        <NoteProperties
+          properties={parsed.properties}
+          collapsed={propertiesCollapsed}
+          onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
+          onTagSelect={onTagSelect}
+        />
+        <NoteLinksPanel links={noteLinks} />
+        <NoteTocMobile headings={tocHeadings} />
+        <div ref={noteBodyRef} className="note-body">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[rehypeKatex]}
+            components={{
+              pre(props) {
+                const first = Children.toArray(props.children)[0];
+                if (
+                  isValidElement<{ className?: string }>(first) &&
+                  first.type !== "code"
+                ) {
+                  return first;
+                }
+                return <pre>{props.children}</pre>;
+              },
+              code(props) {
+                const { children, className } = props;
+                const content = String(children).replace(/\n$/, "");
+                const match = /language-(\w+)/.exec(className || "");
 
-            if (match?.[1] === "mermaid") {
-              return <MermaidDiagram chart={content} />;
-            }
+                if (match?.[1] === "mermaid") {
+                  return <MermaidDiagram chart={content} />;
+                }
 
-            if (!match) {
-              return <code className={className}>{children}</code>;
-            }
+                if (!match) {
+                  return <code className={className}>{children}</code>;
+                }
 
-            return <CodeBlock language={match[1]} content={content} />;
-          },
-          a(props) {
-            const { href, children } = props;
-            if (typeof href === "string" && href.startsWith("/__missing__/")) {
-              const target = decodeURIComponent(
-                href.replace("/__missing__/", ""),
-              );
-              return (
-                <span className="broken-link" title={`Missing: ${target}`}>
-                  {children}
-                </span>
-              );
-            }
-            return <a href={href}>{children}</a>;
-          },
-          img(props) {
-            const source =
-              typeof props.src === "string"
-                ? resolveAssetHref(props.src, note.relative_path)
-                : props.src;
-            return (
-              <img
-                src={source}
-                alt={props.alt ?? ""}
-                loading="lazy"
-                decoding="async"
-              />
-            );
-          },
-          blockquote(props) {
-            return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
-          },
-          table(props) {
-            return (
-              <div className="table-wrap">
-                <table>{props.children}</table>
-              </div>
-            );
-          },
-        }}
-      >
-        {markdown}
-      </ReactMarkdown>
-    </article>
+                return <CodeBlock language={match[1]} content={content} />;
+              },
+              a(props) {
+                const { href, children } = props;
+                if (
+                  typeof href === "string" &&
+                  href.startsWith("/__missing__/")
+                ) {
+                  const target = decodeURIComponent(
+                    href.replace("/__missing__/", ""),
+                  );
+                  return (
+                    <span className="broken-link" title={`Missing: ${target}`}>
+                      {children}
+                    </span>
+                  );
+                }
+                return <a href={href}>{children}</a>;
+              },
+              img(props) {
+                const source =
+                  typeof props.src === "string"
+                    ? resolveAssetHref(props.src, note.relative_path)
+                    : props.src;
+                return (
+                  <img
+                    src={source}
+                    alt={props.alt ?? ""}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                );
+              },
+              blockquote(props) {
+                return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+              },
+              table(props) {
+                return (
+                  <div className="table-wrap">
+                    <table>{props.children}</table>
+                  </div>
+                );
+              },
+              h1(props) {
+                return renderHeading("h1", props.children, headingCounts);
+              },
+              h2(props) {
+                return renderHeading("h2", props.children, headingCounts);
+              },
+              h3(props) {
+                return renderHeading("h3", props.children, headingCounts);
+              },
+              h4(props) {
+                return renderHeading("h4", props.children, headingCounts);
+              },
+              h5(props) {
+                return renderHeading("h5", props.children, headingCounts);
+              },
+              h6(props) {
+                return renderHeading("h6", props.children, headingCounts);
+              },
+            }}
+          >
+            {markdown}
+          </ReactMarkdown>
+        </div>
+      </article>
+
+      <NoteTocDesktop headings={tocHeadings} />
+    </div>
   );
 }
 
@@ -310,6 +422,181 @@ function TagChips({
       ))}
     </div>
   );
+}
+
+function SearchHitNavigator({
+  totalHits,
+  activeHit,
+  onSelect,
+}: {
+  totalHits: number;
+  activeHit: number;
+  onSelect: (index: number) => void;
+}) {
+  if (totalHits <= 0) {
+    return null;
+  }
+
+  const canNavigate = totalHits > 1;
+  const previous = () => {
+    if (!canNavigate) {
+      return;
+    }
+    onSelect((activeHit - 1 + totalHits) % totalHits);
+  };
+  const next = () => {
+    if (!canNavigate) {
+      return;
+    }
+    onSelect((activeHit + 1) % totalHits);
+  };
+
+  return (
+    <div className="note-search-nav" aria-label="Search matches in note">
+      <span>
+        Match {Math.min(activeHit + 1, totalHits)} of {totalHits}
+      </span>
+      <div className="note-search-nav-actions">
+        <UiButton
+          className="close-note"
+          onClick={previous}
+          disabled={!canNavigate}
+        >
+          Prev
+        </UiButton>
+        <UiButton className="close-note" onClick={next} disabled={!canNavigate}>
+          Next
+        </UiButton>
+      </div>
+    </div>
+  );
+}
+
+function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
+  const outgoing = links?.outgoing ?? [];
+  const backlinks = links?.backlinks ?? [];
+  if (outgoing.length === 0 && backlinks.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className="note-links-panel" aria-label="Note links">
+      <h3>Links</h3>
+      <div className="note-links-grid">
+        <NoteLinksList title="Outgoing" links={outgoing} />
+        <NoteLinksList title="Backlinks" links={backlinks} />
+      </div>
+    </section>
+  );
+}
+
+function NoteLinksList({
+  title,
+  links,
+}: {
+  title: string;
+  links: NoteLinks["outgoing"];
+}) {
+  return (
+    <section className="note-links-list">
+      <h4>{title}</h4>
+      {links.length === 0 ? (
+        <p className="note-links-empty">None</p>
+      ) : (
+        <ul>
+          {links.map((link) => (
+            <li key={`${title}-${link.slug}`}>
+              <Link to={`/n/${link.slug}`} title={`${link.relative_path}.md`}>
+                {link.title}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function NoteTocDesktop({ headings }: { headings: NoteHeading[] }) {
+  if (headings.length === 0) {
+    return null;
+  }
+
+  return (
+    <nav className="note-toc note-toc-desktop" aria-label="Table of contents">
+      <p className="note-toc-title">On this page</p>
+      <ul>
+        {headings.map((heading) => (
+          <li key={heading.id}>
+            <button
+              type="button"
+              className="note-toc-link"
+              data-level={heading.level}
+              onClick={() => jumpToHeading(heading.id)}
+            >
+              {heading.text}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
+function NoteTocMobile({ headings }: { headings: NoteHeading[] }) {
+  if (headings.length === 0) {
+    return null;
+  }
+
+  return (
+    <details className="note-toc note-toc-mobile">
+      <summary>On this page</summary>
+      <ul>
+        {headings.map((heading) => (
+          <li key={`mobile-${heading.id}`}>
+            <button
+              type="button"
+              className="note-toc-link"
+              data-level={heading.level}
+              onClick={() => jumpToHeading(heading.id)}
+            >
+              {heading.text}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+function jumpToHeading(id: string): void {
+  const heading = document.getElementById(id);
+  scrollElementIntoView(heading, { block: "start", inline: "nearest" });
+}
+
+function renderHeading(
+  tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6",
+  children: ReactNode,
+  counts: Map<string, number>,
+) {
+  const text = flattenText(children).trim();
+  const id = assignHeadingId(text, counts);
+  return createElement(tag, { id }, children);
+}
+
+function scrollElementIntoView(
+  element: Element | null,
+  options: ScrollIntoViewOptions,
+): void {
+  if (!element) {
+    return;
+  }
+  const maybeScrollable = element as Element & {
+    scrollIntoView?: (options?: ScrollIntoViewOptions) => void;
+  };
+  if (typeof maybeScrollable.scrollIntoView === "function") {
+    maybeScrollable.scrollIntoView(options);
+  }
 }
 
 function useResolvedWikilinks(
