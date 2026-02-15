@@ -480,15 +480,21 @@ function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
   if (outgoing.length === 0 && backlinks.length === 0) {
     return null;
   }
+  const totalLinks = outgoing.length + backlinks.length;
 
   return (
-    <section className="note-links-panel" aria-label="Note links">
-      <h3>Links</h3>
-      <div className="note-links-grid">
-        <NoteLinksList title="Outgoing" links={outgoing} />
-        <NoteLinksList title="Backlinks" links={backlinks} />
+    <details className="note-links-panel" aria-label="Note links">
+      <summary>
+        <span>Links</span>
+        <span className="note-links-count">{totalLinks}</span>
+      </summary>
+      <div className="note-links-body">
+        <div className="note-links-grid">
+          <NoteLinksList title="Outgoing" links={outgoing} />
+          <NoteLinksList title="Backlinks" links={backlinks} />
+        </div>
       </div>
-    </section>
+    </details>
   );
 }
 
@@ -552,7 +558,10 @@ function NoteTocMobile({ headings }: { headings: NoteHeading[] }) {
 
   return (
     <details className="note-toc note-toc-mobile">
-      <summary>On this page</summary>
+      <summary>
+        <span className="note-toc-mobile-label">On this page</span>
+        <span className="note-toc-mobile-count">{headings.length}</span>
+      </summary>
       <ul>
         {headings.map((heading) => (
           <li key={`mobile-${heading.id}`}>
