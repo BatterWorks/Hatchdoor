@@ -351,7 +351,7 @@ function App() {
               onClick={() => setSearchOpen(true)}
               aria-label="Search notes"
             >
-              /
+              ⌕
             </UiButton>
           ) : null}
           <UiButton
@@ -421,6 +421,20 @@ function App() {
           ) : null}
         </div>
       </header>
+      {isMobile ? (
+        <div className="topbar-mobile-meta">
+          <button
+            type="button"
+            className="topbar-mobile-path"
+            onClick={() => setSearchOpen(true)}
+            title={
+              activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"
+            }
+          >
+            {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
+          </button>
+        </div>
+      ) : null}
 
       <div
         className="app-layout"
