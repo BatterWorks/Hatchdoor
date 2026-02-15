@@ -110,6 +110,13 @@ export function NotePage({
     );
   }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
 
+  useEffect(() => {
+    const onToggle = () => setPropertiesCollapsed((prev) => !prev);
+    window.addEventListener("hatchdoor:toggle-note-properties", onToggle);
+    return () =>
+      window.removeEventListener("hatchdoor:toggle-note-properties", onToggle);
+  }, []);
+
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
   const markdown = useResolvedWikilinks(parsed.body, note?.relative_path ?? "");
 

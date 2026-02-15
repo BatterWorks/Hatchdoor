@@ -58,7 +58,7 @@ function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -138,7 +138,7 @@ function App() {
     if (isMobile) {
       setDrawerOpen(false);
     }
-    setMobileMenuOpen(false);
+    setActionsMenuOpen(false);
   }, [location.pathname, isMobile]);
 
   useEffect(() => {
@@ -275,6 +275,37 @@ function App() {
     setSearchIncludeContent(true);
     setSearchOpen(true);
   }, []);
+  const refreshVault = useCallback(async () => {
+    try {
+      await fetch("/api/refresh", { method: "POST" });
+    } catch {
+      // Fall back to tree refresh even if force refresh endpoint fails.
+    }
+    await loadTree();
+  }, [loadTree]);
+  const copyNoteLink = useCallback(async () => {
+    if (!activeNote) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+    } catch {
+      // Ignore clipboard errors in unsupported contexts.
+    }
+  }, [activeNote]);
+  const toggleProperties = useCallback(() => {
+    window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
+  }, []);
+  const focusReaderSettings = useCallback(() => {
+    const toolbar = document.querySelector(".reader-toolbar");
+    if (toolbar instanceof HTMLElement) {
+      toolbar.scrollIntoView({ behavior: "smooth", block: "start" });
+      const select = toolbar.querySelector("select");
+      if (select instanceof HTMLElement) {
+        select.focus();
+      }
+    }
+  }, []);
 
   return (
     <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
@@ -289,8 +320,8 @@ function App() {
               ☰
             </UiButton>
           ) : null}
-          <div>
-            <h1>Hatchdoor</h1>
+          <div className="topbar-context">
+            <h1>{activeNote?.title ?? "Hatchdoor"}</h1>
             <p className="topbar-subtitle">
               {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
             </p>
@@ -298,66 +329,96 @@ function App() {
         </div>
 
         <div className="topbar-center">
+          {!isMobile ? (
+            <UiButton
+              className="topbar-search-trigger"
+              onClick={() => setSearchOpen(true)}
+            >
+              Search
+              <span className="shortcut-hint" aria-hidden="true">
+                ⌘K
+              </span>
+            </UiButton>
+          ) : null}
           {!isOnline ? <StatusBadge tone="error" text="Offline" /> : null}
           {treeIsStale ? <StatusBadge tone="warn" text="Tree Stale" /> : null}
         </div>
 
         <div className="topbar-right">
-          <UiButton className="close-note" onClick={() => setSearchOpen(true)}>
-            Search
-          </UiButton>
           {isMobile ? (
-            <>
-              <UiButton className="close-note" onClick={() => navigate(-1)}>
-                Back
+            <UiButton
+              className="icon-button"
+              onClick={() => setSearchOpen(true)}
+              aria-label="Search notes"
+            >
+              /
+            </UiButton>
+          ) : null}
+          <UiButton
+            className="icon-button"
+            onClick={() => setActionsMenuOpen((prev) => !prev)}
+            aria-haspopup="menu"
+            aria-expanded={actionsMenuOpen}
+            aria-label="More actions"
+          >
+            ...
+          </UiButton>
+          {actionsMenuOpen ? (
+            <div className="topbar-menu" role="menu">
+              <UiButton
+                className="close-note"
+                role="menuitem"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  setSearchOpen(true);
+                }}
+              >
+                Search
               </UiButton>
               <UiButton
                 className="close-note"
-                onClick={() => setMobileMenuOpen((prev) => !prev)}
-                aria-haspopup="menu"
-                aria-expanded={mobileMenuOpen}
-                aria-label="More actions"
+                role="menuitem"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  void refreshVault();
+                }}
               >
-                ...
+                Refresh vault
               </UiButton>
-              {mobileMenuOpen ? (
-                <div className="topbar-menu" role="menu">
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      setMobileMenuOpen(false);
-                      navigate(1);
-                    }}
-                  >
-                    Forward
-                  </UiButton>
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      setMobileMenuOpen(false);
-                      navigate("/");
-                    }}
-                  >
-                    Close
-                  </UiButton>
-                </div>
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    setActionsMenuOpen(false);
+                    void copyNoteLink();
+                  }}
+                >
+                  Copy note link
+                </UiButton>
               ) : null}
-            </>
-          ) : (
-            <>
-              <UiButton className="close-note" onClick={() => navigate(-1)}>
-                Back
+              <UiButton
+                className="close-note"
+                role="menuitem"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  toggleProperties();
+                }}
+              >
+                Toggle properties
               </UiButton>
-              <UiButton className="close-note" onClick={() => navigate(1)}>
-                Forward
+              <UiButton
+                className="close-note"
+                role="menuitem"
+                onClick={() => {
+                  setActionsMenuOpen(false);
+                  focusReaderSettings();
+                }}
+              >
+                Reader settings
               </UiButton>
-              <UiButton className="close-note" onClick={() => navigate("/")}>
-                Close
-              </UiButton>
-            </>
-          )}
+            </div>
+          ) : null}
         </div>
       </header>
 
