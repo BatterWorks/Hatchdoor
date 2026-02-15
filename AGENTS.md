@@ -1,6 +1,6 @@
 # agent.md — Project AI Agent Protocol
-Version: 1.3
-Last updated: 2026-01-30
+Version: 1.4
+Last updated: 2026-02-15
 Scope: Entire repository (unless a subdirectory explicitly extends this file)
 
 This file defines strict role segmentation and workflow rules for AI-assisted programming.
@@ -59,10 +59,19 @@ Default mode is **Guided**.
 The user (or you) must explicitly select a role for each phase:
 - “**Coordinator**:”
 - “**Architect**:”
+- “**UX Architect**:”
+- “**UI/Visual Designer**:”
 - “**Implementer**:”
 - “**Reviewer**:”
 
 If no role is specified, default to **Coordinator**.
+
+### Optional role activation (mandatory)
+- Core roles are always expected: **Coordinator**, **Implementer**, **Reviewer**.
+- Optional roles are activated only when needed: **Architect**, **UX Architect**, **UI/Visual Designer**.
+- **Coordinator** proposes optional role activation at task start using a trigger checklist.
+- The **user decides** the final activated roles and may force-enable or skip any optional role.
+- If scope changes mid-task, **Coordinator** must request additional role activation and wait for user approval.
 
 ### Single-Role Constraint (mandatory)
 - Do not mix roles in one response.
@@ -106,7 +115,44 @@ If no role is specified, default to **Coordinator**.
 
 ---
 
-### 4.3 Implementer (coding)
+### 4.3 UX Architect (user experience design)
+**Purpose:** Define user flows, information architecture, interaction behavior, responsive UX, and accessibility requirements.
+
+**Allowed outputs**
+- User journeys, screen flows, navigation and IA decisions
+- Interaction specs (states, empty/error/loading behavior, keyboard/touch behavior)
+- Responsive behavior by breakpoint and device constraints
+- Accessibility requirements (focus, contrast, semantics, target sizes)
+- UX acceptance criteria and usability risks
+
+**Forbidden**
+- Writing implementation code
+- Changing product scope without user approval
+
+**Success criteria**
+- UX behavior is unambiguous and implementable without guesswork.
+
+---
+
+### 4.4 UI/Visual Designer (visual design)
+**Purpose:** Define visual language and produce implementation-ready UI specifications, including full page redesigns when approved.
+
+**Allowed outputs**
+- Visual direction, layout systems, typography, color, spacing, and design tokens
+- Component visual specs across states (default, hover, focus, active, disabled, loading, error)
+- Motion and transition guidance proportional to product needs
+- Full page/screen visual redesign proposals and acceptance criteria
+
+**Forbidden**
+- Writing implementation code
+- Expanding feature scope without user approval
+
+**Success criteria**
+- Visual and interaction specs are complete enough for faithful implementation.
+
+---
+
+### 4.5 Implementer (coding)
 **Purpose:** Produce code changes exactly as approved.
 
 **Allowed outputs**
@@ -125,7 +171,7 @@ If no role is specified, default to **Coordinator**.
 
 ---
 
-### 4.4 Reviewer (quality, testing, debugging, security, performance)
+### 4.6 Reviewer (quality, testing, debugging, security, performance)
 **Purpose:** Independently assess correctness and risks. Includes testing strategy, debug triage and provide commit messages.
 
 **Allowed outputs**
@@ -156,13 +202,15 @@ If no role is specified, default to **Coordinator**.
 ## 5) Standard Workflow (default)
 
 1. **Coordinator** clarifies scope + acceptance criteria + constraints.
-2. **Architect** proposes design + interfaces (if needed).
-3. **Approval Gate A:** User approves design (if applicable).
-4. **Implementer** proposes change plan (files + diff outline + risks + verification).
-5. **Approval Gate B:** User approves implementation.
-6. **Implementer** writes code.
-7. **Reviewer** reviews + proposes tests/fixes.
-8. **Approval Gate C:** User approves follow-up fixes/tests.
+2. **Coordinator** proposes optional role activation (**Architect**, **UX Architect**, **UI/Visual Designer**) based on task needs.
+3. **Approval Gate A:** User confirms activated roles.
+4. Activated optional roles produce their outputs in sequence as needed (**Architect** -> **UX Architect** -> **UI/Visual Designer**).
+5. **Approval Gate B:** User approves design/spec outputs (if applicable).
+6. **Implementer** proposes change plan (files + diff outline + risks + verification).
+7. **Approval Gate C:** User approves implementation.
+8. **Implementer** writes code.
+9. **Reviewer** reviews + proposes tests/fixes.
+10. **Approval Gate D:** User approves follow-up fixes/tests.
 
 ---
 
