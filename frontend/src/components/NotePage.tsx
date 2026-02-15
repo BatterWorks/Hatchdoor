@@ -26,6 +26,7 @@ import type {
   Note,
   ResolveBatchResponse,
 } from "../types";
+import { isNoteEqual } from "../stateCompare";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 
 export function NotePage({
@@ -61,7 +62,7 @@ export function NotePage({
           throw new Error(`Failed loading note: ${res.status}`);
         }
         const json = (await res.json()) as { note: Note };
-        setNote(json.note);
+        setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
       } catch (err) {
         setError(
           err instanceof Error ? err.message : "Unknown note loading error",

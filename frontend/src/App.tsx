@@ -18,6 +18,7 @@ import {
   UiButton,
   UiToolbar,
 } from "./components/ui";
+import { isExplorerTreeEqual } from "./stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
@@ -73,7 +74,10 @@ function App() {
       if (!res.ok) {
         throw new Error(`Failed loading tree: ${res.status}`);
       }
-      setTree((await res.json()) as ExplorerFolder);
+      const nextTree = (await res.json()) as ExplorerFolder;
+      setTree((prev) =>
+        isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
+      );
     } catch (err) {
       setTreeError(
         err instanceof Error ? err.message : "Unknown tree loading error",

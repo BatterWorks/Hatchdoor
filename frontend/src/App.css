@@ -25,7 +25,6 @@ body {
   min-height: 100vh;
   width: 100%;
   max-width: 100%;
-  overflow-x: clip;
 }
 
 .app-topbar {
@@ -182,7 +181,6 @@ body {
   max-width: 100%;
   box-sizing: border-box;
   min-width: 0;
-  overflow-x: hidden;
 }
 
 .reader-toolbar {
@@ -223,7 +221,6 @@ body {
   font-size: var(--reader-font-size);
   line-height: var(--reader-line-height);
   min-width: 0;
-  overflow-x: hidden;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
