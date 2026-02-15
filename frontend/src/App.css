@@ -583,7 +583,7 @@ body {
 
 .folder-item summary {
   display: grid;
-  grid-template-columns: 0.9rem minmax(0, 1fr);
+  grid-template-columns: 1.4rem minmax(0, 1fr);
   align-items: center;
   cursor: pointer;
   min-height: 28px;
@@ -600,12 +600,18 @@ body {
   display: none;
 }
 
+.folder-item summary::marker {
+  content: "";
+}
+
 .folder-item summary::before {
-  content: "▸";
-  display: inline-block;
-  font-size: 0.86rem;
-  color: #9a9890;
-  transform-origin: 45% 52%;
+  content: "";
+  display: block;
+  width: 0.78rem;
+  height: 0.78rem;
+  background: #7f7c74;
+  clip-path: polygon(30% 18%, 30% 82%, 84% 50%);
+  transform-origin: 50% 50%;
   transition: transform 120ms ease;
 }
 
