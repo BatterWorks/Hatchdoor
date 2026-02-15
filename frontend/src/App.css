@@ -34,7 +34,7 @@ body {
   top: 0;
   z-index: 40;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 20rem) auto;
   gap: 0.8rem;
   align-items: center;
   min-height: 50px;
@@ -52,32 +52,60 @@ body {
 
 .topbar-left h1 {
   margin: 0;
-  font-size: 1.08rem;
-  font-weight: 630;
+  max-width: 26rem;
+  font-size: 0.98rem;
+  font-weight: 620;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .topbar-subtitle {
   margin: 0.08rem 0 0;
-  font-size: 0.83rem;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 20rem;
+  max-width: 26rem;
 }
 
 .topbar-center {
   display: flex;
   gap: 0.35rem;
-  justify-content: center;
+  justify-content: flex-start;
 }
 
 .topbar-right {
   position: relative;
   display: flex;
   gap: 0.35rem;
+  align-items: center;
   justify-content: flex-end;
+}
+
+.topbar-search-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  color: #66635c;
+  box-shadow: var(--shadow-soft);
+}
+
+.shortcut-hint {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 0.06rem 0.25rem;
+  font-size: 0.7rem;
+  color: #7f7c74;
+  margin-left: 0.5rem;
 }
 
 .topbar-menu {
@@ -885,24 +913,12 @@ body.resizing {
 
 @media (max-width: 920px) {
   .app-topbar {
-    grid-template-columns: 1fr auto;
-    grid-template-areas:
-      "left right"
-      "center center";
+    grid-template-columns: minmax(0, 1fr) auto;
     padding: calc(0.25rem + env(safe-area-inset-top)) 0.62rem 0.32rem;
   }
 
-  .topbar-left {
-    grid-area: left;
-  }
-
   .topbar-center {
-    grid-area: center;
-    justify-content: flex-start;
-  }
-
-  .topbar-right {
-    grid-area: right;
+    display: none;
   }
 
   .app-layout {
@@ -927,6 +943,11 @@ body.resizing {
 
   .topbar-subtitle {
     max-width: 8.4rem;
+  }
+
+  .topbar-left h1 {
+    max-width: 11.5rem;
+    font-size: 0.92rem;
   }
 
   .search-overlay {
