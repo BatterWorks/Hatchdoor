@@ -30,4 +30,12 @@ describe("noteHeadings", () => {
   it("slugifyHeading normalizes markdown punctuation", () => {
     expect(slugifyHeading("**API** [Guide](x) / v1")).toBe("api-guide-v1");
   });
+
+  it("extracts obsidian wikilink heading labels for toc ids", () => {
+    const headings = extractMarkdownHeadings("## [[Project/Plan|Plan Home]]");
+
+    expect(headings).toEqual([
+      { level: 2, text: "Plan Home", id: "plan-home" },
+    ]);
+  });
 });

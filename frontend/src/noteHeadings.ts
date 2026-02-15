@@ -64,7 +64,17 @@ export function slugifyHeading(input: string): string {
 
 function normalizeHeadingText(value: string): string {
   return value
+    .replace(/\[\[([^[\]]+)\]\]/g, (_whole, body: string) =>
+      extractWikilinkLabel(body),
+    )
     .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
     .replace(/[`*_~]/g, "")
     .trim();
+}
+
+function extractWikilinkLabel(body: string): string {
+  const [targetRaw, aliasRaw] = body.split("|", 2);
+  const target = (targetRaw || "").trim();
+  const alias = (aliasRaw || "").trim();
+  return alias || target;
 }
