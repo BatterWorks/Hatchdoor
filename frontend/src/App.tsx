@@ -42,7 +42,7 @@ function App() {
     return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
   });
   const [sidebarWidth, setSidebarWidth] = useState<number>(() =>
-    getStoredNumber(SIDEBAR_WIDTH_KEY, 320, 240, 520),
+    getStoredNumber(SIDEBAR_WIDTH_KEY, 268, 220, 420),
   );
   const [readPrefs, setReadPrefs] = useState<ReadPrefs>(() => {
     return getStoredReaderPrefs();
@@ -251,7 +251,7 @@ function App() {
         return;
       }
       const delta = event.clientX - state.startX;
-      const next = clamp(state.startWidth + delta, 240, 520);
+      const next = clamp(state.startWidth + delta, 220, 420);
       setSidebarWidth(next);
     };
 
