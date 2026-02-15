@@ -237,44 +237,14 @@ body {
 }
 
 .note-pane {
+  --reader-font-size: 16px;
+  --reader-line-height: 1.4;
+  --reader-max-width: 860px;
   background: var(--color-bg-surface);
   padding: 1rem 2rem calc(2.6rem + env(safe-area-inset-bottom));
   max-width: 100%;
   box-sizing: border-box;
   min-width: 0;
-}
-
-.reader-toolbar {
-  position: sticky;
-  top: 0.55rem;
-  z-index: 6;
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 0.52rem;
-  align-items: center;
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 0.35rem 0.45rem;
-  margin-bottom: 1.25rem;
-  box-shadow: var(--shadow-soft);
-}
-
-.reader-toolbar label {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-}
-
-.reader-toolbar select {
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-surface);
-  color: var(--color-text);
-  padding: 0.15rem 0.25rem;
-  font-size: 16px;
 }
 
 .note-content {
@@ -726,8 +696,7 @@ body {
 .note-link:focus-visible,
 .tag-chip:focus-visible,
 .search-input:focus-visible,
-.search-toggle input:focus-visible,
-.reader-toolbar select:focus-visible {
+.search-toggle input:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--color-focus) 48%, transparent);
   outline-offset: 1px;
 }
@@ -756,6 +725,12 @@ body {
   width: 2rem;
   height: 2rem;
   padding: 0;
+}
+
+.topbar-search-icon {
+  font-size: 1.45rem;
+  line-height: 1;
+  font-weight: 700;
 }
 
 .state-block {
@@ -1032,25 +1007,6 @@ body.resizing {
     padding: 0.8rem 0.9rem calc(1.8rem + env(safe-area-inset-bottom));
   }
 
-  .reader-toolbar {
-    top: 0.4rem;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.35rem;
-    width: 100%;
-    max-width: 100%;
-    box-shadow: none;
-  }
-
-  .reader-toolbar label {
-    justify-content: space-between;
-    min-width: 0;
-  }
-
-  .reader-toolbar select {
-    width: 100%;
-  }
-
   .note-page-title {
     font-size: clamp(1.7rem, 8.2vw, 2.1rem);
   }
@@ -1077,6 +1033,10 @@ body.resizing {
   .icon-button {
     width: 44px;
     height: 44px;
+  }
+
+  .topbar-search-icon {
+    font-size: 1.75rem;
   }
 
   .note-property-row {

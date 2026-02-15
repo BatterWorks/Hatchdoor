@@ -16,13 +16,11 @@ import {
   StateBlock,
   StatusBadge,
   UiButton,
-  UiToolbar,
 } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
-  ReadPrefs,
   RecentNote,
   SearchResponse,
   SearchResult,
@@ -30,7 +28,6 @@ import type {
 
 const SIDEBAR_WIDTH_KEY = "hatchdoor.sidebarWidth";
 const DRAWER_OPEN_KEY = "hatchdoor.drawerOpen";
-const READER_PREFS_KEY = "hatchdoor.readerPrefs";
 const RECENT_NOTES_KEY = "hatchdoor.recentNotes";
 const NOTE_PROPERTIES_COLLAPSED_KEY = "hatchdoor.notePropertiesCollapsed";
 
@@ -44,9 +41,6 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState<number>(() =>
     getStoredNumber(SIDEBAR_WIDTH_KEY, 268, 220, 420),
   );
-  const [readPrefs, setReadPrefs] = useState<ReadPrefs>(() => {
-    return getStoredReaderPrefs();
-  });
   const [isOnline, setIsOnline] = useState(() => navigator.onLine);
   const [activeNote, setActiveNote] = useState<ActiveNoteMeta | null>(null);
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
@@ -113,10 +107,6 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
   }, [sidebarWidth]);
-
-  useEffect(() => {
-    window.localStorage.setItem(READER_PREFS_KEY, JSON.stringify(readPrefs));
-  }, [readPrefs]);
 
   useEffect(() => {
     window.localStorage.setItem(RECENT_NOTES_KEY, JSON.stringify(recentNotes));
@@ -296,16 +286,6 @@ function App() {
   const toggleProperties = useCallback(() => {
     window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
   }, []);
-  const focusReaderSettings = useCallback(() => {
-    const toolbar = document.querySelector(".reader-toolbar");
-    if (toolbar instanceof HTMLElement) {
-      toolbar.scrollIntoView({ behavior: "smooth", block: "start" });
-      const select = toolbar.querySelector("select");
-      if (select instanceof HTMLElement) {
-        select.focus();
-      }
-    }
-  }, []);
 
   return (
     <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
@@ -351,7 +331,9 @@ function App() {
               onClick={() => setSearchOpen(true)}
               aria-label="Search notes"
             >
-              ⌕
+              <span className="topbar-search-icon" aria-hidden="true">
+                ⌕
+              </span>
             </UiButton>
           ) : null}
           <UiButton
@@ -406,16 +388,6 @@ function App() {
                 }}
               >
                 Toggle properties
-              </UiButton>
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  setActionsMenuOpen(false);
-                  focusReaderSettings();
-                }}
-              >
-                Reader settings
               </UiButton>
             </div>
           ) : null}
@@ -485,17 +457,7 @@ function App() {
           />
         ) : null}
 
-        <main
-          className="note-pane"
-          style={
-            {
-              "--reader-font-size": `${readPrefs.fontSize}px`,
-              "--reader-line-height": String(readPrefs.lineHeight),
-              "--reader-max-width": `${readPrefs.maxWidth}px`,
-            } as CSSProperties
-          }
-        >
-          <ReaderToolbar prefs={readPrefs} onChange={setReadPrefs} />
+        <main className="note-pane">
           <Routes>
             <Route path="/" element={<EmptyState />} />
             <Route
@@ -542,66 +504,6 @@ function App() {
   );
 }
 
-function ReaderToolbar({
-  prefs,
-  onChange,
-}: {
-  prefs: ReadPrefs;
-  onChange: (next: ReadPrefs) => void;
-}) {
-  return (
-    <UiToolbar className="reader-toolbar">
-      <label>
-        Size
-        <select
-          value={prefs.fontSize}
-          onChange={(e) =>
-            onChange({ ...prefs, fontSize: Number(e.target.value) })
-          }
-        >
-          {[15, 16, 18, 20].map((size) => (
-            <option key={size} value={size}>
-              {size}px
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label>
-        Line
-        <select
-          value={prefs.lineHeight}
-          onChange={(e) =>
-            onChange({ ...prefs, lineHeight: Number(e.target.value) })
-          }
-        >
-          {[1.4, 1.55, 1.7, 1.85].map((lineHeight) => (
-            <option key={lineHeight} value={lineHeight}>
-              {lineHeight}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label>
-        Width
-        <select
-          value={prefs.maxWidth}
-          onChange={(e) =>
-            onChange({ ...prefs, maxWidth: Number(e.target.value) })
-          }
-        >
-          {[720, 860, 980].map((width) => (
-            <option key={width} value={width}>
-              {width}px
-            </option>
-          ))}
-        </select>
-      </label>
-    </UiToolbar>
-  );
-}
-
 function EmptyState() {
   return (
     <StateBlock
@@ -639,34 +541,6 @@ function getStoredNumber(
     return fallback;
   }
   return clamp(value, min, max);
-}
-
-function getStoredReaderPrefs(): ReadPrefs {
-  const fallback: ReadPrefs = {
-    fontSize: 16,
-    lineHeight: 1.65,
-    maxWidth: 860,
-  };
-
-  try {
-    const raw = window.localStorage.getItem(READER_PREFS_KEY);
-    if (!raw) {
-      return fallback;
-    }
-
-    const parsed = JSON.parse(raw) as Partial<ReadPrefs>;
-    return {
-      fontSize: clamp(Number(parsed.fontSize ?? fallback.fontSize), 14, 22),
-      lineHeight: clamp(
-        Number(parsed.lineHeight ?? fallback.lineHeight),
-        1.3,
-        2.0,
-      ),
-      maxWidth: clamp(Number(parsed.maxWidth ?? fallback.maxWidth), 640, 1200),
-    };
-  } catch {
-    return fallback;
-  }
 }
 
 function getStoredRecentNotes(): RecentNote[] {
