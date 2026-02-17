@@ -357,6 +357,60 @@ describe("App", () => {
     });
   });
 
+  it("opens external markdown links in a new tab", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content:
+                  "[External](https://example.com)\n\n[Internal](/n/home)",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const external = await screen.findByRole("link", { name: "External" });
+    expect(external).toHaveAttribute("href", "https://example.com");
+    expect(external).toHaveAttribute("target", "_blank");
+    expect(external).toHaveAttribute("rel", "noopener noreferrer");
+
+    const internal = screen.getByRole("link", { name: "Internal" });
+    expect(internal).toHaveAttribute("href", "/n/home");
+    expect(internal).not.toHaveAttribute("target");
+  });
+
   it("escapes markdown control chars in wikilink labels", () => {
     expect(escapeMarkdownLabel("a]b(c) *x*")).toBe("a\\]b\\(c\\) \\*x\\*");
   });

@@ -282,6 +282,13 @@ export function NotePage({
                     </span>
                   );
                 }
+                if (isExternalHref(href)) {
+                  return (
+                    <a href={href} target="_blank" rel="noopener noreferrer">
+                      {children}
+                    </a>
+                  );
+                }
                 return <a href={href}>{children}</a>;
               },
               img(props) {
@@ -607,6 +614,22 @@ function scrollElementIntoView(
   };
   if (typeof maybeScrollable.scrollIntoView === "function") {
     maybeScrollable.scrollIntoView(options);
+  }
+}
+
+function isExternalHref(href: string | undefined): boolean {
+  if (!href) {
+    return false;
+  }
+  if (href.startsWith("/") || href.startsWith("#")) {
+    return false;
+  }
+
+  try {
+    const url = new URL(href, window.location.origin);
+    return url.origin !== window.location.origin;
+  } catch {
+    return false;
   }
 }
 
