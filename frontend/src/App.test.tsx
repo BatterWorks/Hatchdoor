@@ -411,7 +411,7 @@ describe("App", () => {
     expect(internal).not.toHaveAttribute("target");
   });
 
-  it("opens server markdown download endpoint from the actions menu", async () => {
+  it("triggers markdown download endpoint from the actions menu via anchor", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -448,7 +448,20 @@ describe("App", () => {
       },
     );
 
-    const openSpy = vi.spyOn(window, "open").mockReturnValue(window);
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
+    const originalCreateElement = document.createElement.bind(document);
+    const createdAnchors: HTMLAnchorElement[] = [];
+    vi.spyOn(document, "createElement").mockImplementation(
+      ((tagName: string, options?: ElementCreationOptions) => {
+        const element = originalCreateElement(tagName, options);
+        if (tagName.toLowerCase() === "a") {
+          createdAnchors.push(element as HTMLAnchorElement);
+        }
+        return element;
+      }) as typeof document.createElement,
+    );
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -462,14 +475,15 @@ describe("App", () => {
       await screen.findByRole("menuitem", { name: "Download .md" }),
     );
 
-    expect(openSpy).toHaveBeenCalledWith(
-      "/api/note/home/download",
-      "_blank",
-      "noopener,noreferrer",
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    const downloadAnchor = createdAnchors.find(
+      (anchor) => anchor.getAttribute("href") === "/api/note/home/download",
     );
+    expect(downloadAnchor).toBeTruthy();
+    expect(downloadAnchor?.hasAttribute("download")).toBe(true);
   });
 
-  it("attempts popup-safe open for markdown download", async () => {
+  it("does not use window.open or location navigation for markdown download", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -505,7 +519,10 @@ describe("App", () => {
         return new Response("not found", { status: 404 });
       },
     );
-    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+    const openSpy = vi.spyOn(window, "open");
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(() => {});
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -519,11 +536,8 @@ describe("App", () => {
       await screen.findByRole("menuitem", { name: "Download .md" }),
     );
 
-    expect(openSpy).toHaveBeenCalledWith(
-      "/api/note/home/download",
-      "_blank",
-      "noopener,noreferrer",
-    );
+    expect(openSpy).not.toHaveBeenCalled();
+    expect(clickSpy).toHaveBeenCalledTimes(1);
   });
 
   it("escapes markdown control chars in wikilink labels", () => {
