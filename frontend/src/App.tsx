@@ -335,20 +335,19 @@ function App() {
   const toggleProperties = useCallback(() => {
     window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
   }, []);
-  const downloadMarkdown = useCallback(async () => {
+  const downloadMarkdown = useCallback(() => {
     if (!activeNote) {
       return;
     }
     const url = `/api/note/${encodeURIComponent(activeNote.slug)}/download`;
-    if (isMobile) {
-      window.location.assign(url);
-      return;
-    }
-    const opened = window.open(url, "_blank", "noopener,noreferrer");
-    if (!opened) {
-      window.location.assign(url);
-    }
-  }, [activeNote, isMobile]);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.setAttribute("download", "");
+    anchor.style.display = "none";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+  }, [activeNote]);
 
   return (
     <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
