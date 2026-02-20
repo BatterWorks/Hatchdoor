@@ -22,6 +22,7 @@ import { isExplorerTreeEqual } from "./stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
+  Note,
   RecentNote,
   SearchResponse,
   SearchResult,
@@ -59,6 +60,7 @@ function App() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
@@ -153,6 +155,14 @@ function App() {
       setActiveNote(null);
     }
   }, [location.pathname]);
+
+  useEffect(() => {
+    if (!downloadError) {
+      return;
+    }
+    const id = window.setTimeout(() => setDownloadError(null), 3_000);
+    return () => window.clearTimeout(id);
+  }, [downloadError]);
 
   useEffect(() => {
     if (!activeNote) {
@@ -335,6 +345,37 @@ function App() {
   const toggleProperties = useCallback(() => {
     window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
   }, []);
+  const downloadMarkdown = useCallback(async () => {
+    if (!activeNote) {
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `/api/note/${encodeURIComponent(activeNote.slug)}`,
+      );
+      if (!res.ok) {
+        throw new Error(`Download failed: ${res.status}`);
+      }
+      const json = (await res.json()) as { note: Note };
+      const filename = getDownloadFilename(json.note);
+      const blob = new Blob([json.note.content], {
+        type: "text/markdown;charset=utf-8",
+      });
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = filename;
+      anchor.style.display = "none";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(objectUrl);
+      setDownloadError(null);
+    } catch {
+      setDownloadError("Download failed. Try again.");
+    }
+  }, [activeNote]);
 
   return (
     <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
@@ -371,6 +412,9 @@ function App() {
           ) : null}
           {!isOnline ? <StatusBadge tone="error" text="Offline" /> : null}
           {treeIsStale ? <StatusBadge tone="warn" text="Tree Stale" /> : null}
+          {downloadError ? (
+            <StatusBadge tone="error" text={downloadError} />
+          ) : null}
         </div>
 
         <div className="topbar-right">
@@ -426,6 +470,18 @@ function App() {
                   }}
                 >
                   Copy note link
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    setActionsMenuOpen(false);
+                    void downloadMarkdown();
+                  }}
+                >
+                  Download .md
                 </UiButton>
               ) : null}
               <UiButton
@@ -687,6 +743,42 @@ function isEditableTarget(target: EventTarget | null): boolean {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function getDownloadFilename(note: Note): string {
+  const raw =
+    extractFilenameFromRelativePath(note.relative_path) ??
+    note.title ??
+    note.slug;
+  const base = sanitizeFilename(raw) || note.slug || "note";
+  return base.endsWith(".md") ? base : `${base}.md`;
+}
+
+function extractFilenameFromRelativePath(relativePath: string): string | null {
+  const trimmed = relativePath.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const segments = trimmed.split("/");
+  const filename = segments[segments.length - 1]?.trim();
+  return filename && filename.length > 0 ? filename : null;
+}
+
+function sanitizeFilename(input: string): string {
+  const disallowed = new Set(["<", ">", ":", '"', "/", "\\", "|", "?", "*"]);
+  return input
+    .trim()
+    .split("")
+    .map((char) => {
+      if (char.charCodeAt(0) <= 31 || disallowed.has(char)) {
+        return "-";
+      }
+      return char;
+    })
+    .join("")
+    .replace(/\s+/g, " ")
+    .replace(/\.+$/g, "")
+    .trim();
 }
 
 export default App;
