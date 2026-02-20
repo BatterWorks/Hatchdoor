@@ -375,13 +375,13 @@ async fn note_download_handler(
     };
 
     let filename = download_filename_for_note(&note);
-    let content_disposition = format!("inline; filename=\"{filename}\"");
+    let content_disposition = build_download_content_disposition(&filename);
 
     let mut response = Response::new(note.content.into());
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("text/markdown; charset=utf-8"),
+        HeaderValue::from_static("application/octet-stream"),
     );
     response
         .headers_mut()
@@ -389,7 +389,7 @@ async fn note_download_handler(
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&content_disposition)
-            .unwrap_or_else(|_| HeaderValue::from_static("inline; filename=\"note.md\"")),
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment; filename=\"note.md\"")),
     );
 
     response
@@ -689,6 +689,35 @@ fn sanitize_download_filename(input: &str) -> String {
     }
 }
 
+fn build_download_content_disposition(filename: &str) -> String {
+    let ascii_fallback = filename
+        .chars()
+        .map(|ch| if ch.is_ascii() { ch } else { '-' })
+        .collect::<String>();
+    format!(
+        "attachment; filename=\"{}\"; filename*=UTF-8''{}",
+        ascii_fallback,
+        percent_encode_filename(filename)
+    )
+}
+
+fn percent_encode_filename(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        let is_safe = matches!(
+            byte,
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'
+        );
+        if is_safe {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,6 +858,15 @@ mod tests {
         assert_eq!(download_filename_for_note(&note), "README.md");
     }
 
+    #[test]
+    fn build_download_content_disposition_includes_utf8_filename() {
+        let value = build_download_content_disposition("Homelab Atlas.md");
+        assert_eq!(
+            value,
+            "attachment; filename=\"Homelab Atlas.md\"; filename*=UTF-8''Homelab%20Atlas.md"
+        );
+    }
+
     #[tokio::test]
     async fn note_download_handler_returns_markdown_with_headers() {
         let tmp = TempDir::new().expect("temp dir");
@@ -854,14 +892,17 @@ mod tests {
             .expect("content type")
             .to_str()
             .expect("header string");
-        assert_eq!(content_type, "text/markdown; charset=utf-8");
+        assert_eq!(content_type, "application/octet-stream");
         let content_disposition = response
             .headers()
             .get(header::CONTENT_DISPOSITION)
             .expect("content disposition")
             .to_str()
             .expect("header string");
-        assert_eq!(content_disposition, "inline; filename=\"README.md\"");
+        assert_eq!(
+            content_disposition,
+            "attachment; filename=\"README.md\"; filename*=UTF-8''README.md"
+        );
 
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
