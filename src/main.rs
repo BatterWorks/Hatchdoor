@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
-use axum::http::{StatusCode, header};
-use axum::response::{Html, IntoResponse};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dotenvy::dotenv;
@@ -165,6 +165,7 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/api/tree", get(tree_handler))
         .route("/api/note/{slug}", get(note_handler))
+        .route("/api/note/{slug}/download", get(note_download_handler))
         .route("/api/note/{slug}/links", get(note_links_handler))
         .route("/api/resolve", get(resolve_handler))
         .route("/api/resolve-batch", post(resolve_batch_handler))
@@ -339,6 +340,59 @@ async fn note_handler(
         )
             .into_response(),
     }
+}
+
+async fn note_download_handler(
+    Path(slug): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let (index, _tree) = match snapshot(&state).await {
+        Ok(s) => s,
+        Err(err) => return err.into_response(),
+    };
+
+    let note = match index.read_note_by_slug(&slug) {
+        Ok(Some(note)) => note,
+        Ok(None) => {
+            warn!(slug = %slug, "Note not found for download");
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Note not found: {slug}"),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed reading note {slug}: {e}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let filename = download_filename_for_note(&note);
+    let content_disposition = format!("inline; filename=\"{filename}\"");
+
+    let mut response = Response::new(note.content.into());
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/markdown; charset=utf-8"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&content_disposition)
+            .unwrap_or_else(|_| HeaderValue::from_static("inline; filename=\"note.md\"")),
+    );
+
+    response
 }
 
 async fn note_links_handler(
@@ -601,9 +655,44 @@ enum AssetPathError {
     Internal,
 }
 
+fn download_filename_for_note(note: &Note) -> String {
+    let from_path = note
+        .relative_path
+        .split('/')
+        .next_back()
+        .unwrap_or(note.title.as_str());
+    let base = sanitize_download_filename(from_path);
+    if base.ends_with(".md") {
+        base
+    } else {
+        format!("{base}.md")
+    }
+}
+
+fn sanitize_download_filename(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.trim().chars() {
+        let allowed = ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '-' | '_' | '.' | '(' | ')');
+        if allowed {
+            output.push(ch);
+        } else if !ch.is_ascii_control() {
+            output.push('-');
+        }
+    }
+
+    let collapsed = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim_end_matches('.').trim();
+    if trimmed.is_empty() {
+        "note".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use tempfile::TempDir;
 
     #[test]
@@ -717,5 +806,66 @@ mod tests {
             resolve_asset_path(&vault_root, "missing.png"),
             Err(AssetPathError::NotFound)
         );
+    }
+
+    #[test]
+    fn sanitize_download_filename_replaces_unsafe_chars() {
+        assert_eq!(
+            sanitize_download_filename("  Prox:mox/Note?.md  "),
+            "Prox-mox-Note-.md"
+        );
+        assert_eq!(sanitize_download_filename(""), "note");
+    }
+
+    #[test]
+    fn download_filename_for_note_adds_md_extension_when_missing() {
+        let note = Note {
+            title: "README".to_string(),
+            slug: "readme".to_string(),
+            relative_path: "Docs/README".to_string(),
+            content: "# Readme".to_string(),
+        };
+
+        assert_eq!(download_filename_for_note(&note), "README.md");
+    }
+
+    #[tokio::test]
+    async fn note_download_handler_returns_markdown_with_headers() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        std::fs::write(vault_root.join("README.md"), "# Home\n").expect("write note");
+
+        let cache = build_cache(&vault_root).expect("build cache");
+        let state = AppState {
+            vault_path: vault_root,
+            refresh_interval: Duration::from_secs(60),
+            cache: Arc::new(RwLock::new(cache)),
+        };
+
+        let response = note_download_handler(Path("readme".to_string()), State(state))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("content type")
+            .to_str()
+            .expect("header string");
+        assert_eq!(content_type, "text/markdown; charset=utf-8");
+        let content_disposition = response
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .expect("content disposition")
+            .to_str()
+            .expect("header string");
+        assert_eq!(content_disposition, "inline; filename=\"README.md\"");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        assert_eq!(body, "# Home\n");
     }
 }

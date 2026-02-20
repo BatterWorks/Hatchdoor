@@ -411,7 +411,7 @@ describe("App", () => {
     expect(internal).not.toHaveAttribute("target");
   });
 
-  it("downloads the current note as markdown from the actions menu", async () => {
+  it("opens server markdown download endpoint from the actions menu", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -448,19 +448,7 @@ describe("App", () => {
       },
     );
 
-    const createObjectURLMock = vi.fn(() => "blob:test");
-    const revokeObjectURLMock = vi.fn();
-    Object.defineProperty(URL, "createObjectURL", {
-      configurable: true,
-      value: createObjectURLMock,
-    });
-    Object.defineProperty(URL, "revokeObjectURL", {
-      configurable: true,
-      value: revokeObjectURLMock,
-    });
-    const clickMock = vi
-      .spyOn(HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(window);
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -474,15 +462,14 @@ describe("App", () => {
       await screen.findByRole("menuitem", { name: "Download .md" }),
     );
 
-    await waitFor(() => {
-      expect(createObjectURLMock).toHaveBeenCalledTimes(1);
-      expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:test");
-      expect(clickMock).toHaveBeenCalledTimes(1);
-    });
+    expect(openSpy).toHaveBeenCalledWith(
+      "/api/note/home/download",
+      "_blank",
+      "noopener,noreferrer",
+    );
   });
 
-  it("shows an error badge when markdown download fails", async () => {
-    let noteCalls = 0;
+  it("attempts popup-safe open for markdown download", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -498,21 +485,17 @@ describe("App", () => {
         }
 
         if (url.includes("/api/note/home")) {
-          noteCalls += 1;
-          if (noteCalls === 1) {
-            return new Response(
-              JSON.stringify({
-                note: {
-                  title: "Home",
-                  slug: "home",
-                  relative_path: "Notes/Home",
-                  content: "# Home",
-                },
-              }),
-              { status: 200 },
-            );
-          }
-          return new Response("boom", { status: 500 });
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Notes/Home",
+                content: "# Home",
+              },
+            }),
+            { status: 200 },
+          );
         }
 
         if (url.includes("/api/resolve-batch")) {
@@ -522,6 +505,7 @@ describe("App", () => {
         return new Response("not found", { status: 404 });
       },
     );
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -535,9 +519,11 @@ describe("App", () => {
       await screen.findByRole("menuitem", { name: "Download .md" }),
     );
 
-    expect(
-      await screen.findByText("Download failed. Try again."),
-    ).toBeInTheDocument();
+    expect(openSpy).toHaveBeenCalledWith(
+      "/api/note/home/download",
+      "_blank",
+      "noopener,noreferrer",
+    );
   });
 
   it("escapes markdown control chars in wikilink labels", () => {
