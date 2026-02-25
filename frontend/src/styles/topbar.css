@@ -1,0 +1,124 @@
+.app-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 20rem) auto;
+  gap: 0.65rem;
+  align-items: center;
+  min-height: 49px;
+  padding: calc(0.3rem + env(safe-area-inset-top)) 0.85rem 0.3rem;
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(247, 246, 243, 0.96);
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.topbar-context {
+  min-width: 0;
+}
+
+.topbar-left h1 {
+  margin: 0;
+  max-width: 26rem;
+  font-size: 1.01rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topbar-subtitle {
+  margin: 0.08rem 0 0;
+  font-size: 0.74rem;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 26rem;
+}
+
+.topbar-center {
+  display: flex;
+  gap: 0.35rem;
+  justify-content: flex-start;
+}
+
+.topbar-right {
+  position: relative;
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.topbar-mobile-meta {
+  display: none;
+}
+
+.topbar-search-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 30px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  color: var(--color-text-muted);
+  box-shadow: none;
+}
+
+.shortcut-hint {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 4px;
+  padding: 0.06rem 0.25rem;
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  margin-left: 0.5rem;
+}
+
+.topbar-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.3rem);
+  display: grid;
+  gap: 0.3rem;
+  min-width: 11rem;
+  padding: 0.45rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  box-shadow: var(--shadow-float);
+  z-index: 70;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  border: 1px solid;
+}
+
+.status-badge.warn {
+  background: #fff6e7;
+  border-color: #f0ddb7;
+  color: #7d5b1a;
+}
+
+.status-badge.error {
+  background: #fdeeee;
+  border-color: #efc7c7;
+  color: #8f2f2f;
+}
+

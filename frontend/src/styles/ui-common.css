@@ -1,0 +1,123 @@
+.ui-button,
+.close-note,
+.icon-button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text);
+  border-radius: 6px;
+  padding: 0.26rem 0.52rem;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.ui-button:hover,
+.close-note:hover,
+.icon-button:hover {
+  background: var(--color-btn-hover);
+}
+
+.ui-button:focus-visible,
+.close-note:focus-visible,
+.icon-button:focus-visible,
+.note-link:focus-visible,
+.tag-chip:focus-visible,
+.search-input:focus-visible,
+.search-toggle input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-focus) 48%, transparent);
+  outline-offset: 1px;
+}
+
+.ui-panel {
+  border-radius: var(--radius-md);
+}
+
+.ui-toolbar {
+  width: 100%;
+}
+
+.ui-badge {
+  font-weight: 600;
+}
+
+.ui-empty-state {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1rem;
+  box-shadow: var(--shadow-soft);
+}
+
+.icon-button {
+  width: 2.05rem;
+  height: 2.05rem;
+  padding: 0;
+}
+
+.topbar-search-icon {
+  font-size: 1.45rem;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.state-block {
+  text-align: left;
+  max-width: 38rem;
+  margin: 0 auto;
+}
+
+.state-block h2 {
+  margin-top: 0;
+}
+
+.skeleton-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.skeleton-line {
+  height: 0.8rem;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #f0f0ee, #f8f8f6, #f0f0ee);
+  background-size: 200% 100%;
+  animation: shimmer 1.15s linear infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 0 0;
+  }
+
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.mermaid {
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 0.48rem;
+  background: #fff;
+}
+
+.error {
+  color: #9a3737;
+}
+
+.broken-link {
+  color: #9a3737;
+  border-bottom: 1px dashed #be6565;
+  cursor: not-allowed;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: calc(52px + env(safe-area-inset-top)) 0 0 0;
+  border: 0;
+  background: rgba(15, 15, 15, 0.35);
+  z-index: 20;
+}
+
