@@ -1,23 +1,31 @@
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import "./App.css";
 import "./noteEnhancements.css";
-import { FolderTree, RecentNotesList } from "./components/Explorer";
+import { AppTopbar } from "./app/AppTopbar";
+import {
+  DRAWER_OPEN_KEY,
+  EXPLORER_SCROLL_TOP_KEY,
+  EXPANDED_FOLDERS_KEY,
+  LAST_NOTE_KEY,
+  NOTE_PROPERTIES_COLLAPSED_KEY,
+  RECENT_NOTES_KEY,
+  SIDEBAR_WIDTH_KEY,
+} from "./app/constants";
+import { ExplorerPane } from "./app/ExplorerPane";
+import {
+  clampSidebarWidth,
+  getStoredExpandedFolders,
+  getStoredNumber,
+  getStoredRecentNotes,
+  getStoredString,
+  isEditableTarget,
+} from "./app/storage";
+import { useIsMobile } from "./app/useIsMobile";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
-import {
-  ExplorerSkeleton,
-  StateBlock,
-  StatusBadge,
-  UiButton,
-} from "./components/ui";
+import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
 import type {
   ActiveNoteMeta,
@@ -26,14 +34,6 @@ import type {
   SearchResponse,
   SearchResult,
 } from "./types";
-
-const SIDEBAR_WIDTH_KEY = "hatchdoor.sidebarWidth";
-const DRAWER_OPEN_KEY = "hatchdoor.drawerOpen";
-const RECENT_NOTES_KEY = "hatchdoor.recentNotes";
-const EXPANDED_FOLDERS_KEY = "hatchdoor.expandedFolders";
-const EXPLORER_SCROLL_TOP_KEY = "hatchdoor.explorerScrollTop";
-const LAST_NOTE_KEY = "hatchdoor.lastNote";
-const NOTE_PROPERTIES_COLLAPSED_KEY = "hatchdoor.notePropertiesCollapsed";
 
 function App() {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
@@ -50,9 +50,9 @@ function App() {
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
-  const [expandedFolders, setExpandedFolders] = useState<
-    Record<string, boolean>
-  >(() => getStoredExpandedFolders());
+  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>(
+    () => getStoredExpandedFolders(),
+  );
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
@@ -63,9 +63,7 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
-  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
-    null,
-  );
+  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
@@ -79,13 +77,9 @@ function App() {
         throw new Error(`Failed loading tree: ${res.status}`);
       }
       const nextTree = (await res.json()) as ExplorerFolder;
-      setTree((prev) =>
-        isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
-      );
+      setTree((prev) => (isExplorerTreeEqual(prev, nextTree) ? prev : nextTree));
     } catch (err) {
-      setTreeError(
-        err instanceof Error ? err.message : "Unknown tree loading error",
-      );
+      setTreeError(err instanceof Error ? err.message : "Unknown tree loading error");
     }
   }, []);
 
@@ -160,9 +154,7 @@ function App() {
     }
 
     setRecentNotes((prev) => {
-      const withoutCurrent = prev.filter(
-        (item) => item.slug !== activeNote.slug,
-      );
+      const withoutCurrent = prev.filter((item) => item.slug !== activeNote.slug);
       const next: RecentNote[] = [
         { ...activeNote, viewedAt: Date.now() },
         ...withoutCurrent,
@@ -277,7 +269,7 @@ function App() {
         return;
       }
       const delta = event.clientX - state.startX;
-      const next = clamp(state.startWidth + delta, 220, 420);
+      const next = clampSidebarWidth(state.startWidth + delta);
       setSidebarWidth(next);
     };
 
@@ -351,186 +343,42 @@ function App() {
 
   return (
     <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
-      <header className="app-topbar">
-        <div className="topbar-left">
-          {isMobile ? (
-            <UiButton
-              className="icon-button"
-              onClick={() => setDrawerOpen((prev) => !prev)}
-              aria-label="Toggle explorer"
-            >
-              ☰
-            </UiButton>
-          ) : null}
-          <div className="topbar-context">
-            <h1>{activeNote?.title ?? "Hatchdoor"}</h1>
-            <p className="topbar-subtitle">
-              {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
-            </p>
-          </div>
-        </div>
-
-        <div className="topbar-center">
-          {!isMobile ? (
-            <UiButton
-              className="topbar-search-trigger"
-              onClick={() => setSearchOpen(true)}
-            >
-              Search
-              <span className="shortcut-hint" aria-hidden="true">
-                ⌘K
-              </span>
-            </UiButton>
-          ) : null}
-          {!isOnline ? <StatusBadge tone="error" text="Offline" /> : null}
-          {treeIsStale ? <StatusBadge tone="warn" text="Tree Stale" /> : null}
-        </div>
-
-        <div className="topbar-right">
-          {isMobile ? (
-            <UiButton
-              className="icon-button"
-              onClick={() => setSearchOpen(true)}
-              aria-label="Search notes"
-            >
-              <span className="topbar-search-icon" aria-hidden="true">
-                ⌕
-              </span>
-            </UiButton>
-          ) : null}
-          <UiButton
-            className="icon-button"
-            onClick={() => setActionsMenuOpen((prev) => !prev)}
-            aria-haspopup="menu"
-            aria-expanded={actionsMenuOpen}
-            aria-label="More actions"
-          >
-            ...
-          </UiButton>
-          {actionsMenuOpen ? (
-            <div className="topbar-menu" role="menu">
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  setActionsMenuOpen(false);
-                  setSearchOpen(true);
-                }}
-              >
-                Search
-              </UiButton>
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  setActionsMenuOpen(false);
-                  void refreshVault();
-                }}
-              >
-                Refresh vault
-              </UiButton>
-              {activeNote ? (
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    setActionsMenuOpen(false);
-                    void copyNoteLink();
-                  }}
-                >
-                  Copy note link
-                </UiButton>
-              ) : null}
-              {activeNote ? (
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    setActionsMenuOpen(false);
-                    void downloadMarkdown();
-                  }}
-                >
-                  Download .md
-                </UiButton>
-              ) : null}
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  setActionsMenuOpen(false);
-                  toggleProperties();
-                }}
-              >
-                Toggle properties
-              </UiButton>
-            </div>
-          ) : null}
-        </div>
-      </header>
-      {isMobile ? (
-        <div className="topbar-mobile-meta">
-          <button
-            type="button"
-            className="topbar-mobile-path"
-            onClick={() => setSearchOpen(true)}
-            title={
-              activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"
-            }
-          >
-            {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
-          </button>
-        </div>
-      ) : null}
+      <AppTopbar
+        activeNote={activeNote}
+        isMobile={isMobile}
+        isOnline={isOnline}
+        treeIsStale={treeIsStale}
+        actionsMenuOpen={actionsMenuOpen}
+        onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
+        onOpenSearch={() => setSearchOpen(true)}
+        onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}
+        onCloseActionsMenu={() => setActionsMenuOpen(false)}
+        onRefreshVault={() => void refreshVault()}
+        onCopyNoteLink={() => void copyNoteLink()}
+        onDownloadMarkdown={() => downloadMarkdown()}
+        onToggleProperties={toggleProperties}
+      />
 
       <div
         className="app-layout"
         style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
       >
-        <aside
-          ref={explorerPaneRef}
-          className="explorer-pane"
-          data-open={drawerOpen}
-          onScroll={(event) => {
-            const current = event.currentTarget.scrollTop;
-            window.localStorage.setItem(
-              EXPLORER_SCROLL_TOP_KEY,
-              String(current),
-            );
+        <ExplorerPane
+          explorerPaneRef={explorerPaneRef}
+          drawerOpen={drawerOpen}
+          locationPathname={location.pathname}
+          recentNotes={recentNotes}
+          loadingTree={loadingTree}
+          treeError={treeError}
+          tree={tree}
+          expandedFolders={expandedFolders}
+          onExpandedFoldersChange={setExpandedFolders}
+          onCloseDrawer={() => setDrawerOpen(false)}
+          onRefreshTree={() => void loadTree()}
+          onScrollTopChange={(current) => {
+            window.localStorage.setItem(EXPLORER_SCROLL_TOP_KEY, String(current));
           }}
-        >
-          <header className="explorer-header">
-            <p>Vault Explorer</p>
-            <div className="explorer-actions">
-              <UiButton className="close-note" onClick={() => void loadTree()}>
-                Refresh
-              </UiButton>
-            </div>
-          </header>
-
-          <RecentNotesList
-            notes={recentNotes}
-            currentPath={location.pathname}
-            onNavigate={() => setDrawerOpen(false)}
-          />
-
-          {loadingTree ? <ExplorerSkeleton /> : null}
-          {!loadingTree && treeError && !tree ? (
-            <StateBlock
-              title="Explorer Unavailable"
-              description={treeError}
-              actionLabel="Retry"
-              onAction={() => void loadTree()}
-            />
-          ) : null}
-          {tree ? (
-            <FolderTree
-              root={tree}
-              currentPath={location.pathname}
-              expandedFolders={expandedFolders}
-              onExpandedFoldersChange={setExpandedFolders}
-            />
-          ) : null}
-        </aside>
+        />
 
         {!isMobile ? (
           <div
@@ -609,109 +457,6 @@ function EmptyState() {
       description="Select any note from the explorer to start reading."
     />
   );
-}
-
-function useIsMobile(maxWidth: number): boolean {
-  const [isMobile, setIsMobile] = useState(
-    () => window.matchMedia(`(max-width: ${maxWidth}px)`).matches,
-  );
-
-  useEffect(() => {
-    const query = window.matchMedia(`(max-width: ${maxWidth}px)`);
-    const onChange = (event: MediaQueryListEvent) => setIsMobile(event.matches);
-
-    query.addEventListener("change", onChange);
-    return () => query.removeEventListener("change", onChange);
-  }, [maxWidth]);
-
-  return isMobile;
-}
-
-function getStoredNumber(
-  key: string,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  const raw = window.localStorage.getItem(key);
-  const value = raw ? Number(raw) : fallback;
-  if (Number.isNaN(value)) {
-    return fallback;
-  }
-  return clamp(value, min, max);
-}
-
-function getStoredRecentNotes(): RecentNote[] {
-  try {
-    const raw = window.localStorage.getItem(RECENT_NOTES_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw) as Partial<RecentNote>[];
-    return parsed
-      .filter(
-        (item) =>
-          typeof item.slug === "string" &&
-          typeof item.title === "string" &&
-          typeof item.relativePath === "string" &&
-          typeof item.viewedAt === "number",
-      )
-      .slice(0, 12)
-      .map((item) => ({
-        slug: item.slug as string,
-        title: item.title as string,
-        relativePath: item.relativePath as string,
-        viewedAt: item.viewedAt as number,
-      }));
-  } catch {
-    return [];
-  }
-}
-
-function getStoredExpandedFolders(): Record<string, boolean> {
-  try {
-    const raw = window.localStorage.getItem(EXPANDED_FOLDERS_KEY);
-    if (!raw) {
-      return {};
-    }
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const result: Record<string, boolean> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (key.length > 0 && typeof value === "boolean") {
-        result[key] = value;
-      }
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
-
-function getStoredString(key: string): string | null {
-  const raw = window.localStorage.getItem(key);
-  if (!raw) {
-    return null;
-  }
-  const trimmed = raw.trim();
-  return trimmed.length > 0 ? trimmed : null;
-}
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
-    return false;
-  }
-
-  const tagName = target.tagName.toLowerCase();
-  return (
-    tagName === "input" ||
-    tagName === "textarea" ||
-    tagName === "select" ||
-    target.isContentEditable
-  );
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 export default App;
