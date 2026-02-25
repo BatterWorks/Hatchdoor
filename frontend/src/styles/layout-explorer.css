@@ -1,0 +1,83 @@
+.app-layout {
+  --sidebar-width: 270px;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) 8px minmax(0, 1fr);
+  min-height: calc(100dvh - 52px - env(safe-area-inset-top));
+  min-width: 0;
+}
+
+.explorer-pane {
+  border-right: 1px solid var(--color-border);
+  background: var(--color-bg-muted);
+  padding: 0.55rem;
+  overflow-y: auto;
+}
+
+.explorer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.55rem;
+  padding-inline: 0.2rem;
+}
+
+.explorer-header p {
+  margin: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.explorer-actions {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.recent-notes {
+  margin: 0 0 0.58rem;
+  border: 0;
+  background: transparent;
+  border-radius: 0;
+  padding: 0.04rem 0.08rem 0.16rem;
+}
+
+.recent-notes-title {
+  margin: 0 0 0.16rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--color-text-tertiary);
+}
+
+.recent-notes .note-link {
+  display: flex;
+  min-height: 30px;
+  padding: 0.08rem 0.26rem;
+}
+
+.recent-notes .active-note {
+  background: var(--color-btn-active);
+  box-shadow: inset 2px 0 0 #8f8b83;
+}
+
+.sidebar-resizer {
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+}
+
+.sidebar-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: #ececea;
+}
+
+.sidebar-resizer:hover::before {
+  background: #d8d8d5;
+}
+
