@@ -161,6 +161,30 @@ fn search_content_extension_returns_snippet() {
 }
 
 #[test]
+fn search_returns_empty_for_blank_query_and_zero_limit() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("Home.md"), "secret token").expect("write note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    assert!(vault.search("   ", true, 10).is_empty());
+    assert!(vault.search("token", true, 0).is_empty());
+}
+
+#[test]
+fn search_content_snippet_truncates_long_lines() {
+    let dir = tempdir().expect("temp dir");
+    let long_line = format!("{} token", "A".repeat(220));
+    fs::write(dir.path().join("Home.md"), long_line).expect("write note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let hits = vault.search("token", true, 10);
+    assert_eq!(hits.len(), 1);
+    let snippet = hits[0].snippet.clone().expect("snippet");
+    assert!(snippet.ends_with("..."));
+    assert_eq!(snippet.chars().count(), 180);
+}
+
+#[test]
 fn explorer_tree_keeps_notes_with_case_only_path_differences() {
     let dir = tempdir().expect("temp dir");
     fs::write(dir.path().join("Foo.md"), "upper").expect("write upper");
@@ -229,4 +253,33 @@ fn note_links_ignore_wikilinks_in_fenced_and_inline_code() {
 
     let plan_links = vault.note_links("plan").expect("plan links");
     assert!(plan_links.backlinks.is_empty());
+}
+
+#[test]
+fn note_links_dedup_targets_and_ignore_self_references() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(
+        dir.path().join("Home.md"),
+        "[[Plan]]\n[[Plan#Heading]]\n[[Plan^block]]\n[[Home]]",
+    )
+    .expect("write home");
+    fs::write(dir.path().join("Plan.md"), "plan").expect("write plan");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let links = vault.note_links("home").expect("home links");
+    assert_eq!(links.outgoing.len(), 1);
+    assert_eq!(links.outgoing[0].slug, "plan");
+}
+
+#[test]
+fn read_note_by_slug_surfaces_io_error_for_deleted_file() {
+    let dir = tempdir().expect("temp dir");
+    let note_path = dir.path().join("Home.md");
+    fs::write(&note_path, "hello").expect("write note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    fs::remove_file(note_path).expect("remove note");
+
+    let result = vault.read_note_by_slug("home");
+    assert!(result.is_err());
 }
