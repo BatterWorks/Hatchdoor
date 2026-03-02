@@ -441,6 +441,7 @@ mod tests {
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -618,6 +619,13 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> Value {
         let text = response_text(response).await;
         serde_json::from_str(&text).expect("valid json response")
+    }
+
+    fn spa_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("spa test lock")
     }
 
     #[tokio::test]
@@ -837,5 +845,48 @@ mod tests {
         let missing =
             vault_asset_handler(Path("img/missing.png".to_string()), State(state)).await.into_response();
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spa_index_handler_returns_html_when_frontend_is_built() {
+        let _guard = spa_test_guard();
+        let index_path = PathBuf::from("frontend/dist/index.html");
+        let backup = fs::read(&index_path).ok();
+        if let Some(parent) = index_path.parent() {
+            fs::create_dir_all(parent).expect("create frontend dist");
+        }
+        fs::write(&index_path, "<!doctype html><title>Hatchdoor Test</title>")
+            .expect("write index");
+
+        let response = spa_index_handler().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_text(response).await;
+        assert!(html.contains("Hatchdoor Test"));
+
+        if let Some(bytes) = backup {
+            fs::write(&index_path, bytes).expect("restore index");
+        } else {
+            let _ = fs::remove_file(&index_path);
+        }
+    }
+
+    #[tokio::test]
+    async fn spa_index_handler_returns_service_unavailable_when_frontend_not_built() {
+        let _guard = spa_test_guard();
+        let index_path = PathBuf::from("frontend/dist/index.html");
+        let backup = fs::read(&index_path).ok();
+        let _ = fs::remove_file(&index_path);
+
+        let response = spa_index_handler().await.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let html = response_text(response).await;
+        assert!(html.contains("Frontend not built"));
+
+        if let Some(bytes) = backup {
+            if let Some(parent) = index_path.parent() {
+                fs::create_dir_all(parent).expect("create frontend dist");
+            }
+            fs::write(&index_path, bytes).expect("restore index");
+        }
     }
 }

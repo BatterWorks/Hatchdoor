@@ -21,31 +21,8 @@ use crate::handlers::{
     vault_asset_handler,
 };
 
-#[tokio::main]
-async fn main() {
-    dotenv().ok();
-    init_logging();
-
-    let config = AppConfig::from_env().unwrap_or_else(|e| {
-        error!("Configuration error: {e}");
-        std::process::exit(1);
-    });
-
-    let cache = build_cache(&config.vault_path).unwrap_or_else(|e| {
-        error!(
-            "Failed to index vault at {}: {e}",
-            config.vault_path.display()
-        );
-        std::process::exit(1);
-    });
-
-    let state = AppState {
-        vault_path: config.vault_path.clone(),
-        refresh_interval: Duration::from_secs(config.refresh_seconds),
-        cache: Arc::new(RwLock::new(cache)),
-    };
-
-    let app = Router::new()
+fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/health", get(health_handler))
         .route("/api/tree", get(tree_handler))
         .route("/api/note/{slug}", get(note_handler))
@@ -74,7 +51,34 @@ async fn main() {
                 .make_span_with(DefaultMakeSpan::new().include_headers(false))
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
-        .with_state(state);
+        .with_state(state)
+}
+
+#[tokio::main]
+async fn main() {
+    dotenv().ok();
+    init_logging();
+
+    let config = AppConfig::from_env().unwrap_or_else(|e| {
+        error!("Configuration error: {e}");
+        std::process::exit(1);
+    });
+
+    let cache = build_cache(&config.vault_path).unwrap_or_else(|e| {
+        error!(
+            "Failed to index vault at {}: {e}",
+            config.vault_path.display()
+        );
+        std::process::exit(1);
+    });
+
+    let state = AppState {
+        vault_path: config.vault_path.clone(),
+        refresh_interval: Duration::from_secs(config.refresh_seconds),
+        cache: Arc::new(RwLock::new(cache)),
+    };
+
+    let app = build_router(state);
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
         error!("Address error: {e}");
@@ -100,4 +104,116 @@ async fn main() {
         error!("Server error: {e}");
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::{Request, StatusCode};
+    use std::time::Duration;
+    use tokio::sync::RwLock;
+    use tower::ServiceExt;
+
+    fn app_for_tests() -> Router {
+        let unique = format!(
+            "hatchdoor-router-tests-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let vault_root = base.join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
+        let cache = build_cache(&vault_root).expect("cache");
+        let state = AppState {
+            vault_path: vault_root,
+            refresh_interval: Duration::from_secs(60),
+            cache: Arc::new(RwLock::new(cache)),
+        };
+
+        build_router(state)
+    }
+
+    #[tokio::test]
+    async fn router_health_route_returns_ok() {
+        let app = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn router_enforces_http_methods_for_api_routes() {
+        let app = app_for_tests();
+        let tree_post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(tree_post.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        let refresh_get = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/refresh")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(refresh_get.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn router_wires_core_api_routes() {
+        let app = app_for_tests();
+
+        let note = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(note.status(), StatusCode::OK);
+
+        let resolve_batch = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resolve-batch")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"targets":["Home"]}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resolve_batch.status(), StatusCode::OK);
+    }
 }
