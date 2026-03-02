@@ -176,6 +176,7 @@ dependencies = [
  "axum",
  "dotenvy",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tower-http",
