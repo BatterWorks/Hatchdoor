@@ -628,6 +628,24 @@ mod tests {
             .expect("spa test lock")
     }
 
+    struct FileRestoreGuard {
+        path: PathBuf,
+        backup: Option<Vec<u8>>,
+    }
+
+    impl Drop for FileRestoreGuard {
+        fn drop(&mut self) {
+            if let Some(bytes) = &self.backup {
+                if let Some(parent) = self.path.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&self.path, bytes);
+            } else {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn health_handler_returns_ok() {
         let response = health_handler().await.into_response();
@@ -851,7 +869,10 @@ mod tests {
     async fn spa_index_handler_returns_html_when_frontend_is_built() {
         let _guard = spa_test_guard();
         let index_path = PathBuf::from("frontend/dist/index.html");
-        let backup = fs::read(&index_path).ok();
+        let _restore = FileRestoreGuard {
+            path: index_path.clone(),
+            backup: fs::read(&index_path).ok(),
+        };
         if let Some(parent) = index_path.parent() {
             fs::create_dir_all(parent).expect("create frontend dist");
         }
@@ -862,31 +883,21 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let html = response_text(response).await;
         assert!(html.contains("Hatchdoor Test"));
-
-        if let Some(bytes) = backup {
-            fs::write(&index_path, bytes).expect("restore index");
-        } else {
-            let _ = fs::remove_file(&index_path);
-        }
     }
 
     #[tokio::test]
     async fn spa_index_handler_returns_service_unavailable_when_frontend_not_built() {
         let _guard = spa_test_guard();
         let index_path = PathBuf::from("frontend/dist/index.html");
-        let backup = fs::read(&index_path).ok();
+        let _restore = FileRestoreGuard {
+            path: index_path.clone(),
+            backup: fs::read(&index_path).ok(),
+        };
         let _ = fs::remove_file(&index_path);
 
         let response = spa_index_handler().await.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let html = response_text(response).await;
         assert!(html.contains("Frontend not built"));
-
-        if let Some(bytes) = backup {
-            if let Some(parent) = index_path.parent() {
-                fs::create_dir_all(parent).expect("create frontend dist");
-            }
-            fs::write(&index_path, bytes).expect("restore index");
-        }
     }
 }

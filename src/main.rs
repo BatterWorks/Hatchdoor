@@ -111,21 +111,14 @@ mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
+    use tempfile::TempDir;
     use std::time::Duration;
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
-    fn app_for_tests() -> Router {
-        let unique = format!(
-            "hatchdoor-router-tests-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        );
-        let base = std::env::temp_dir().join(unique);
-        let vault_root = base.join("vault");
+    fn app_for_tests() -> (Router, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
         let cache = build_cache(&vault_root).expect("cache");
@@ -135,12 +128,12 @@ mod tests {
             cache: Arc::new(RwLock::new(cache)),
         };
 
-        build_router(state)
+        (build_router(state), tmp)
     }
 
     #[tokio::test]
     async fn router_health_route_returns_ok() {
-        let app = app_for_tests();
+        let (app, _tmp) = app_for_tests();
         let response = app
             .oneshot(
                 Request::builder()
@@ -159,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_enforces_http_methods_for_api_routes() {
-        let app = app_for_tests();
+        let (app, _tmp) = app_for_tests();
         let tree_post = app
             .clone()
             .oneshot(
@@ -188,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn router_wires_core_api_routes() {
-        let app = app_for_tests();
+        let (app, _tmp) = app_for_tests();
 
         let note = app
             .clone()
