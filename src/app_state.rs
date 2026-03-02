@@ -156,6 +156,7 @@ pub(crate) async fn refresh_if_needed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn parse_port_accepts_valid_u16() {
@@ -190,5 +191,56 @@ mod tests {
 
         let addr = cfg.socket_addr().expect("valid addr");
         assert_eq!(addr.to_string(), "0.0.0.0:42824");
+    }
+
+    fn state_with_vault(vault_path: PathBuf, refresh_interval: Duration) -> AppState {
+        let cache = build_cache(&vault_path).expect("build cache");
+        AppState {
+            vault_path,
+            refresh_interval,
+            cache: Arc::new(RwLock::new(cache)),
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_if_needed_skips_when_interval_not_elapsed() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+
+        let mut state = state_with_vault(vault_path, Duration::from_secs(3600));
+        state.vault_path = dir.path().join("missing-vault");
+
+        let result = refresh_if_needed(&state, false).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn refresh_if_needed_force_refresh_surfaces_errors() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+
+        let mut state = state_with_vault(vault_path, Duration::from_secs(3600));
+        state.vault_path = dir.path().join("missing-vault");
+
+        let result = refresh_if_needed(&state, true).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_refresh_error_when_reindex_fails() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+
+        let mut state = state_with_vault(vault_path, Duration::from_secs(0));
+        state.vault_path = dir.path().join("missing-vault");
+
+        let result = snapshot(&state).await;
+        assert!(result.is_err());
     }
 }

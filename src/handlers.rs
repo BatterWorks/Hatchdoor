@@ -438,6 +438,8 @@ fn percent_encode_filename(input: &str) -> String {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use std::fs;
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
     use std::sync::Arc;
@@ -594,5 +596,236 @@ mod tests {
             .await
             .expect("body bytes");
         assert_eq!(body, "# Home\n");
+    }
+
+    fn build_state_from_dir(vault_root: &PathBuf, refresh_interval: Duration) -> AppState {
+        let cache = build_cache(vault_root).expect("build cache");
+        AppState {
+            vault_path: vault_root.clone(),
+            refresh_interval,
+            cache: Arc::new(RwLock::new(cache)),
+        }
+    }
+
+    async fn response_text(response: axum::response::Response) -> String {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        String::from_utf8(bytes.to_vec()).expect("utf-8 body")
+    }
+
+    #[tokio::test]
+    async fn health_handler_returns_ok() {
+        let response = health_handler().await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_text(response).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn tree_handler_returns_explorer_tree() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault");
+        fs::write(vault_root.join("Home.md"), "# Home").expect("write note");
+        let state = build_state_from_dir(&vault_root, Duration::from_secs(60));
+
+        let response = tree_handler(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_text(response).await;
+        assert!(body.contains("\"name\":\"Vault\""));
+        assert!(body.contains("\"title\":\"Home\""));
+    }
+
+    #[tokio::test]
+    async fn note_handler_returns_200_404_and_500_paths() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault");
+        let home_path = vault_root.join("Home.md");
+        fs::write(&home_path, "hello").expect("write note");
+        let state = build_state_from_dir(&vault_root, Duration::from_secs(60));
+
+        let ok_response =
+            note_handler(Path("home".to_string()), State(state.clone())).await.into_response();
+        assert_eq!(ok_response.status(), StatusCode::OK);
+        assert!(response_text(ok_response).await.contains("\"slug\":\"home\""));
+
+        let not_found =
+            note_handler(Path("missing".to_string()), State(state.clone())).await.into_response();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        assert!(response_text(not_found).await.contains("Note not found: missing"));
+
+        fs::remove_file(home_path).expect("remove note");
+        let io_failure =
+            note_handler(Path("home".to_string()), State(state)).await.into_response();
+        assert_eq!(io_failure.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response_text(io_failure).await.contains("Failed reading note home"));
+    }
+
+    #[tokio::test]
+    async fn note_links_handler_returns_links_and_not_found() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault");
+        fs::write(vault_root.join("Home.md"), "[[Plan]]").expect("write home");
+        fs::write(vault_root.join("Plan.md"), "[[Home]]").expect("write plan");
+        let state = build_state_from_dir(&vault_root, Duration::from_secs(60));
+
+        let ok =
+            note_links_handler(Path("home".to_string()), State(state.clone())).await.into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let ok_body = response_text(ok).await;
+        assert!(ok_body.contains("\"outgoing\""));
+        assert!(ok_body.contains("\"backlinks\""));
+
+        let missing =
+            note_links_handler(Path("missing".to_string()), State(state)).await.into_response();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert!(response_text(missing).await.contains("Note not found: missing"));
+    }
+
+    #[tokio::test]
+    async fn resolve_handlers_return_expected_slug_mappings() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault");
+        fs::write(vault_root.join("Home.md"), "home").expect("write home");
+        let state = build_state_from_dir(&vault_root, Duration::from_secs(60));
+
+        let single = resolve_handler(
+            Query(ResolveQuery {
+                target: "Home".to_string(),
+            }),
+            State(state.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(single.status(), StatusCode::OK);
+        assert!(response_text(single).await.contains("\"slug\":\"home\""));
+
+        let single_missing = resolve_handler(
+            Query(ResolveQuery {
+                target: "Nope".to_string(),
+            }),
+            State(state.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(single_missing.status(), StatusCode::OK);
+        assert!(response_text(single_missing).await.contains("\"slug\":null"));
+
+        let batch = resolve_batch_handler(
+            State(state),
+            Json(ResolveBatchRequest {
+                targets: vec!["Home".to_string(), "Nope".to_string()],
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(batch.status(), StatusCode::OK);
+        let batch_body = response_text(batch).await;
+        assert!(batch_body.contains("\"target\":\"Home\""));
+        assert!(batch_body.contains("\"slug\":\"home\""));
+        assert!(batch_body.contains("\"target\":\"Nope\""));
+        assert!(batch_body.contains("\"slug\":null"));
+    }
+
+    #[tokio::test]
+    async fn refresh_handler_reports_success_and_failure() {
+        let ok_tmp = TempDir::new().expect("temp dir");
+        let ok_vault = ok_tmp.path().join("vault");
+        fs::create_dir_all(&ok_vault).expect("create vault");
+        fs::write(ok_vault.join("Home.md"), "home").expect("write note");
+        let ok_state = build_state_from_dir(&ok_vault, Duration::from_secs(60));
+
+        let ok = refresh_handler(State(ok_state)).await.into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert!(response_text(ok).await.contains("\"refreshed\":true"));
+
+        let fail_tmp = TempDir::new().expect("temp dir");
+        let fail_vault = fail_tmp.path().join("vault");
+        fs::create_dir_all(&fail_vault).expect("create vault");
+        fs::write(fail_vault.join("Home.md"), "home").expect("write note");
+        let mut fail_state = build_state_from_dir(&fail_vault, Duration::from_secs(60));
+        fail_state.vault_path = fail_tmp.path().join("missing-vault");
+
+        let failed = refresh_handler(State(fail_state)).await.into_response();
+        assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response_text(failed).await.contains("Vault refresh failed"));
+    }
+
+    #[tokio::test]
+    async fn search_handler_clamps_limits_and_returns_results() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(&vault_root).expect("create vault");
+        fs::write(vault_root.join("Home.md"), "alpha token").expect("write home");
+        fs::write(vault_root.join("Plan.md"), "token in content").expect("write plan");
+        let state = build_state_from_dir(&vault_root, Duration::from_secs(60));
+
+        let by_title = search_handler(
+            Query(SearchQuery {
+                q: "home".to_string(),
+                content: Some(false),
+                limit: Some(999),
+            }),
+            State(state.clone()),
+        )
+        .await
+        .into_response();
+        assert_eq!(by_title.status(), StatusCode::OK);
+        let by_title_body = response_text(by_title).await;
+        assert!(by_title_body.contains("\"match_kind\":\"title\""));
+        assert!(by_title_body.contains("\"slug\":\"home\""));
+
+        let by_content = search_handler(
+            Query(SearchQuery {
+                q: "token".to_string(),
+                content: Some(true),
+                limit: Some(1),
+            }),
+            State(state),
+        )
+        .await
+        .into_response();
+        assert_eq!(by_content.status(), StatusCode::OK);
+        let body = response_text(by_content).await;
+        assert!(body.contains("\"results\":["));
+        assert_eq!(body.matches("\"slug\"").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn vault_asset_handler_returns_bytes_and_path_errors() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        fs::create_dir_all(vault_root.join("img")).expect("create dir");
+        fs::write(vault_root.join("img").join("a.png"), b"png").expect("write image");
+        fs::write(vault_root.join("secret.txt"), b"secret").expect("write text");
+        let state = build_state_from_dir(&vault_root, Duration::from_secs(60));
+
+        let ok =
+            vault_asset_handler(Path("img/a.png".to_string()), State(state.clone())).await.into_response();
+        assert_eq!(ok.status(), StatusCode::OK);
+        let ok_content_type = ok
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("content type")
+            .to_str()
+            .expect("header str");
+        assert_eq!(ok_content_type, "image/png");
+        let body = to_bytes(ok.into_body(), usize::MAX).await.expect("body");
+        assert_eq!(&body[..], b"png");
+
+        let bad =
+            vault_asset_handler(Path("../a.png".to_string()), State(state.clone())).await.into_response();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let forbidden =
+            vault_asset_handler(Path("secret.txt".to_string()), State(state.clone())).await.into_response();
+        assert_eq!(forbidden.status(), StatusCode::FORBIDDEN);
+
+        let missing =
+            vault_asset_handler(Path("img/missing.png".to_string()), State(state)).await.into_response();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 }
