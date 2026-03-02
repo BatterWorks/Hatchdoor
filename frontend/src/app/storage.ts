@@ -83,7 +83,7 @@ export function isEditableTarget(target: EventTarget | null): boolean {
     tagName === "input" ||
     tagName === "textarea" ||
     tagName === "select" ||
-    target.isContentEditable
+    Boolean(target.isContentEditable)
   );
 }
 

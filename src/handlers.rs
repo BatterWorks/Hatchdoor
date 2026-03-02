@@ -438,12 +438,13 @@ fn percent_encode_filename(input: &str) -> String {
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;
-    use tempfile::TempDir;
-    use tokio::sync::RwLock;
     use std::sync::Arc;
     use std::time::Duration;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
 
     use crate::app_state::build_cache;
 
@@ -614,6 +615,11 @@ mod tests {
         String::from_utf8(bytes.to_vec()).expect("utf-8 body")
     }
 
+    async fn response_json(response: axum::response::Response) -> Value {
+        let text = response_text(response).await;
+        serde_json::from_str(&text).expect("valid json response")
+    }
+
     #[tokio::test]
     async fn health_handler_returns_ok() {
         let response = health_handler().await.into_response();
@@ -631,9 +637,9 @@ mod tests {
 
         let response = tree_handler(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response_text(response).await;
-        assert!(body.contains("\"name\":\"Vault\""));
-        assert!(body.contains("\"title\":\"Home\""));
+        let body = response_json(response).await;
+        assert_eq!(body["name"], "Vault");
+        assert_eq!(body["notes"][0]["title"], "Home");
     }
 
     #[tokio::test]
@@ -648,7 +654,8 @@ mod tests {
         let ok_response =
             note_handler(Path("home".to_string()), State(state.clone())).await.into_response();
         assert_eq!(ok_response.status(), StatusCode::OK);
-        assert!(response_text(ok_response).await.contains("\"slug\":\"home\""));
+        let ok_body = response_json(ok_response).await;
+        assert_eq!(ok_body["note"]["slug"], "home");
 
         let not_found =
             note_handler(Path("missing".to_string()), State(state.clone())).await.into_response();
@@ -674,9 +681,9 @@ mod tests {
         let ok =
             note_links_handler(Path("home".to_string()), State(state.clone())).await.into_response();
         assert_eq!(ok.status(), StatusCode::OK);
-        let ok_body = response_text(ok).await;
-        assert!(ok_body.contains("\"outgoing\""));
-        assert!(ok_body.contains("\"backlinks\""));
+        let ok_body = response_json(ok).await;
+        assert!(ok_body["links"]["outgoing"].is_array());
+        assert!(ok_body["links"]["backlinks"].is_array());
 
         let missing =
             note_links_handler(Path("missing".to_string()), State(state)).await.into_response();
@@ -701,7 +708,7 @@ mod tests {
         .await
         .into_response();
         assert_eq!(single.status(), StatusCode::OK);
-        assert!(response_text(single).await.contains("\"slug\":\"home\""));
+        assert_eq!(response_json(single).await["slug"], "home");
 
         let single_missing = resolve_handler(
             Query(ResolveQuery {
@@ -712,7 +719,7 @@ mod tests {
         .await
         .into_response();
         assert_eq!(single_missing.status(), StatusCode::OK);
-        assert!(response_text(single_missing).await.contains("\"slug\":null"));
+        assert!(response_json(single_missing).await["slug"].is_null());
 
         let batch = resolve_batch_handler(
             State(state),
@@ -723,11 +730,13 @@ mod tests {
         .await
         .into_response();
         assert_eq!(batch.status(), StatusCode::OK);
-        let batch_body = response_text(batch).await;
-        assert!(batch_body.contains("\"target\":\"Home\""));
-        assert!(batch_body.contains("\"slug\":\"home\""));
-        assert!(batch_body.contains("\"target\":\"Nope\""));
-        assert!(batch_body.contains("\"slug\":null"));
+        let batch_body = response_json(batch).await;
+        let results = batch_body["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["target"], "Home");
+        assert_eq!(results[0]["slug"], "home");
+        assert_eq!(results[1]["target"], "Nope");
+        assert!(results[1]["slug"].is_null());
     }
 
     #[tokio::test]
@@ -740,7 +749,7 @@ mod tests {
 
         let ok = refresh_handler(State(ok_state)).await.into_response();
         assert_eq!(ok.status(), StatusCode::OK);
-        assert!(response_text(ok).await.contains("\"refreshed\":true"));
+        assert_eq!(response_json(ok).await["refreshed"], true);
 
         let fail_tmp = TempDir::new().expect("temp dir");
         let fail_vault = fail_tmp.path().join("vault");
@@ -774,9 +783,9 @@ mod tests {
         .await
         .into_response();
         assert_eq!(by_title.status(), StatusCode::OK);
-        let by_title_body = response_text(by_title).await;
-        assert!(by_title_body.contains("\"match_kind\":\"title\""));
-        assert!(by_title_body.contains("\"slug\":\"home\""));
+        let by_title_body = response_json(by_title).await;
+        assert_eq!(by_title_body["results"][0]["match_kind"], "title");
+        assert_eq!(by_title_body["results"][0]["slug"], "home");
 
         let by_content = search_handler(
             Query(SearchQuery {
@@ -789,9 +798,10 @@ mod tests {
         .await
         .into_response();
         assert_eq!(by_content.status(), StatusCode::OK);
-        let body = response_text(by_content).await;
-        assert!(body.contains("\"results\":["));
-        assert_eq!(body.matches("\"slug\"").count(), 1);
+        let body = response_json(by_content).await;
+        let results = body["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["slug"].is_string());
     }
 
     #[tokio::test]

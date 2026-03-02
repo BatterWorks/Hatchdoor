@@ -15,3 +15,4 @@ walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = "1"

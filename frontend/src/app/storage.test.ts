@@ -72,7 +72,7 @@ describe("storage helpers", () => {
     expect(isEditableTarget(div)).toBe(true);
 
     const span = document.createElement("span");
-    expect(isEditableTarget(span)).toBeFalsy();
+    expect(isEditableTarget(span)).toBe(false);
     expect(isEditableTarget(null)).toBe(false);
   });
 });
