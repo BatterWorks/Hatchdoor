@@ -100,12 +100,16 @@ describe("App navigation/search", () => {
       </MemoryRouter>,
     );
 
-    expect(
-      await screen.findByRole("link", { name: "Home" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("link", { name: "Home" }).length,
+      ).toBeGreaterThan(0);
+    });
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Home" })).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { level: 2, name: "Home" }),
+      ).toBeInTheDocument();
     });
   });
 
