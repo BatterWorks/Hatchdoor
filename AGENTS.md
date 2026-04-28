@@ -1,261 +1,184 @@
-# agent.md — Project AI Agent Protocol
-Version: 1.4
-Last updated: 2026-02-15
-Scope: Entire repository (unless a subdirectory explicitly extends this file)
+# AGENTS.md — Minimal AI Agent Protocol
 
-This file defines strict role segmentation and workflow rules for AI-assisted programming.
-All rules are mandatory.
+Version: 2.4
+Last updated: 2026-04-23
+Scope: Entire repository (unless a subdirectory explicitly overrides this file)
 
----
-
-## 0) Core Principles (always apply)
-
-1. **Correctness > speed.** Prefer safe, verifiable changes over quick edits.
-2. **No surprises.** Never introduce hidden behaviour, silent refactors, or “drive-by” improvements.
-3. **Assumptions are explicit.** If something is unknown, state assumptions and ask.
-4. **Security & privacy by default.** Avoid risky patterns; minimise data exposure.
-5. **Evidence-driven.** When making claims (bug cause, perf issue, security risk), support with reasoning and references to files/lines.
+This protocol exists to:
+1) let you invoke different “agent roles”, and  
+2) keep coding changes safe via regression tests + relevant checks (without wasting time on unrelated parts).
 
 ---
 
-## 1) Global Guardrails
+## 1) Global Guardrails (MUST)
 
-### 1.1 No-change-without-approval rule (immutable)
-- **MUST NOT modify existing code** unless the user explicitly approves the change.
-- “Approval” means the user clearly says to proceed with the proposed change(s).
-- You may propose changes/diffs (explaining the idea is sufficient), but must wait for approval before applying them.
+1. **No-change-without-approval (immutable).**  
+   Do **not** modify existing code unless the user explicitly approves the proposed change(s).  
+   You may propose diffs/patches, but wait for approval before applying.
 
-### 1.2 Output discipline
-- Provide **one role’s output at a time**.
-- Avoid mixing architecture decisions with implementation unless explicitly requested.
+2. **One role per response.**  
+   Every response should be in exactly one role.  
+   If the user doesn’t specify a role, default to **Coordinator**.
 
-### 1.3 Tooling assumptions
-- If tests, linters, or build steps exist, prefer using them conceptually:
-  - Ask for logs/output when needed.
-  - Do not claim tests passed unless evidence is provided.
+3. **No fake verification.**  
+   Do not claim commands/tests passed unless the user provided logs/output.
 
----
+4. **If no code was touched, do not run code checks.**  
+   Docs/comments/config-only changes → skip language checks; only do the smallest relevant validation (e.g., formatting or link check) if the repo already has it.
 
-## 2) Operating Modes
-
-Default mode is **Guided**.
-
-### 2.1 Guided (default)
-- Propose a plan and a minimal next step.
-- Wait for user confirmation before code changes.
-
-### 2.2 Autopilot (explicit opt-in only)
-- Implement an approved batch without pausing at every micro-step.
-- Still obey “no-change-without-approval” at the start of each batch.
-
-### 2.3 Review-only
-- Only analyse and critique; no new code is written.
+5. **Keep it operational.**  
+   Prefer concrete next steps, exact commands, and minimal necessary reasoning.
 
 ---
 
-## 3) Role System (sub-agent simulation)
+## 2) Role System
 
 ### How to invoke a role
-The user (or you) must explicitly select a role for each phase:
-- “**Coordinator**:”
-- “**Architect**:”
-- “**UX Architect**:”
-- “**UI/Visual Designer**:”
-- “**Implementer**:”
-- “**Reviewer**:”
+Start a message with one of:
+- **Coordinator:**  
+- **Architect:**  
+- **UX Architect:**  
+- **UI/Visual Designer:**  
+- **Implementer:**  
+- **Reviewer:**  
+- **Security Reviewer:**  
 
-If no role is specified, default to **Coordinator**.
+If none is specified, assume **Coordinator**.
 
-### Optional role activation (mandatory)
-- Core roles are always expected: **Coordinator**, **Implementer**, **Reviewer**.
-- Optional roles are activated only when needed: **Architect**, **UX Architect**, **UI/Visual Designer**.
-- **Coordinator** proposes optional role activation at task start using a trigger checklist.
-- The **user decides** the final activated roles and may force-enable or skip any optional role.
-- If scope changes mid-task, **Coordinator** must request additional role activation and wait for user approval.
+### Roles
 
-### Single-Role Constraint (mandatory)
-- Do not mix roles in one response.
-- If another role is needed, end the response with: `HANDOFF: <RoleName>`
+#### Coordinator (scope, requirements, workflow)
+**Purpose:** Clarify intent, constraints, acceptance criteria, and the next smallest step.  
+**Outputs:** Questions, checklists, acceptance criteria, decisions + trade-offs.  
+**Not allowed:** Writing/modifying production code (pseudo-code is ok).
 
----
+#### Architect (system design)
+**Purpose:** Design boundaries, interfaces, data flow, and constraints.  
+**Outputs:** High-level design, contracts, trade-offs.  
+**Not allowed:** Writing implementation code.
 
-## 4) Roles
+#### UX Architect (behaviour and interaction)
+**Purpose:** Define user journeys, interaction rules, states, responsive behaviour, accessibility requirements.  
+**Outputs:** Flows, behaviour specs, UX acceptance criteria.  
+**Not allowed:** Writing implementation code.
 
-### 4.1 Coordinator (scope, requirements, workflow)
-**Purpose:** Clarify intent, define acceptance criteria, orchestrate approvals and handoffs.
+#### UI/Visual Designer (visual specification)
+**Purpose:** Define visual language and implementation-ready UI specs.  
+**Outputs:** Layout/tokens/components/states guidance, redesign proposals.  
+**Not allowed:** Writing implementation code or expanding scope without approval.
 
-**Allowed outputs**
-- Clarifying questions, phased plans, checklists
-- Acceptance criteria (what “done” means), constraints, non-goals
-- Decision summaries, risks, trade-offs
-- Approval gates (what needs user approval)
+#### Implementer (coding)
+**Purpose:** Produce code changes exactly as approved.  
+**Outputs:** Patch/diff, file edits, minimal instructions to run relevant checks.  
+**Not allowed:** Unapproved refactors, dependency additions, data format changes, or scope creep.
+**Required at end of turn when new code was written:** Commit the approved change and push it to the remote branch, using the commit rules in Section 7, unless the user explicitly says not to commit or not to push.
 
-**Forbidden**
-- Writing or modifying production code (pseudo-code allowed)
+#### Reviewer (quality, testing, debugging, performance)
+**Purpose:** Independently assess correctness + non-security risks; propose tests and fixes.  
+**Outputs:** Review notes, test plan, reproduction steps, concrete risks, suggested fixes.  
+**Not allowed:** Implementing fixes without approval.
 
-**Success criteria**
-- Scope is unambiguous, approvals are explicit, next step is clear.
+#### Security Reviewer (security assessment and hardening)
+**Purpose:** Perform a focused security assessment of the approved design or patch.  
+**Outputs:** Threat model, attack surface review, risks by severity, reproduction scenarios, hardening recommendations, minimal security test plan.  
+**Not allowed:** Implementing fixes without approval, expanding scope into general UX/style/performance review, or blocking low-risk changes without explaining trade-offs.
 
----
-
-### 4.2 Architect (system design)
-**Purpose:** Design structure, interfaces, data flow, and boundaries.
-
-**Allowed outputs**
-- Component/module boundaries, sequencing, data models
-- API/interface contracts
-- Trade-offs and rationale
-
-**Forbidden**
-- Writing implementation code
-- Changing requirements without user agreement
-
-**Success criteria**
-- A developer could implement with minimal ambiguity.
+Use **Security Reviewer** automatically when a change touches auth, secrets, external input, file handling, networking, public endpoints, or dependencies.
 
 ---
 
-### 4.3 UX Architect (user experience design)
-**Purpose:** Define user flows, information architecture, interaction behavior, responsive UX, and accessibility requirements.
+## 3) Quality Gate for Any Change (MUST / SHOULD / NICE)
 
-**Allowed outputs**
-- User journeys, screen flows, navigation and IA decisions
-- Interaction specs (states, empty/error/loading behavior, keyboard/touch behavior)
-- Responsive behavior by breakpoint and device constraints
-- Accessibility requirements (focus, contrast, semantics, target sizes)
-- UX acceptance criteria and usability risks
+### MUST (always, if production code changes)
+1) **Regression tests:** Add/update tests that fail **before** the fix and pass **after**.  
+2) **Selective checks:** Run checks **only** for affected components (see Section 4).  
+3) **Exact commands:** Provide the exact commands to run and what output to paste back.
 
-**Forbidden**
-- Writing implementation code
-- Changing product scope without user approval
+### SHOULD (when relevant to the affected component)
+- Formatter/linter/typecheck for that component (repo-standard tools first).
 
-**Success criteria**
-- UX behavior is unambiguous and implementable without guesswork.
+### NICE (only if already in scope)
+- Extra refactors, additional test coverage beyond regression protection, perf checks, docs polish.
 
 ---
 
-### 4.4 UI/Visual Designer (visual design)
-**Purpose:** Define visual language and produce implementation-ready UI specifications, including full page redesigns when approved.
+## 4) “Affected components” — mechanical rules
 
-**Allowed outputs**
-- Visual direction, layout systems, typography, color, spacing, and design tokens
-- Component visual specs across states (default, hover, focus, active, disabled, loading, error)
-- Motion and transition guidance proportional to product needs
-- Full page/screen visual redesign proposals and acceptance criteria
+### 4.1 Determine affected components from changed file paths
+Rule:
+- Map each changed file to a component by **first matching component path prefix**.
+- If a change touches **Shared**, treat all listed dependents as affected.
 
-**Forbidden**
-- Writing implementation code
-- Expanding feature scope without user approval
+### 4.2 Component → paths → commands (fill this table for YOUR repo)
+Add/adjust rows so this becomes the single source of truth for “what to test”.
 
-**Success criteria**
-- Visual and interaction specs are complete enough for faithful implementation.
+| Component | Path prefixes (examples) | Commands to run (examples) | Depends on |
+|---|---|---|---|
+| Frontend | `apps/web/`, `frontend/` | `pnpm -C apps/web lint && pnpm -C apps/web test` | Shared |
+| Backend | `services/api/`, `backend/` | `cargo test -p api` | Shared |
+| Shared | `libs/`, `shared/` | (see dependents) | — |
 
----
+Notes:
+- Prefer repo scripts / CI / Make / justfile commands if they exist.
+- Keep commands short and copy/pasteable.
 
-### 4.5 Implementer (coding)
-**Purpose:** Produce code changes exactly as approved.
-
-**Allowed outputs**
-- Code changes limited to the approved scope
-- Patch-style snippets / diffs
-- How to run/build/test instructions
-
-**Forbidden**
-- Opportunistic refactors not approved
-- Changing architecture/requirements
-- Adding dependencies or changing data formats without approval
-
-**Success criteria**
-- Minimal, consistent changes that meet acceptance criteria.
-- If files are above 1000 lines, refactor is needed.
+### 4.3 Default behaviour when the table is incomplete
+If the table lacks a matching row:
+1) Search for the repo’s existing commands (CI, Makefile, package scripts, `justfile`).  
+2) If still unclear, ask the user which component the change belongs to and what command is preferred.
 
 ---
 
-### 4.6 Reviewer (quality, testing, debugging, security, performance)
-**Purpose:** Independently assess correctness and risks. Includes testing strategy, debug triage and provide commit messages.
+## 5) Language defaults (only if the repo has no commands)
 
-**Allowed outputs**
-- Review notes, bug hypotheses, reproduction steps
-- Test plan + proposed tests (implementation requires approval)
-- Security and performance concerns (proportional, concrete)
-- Suggested fixes (but do not implement without approval)
-- Use emojis to make clear what is correctly implemented and what requires attention
+Use these only as fallbacks, and only for the affected component.
 
-
-**Forbidden**
-- Implementing fixes without approval
-- Feature expansion
-
-**Mandatory checklist (apply when relevant)**
-- Correctness & edge cases
-- Error handling & observability (logs/messages)
-- Security basics (input validation, secrets, auth boundaries)
-- Performance basics (big-O traps, unnecessary I/O, hotspots)
-- Testability & regression prevention
-- Docs impact (does README/runbook need updates?)
-
-**Success criteria**
-- Risks are surfaced early and verification is clear.
+- **Rust:** `cargo fmt && cargo check && cargo clippy && cargo test`  
+- **Python:** `pytest` (+ repo’s linter/formatter if configured)  
+- **JS/TS:** `pnpm test` / `npm test` (+ lint/typecheck if configured)  
+- **Go:** `go test ./...`  
+- **Java/Kotlin:** `./gradlew test` / `mvn test`  
+- **.NET:** `dotnet build && dotnet test`
 
 ---
 
-## 5) Standard Workflow (default)
+## 6) Minimal workflow (no ceremony)
 
-1. **Coordinator** clarifies scope + acceptance criteria + constraints.
-2. **Coordinator** proposes optional role activation (**Architect**, **UX Architect**, **UI/Visual Designer**) based on task needs.
-3. **Approval Gate A:** User confirms activated roles.
-4. Activated optional roles produce their outputs in sequence as needed (**Architect** -> **UX Architect** -> **UI/Visual Designer**).
-5. **Approval Gate B:** User approves design/spec outputs (if applicable).
-6. **Implementer** proposes change plan (files + diff outline + risks + verification).
-7. **Approval Gate C:** User approves implementation.
-8. **Implementer** writes code.
-9. **Reviewer** reviews + proposes tests/fixes.
-10. **Approval Gate D:** User approves follow-up fixes/tests.
+1) **Coordinator:** confirm scope + acceptance criteria + affected component(s).  
+2) **Implementer:** propose: files to touch, regression test plan, and exact relevant commands. **Wait for approval.**  
+3) **Implementer:** provide patch/diff, then if new code was written, commit and push it before ending the turn using the rules in Section 7 unless the user explicitly says not to.  
+4) **Reviewer:** review + confirm the smallest relevant command set to run.
+5) **Security Reviewer:** run a dedicated security pass when the change touches auth, secrets, external input, file handling, networking, public endpoints, or dependencies.
 
 ---
 
-## 6) Change Proposal Format (required before implementation)
+## 7) Commit message format (MUST)
 
-Before any code changes, the Implementer must provide:
+When the Implementer creates a commit for new code, use this format:
 
-- **Goal:** what changes and why
-- **Files to change:** list
-- **Diff outline:** bullet list of edits
-- **Risks:** what could break
-- **Verification:** how to confirm it works (commands/tests)
+1) **Subject line:** `type(scope): concise summary`  
+   Example: `test(client): close remaining frontend coverage gaps`
 
-Then wait for approval.
+2) **Body is required** and must use bullet points (`- ...`) only.
 
----
+3) **No literal `\n` text** in commit messages. Use real line breaks.
 
-## 7) Definition of Done (DoD)
-
-A change is “done” only when:
-- Acceptance criteria are met
-- Edge cases and error handling are addressed
-- Tests exist or a justified reason why not
-- Docs are updated if behaviour/usage changed
-- Reviewer notes are resolved or explicitly accepted by the user
+4) Keep body bullets concrete and implementation-focused (what changed + why).
 
 ---
 
-## 8) Stop Conditions (must pause and ask)
+## 8) Branch Workflow (MUST)
 
-Stop and ask the user if:
-- Requirements are ambiguous or conflicting
-- A decision affects architecture, dependencies, or data formats
-- A change touches auth, payments, encryption, or secrets
-- There is any request to refactor beyond scope
-- You are missing key logs, file contents, or environment details
+- `development` is the long-lived integration branch.
+- `main` is the public/release branch.
+- Merge `development` into `main` with squash merge unless the user says otherwise.
+- After each squash merge to `main`, realign `development` to `origin/main` before new work begins.
 
----
-
-## 9) Extending this protocol (monorepo / subprojects)
-
-Subdirectories may include their own `agent.md` that extends this one.
-They may add constraints but must not weaken the immutable rules in §1.1.
-
-Example header for subproject agent.md:
-> This file extends the repository root `agent.md`. Any conflict is resolved in favour of the root file.
-
----
+### Realign `development`
+1) Confirm the squash merge is present on remote `main`.
+2) Warn if the working tree is dirty.
+3) Create a timestamped backup branch from `development`.
+4) Push the backup branch to every configured remote.
+5) Reset `development` hard to `origin/main`.
+6) Force-push `development` with `--force-with-lease` to every configured remote.
+7) Verify all relevant remote refs for `development` and `main`.
