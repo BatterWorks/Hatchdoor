@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
@@ -10,6 +17,7 @@ import { parseFrontmatter } from "../markdown";
 import { extractMarkdownHeadings } from "../noteHeadings";
 import {
   applySearchHighlights,
+  clearSearchHighlights,
   normalizeSearchQuery,
   setActiveSearchHit as setActiveSearchHitClass,
 } from "../noteSearch";
@@ -48,9 +56,11 @@ export function NotePage({
   const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(() => {
-    return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
-  });
+  const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
+    () => {
+      return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
+    },
+  );
   const [searchHitCount, setSearchHitCount] = useState(0);
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
@@ -71,7 +81,9 @@ export function NotePage({
         const json = (await res.json()) as { note: Note };
         setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Unknown note loading error");
+        setError(
+          err instanceof Error ? err.message : "Unknown note loading error",
+        );
       }
     },
     [slug],
@@ -145,9 +157,12 @@ export function NotePage({
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
   );
-  const tocHeadings = useMemo(() => extractMarkdownHeadings(parsed.body), [parsed.body]);
+  const tocHeadings = useMemo(
+    () => extractMarkdownHeadings(parsed.body),
+    [parsed.body],
+  );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = noteBodyRef.current;
     if (!root) {
       return;
@@ -162,6 +177,11 @@ export function NotePage({
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
     }
+
+    return () => {
+      searchHitsRef.current = [];
+      clearSearchHighlights(root);
+    };
   }, [searchQuery, markdown, note?.slug]);
 
   useEffect(() => {
@@ -185,7 +205,9 @@ export function NotePage({
     );
   }
   if (!note) {
-    return <StateBlock title="Not Found" description="This note no longer exists." />;
+    return (
+      <StateBlock title="Not Found" description="This note no longer exists." />
+    );
   }
 
   const headingCounts = new Map<string, number>();
@@ -221,7 +243,10 @@ export function NotePage({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={[rehypeKatex]}
-            components={createNoteMarkdownComponents(note.relative_path, headingCounts)}
+            components={createNoteMarkdownComponents(
+              note.relative_path,
+              headingCounts,
+            )}
           >
             {markdown}
           </ReactMarkdown>

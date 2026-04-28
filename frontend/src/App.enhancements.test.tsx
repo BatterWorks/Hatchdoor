@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -170,7 +171,7 @@ describe("App enhancements", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Home" }),
+      await screen.findByRole("heading", { level: 2, name: "Home" }),
     ).toBeInTheDocument();
   });
 
@@ -251,5 +252,78 @@ describe("App enhancements", () => {
 
     expect(await screen.findByText(/Match 1 of 2/)).toBeInTheDocument();
     expect(document.querySelectorAll("mark.search-hit")).toHaveLength(2);
+  });
+
+  it("keeps searched note renders stable while wikilinks resolve", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [
+                { title: "Home", slug: "home" },
+                { title: "Plan", slug: "plan" },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home/links")) {
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "Read the token in [[Plan]].",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(
+            JSON.stringify({
+              results: [{ target: "Plan", slug: "plan" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home?q=token"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Match 1 of 1/)).toBeInTheDocument();
+    const noteBody = document.querySelector(".note-body");
+    expect(noteBody).not.toBeNull();
+    await waitFor(() => {
+      expect(
+        within(noteBody as HTMLElement).getByRole("link", { name: "Plan" }),
+      ).toHaveAttribute("href", "/n/plan");
+    });
+    expect(document.querySelectorAll("mark.search-hit")).toHaveLength(1);
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });
