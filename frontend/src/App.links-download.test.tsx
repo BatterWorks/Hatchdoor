@@ -117,7 +117,7 @@ describe("App links/download", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Home" });
+    await screen.findByRole("heading", { level: 2, name: "Home" });
     const external = await screen.findByRole("link", { name: "External" });
     expect(external).toHaveAttribute("href", "https://example.com");
     expect(external).toHaveAttribute("target", "_blank");
@@ -170,15 +170,16 @@ describe("App links/download", () => {
       .mockImplementation(() => {});
     const originalCreateElement = document.createElement.bind(document);
     const createdAnchors: HTMLAnchorElement[] = [];
-    vi.spyOn(document, "createElement").mockImplementation(
-      ((tagName: string, options?: ElementCreationOptions) => {
-        const element = originalCreateElement(tagName, options);
-        if (tagName.toLowerCase() === "a") {
-          createdAnchors.push(element as HTMLAnchorElement);
-        }
-        return element;
-      }) as typeof document.createElement,
-    );
+    vi.spyOn(document, "createElement").mockImplementation(((
+      tagName: string,
+      options?: ElementCreationOptions,
+    ) => {
+      const element = originalCreateElement(tagName, options);
+      if (tagName.toLowerCase() === "a") {
+        createdAnchors.push(element as HTMLAnchorElement);
+      }
+      return element;
+    }) as typeof document.createElement);
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -186,7 +187,7 @@ describe("App links/download", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Home" });
+    await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "Download .md" }),
@@ -247,7 +248,7 @@ describe("App links/download", () => {
       </MemoryRouter>,
     );
 
-    await screen.findByRole("heading", { name: "Home" });
+    await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "Download .md" }),

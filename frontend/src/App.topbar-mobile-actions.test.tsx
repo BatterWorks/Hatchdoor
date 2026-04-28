@@ -35,6 +35,8 @@ describe("App mobile and topbar actions", () => {
           matches: query.includes("max-width"),
           media: query,
           onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
           addEventListener: () => {},
           removeEventListener: () => {},
           dispatchEvent: () => false,
@@ -57,14 +59,18 @@ describe("App mobile and topbar actions", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Toggle explorer" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Toggle explorer" }),
+    );
     expect(
       await screen.findByRole("button", { name: "Close explorer" }),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close explorer" }));
     await waitFor(() => {
-      expect(screen.queryByRole("button", { name: "Close explorer" })).toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Close explorer" }),
+      ).toBeNull();
     });
   });
 
@@ -84,55 +90,61 @@ describe("App mobile and topbar actions", () => {
     let treeCalls = 0;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.includes("/api/tree")) {
-          treeCalls += 1;
-          if (treeCalls === 1) {
+      .mockImplementation(
+        async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/api/tree")) {
+            treeCalls += 1;
+            if (treeCalls === 1) {
+              return new Response(
+                JSON.stringify({
+                  name: "Vault",
+                  folders: [],
+                  notes: [{ title: "Home", slug: "home" }],
+                }),
+                { status: 200 },
+              );
+            }
+            return new Response("boom", { status: 500 });
+          }
+
+          if (url.includes("/api/refresh")) {
+            expect(init?.method).toBe("POST");
+            return new Response(JSON.stringify({ refreshed: true }), {
+              status: 200,
+            });
+          }
+
+          if (url.includes("/api/note/home/links")) {
+            return new Response(
+              JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+              { status: 200 },
+            );
+          }
+
+          if (url.includes("/api/note/home")) {
             return new Response(
               JSON.stringify({
-                name: "Vault",
-                folders: [],
-                notes: [{ title: "Home", slug: "home" }],
+                note: {
+                  title: "Home",
+                  slug: "home",
+                  relative_path: "Home",
+                  content: "# Home",
+                },
               }),
               { status: 200 },
             );
           }
-          return new Response("boom", { status: 500 });
-        }
 
-        if (url.includes("/api/refresh")) {
-          expect(init?.method).toBe("POST");
-          return new Response(JSON.stringify({ refreshed: true }), { status: 200 });
-        }
+          if (url.includes("/api/resolve-batch")) {
+            return new Response(JSON.stringify({ results: [] }), {
+              status: 200,
+            });
+          }
 
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home",
-              },
-            }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
-        }
-
-        return new Response("not found", { status: 404 });
-      });
+          return new Response("not found", { status: 404 });
+        },
+      );
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -140,31 +152,44 @@ describe("App mobile and topbar actions", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByRole("heading", { name: "Home" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Home" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Offline")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Refresh vault" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Refresh vault" }),
+    );
 
     await waitFor(() => {
       expect(screen.getByText("Tree Stale")).toBeInTheDocument();
     });
     expect(
-      fetchSpy.mock.calls.some((call) => String(call[0]).includes("/api/refresh")),
+      fetchSpy.mock.calls.some((call) =>
+        String(call[0]).includes("/api/refresh"),
+      ),
     ).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Copy note link" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Copy note link" }),
+    );
     await waitFor(() => {
       expect(clipboardWrite).toHaveBeenCalledTimes(1);
     });
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Toggle properties" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Toggle properties" }),
+    );
     expect(dispatchSpy).toHaveBeenCalled();
     const toggleDispatched = dispatchSpy.mock.calls.some((call) => {
       const event = call[0];
-      return event instanceof Event && event.type === "hatchdoor:toggle-note-properties";
+      return (
+        event instanceof Event &&
+        event.type === "hatchdoor:toggle-note-properties"
+      );
     });
     expect(toggleDispatched).toBe(true);
   });
