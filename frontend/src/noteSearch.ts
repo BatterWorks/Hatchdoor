@@ -1,4 +1,10 @@
-const SEARCH_MARK_SELECTOR = "mark.search-hit";
+type HastNode = {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+};
 
 export function normalizeSearchQuery(raw: string | null): string {
   if (!raw) {
@@ -7,108 +13,138 @@ export function normalizeSearchQuery(raw: string | null): string {
   return raw.trim();
 }
 
-export function clearSearchHighlights(root: HTMLElement): void {
-  const marks = root.querySelectorAll<HTMLSpanElement>(SEARCH_MARK_SELECTOR);
-  for (const mark of marks) {
-    const parent = mark.parentNode;
-    if (!parent) {
-      continue;
-    }
+export function createSearchHighlightPlugin(query: string) {
+  const trimmedQuery = normalizeSearchQuery(query);
 
-    parent.replaceChild(document.createTextNode(mark.textContent ?? ""), mark);
-    parent.normalize();
+  return function searchHighlightPlugin() {
+    return function transform(tree: HastNode): void {
+      if (!trimmedQuery) {
+        return;
+      }
+
+      let hitIndex = 0;
+      visit(tree, false, (node, index, parent) => {
+        if (
+          !parent ||
+          index === null ||
+          node.type !== "text" ||
+          typeof node.value !== "string" ||
+          !node.value.trim()
+        ) {
+          return;
+        }
+
+        const highlighted = highlightTextNode(
+          node.value,
+          trimmedQuery,
+          () => hitIndex++,
+        );
+        if (highlighted.length > 1) {
+          parent.children?.splice(index, 1, ...highlighted);
+        }
+      });
+    };
+  };
+}
+
+function visit(
+  node: HastNode,
+  skipped: boolean,
+  visitor: (
+    node: HastNode,
+    index: number | null,
+    parent: HastNode | null,
+  ) => void,
+  index: number | null = null,
+  parent: HastNode | null = null,
+): void {
+  visitor(node, index, parent);
+
+  const nextSkipped = skipped || shouldSkipHighlighting(node);
+  if (nextSkipped || !node.children) {
+    return;
+  }
+
+  for (let childIndex = 0; childIndex < node.children.length; childIndex += 1) {
+    visit(node.children[childIndex], nextSkipped, visitor, childIndex, node);
   }
 }
 
-export function applySearchHighlights(
-  root: HTMLElement,
+function shouldSkipHighlighting(node: HastNode): boolean {
+  if (node.type !== "element") {
+    return false;
+  }
+
+  if (node.tagName === "pre" || node.tagName === "code") {
+    return true;
+  }
+
+  const className = node.properties?.className;
+  const classes = Array.isArray(className)
+    ? className
+    : typeof className === "string"
+      ? className.split(/\s+/)
+      : [];
+
+  return classes.some((item) =>
+    [
+      "search-hit",
+      "katex",
+      "katex-display",
+      "math",
+      "math-inline",
+      "math-display",
+    ].includes(String(item)),
+  );
+}
+
+function highlightTextNode(
+  text: string,
   query: string,
-): HTMLSpanElement[] {
-  clearSearchHighlights(root);
-
-  const trimmedQuery = normalizeSearchQuery(query);
-  if (!trimmedQuery) {
-    return [];
+  nextHitIndex: () => number,
+): HastNode[] {
+  const lower = text.toLowerCase();
+  const queryLower = query.toLowerCase();
+  if (!lower.includes(queryLower)) {
+    return [{ type: "text", value: text }];
   }
 
-  const queryLower = trimmedQuery.toLowerCase();
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (!node.nodeValue || !node.nodeValue.trim()) {
-        return NodeFilter.FILTER_REJECT;
-      }
+  const nodes: HastNode[] = [];
+  let start = 0;
 
-      const parent = node.parentElement;
-      if (!parent) {
-        return NodeFilter.FILTER_REJECT;
-      }
-
-      if (
-        parent.closest(
-          "pre, code, .code-block, .search-match, .note-links-panel, .note-toc, .tag-chip",
-        )
-      ) {
-        return NodeFilter.FILTER_REJECT;
-      }
-
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-
-  const nodes: Text[] = [];
-  let current = walker.nextNode();
-  while (current) {
-    if (current.nodeType === Node.TEXT_NODE) {
-      nodes.push(current as Text);
-    }
-    current = walker.nextNode();
-  }
-
-  const marks: HTMLSpanElement[] = [];
-
-  for (const node of nodes) {
-    const text = node.nodeValue ?? "";
-    const lower = text.toLowerCase();
-    if (!lower.includes(queryLower)) {
-      continue;
+  while (start < text.length) {
+    const matchIndex = lower.indexOf(queryLower, start);
+    if (matchIndex === -1) {
+      nodes.push({ type: "text", value: text.slice(start) });
+      break;
     }
 
-    const fragment = document.createDocumentFragment();
-    let start = 0;
-
-    while (start < text.length) {
-      const matchIndex = lower.indexOf(queryLower, start);
-      if (matchIndex === -1) {
-        fragment.appendChild(document.createTextNode(text.slice(start)));
-        break;
-      }
-
-      if (matchIndex > start) {
-        fragment.appendChild(
-          document.createTextNode(text.slice(start, matchIndex)),
-        );
-      }
-
-      const mark = document.createElement("mark");
-      mark.className = "search-hit";
-      mark.textContent = text.slice(
-        matchIndex,
-        matchIndex + trimmedQuery.length,
-      );
-      marks.push(mark);
-      fragment.appendChild(mark);
-
-      start = matchIndex + trimmedQuery.length;
+    if (matchIndex > start) {
+      nodes.push({ type: "text", value: text.slice(start, matchIndex) });
     }
 
-    node.parentNode?.replaceChild(fragment, node);
+    nodes.push({
+      type: "element",
+      tagName: "mark",
+      properties: {
+        className: ["search-hit"],
+        "data-hit-index": String(nextHitIndex()),
+      },
+      children: [
+        {
+          type: "text",
+          value: text.slice(matchIndex, matchIndex + query.length),
+        },
+      ],
+    });
+
+    start = matchIndex + query.length;
   }
 
-  for (const [index, mark] of marks.entries()) {
-    mark.setAttribute("data-hit-index", String(index));
+  if (nodes.length === 0) {
+    return [{ type: "text", value: text }];
   }
-
-  return marks;
+  return nodes;
 }
 
 export function setActiveSearchHit(

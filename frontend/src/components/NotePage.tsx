@@ -16,8 +16,7 @@ import remarkMath from "remark-math";
 import { parseFrontmatter } from "../markdown";
 import { extractMarkdownHeadings } from "../noteHeadings";
 import {
-  applySearchHighlights,
-  clearSearchHighlights,
+  createSearchHighlightPlugin,
   normalizeSearchQuery,
   setActiveSearchHit as setActiveSearchHitClass,
 } from "../noteSearch";
@@ -161,6 +160,10 @@ export function NotePage({
     () => extractMarkdownHeadings(parsed.body),
     [parsed.body],
   );
+  const rehypePlugins = useMemo(
+    () => [rehypeKatex, createSearchHighlightPlugin(searchQuery)],
+    [searchQuery],
+  );
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
@@ -168,7 +171,9 @@ export function NotePage({
       return;
     }
 
-    const hits = applySearchHighlights(root, searchQuery);
+    const hits = Array.from(
+      root.querySelectorAll<HTMLSpanElement>("mark.search-hit"),
+    );
     searchHitsRef.current = hits;
     setSearchHitCount(hits.length);
     setActiveSearchHit(0);
@@ -180,9 +185,8 @@ export function NotePage({
 
     return () => {
       searchHitsRef.current = [];
-      clearSearchHighlights(root);
     };
-  }, [searchQuery, markdown, note?.slug]);
+  }, [markdown, note?.slug, searchQuery]);
 
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
@@ -242,7 +246,7 @@ export function NotePage({
         <div ref={noteBodyRef} className="note-body">
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={[rehypeKatex]}
+            rehypePlugins={rehypePlugins}
             components={createNoteMarkdownComponents(
               note.relative_path,
               headingCounts,

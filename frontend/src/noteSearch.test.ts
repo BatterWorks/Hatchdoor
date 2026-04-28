@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applySearchHighlights,
-  clearSearchHighlights,
+  createSearchHighlightPlugin,
   normalizeSearchQuery,
   setActiveSearchHit,
 } from "./noteSearch";
@@ -13,24 +12,123 @@ describe("noteSearch", () => {
     expect(normalizeSearchQuery("  atlas  ")).toBe("atlas");
   });
 
-  it("highlights matches and skips code blocks", () => {
-    const root = document.createElement("div");
-    root.innerHTML = "<p>Atlas home atlas</p><pre><code>atlas</code></pre>";
+  it("creates render-owned highlights and skips code blocks", () => {
+    const tree: {
+      type: string;
+      children: Array<{
+        type: string;
+        tagName: string;
+        properties: Record<string, unknown>;
+        children: Array<{
+          type: string;
+          tagName?: string;
+          properties?: Record<string, unknown>;
+          value?: string;
+          children?: Array<{ type: string; value: string }>;
+        }>;
+      }>;
+    } = {
+      type: "root",
+      children: [
+        {
+          type: "element",
+          tagName: "p",
+          properties: {},
+          children: [{ type: "text", value: "Atlas home atlas" }],
+        },
+        {
+          type: "element",
+          tagName: "pre",
+          properties: {},
+          children: [
+            {
+              type: "element",
+              tagName: "code",
+              properties: {},
+              children: [{ type: "text", value: "atlas" }],
+            },
+          ],
+        },
+      ],
+    };
 
-    const hits = applySearchHighlights(root, "atlas");
+    createSearchHighlightPlugin("atlas")()(tree);
 
-    expect(hits).toHaveLength(2);
-    expect(root.querySelectorAll("pre mark.search-hit")).toHaveLength(0);
+    const paragraph = tree.children[0];
+    expect(paragraph.children).toHaveLength(3);
+    expect(paragraph.children[0]).toMatchObject({
+      type: "element",
+      tagName: "mark",
+      properties: {
+        className: ["search-hit"],
+        "data-hit-index": "0",
+      },
+    });
+    expect(paragraph.children[2]).toMatchObject({
+      type: "element",
+      tagName: "mark",
+      properties: {
+        className: ["search-hit"],
+        "data-hit-index": "1",
+      },
+    });
+    expect(tree.children[1].children[0].children).toEqual([
+      { type: "text", value: "atlas" },
+    ]);
   });
 
-  it("clearSearchHighlights unwraps marks", () => {
-    const root = document.createElement("div");
-    root.innerHTML = '<p>A <mark class="search-hit">B</mark> C</p>';
+  it("assigns hit indexes in reading order across sibling text nodes", () => {
+    const tree: {
+      type: string;
+      children: Array<{
+        type: string;
+        tagName: string;
+        properties: Record<string, unknown>;
+        children: Array<{
+          type: string;
+          tagName?: string;
+          properties?: Record<string, unknown>;
+          value?: string;
+          children?: Array<{ type: string; value: string }>;
+        }>;
+      }>;
+    } = {
+      type: "root",
+      children: [
+        {
+          type: "element",
+          tagName: "p",
+          properties: {},
+          children: [
+            { type: "text", value: "first token " },
+            {
+              type: "element",
+              tagName: "strong",
+              properties: {},
+              children: [{ type: "text", value: "second token" }],
+            },
+          ],
+        },
+      ],
+    };
 
-    clearSearchHighlights(root);
+    createSearchHighlightPlugin("token")()(tree);
 
-    expect(root.querySelectorAll("mark.search-hit")).toHaveLength(0);
-    expect(root.textContent).toContain("A B C");
+    const paragraph = tree.children[0];
+    expect(paragraph.children[1]).toMatchObject({
+      type: "element",
+      tagName: "mark",
+      properties: {
+        "data-hit-index": "0",
+      },
+    });
+    expect(paragraph.children[3].children?.[1]).toMatchObject({
+      type: "element",
+      tagName: "mark",
+      properties: {
+        "data-hit-index": "1",
+      },
+    });
   });
 
   it("setActiveSearchHit toggles the active marker", () => {
