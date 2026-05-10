@@ -1,14 +1,15 @@
 use std::collections::HashSet;
 use std::fs;
 
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::vault::{normalize_title, NoteEntry, VaultIndex};
+use crate::vault::{NoteEntry, VaultIndex, normalize_title};
 
-use super::parse::{
-    content_hash, current_unix_timestamp, extract_headings, extract_tags, file_snapshot, FileSnapshot,
-};
 use super::SqliteCache;
+use super::parse::{
+    FileSnapshot, content_hash, current_unix_timestamp, extract_headings, extract_tags,
+    file_snapshot,
+};
 
 impl SqliteCache {
     pub(crate) fn replace_from_index(&self, index: &VaultIndex) -> Result<(), String> {
@@ -94,15 +95,20 @@ fn delete_note_by_relative_path(tx: &Transaction<'_>, relative_path: &str) -> Re
             |row| row.get::<_, i64>(0),
         )
         .optional()
-        .map_err(|error| format!("failed finding cached note '{relative_path}' for delete: {error}"))?;
+        .map_err(|error| {
+            format!("failed finding cached note '{relative_path}' for delete: {error}")
+        })?;
 
     if let Some(rowid) = rowid {
         tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![rowid])
             .map_err(|error| format!("failed deleting FTS row for '{relative_path}': {error}"))?;
     }
 
-    tx.execute("DELETE FROM notes WHERE relative_path = ?1", params![relative_path])
-        .map_err(|error| format!("failed deleting cached note '{relative_path}': {error}"))?;
+    tx.execute(
+        "DELETE FROM notes WHERE relative_path = ?1",
+        params![relative_path],
+    )
+    .map_err(|error| format!("failed deleting cached note '{relative_path}': {error}"))?;
     Ok(())
 }
 
@@ -114,9 +120,9 @@ fn upsert_note_if_changed(
     let snapshot = file_snapshot(&entry.path)?;
     let cached = cached_note_state(tx, &entry.relative_path)?;
 
-    let cached_matches_file = cached.as_ref().is_some_and(|cached| {
-        cached.slug == entry.slug && cached.snapshot == snapshot
-    });
+    let cached_matches_file = cached
+        .as_ref()
+        .is_some_and(|cached| cached.slug == entry.slug && cached.snapshot == snapshot);
     if cached_matches_file {
         return Ok(());
     }
@@ -125,9 +131,9 @@ fn upsert_note_if_changed(
         .map_err(|error| format!("failed reading note '{}': {error}", entry.path.display()))?;
     let hash = content_hash(&content);
 
-    let cached_matches_content = cached.as_ref().is_some_and(|cached| {
-        cached.slug == entry.slug && cached.content_hash == hash
-    });
+    let cached_matches_content = cached
+        .as_ref()
+        .is_some_and(|cached| cached.slug == entry.slug && cached.content_hash == hash);
     if cached_matches_content {
         update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
         return Ok(());
@@ -178,7 +184,12 @@ fn update_note_file_metadata(
             indexed_at,
         ],
     )
-    .map_err(|error| format!("failed updating cached metadata for '{}': {error}", entry.slug))?;
+    .map_err(|error| {
+        format!(
+            "failed updating cached metadata for '{}': {error}",
+            entry.slug
+        )
+    })?;
 
     let note_id = tx
         .query_row(
@@ -194,9 +205,20 @@ fn update_note_file_metadata(
         INSERT INTO note_fts(rowid, title, relative_path, content, slug)
         VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
-        params![note_id, &entry.title, &entry.relative_path, content, &entry.slug],
+        params![
+            note_id,
+            &entry.title,
+            &entry.relative_path,
+            content,
+            &entry.slug
+        ],
     )
-    .map_err(|error| format!("failed refreshing FTS metadata for '{}': {error}", entry.slug))?;
+    .map_err(|error| {
+        format!(
+            "failed refreshing FTS metadata for '{}': {error}",
+            entry.slug
+        )
+    })?;
     Ok(())
 }
 
@@ -271,7 +293,13 @@ fn upsert_note_content(
         INSERT INTO note_fts(rowid, title, relative_path, content, slug)
         VALUES (?1, ?2, ?3, ?4, ?5)
         "#,
-        params![note_id, &entry.title, &entry.relative_path, content, &entry.slug],
+        params![
+            note_id,
+            &entry.title,
+            &entry.relative_path,
+            content,
+            &entry.slug
+        ],
     )
     .map_err(|error| format!("failed indexing note '{}' for search: {error}", entry.slug))?;
 
@@ -284,10 +312,16 @@ fn rebuild_note_details(
     entry: &NoteEntry,
     content: &str,
 ) -> Result<(), String> {
-    tx.execute("DELETE FROM headings WHERE note_slug = ?1", params![&entry.slug])
-        .map_err(|error| format!("failed deleting old headings for '{}': {error}", entry.slug))?;
-    tx.execute("DELETE FROM tags WHERE note_slug = ?1", params![&entry.slug])
-        .map_err(|error| format!("failed deleting old tags for '{}': {error}", entry.slug))?;
+    tx.execute(
+        "DELETE FROM headings WHERE note_slug = ?1",
+        params![&entry.slug],
+    )
+    .map_err(|error| format!("failed deleting old headings for '{}': {error}", entry.slug))?;
+    tx.execute(
+        "DELETE FROM tags WHERE note_slug = ?1",
+        params![&entry.slug],
+    )
+    .map_err(|error| format!("failed deleting old tags for '{}': {error}", entry.slug))?;
 
     for heading in extract_headings(content) {
         tx.execute(
@@ -295,7 +329,13 @@ fn rebuild_note_details(
             INSERT OR IGNORE INTO headings(note_slug, level, text, anchor, position)
             VALUES (?1, ?2, ?3, ?4, ?5)
             "#,
-            params![&entry.slug, heading.level, &heading.text, &heading.anchor, heading.position],
+            params![
+                &entry.slug,
+                heading.level as i64,
+                &heading.text,
+                &heading.anchor,
+                heading.position as i64
+            ],
         )
         .map_err(|error| format!("failed caching heading for '{}': {error}", entry.slug))?;
     }
