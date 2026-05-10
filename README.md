@@ -7,6 +7,9 @@ Rust backend + React/Vite frontend for browsing an Obsidian vault in read-only m
 - Explorer tree from vault folders/files
 - Open notes via route (`/n/:slug`)
 - Obsidian wikilinks (`[[Note]]`, `[[Note|Alias]]`) resolved through backend API
+- Persistent SQLite cache/read model for fast API, UI, search, links, and MCP reads
+- SQLite FTS5 search over note title, relative path, and Markdown content
+- Cached headings, tags, wikilinks, and backlinks
 - Markdown rendering with:
   - GFM (tables, task lists, strikethrough)
   - Math (`remark-math` + KaTeX)
@@ -21,16 +24,41 @@ Rust backend + React/Vite frontend for browsing an Obsidian vault in read-only m
 Copy `.env.example` to `.env`:
 
 - `HOST_VAULT_PATH=./vault`
+- `HOST_CACHE_PATH=./data/cache`
 - `HOST=0.0.0.0`
 - `PORT=42824`
 - `VAULT_REFRESH_SECONDS=2`
+- `HATCHDOOR_CACHE_DB=/data/cache/hatchdoor-cache.sqlite3`
 - `HATCHDOOR_MCP_ENABLED=false`
 - `HATCHDOOR_MCP_BEARER_TOKEN=`
 - `HATCHDOOR_MCP_ALLOWED_ORIGINS=http://127.0.0.1,http://localhost`
 - `RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn`
 
-`VAULT_REFRESH_SECONDS` controls how often API requests may trigger a fresh vault scan.
+`VAULT_REFRESH_SECONDS` controls how often API/UI/MCP requests may trigger a fresh vault scan.
+`HATCHDOOR_CACHE_DB` points to Hatchdoor's generated SQLite cache. Keep it outside the Markdown vault.
 `RUST_LOG` controls structured backend log verbosity.
+
+## SQLite cache/read model
+
+Markdown remains the source of truth. SQLite is a persistent, disposable cache/read model.
+
+Hatchdoor stores this in SQLite:
+
+- note metadata and full Markdown content
+- explorer tree data
+- FTS5 search index
+- resolved wikilinks and backlinks
+- headings
+- tags
+
+If the SQLite database is deleted, Hatchdoor rebuilds it from the Markdown vault at startup. If the database cannot be opened or migrated, Hatchdoor fails startup rather than silently falling back.
+
+Manual cache rebuild:
+
+```bash
+rm ./data/cache/hatchdoor-cache.sqlite3
+docker compose restart hatchdoor
+```
 
 The embedded MCP endpoint is disabled by default. Enable it only when OpenClaw should be allowed to query Hatchdoor:
 
@@ -79,7 +107,14 @@ docker compose up -d
 
 Compose uses `.env` via `env_file` for container runtime variables.
 Use `HOST_VAULT_PATH` in `.env` for the host vault directory.
-The container always uses `VAULT_PATH=/data/vault`.
+Use `HOST_CACHE_PATH` in `.env` for the host SQLite cache directory.
+
+The container uses:
+
+```text
+/data/vault  = Markdown vault, source of truth
+/data/cache  = generated SQLite cache
+```
 
 ## API
 
@@ -88,7 +123,7 @@ The container always uses `VAULT_PATH=/data/vault`.
 - `GET /api/resolve?target=...` -> single wikilink resolution (`slug` or `null`)
 - `POST /api/resolve-batch` -> batch wikilink resolution
 - `GET /api/search?q=...` -> note search results
-- `POST /api/refresh` -> force vault reindex
+- `POST /api/refresh` -> force SQLite cache refresh from Markdown vault
 - `GET /vault-assets/*path` -> image assets from vault (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`)
 - `GET /health` -> `ok`
 
@@ -127,12 +162,12 @@ MCP transport behaviour:
 
 Vault-safe MCP tools:
 
-- `search_notes` -> compact search results; prefer this before fetching full note content
-- `get_note` -> fetch one note by slug with Markdown content
+- `search_notes` -> compact SQLite search results; prefer this before fetching full note content
+- `get_note` -> fetch one note by slug with Markdown content from SQLite cache
 - `get_note_links` -> fetch outgoing links and backlinks for a slug
 - `resolve_wikilink` -> resolve an Obsidian wikilink target to a slug
 - `get_tree` -> fetch the explorer tree; potentially larger response
-- `refresh_index` -> force Hatchdoor to refresh its view of the vault without modifying vault content
+- `refresh_index` -> force Hatchdoor to refresh its SQLite view of the vault without modifying vault content
 
 The MCP endpoint does not expose write, delete, shell, or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
 
