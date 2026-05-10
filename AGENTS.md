@@ -1,7 +1,7 @@
 # AGENTS.md — Minimal AI Agent Protocol
 
-Version: 2.4
-Last updated: 2026-04-23
+Version: 2.5
+Last updated: 2026-05-08
 Scope: Entire repository (unless a subdirectory explicitly overrides this file)
 
 This protocol exists to:
@@ -93,6 +93,8 @@ Use **Security Reviewer** automatically when a change touches auth, secrets, ext
 1) **Regression tests:** Add/update tests that fail **before** the fix and pass **after**.  
 2) **Selective checks:** Run checks **only** for affected components (see Section 4).  
 3) **Exact commands:** Provide the exact commands to run and what output to paste back.
+
+When a bug is described, write the failing regression test first. Use that failure to confirm the cause before changing implementation code.
 
 ### SHOULD (when relevant to the affected component)
 - Formatter/linter/typecheck for that component (repo-standard tools first).
