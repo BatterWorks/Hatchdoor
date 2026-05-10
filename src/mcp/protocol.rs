@@ -1,8 +1,8 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonRpcRequest {
@@ -42,11 +42,14 @@ impl JsonRpcFailure {
 }
 
 pub(crate) fn jsonrpc_success_response(id: Value, result: Value) -> Response {
-    (StatusCode::OK, Json(json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    })))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        })),
+    )
         .into_response()
 }
 
@@ -56,14 +59,17 @@ pub(crate) fn jsonrpc_error_response(
     code: i64,
     message: String,
 ) -> Response {
-    (status, Json(json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message,
-        }
-    })))
+    (
+        status,
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": code,
+                "message": message,
+            }
+        })),
+    )
         .into_response()
 }
 

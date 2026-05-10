@@ -1,14 +1,14 @@
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::app_state::AppState;
 
-use super::config::{validate_mcp_request, McpConfig, PROTOCOL_VERSION, SERVER_INSTRUCTIONS};
+use super::config::{McpConfig, PROTOCOL_VERSION, SERVER_INSTRUCTIONS, validate_mcp_request};
 use super::protocol::{
-    jsonrpc_error_response, jsonrpc_success_response, JsonRpcFailure, JsonRpcRequest,
+    JsonRpcFailure, JsonRpcRequest, jsonrpc_error_response, jsonrpc_success_response,
 };
 use super::tools::{handle_tools_call, tools_list};
 
@@ -28,7 +28,7 @@ pub(crate) async fn mcp_post_handler(
 
 async fn handle_mcp_get(headers: &HeaderMap, config: &McpConfig) -> Response {
     if let Err(response) = validate_mcp_request(headers, config) {
-        return response;
+        return *response;
     }
 
     let mut response = StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -45,7 +45,7 @@ async fn handle_mcp_post(
     config: &McpConfig,
 ) -> Response {
     if let Err(response) = validate_mcp_request(headers, config) {
-        return response;
+        return *response;
     }
 
     let request: JsonRpcRequest = match serde_json::from_slice(&body) {
@@ -120,7 +120,10 @@ mod tests {
         McpConfig {
             enabled: true,
             bearer_token: None,
-            allowed_origins: vec!["http://127.0.0.1".to_string(), "http://localhost".to_string()],
+            allowed_origins: vec![
+                "http://127.0.0.1".to_string(),
+                "http://localhost".to_string(),
+            ],
         }
     }
 
@@ -130,8 +133,7 @@ mod tests {
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\nalpha token\n[[Plan]]")
             .expect("write home");
-        std::fs::write(vault_root.join("Plan.md"), "# Plan\nlinked note")
-            .expect("write plan");
+        std::fs::write(vault_root.join("Plan.md"), "# Plan\nlinked note").expect("write plan");
         let cache = build_cache(&vault_root).expect("build cache");
         let state = AppState {
             vault_path: vault_root,
@@ -289,9 +291,11 @@ mod tests {
                 "refresh_index"
             ]
         );
-        assert!(!names
-            .iter()
-            .any(|name| name.contains("write") || name.contains("delete")));
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.contains("write") || name.contains("delete"))
+        );
 
         for tool in tools.iter().take(5) {
             assert_eq!(tool["annotations"]["readOnlyHint"], true);
@@ -351,11 +355,16 @@ mod tests {
         .await;
         assert_eq!(ok.status(), StatusCode::OK);
         let ok_body = response_json(ok).await;
-        assert_eq!(ok_body["result"]["structuredContent"]["note"]["slug"], "home");
-        assert!(ok_body["result"]["structuredContent"]["note"]["content"]
-            .as_str()
-            .expect("content")
-            .contains("alpha token"));
+        assert_eq!(
+            ok_body["result"]["structuredContent"]["note"]["slug"],
+            "home"
+        );
+        assert!(
+            ok_body["result"]["structuredContent"]["note"]["content"]
+                .as_str()
+                .expect("content")
+                .contains("alpha token")
+        );
 
         let missing = post_json(
             state,
@@ -432,7 +441,10 @@ mod tests {
     async fn disallowed_origin_is_rejected() {
         let (state, _tmp) = test_state();
         let mut headers = HeaderMap::new();
-        headers.insert(header::ORIGIN, HeaderValue::from_static("https://evil.example"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
         let response = handle_mcp_post(
             state,
             &headers,

@@ -1,11 +1,11 @@
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use tracing::warn;
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::{sqlite_cache, AppState};
+use crate::app_state::{AppState, sqlite_cache};
 use crate::vault::Note;
 
 pub(crate) async fn note_download_handler(
@@ -23,7 +23,9 @@ pub(crate) async fn note_download_handler(
             warn!(slug = %slug, "Note not found for download");
             return note_not_found_response(&slug);
         }
-        Err(error) => return internal_error_response(format!("Failed reading note {slug}: {error}")),
+        Err(error) => {
+            return internal_error_response(format!("Failed reading note {slug}: {error}"));
+        }
     };
 
     let filename = download_filename_for_note(&note);

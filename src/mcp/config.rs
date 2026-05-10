@@ -1,6 +1,6 @@
 use std::env;
 
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::mcp::protocol::jsonrpc_error_response;
@@ -44,20 +44,20 @@ impl McpConfig {
 pub(crate) fn validate_mcp_request(
     headers: &HeaderMap,
     config: &McpConfig,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     if !config.enabled {
-        return Err(StatusCode::NOT_FOUND.into_response());
+        return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }
 
-    if let Some(origin) = headers.get(header::ORIGIN).and_then(header_to_str) {
-        if !is_allowed_origin(origin, &config.allowed_origins) {
-            return Err(jsonrpc_error_response(
-                StatusCode::FORBIDDEN,
-                Value::Null,
-                -32000,
-                "Forbidden MCP origin".to_string(),
-            ));
-        }
+    if let Some(origin) = headers.get(header::ORIGIN).and_then(header_to_str)
+        && !is_allowed_origin(origin, &config.allowed_origins)
+    {
+        return Err(Box::new(jsonrpc_error_response(
+            StatusCode::FORBIDDEN,
+            Value::Null,
+            -32000,
+            "Forbidden MCP origin".to_string(),
+        )));
     }
 
     if let Some(expected_token) = &config.bearer_token {
@@ -67,12 +67,12 @@ pub(crate) fn validate_mcp_request(
             .map(|value| value == format!("Bearer {expected_token}"))
             .unwrap_or(false);
         if !authorized {
-            return Err(jsonrpc_error_response(
+            return Err(Box::new(jsonrpc_error_response(
                 StatusCode::UNAUTHORIZED,
                 Value::Null,
                 -32001,
                 "Missing or invalid MCP bearer token".to_string(),
-            ));
+            )));
         }
     }
 
@@ -80,15 +80,14 @@ pub(crate) fn validate_mcp_request(
         .get("MCP-Protocol-Version")
         .or_else(|| headers.get("Mcp-Protocol-Version"))
         .and_then(header_to_str)
+        && protocol_version != PROTOCOL_VERSION
     {
-        if protocol_version != PROTOCOL_VERSION {
-            return Err(jsonrpc_error_response(
-                StatusCode::BAD_REQUEST,
-                Value::Null,
-                -32002,
-                format!("Unsupported MCP protocol version: {protocol_version}"),
-            ));
-        }
+        return Err(Box::new(jsonrpc_error_response(
+            StatusCode::BAD_REQUEST,
+            Value::Null,
+            -32002,
+            format!("Unsupported MCP protocol version: {protocol_version}"),
+        )));
     }
 
     Ok(())
@@ -147,7 +146,10 @@ mod tests {
             "http://localhost:5173",
             "http://localhost"
         ));
-        assert!(origin_matches_allowed("https://app.example", "https://app.example"));
+        assert!(origin_matches_allowed(
+            "https://app.example",
+            "https://app.example"
+        ));
         assert!(!origin_matches_allowed(
             "https://app.example:443",
             "https://app.example"
