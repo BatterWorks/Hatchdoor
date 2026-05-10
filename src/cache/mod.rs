@@ -35,6 +35,7 @@ impl SqliteCache {
         Ok(cache)
     }
 
+    #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory()
             .map_err(|error| format!("failed to open in-memory SQLite cache: {error}"))?;
