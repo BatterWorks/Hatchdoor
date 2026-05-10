@@ -32,18 +32,19 @@ impl SqliteCache {
                 format!("failed reading note '{}': {error}", entry.path.display())
             })?;
             let hash = content_hash(&content);
+            let absolute_path = entry.path.to_string_lossy().to_string();
             tx.execute(
                 r#"
                 INSERT INTO notes(slug, title, relative_path, absolute_path, content, content_hash, indexed_at)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                 "#,
                 params![
-                    entry.slug,
-                    entry.title,
-                    entry.relative_path,
-                    entry.path.to_string_lossy(),
-                    content,
-                    hash,
+                    &entry.slug,
+                    &entry.title,
+                    &entry.relative_path,
+                    &absolute_path,
+                    &content,
+                    &hash,
                     now,
                 ],
             )
@@ -54,7 +55,7 @@ impl SqliteCache {
                 INSERT INTO note_fts(rowid, title, relative_path, content, slug)
                 VALUES (?1, ?2, ?3, ?4, ?5)
                 "#,
-                params![note_id, entry.title, entry.relative_path, content, entry.slug],
+                params![note_id, &entry.title, &entry.relative_path, &content, &entry.slug],
             )
             .map_err(|error| format!("failed to index note '{}' for search: {error}", entry.slug))?;
 
@@ -64,7 +65,7 @@ impl SqliteCache {
                     INSERT OR IGNORE INTO headings(note_slug, level, text, anchor, position)
                     VALUES (?1, ?2, ?3, ?4, ?5)
                     "#,
-                    params![entry.slug, heading.level, heading.text, heading.anchor, heading.position],
+                    params![&entry.slug, heading.level, &heading.text, &heading.anchor, heading.position],
                 )
                 .map_err(|error| format!("failed to cache heading for '{}': {error}", entry.slug))?;
             }
@@ -75,7 +76,7 @@ impl SqliteCache {
                     INSERT OR IGNORE INTO tags(note_slug, tag)
                     VALUES (?1, ?2)
                     "#,
-                    params![entry.slug, tag],
+                    params![&entry.slug, &tag],
                 )
                 .map_err(|error| format!("failed to cache tag for '{}': {error}", entry.slug))?;
             }
@@ -89,7 +90,7 @@ impl SqliteCache {
                         INSERT OR IGNORE INTO note_links(source_slug, target_slug)
                         VALUES (?1, ?2)
                         "#,
-                        params![entry.slug, link.slug],
+                        params![&entry.slug, &link.slug],
                     )
                     .map_err(|error| format!("failed to cache link for '{}': {error}", entry.slug))?;
                 }
