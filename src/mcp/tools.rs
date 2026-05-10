@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::api_types::RefreshResponse;
-use crate::app_state::{refresh_if_needed, snapshot, AppState};
+use crate::app_state::{refresh_if_needed, sqlite_cache, AppState};
 
 use super::protocol::{tool_error, tool_success, JsonRpcFailure};
 
@@ -126,7 +126,7 @@ pub(crate) fn tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "refresh_index",
-            "description": "Refresh Hatchdoor's view of the vault. Use only when the user says files changed or results appear stale; do not call before every search.",
+            "description": "Refresh Hatchdoor's SQLite view of the vault. Use only when the user says files changed or results appear stale; do not call before every search.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -150,14 +150,12 @@ async fn search_notes_tool(state: AppState, arguments: Value) -> Result<Value, J
 
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
     let include_content = args.include_content.unwrap_or(false);
-    let (index, _tree) = snapshot(&state)
+    let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    let handle = tokio::task::spawn_blocking(move || index.search(&query, include_content, limit));
-    let results = handle
-        .await
-        .map_err(|error| JsonRpcFailure::internal(format!("Search task failed: {error}")))?;
+    let results = cache
+        .search(&query, include_content, limit)
+        .map_err(JsonRpcFailure::internal)?;
 
     Ok(tool_success(json!({ "results": results })))
 }
@@ -166,20 +164,16 @@ async fn get_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonR
     let args: SlugArgs = serde_json::from_value(arguments)
         .map_err(|error| JsonRpcFailure::invalid_params(format!("Invalid get_note arguments: {error}")))?;
     let slug = non_empty_argument("slug", args.slug)?;
-    let (index, _tree) = snapshot(&state)
+    let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    let requested_slug = slug.clone();
-    let handle = tokio::task::spawn_blocking(move || index.read_note_by_slug(&slug));
-    let note = handle
-        .await
-        .map_err(|error| JsonRpcFailure::internal(format!("Note read task failed: {error}")))?
-        .map_err(|error| JsonRpcFailure::internal(format!("Failed reading note {requested_slug}: {error}")))?;
+    let note = cache
+        .read_note_by_slug(&slug)
+        .map_err(JsonRpcFailure::internal)?;
 
     match note {
         Some(note) => Ok(tool_success(json!({ "note": note }))),
-        None => Ok(tool_error(format!("Note not found: {requested_slug}"))),
+        None => Ok(tool_error(format!("Note not found: {slug}"))),
     }
 }
 
@@ -188,11 +182,11 @@ async fn get_note_links_tool(state: AppState, arguments: Value) -> Result<Value,
         JsonRpcFailure::invalid_params(format!("Invalid get_note_links arguments: {error}"))
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
-    let (index, _tree) = snapshot(&state)
+    let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
-    match index.note_links(&slug) {
+    match cache.note_links(&slug).map_err(JsonRpcFailure::internal)? {
         Some(links) => Ok(tool_success(json!({ "links": links }))),
         None => Ok(tool_error(format!("Note not found: {slug}"))),
     }
@@ -203,21 +197,22 @@ async fn resolve_wikilink_tool(state: AppState, arguments: Value) -> Result<Valu
         JsonRpcFailure::invalid_params(format!("Invalid resolve_wikilink arguments: {error}"))
     })?;
     let target = non_empty_argument("target", args.target)?;
-    let (index, _tree) = snapshot(&state)
+    let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
-    let slug = index
+    let slug = cache
         .resolve_wikilink(&target)
-        .map(|entry| entry.slug.clone());
+        .map_err(JsonRpcFailure::internal)?;
     Ok(tool_success(json!({ "slug": slug })))
 }
 
 async fn get_tree_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
     reject_non_empty_arguments("get_tree", &arguments)?;
-    let (_index, tree) = snapshot(&state)
+    let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
+    let tree = cache.explorer_tree().map_err(JsonRpcFailure::internal)?;
 
     Ok(tool_success(json!({ "tree": tree })))
 }
