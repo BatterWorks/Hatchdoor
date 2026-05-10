@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{OptionalExtension, params};
 
 use crate::vault::{
-    content_snippet, normalize_link_target, normalize_title, slugify, ExplorerFolder, ExplorerNote,
-    Note, NoteLink, NoteLinks, SearchHit,
+    ExplorerFolder, ExplorerNote, Note, NoteLink, NoteLinks, SearchHit, content_snippet,
+    normalize_link_target, normalize_title, slugify,
 };
 
-use super::parse::build_fts_query;
 use super::SqliteCache;
+use super::parse::build_fts_query;
 
 impl SqliteCache {
     pub(crate) fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
@@ -92,14 +92,17 @@ impl SqliteCache {
             )
             .map_err(|error| format!("failed to prepare SQLite FTS search: {error}"))?;
         let rows = stmt
-            .query_map(params![fts_query, (remaining * 3).max(remaining) as i64], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
+            .query_map(
+                params![fts_query, (remaining * 3).max(remaining) as i64],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
             .map_err(|error| format!("failed to execute SQLite FTS search: {error}"))?;
 
         for row in rows {

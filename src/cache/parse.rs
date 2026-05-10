@@ -67,7 +67,9 @@ pub(crate) fn extract_headings(content: &str) -> Vec<HeadingRow> {
         .filter_map(|(idx, line)| {
             let trimmed = line.trim_start();
             let level = trimmed.chars().take_while(|ch| *ch == '#').count();
-            if level == 0 || level > 6 || !trimmed.chars().nth(level).is_some_and(char::is_whitespace)
+            if level == 0
+                || level > 6
+                || !trimmed.chars().nth(level).is_some_and(char::is_whitespace)
             {
                 return None;
             }
@@ -90,7 +92,10 @@ pub(crate) fn extract_tags(content: &str) -> HashSet<String> {
         .split_whitespace()
         .filter_map(|token| {
             let token = token.trim_matches(|ch: char| {
-                matches!(ch, ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}')
+                matches!(
+                    ch,
+                    ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}'
+                )
             });
             let tag = token.strip_prefix('#')?;
             if tag.is_empty() || tag.starts_with('#') || tag.chars().all(|ch| ch == '-') {

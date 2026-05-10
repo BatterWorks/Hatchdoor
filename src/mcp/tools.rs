@@ -1,16 +1,17 @@
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::api_types::RefreshResponse;
-use crate::app_state::{refresh_if_needed, sqlite_cache, AppState};
+use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 
-use super::protocol::{tool_error, tool_success, JsonRpcFailure};
+use super::protocol::{JsonRpcFailure, tool_error, tool_success};
 
 pub(crate) async fn handle_tools_call(
     state: AppState,
     params: Option<Value>,
 ) -> Result<Value, JsonRpcFailure> {
-    let params = params.ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool call params"))?;
+    let params =
+        params.ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool call params"))?;
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -161,8 +162,9 @@ async fn search_notes_tool(state: AppState, arguments: Value) -> Result<Value, J
 }
 
 async fn get_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    let args: SlugArgs = serde_json::from_value(arguments)
-        .map_err(|error| JsonRpcFailure::invalid_params(format!("Invalid get_note arguments: {error}")))?;
+    let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid get_note arguments: {error}"))
+    })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let cache = sqlite_cache(&state)
         .await
@@ -227,7 +229,11 @@ async fn refresh_index_tool(state: AppState, arguments: Value) -> Result<Value, 
 }
 
 fn reject_non_empty_arguments(tool_name: &str, arguments: &Value) -> Result<(), JsonRpcFailure> {
-    if arguments.as_object().map(|object| object.is_empty()).unwrap_or(false) {
+    if arguments
+        .as_object()
+        .map(|object| object.is_empty())
+        .unwrap_or(false)
+    {
         return Ok(());
     }
 

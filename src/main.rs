@@ -8,15 +8,15 @@ mod vault;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{build_cache_with_sqlite, init_logging, AppConfig, AppState};
+use crate::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
 use crate::cache::SqliteCache;
 use crate::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
@@ -69,13 +69,15 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let sqlite = Arc::new(SqliteCache::open(&config.cache_db_path).unwrap_or_else(|e| {
-        error!(
-            cache_db_path = %config.cache_db_path.display(),
-            "SQLite cache startup failed: {e}"
-        );
-        std::process::exit(1);
-    }));
+    let sqlite = Arc::new(
+        SqliteCache::open(&config.cache_db_path).unwrap_or_else(|e| {
+            error!(
+                cache_db_path = %config.cache_db_path.display(),
+                "SQLite cache startup failed: {e}"
+            );
+            std::process::exit(1);
+        }),
+    );
 
     let cache = build_cache_with_sqlite(&config.vault_path, sqlite).unwrap_or_else(|e| {
         error!(
@@ -124,7 +126,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -163,7 +165,9 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert_eq!(&body[..], b"ok");
     }
 

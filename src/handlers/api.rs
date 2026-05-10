@@ -1,7 +1,7 @@
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use tracing::{debug, warn};
 
 use crate::api_types::{
@@ -9,7 +9,7 @@ use crate::api_types::{
     ResolveBatchResponse, ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery,
     SearchResponse,
 };
-use crate::app_state::{refresh_if_needed, sqlite_cache, AppState};
+use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 
 pub(crate) async fn health_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
@@ -119,9 +119,7 @@ pub(crate) async fn search_handler(
     let search_query = query.q;
     debug!(
         query_len = search_query.len(),
-        include_content,
-        limit,
-        "Executing SQLite search"
+        include_content, limit, "Executing SQLite search"
     );
 
     match cache.search(&search_query, include_content, limit) {
