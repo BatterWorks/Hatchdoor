@@ -115,10 +115,8 @@ pub(crate) fn extract_tags(content: &str) -> HashSet<String> {
 }
 
 pub(crate) fn build_fts_query(input: &str) -> Option<String> {
-    let tokens = input
-        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-'))
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
+    let tokens = fts_query_terms(input)
+        .into_iter()
         .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
         .collect::<Vec<_>>();
 
@@ -127,6 +125,15 @@ pub(crate) fn build_fts_query(input: &str) -> Option<String> {
     } else {
         Some(tokens.join(" OR "))
     }
+}
+
+pub(crate) fn fts_query_terms(input: &str) -> Vec<String> {
+    input
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-'))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[cfg(test)]
