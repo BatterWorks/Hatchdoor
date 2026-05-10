@@ -129,7 +129,7 @@ fn upsert_note_if_changed(
         cached.slug == entry.slug && cached.content_hash == hash
     });
     if cached_matches_content {
-        update_note_file_metadata(tx, entry, snapshot, indexed_at)?;
+        update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
         return Ok(());
     }
 
@@ -146,33 +146,57 @@ fn upsert_note_if_changed(
 fn update_note_file_metadata(
     tx: &Transaction<'_>,
     entry: &NoteEntry,
+    content: &str,
     snapshot: FileSnapshot,
     indexed_at: i64,
 ) -> Result<(), String> {
+    let normalized_title = normalize_title(&entry.title);
+    let normalized_relative_path = normalize_title(&entry.relative_path);
+    let absolute_path = entry.path.to_string_lossy().to_string();
     tx.execute(
         r#"
         UPDATE notes
         SET title = ?2,
             normalized_title = ?3,
             slug = ?4,
-            absolute_path = ?5,
-            mtime_ns = ?6,
-            size_bytes = ?7,
-            indexed_at = ?8
+            normalized_relative_path = ?5,
+            absolute_path = ?6,
+            mtime_ns = ?7,
+            size_bytes = ?8,
+            indexed_at = ?9
         WHERE relative_path = ?1
         "#,
         params![
             &entry.relative_path,
             &entry.title,
-            normalize_title(&entry.title),
+            &normalized_title,
             &entry.slug,
-            entry.path.to_string_lossy().to_string(),
+            &normalized_relative_path,
+            &absolute_path,
             snapshot.mtime_ns,
             snapshot.size_bytes,
             indexed_at,
         ],
     )
     .map_err(|error| format!("failed updating cached metadata for '{}': {error}", entry.slug))?;
+
+    let note_id = tx
+        .query_row(
+            "SELECT id FROM notes WHERE relative_path = ?1",
+            params![&entry.relative_path],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| format!("failed reading note id for '{}': {error}", entry.slug))?;
+    tx.execute("DELETE FROM note_fts WHERE rowid = ?1", params![note_id])
+        .map_err(|error| format!("failed deleting old FTS row for '{}': {error}", entry.slug))?;
+    tx.execute(
+        r#"
+        INSERT INTO note_fts(rowid, title, relative_path, content, slug)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        "#,
+        params![note_id, &entry.title, &entry.relative_path, content, &entry.slug],
+    )
+    .map_err(|error| format!("failed refreshing FTS metadata for '{}': {error}", entry.slug))?;
     Ok(())
 }
 
