@@ -69,32 +69,7 @@ impl SqliteCache {
         let mut results = Vec::new();
         let mut seen = HashSet::new();
 
-        for note in self.note_rows_ordered()? {
-            let normalized_title = normalize_title(&note.title);
-            let normalized_path = normalize_title(&note.relative_path);
-            let match_kind = if normalized_title.contains(&normalized_query) {
-                Some("title")
-            } else if normalized_path.contains(&normalized_query) {
-                Some("path")
-            } else {
-                None
-            };
-
-            if let Some(kind) = match_kind {
-                seen.insert(note.slug.clone());
-                results.push(SearchHit {
-                    title: note.title,
-                    slug: note.slug,
-                    relative_path: note.relative_path,
-                    match_kind: kind.to_string(),
-                    snippet: None,
-                });
-                if results.len() >= limit {
-                    return Ok(results);
-                }
-            }
-        }
-
+        self.search_title_or_path(&normalized_query, limit, &mut seen, &mut results)?;
         if !include_content || results.len() >= limit {
             return Ok(results);
         }
@@ -103,6 +78,7 @@ impl SqliteCache {
             return Ok(results);
         };
 
+        let remaining = limit.saturating_sub(results.len());
         let conn = self.connection()?;
         let mut stmt = conn
             .prepare(
@@ -116,7 +92,7 @@ impl SqliteCache {
             )
             .map_err(|error| format!("failed to prepare SQLite FTS search: {error}"))?;
         let rows = stmt
-            .query_map(params![fts_query, limit as i64], |row| {
+            .query_map(params![fts_query, (remaining * 3).max(remaining) as i64], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -188,7 +164,13 @@ impl SqliteCache {
 
         let by_path = conn
             .query_row(
-                "SELECT slug FROM notes WHERE lower(relative_path) = ?1 ORDER BY relative_path LIMIT 1",
+                r#"
+                SELECT slug
+                FROM notes
+                WHERE normalized_relative_path = ?1
+                ORDER BY relative_path
+                LIMIT 1
+                "#,
                 params![normalized_path],
                 |row| row.get::<_, String>(0),
             )
@@ -205,7 +187,13 @@ impl SqliteCache {
         let normalized_base = normalize_title(base);
         let by_title = conn
             .query_row(
-                "SELECT slug FROM notes WHERE lower(title) = ?1 ORDER BY relative_path LIMIT 1",
+                r#"
+                SELECT slug
+                FROM notes
+                WHERE normalized_title = ?1
+                ORDER BY relative_path
+                LIMIT 1
+                "#,
                 params![normalized_base],
                 |row| row.get::<_, String>(0),
             )
@@ -223,6 +211,64 @@ impl SqliteCache {
         )
         .optional()
         .map_err(|error| format!("failed to resolve wikilink by slug: {error}"))
+    }
+
+    fn search_title_or_path(
+        &self,
+        normalized_query: &str,
+        limit: usize,
+        seen: &mut HashSet<String>,
+        results: &mut Vec<SearchHit>,
+    ) -> Result<(), String> {
+        let like = format!("%{}%", escape_like(normalized_query));
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT title,
+                       slug,
+                       relative_path,
+                       CASE
+                         WHEN normalized_title LIKE ?1 ESCAPE '\' THEN 'title'
+                         ELSE 'path'
+                       END AS match_kind
+                FROM notes
+                WHERE normalized_title LIKE ?1 ESCAPE '\'
+                   OR normalized_relative_path LIKE ?1 ESCAPE '\'
+                ORDER BY
+                  CASE WHEN normalized_title LIKE ?1 ESCAPE '\' THEN 0 ELSE 1 END,
+                  relative_path
+                LIMIT ?2
+                "#,
+            )
+            .map_err(|error| format!("failed to prepare title/path search: {error}"))?;
+        let rows = stmt
+            .query_map(params![like, limit as i64], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| format!("failed to execute title/path search: {error}"))?;
+
+        for row in rows {
+            let (title, slug, relative_path, match_kind) =
+                row.map_err(|error| format!("failed to read title/path search result: {error}"))?;
+            if !seen.insert(slug.clone()) {
+                continue;
+            }
+            results.push(SearchHit {
+                title,
+                slug,
+                relative_path,
+                match_kind,
+                snippet: None,
+            });
+        }
+
+        Ok(())
     }
 
     fn note_rows_ordered(&self) -> Result<Vec<NoteRow>, String> {
@@ -312,4 +358,15 @@ impl FolderBuilder {
             notes: self.notes,
         }
     }
+}
+
+fn escape_like(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
