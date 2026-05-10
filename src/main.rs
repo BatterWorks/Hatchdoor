@@ -1,6 +1,7 @@
 mod api_types;
 mod app_state;
 mod handlers;
+mod mcp;
 mod vault;
 
 use std::sync::Arc;
@@ -20,10 +21,12 @@ use crate::handlers::{
     resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, tree_handler,
     vault_asset_handler,
 };
+use crate::mcp::{mcp_get_handler, mcp_post_handler};
 
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .route("/api/tree", get(tree_handler))
         .route("/api/note/{slug}", get(note_handler))
         .route("/api/note/{slug}/download", get(note_download_handler))
@@ -111,8 +114,8 @@ mod tests {
     use super::*;
     use axum::body::{to_bytes, Body};
     use axum::http::{Request, StatusCode};
-    use tempfile::TempDir;
     use std::time::Duration;
+    use tempfile::TempDir;
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
