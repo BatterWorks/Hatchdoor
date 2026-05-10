@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
-use crate::vault::{ExplorerFolder, VaultIndex};
+use crate::vault::VaultIndex;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppConfig {
@@ -71,8 +71,6 @@ pub(crate) struct AppState {
 }
 
 pub(crate) struct VaultCache {
-    pub(crate) index: Arc<VaultIndex>,
-    pub(crate) explorer_tree: Arc<ExplorerFolder>,
     pub(crate) sqlite: Arc<SqliteCache>,
     pub(crate) last_refresh: Instant,
 }
@@ -100,22 +98,11 @@ pub(crate) fn build_cache_with_sqlite(
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
     sqlite.replace_from_index(&index)?;
-    let explorer_tree = sqlite.explorer_tree()?;
 
     Ok(VaultCache {
-        index: Arc::new(index),
-        explorer_tree: Arc::new(explorer_tree),
         sqlite,
         last_refresh: Instant::now(),
     })
-}
-
-pub(crate) async fn snapshot(
-    state: &AppState,
-) -> Result<(Arc<VaultIndex>, Arc<ExplorerFolder>), (StatusCode, Json<ErrorResponse>)> {
-    refresh_if_needed(state, false).await?;
-    let guard = state.cache.read().await;
-    Ok((guard.index.clone(), guard.explorer_tree.clone()))
 }
 
 pub(crate) async fn sqlite_cache(
@@ -256,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_returns_refresh_error_when_reindex_fails() {
+    async fn sqlite_cache_returns_refresh_error_when_reindex_fails() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -265,7 +252,7 @@ mod tests {
         let mut state = state_with_vault(vault_path, Duration::from_secs(0));
         state.vault_path = dir.path().join("missing-vault");
 
-        let result = snapshot(&state).await;
+        let result = sqlite_cache(&state).await;
         assert!(result.is_err());
     }
 }
