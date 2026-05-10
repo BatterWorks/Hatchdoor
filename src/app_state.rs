@@ -88,8 +88,16 @@ pub(crate) fn init_logging() {
         .init();
 }
 
-pub(crate) fn build_cache(vault_path: &PathBuf, sqlite: Arc<SqliteCache>) -> Result<VaultCache, String> {
-    debug!(vault_path = %vault_path.display(), "Building vault cache");
+pub(crate) fn build_cache(vault_path: &PathBuf) -> Result<VaultCache, String> {
+    let sqlite = Arc::new(SqliteCache::in_memory()?);
+    build_cache_with_sqlite(vault_path, sqlite)
+}
+
+pub(crate) fn build_cache_with_sqlite(
+    vault_path: &PathBuf,
+    sqlite: Arc<SqliteCache>,
+) -> Result<VaultCache, String> {
+    debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
     sqlite.replace_from_index(&index)?;
     let explorer_tree = sqlite.explorer_tree()?;
@@ -100,12 +108,6 @@ pub(crate) fn build_cache(vault_path: &PathBuf, sqlite: Arc<SqliteCache>) -> Res
         sqlite,
         last_refresh: Instant::now(),
     })
-}
-
-#[cfg(test)]
-pub(crate) fn build_test_cache(vault_path: &PathBuf) -> Result<VaultCache, String> {
-    let sqlite = Arc::new(SqliteCache::in_memory()?);
-    build_cache(vault_path, sqlite)
 }
 
 pub(crate) async fn snapshot(
@@ -140,7 +142,7 @@ pub(crate) async fn refresh_if_needed(
         return Ok(());
     }
 
-    match build_cache(&state.vault_path, guard.sqlite.clone()) {
+    match build_cache_with_sqlite(&state.vault_path, guard.sqlite.clone()) {
         Ok(cache) => {
             if force {
                 info!(
@@ -217,7 +219,7 @@ mod tests {
     }
 
     fn state_with_vault(vault_path: PathBuf, refresh_interval: Duration) -> AppState {
-        let cache = build_test_cache(&vault_path).expect("build cache");
+        let cache = build_cache(&vault_path).expect("build cache");
         AppState {
             vault_path,
             refresh_interval,
