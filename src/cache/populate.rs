@@ -120,16 +120,16 @@ fn upsert_note_if_changed(
     let snapshot = file_snapshot(&entry.path)?;
     let cached = cached_note_state(tx, &entry.relative_path)?;
 
-    let cached_matches_file = cached
-        .as_ref()
-        .is_some_and(|cached| cached.slug == entry.slug && cached.snapshot == snapshot);
-    if cached_matches_file {
-        return Ok(());
-    }
-
     let content = fs::read_to_string(&entry.path)
         .map_err(|error| format!("failed reading note '{}': {error}", entry.path.display()))?;
     let hash = content_hash(&content);
+
+    let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
+        cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
+    });
+    if cached_matches_file_and_content {
+        return Ok(());
+    }
 
     let cached_matches_content = cached
         .as_ref()
@@ -378,4 +378,49 @@ fn rebuild_links(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::SqliteCache;
+    use crate::vault::VaultIndex;
+    use tempfile::tempdir;
+
+    #[test]
+    fn refresh_updates_content_even_when_cached_file_snapshot_matches() {
+        let dir = tempdir().expect("temp dir");
+        let note_path = dir.path().join("Home.md");
+        fs::write(&note_path, "# Home\nalpha token").expect("write original note");
+
+        let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let index = VaultIndex::build(dir.path()).expect("build original index");
+        cache.replace_from_index(&index).expect("initial populate");
+
+        fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
+        let snapshot = file_snapshot(&note_path).expect("file snapshot");
+        {
+            let conn = cache.connection().expect("connection");
+            conn.execute(
+                "UPDATE notes SET mtime_ns = ?1, size_bytes = ?2 WHERE slug = 'home'",
+                params![snapshot.mtime_ns, snapshot.size_bytes],
+            )
+            .expect("force cached snapshot to match file");
+        }
+
+        let refreshed_index = VaultIndex::build(dir.path()).expect("build refreshed index");
+        cache
+            .replace_from_index(&refreshed_index)
+            .expect("refresh populate");
+
+        let note = cache
+            .read_note_by_slug("home")
+            .expect("read note")
+            .expect("note exists");
+        assert_eq!(note.content, "# Home\nbravo token");
+
+        let hits = cache.search("bravo", true, 10).expect("content search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].slug, "home");
+    }
 }

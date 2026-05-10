@@ -8,7 +8,7 @@ use crate::vault::{
 };
 
 use super::SqliteCache;
-use super::parse::build_fts_query;
+use super::parse::{build_fts_query, fts_query_terms};
 
 impl SqliteCache {
     pub(crate) fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
@@ -77,6 +77,10 @@ impl SqliteCache {
         let Some(fts_query) = build_fts_query(query) else {
             return Ok(results);
         };
+        let snippet_terms = fts_query_terms(query)
+            .into_iter()
+            .map(|term| normalize_title(&term))
+            .collect::<Vec<_>>();
 
         let remaining = limit.saturating_sub(results.len());
         let conn = self.connection()?;
@@ -112,7 +116,11 @@ impl SqliteCache {
                 continue;
             }
             seen.insert(slug.clone());
-            let snippet = content_snippet(&content, &normalized_query);
+            let snippet = content_snippet(&content, &normalized_query).or_else(|| {
+                snippet_terms
+                    .iter()
+                    .find_map(|term| content_snippet(&content, term))
+            });
             results.push(SearchHit {
                 title,
                 slug,
@@ -372,4 +380,29 @@ fn escape_like(input: &str) -> String {
         escaped.push(ch);
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cache::SqliteCache;
+    use crate::vault::VaultIndex;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn content_search_snippet_falls_back_to_matched_query_token() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(dir.path().join("Home.md"), "alpha context only").expect("write note");
+        let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache.replace_from_index(&index).expect("populate cache");
+
+        let hits = cache
+            .search("alpha missing", true, 10)
+            .expect("search cache");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].match_kind, "content");
+        assert_eq!(hits[0].snippet.as_deref(), Some("alpha context only"));
+    }
 }
