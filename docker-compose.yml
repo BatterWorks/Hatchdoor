@@ -6,8 +6,10 @@ services:
       - .env
     environment:
       VAULT_PATH: /data/vault
+      HATCHDOOR_CACHE_DB: /data/cache/hatchdoor-cache.sqlite3
     ports:
       - "42824:42824"
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
+      - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
     restart: unless-stopped
