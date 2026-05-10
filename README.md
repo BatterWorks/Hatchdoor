@@ -45,13 +45,22 @@ Markdown remains the source of truth. SQLite is a persistent, disposable cache/r
 Hatchdoor stores this in SQLite:
 
 - note metadata and full Markdown content
+- normalised title/path lookup data
+- file modification time, size, and stable content hash
 - explorer tree data
 - FTS5 search index
 - resolved wikilinks and backlinks
 - headings
 - tags
 
-If the SQLite database is deleted, Hatchdoor rebuilds it from the Markdown vault at startup. If the database cannot be opened or migrated, Hatchdoor fails startup rather than silently falling back.
+Refresh behaviour:
+
+- API/UI/MCP requests trigger refresh only when `VAULT_REFRESH_SECONDS` has elapsed.
+- Changed/new/deleted note rows are updated incrementally using file metadata plus stable content hash.
+- Link relationships are rebuilt from the current vault index on refresh so backlinks stay correct after note renames, additions, or deletions.
+- `/api/refresh` and MCP `refresh_index` force an immediate refresh.
+
+If the SQLite database is deleted, Hatchdoor rebuilds it from the Markdown vault at startup. If the database cannot be opened, has no schema metadata, or has an unsupported schema version, Hatchdoor fails startup rather than silently falling back.
 
 Manual cache rebuild:
 
