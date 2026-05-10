@@ -95,6 +95,13 @@ impl VaultIndex {
         })
     }
 
+    pub fn ordered_entries(&self) -> Vec<NoteEntry> {
+        self.ordered_slugs
+            .iter()
+            .filter_map(|slug| self.by_slug.get(slug).cloned())
+            .collect()
+    }
+
     pub fn find_by_slug(&self, slug: &str) -> Option<&NoteEntry> {
         self.by_slug.get(slug)
     }
