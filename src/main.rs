@@ -1,5 +1,6 @@
 mod api_types;
 mod app_state;
+mod cache;
 mod handlers;
 mod mcp;
 mod vault;
@@ -15,7 +16,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{build_cache, init_logging, AppConfig, AppState};
+use crate::app_state::{build_cache, build_test_cache, init_logging, AppConfig, AppState};
+use crate::cache::SqliteCache;
 use crate::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
     resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, tree_handler,
@@ -67,10 +69,19 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let cache = build_cache(&config.vault_path).unwrap_or_else(|e| {
+    let sqlite = Arc::new(SqliteCache::open(&config.cache_db_path).unwrap_or_else(|e| {
         error!(
-            "Failed to index vault at {}: {e}",
-            config.vault_path.display()
+            cache_db_path = %config.cache_db_path.display(),
+            "SQLite cache startup failed: {e}"
+        );
+        std::process::exit(1);
+    }));
+
+    let cache = build_cache(&config.vault_path, sqlite).unwrap_or_else(|e| {
+        error!(
+            "Failed to index vault at {} into SQLite cache {}: {e}",
+            config.vault_path.display(),
+            config.cache_db_path.display()
         );
         std::process::exit(1);
     });
@@ -93,6 +104,7 @@ async fn main() {
         port = config.port,
         refresh_seconds = config.refresh_seconds,
         vault_path = %config.vault_path.display(),
+        cache_db_path = %config.cache_db_path.display(),
         "Hatchdoor starting"
     );
     info!("Hatchdoor listening on http://{addr}");
@@ -124,7 +136,7 @@ mod tests {
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let cache = build_cache(&vault_root).expect("cache");
+        let cache = build_test_cache(&vault_root).expect("cache");
         let state = AppState {
             vault_path: vault_root,
             refresh_interval: Duration::from_secs(60),
