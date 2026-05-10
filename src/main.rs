@@ -16,7 +16,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{build_cache, init_logging, AppConfig, AppState};
+use crate::app_state::{build_cache, build_cache_with_sqlite, init_logging, AppConfig, AppState};
 use crate::cache::SqliteCache;
 use crate::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
@@ -77,7 +77,7 @@ async fn main() {
         std::process::exit(1);
     }));
 
-    let cache = build_cache(&config.vault_path, sqlite).unwrap_or_else(|e| {
+    let cache = build_cache_with_sqlite(&config.vault_path, sqlite).unwrap_or_else(|e| {
         error!(
             "Failed to index vault at {} into SQLite cache {}: {e}",
             config.vault_path.display(),
@@ -131,14 +131,12 @@ mod tests {
     use tokio::sync::RwLock;
     use tower::ServiceExt;
 
-    use crate::app_state::build_test_cache;
-
     fn app_for_tests() -> (Router, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let cache = build_test_cache(&vault_root).expect("cache");
+        let cache = build_cache(&vault_root).expect("cache");
         let state = AppState {
             vault_path: vault_root,
             refresh_interval: Duration::from_secs(60),
