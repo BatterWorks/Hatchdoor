@@ -86,6 +86,7 @@ pub(crate) fn init_logging() {
         .init();
 }
 
+#[cfg(test)]
 pub(crate) fn build_cache(vault_path: &PathBuf) -> Result<VaultCache, String> {
     let sqlite = Arc::new(SqliteCache::in_memory()?);
     build_cache_with_sqlite(vault_path, sqlite)
