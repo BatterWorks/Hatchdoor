@@ -16,7 +16,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{build_cache, build_cache_with_sqlite, init_logging, AppConfig, AppState};
+use crate::app_state::{build_cache_with_sqlite, init_logging, AppConfig, AppState};
 use crate::cache::SqliteCache;
 use crate::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
@@ -130,6 +130,8 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::RwLock;
     use tower::ServiceExt;
+
+    use crate::app_state::build_cache;
 
     fn app_for_tests() -> (Router, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
