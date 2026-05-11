@@ -1,29 +1,34 @@
 mod api_types;
 mod app_state;
+mod cache;
 mod handlers;
+mod mcp;
 mod vault;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{build_cache, init_logging, AppConfig, AppState};
+use crate::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
+use crate::cache::SqliteCache;
 use crate::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
     resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, tree_handler,
     vault_asset_handler,
 };
+use crate::mcp::{mcp_get_handler, mcp_post_handler};
 
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .route("/api/tree", get(tree_handler))
         .route("/api/note/{slug}", get(note_handler))
         .route("/api/note/{slug}/download", get(note_download_handler))
@@ -64,10 +69,21 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let cache = build_cache(&config.vault_path).unwrap_or_else(|e| {
+    let sqlite = Arc::new(
+        SqliteCache::open(&config.cache_db_path).unwrap_or_else(|e| {
+            error!(
+                cache_db_path = %config.cache_db_path.display(),
+                "SQLite cache startup failed: {e}"
+            );
+            std::process::exit(1);
+        }),
+    );
+
+    let cache = build_cache_with_sqlite(&config.vault_path, sqlite).unwrap_or_else(|e| {
         error!(
-            "Failed to index vault at {}: {e}",
-            config.vault_path.display()
+            "Failed to index vault at {} into SQLite cache {}: {e}",
+            config.vault_path.display(),
+            config.cache_db_path.display()
         );
         std::process::exit(1);
     });
@@ -90,6 +106,7 @@ async fn main() {
         port = config.port,
         refresh_seconds = config.refresh_seconds,
         vault_path = %config.vault_path.display(),
+        cache_db_path = %config.cache_db_path.display(),
         "Hatchdoor starting"
     );
     info!("Hatchdoor listening on http://{addr}");
@@ -109,12 +126,14 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use tempfile::TempDir;
     use std::time::Duration;
+    use tempfile::TempDir;
     use tokio::sync::RwLock;
     use tower::ServiceExt;
+
+    use crate::app_state::build_cache;
 
     fn app_for_tests() -> (Router, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
@@ -146,7 +165,9 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert_eq!(&body[..], b"ok");
     }
 

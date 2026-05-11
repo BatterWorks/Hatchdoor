@@ -4,18 +4,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::StatusCode;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use crate::api_types::ErrorResponse;
-use crate::vault::{ExplorerFolder, VaultIndex};
+use crate::cache::SqliteCache;
+use crate::vault::VaultIndex;
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppConfig {
     pub(crate) vault_path: PathBuf,
+    pub(crate) cache_db_path: PathBuf,
     pub(crate) host: String,
     pub(crate) port: u16,
     pub(crate) refresh_seconds: u64,
@@ -24,6 +26,8 @@ pub(crate) struct AppConfig {
 impl AppConfig {
     pub(crate) fn from_env() -> Result<Self, String> {
         let vault_path = env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
+        let cache_db_path = env::var("HATCHDOOR_CACHE_DB")
+            .unwrap_or_else(|_| "./data/cache/hatchdoor-cache.sqlite3".to_string());
         let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let port_raw = env::var("PORT").unwrap_or_else(|_| "42824".to_string());
         let refresh_raw = env::var("VAULT_REFRESH_SECONDS").unwrap_or_else(|_| "2".to_string());
@@ -33,6 +37,7 @@ impl AppConfig {
 
         Ok(Self {
             vault_path: PathBuf::from(vault_path),
+            cache_db_path: PathBuf::from(cache_db_path),
             host,
             port,
             refresh_seconds,
@@ -66,8 +71,7 @@ pub(crate) struct AppState {
 }
 
 pub(crate) struct VaultCache {
-    pub(crate) index: Arc<VaultIndex>,
-    pub(crate) explorer_tree: Arc<ExplorerFolder>,
+    pub(crate) sqlite: Arc<SqliteCache>,
     pub(crate) last_refresh: Instant,
 }
 
@@ -82,24 +86,32 @@ pub(crate) fn init_logging() {
         .init();
 }
 
+#[cfg(test)]
 pub(crate) fn build_cache(vault_path: &PathBuf) -> Result<VaultCache, String> {
-    debug!(vault_path = %vault_path.display(), "Building vault cache");
+    let sqlite = Arc::new(SqliteCache::in_memory()?);
+    build_cache_with_sqlite(vault_path, sqlite)
+}
+
+pub(crate) fn build_cache_with_sqlite(
+    vault_path: &PathBuf,
+    sqlite: Arc<SqliteCache>,
+) -> Result<VaultCache, String> {
+    debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
-    let explorer_tree = index.explorer_tree();
+    sqlite.replace_from_index(&index)?;
 
     Ok(VaultCache {
-        index: Arc::new(index),
-        explorer_tree: Arc::new(explorer_tree),
+        sqlite,
         last_refresh: Instant::now(),
     })
 }
 
-pub(crate) async fn snapshot(
+pub(crate) async fn sqlite_cache(
     state: &AppState,
-) -> Result<(Arc<VaultIndex>, Arc<ExplorerFolder>), (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Arc<SqliteCache>, (StatusCode, Json<ErrorResponse>)> {
     refresh_if_needed(state, false).await?;
     let guard = state.cache.read().await;
-    Ok((guard.index.clone(), guard.explorer_tree.clone()))
+    Ok(guard.sqlite.clone())
 }
 
 pub(crate) async fn refresh_if_needed(
@@ -118,19 +130,19 @@ pub(crate) async fn refresh_if_needed(
         return Ok(());
     }
 
-    match build_cache(&state.vault_path) {
+    match build_cache_with_sqlite(&state.vault_path, guard.sqlite.clone()) {
         Ok(cache) => {
             if force {
                 info!(
                     force_refresh = true,
                     vault_path = %state.vault_path.display(),
-                    "Vault cache refreshed"
+                    "SQLite vault cache refreshed"
                 );
             } else {
                 debug!(
                     force_refresh = false,
                     vault_path = %state.vault_path.display(),
-                    "Vault cache refreshed"
+                    "SQLite vault cache refreshed"
                 );
             }
             *guard = cache;
@@ -184,6 +196,7 @@ mod tests {
     fn socket_addr_builds_expected_address() {
         let cfg = AppConfig {
             vault_path: PathBuf::from("./vault"),
+            cache_db_path: PathBuf::from("./data/cache/hatchdoor-cache.sqlite3"),
             host: "0.0.0.0".to_string(),
             port: 42824,
             refresh_seconds: 2,
@@ -231,7 +244,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_returns_refresh_error_when_reindex_fails() {
+    async fn sqlite_cache_returns_refresh_error_when_reindex_fails() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -240,7 +253,7 @@ mod tests {
         let mut state = state_with_vault(vault_path, Duration::from_secs(0));
         state.vault_path = dir.path().join("missing-vault");
 
-        let result = snapshot(&state).await;
+        let result = sqlite_cache(&state).await;
         assert!(result.is_err());
     }
 }

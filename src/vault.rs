@@ -6,5 +6,8 @@ mod tests;
 mod types;
 
 #[cfg(test)]
-pub use paths::{normalize_link_target, normalize_title, slugify, strip_md_extension};
-pub use types::{ExplorerFolder, Note, NoteLinks, SearchHit, VaultIndex};
+pub(crate) use paths::strip_md_extension;
+pub(crate) use paths::{content_snippet, normalize_link_target, normalize_title, slugify};
+pub use types::{
+    ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
+};
