@@ -88,8 +88,8 @@ async fn handle_mcp_post(
     let result = match request.method.as_str() {
         "initialize" => Ok(handle_initialize()),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools_list() })),
-        "tools/call" => handle_tools_call(state, request.params).await,
+        "tools/list" => Ok(json!({ "tools": tools_list(config.write_enabled) })),
+        "tools/call" => handle_tools_call(state, request.params, config.write_enabled).await,
         method => Err(JsonRpcFailure::method_not_found(format!(
             "Unsupported MCP method: {method}"
         ))),
@@ -131,7 +131,20 @@ mod tests {
     fn enabled_config() -> McpConfig {
         McpConfig {
             enabled: true,
+            write_enabled: false,
             bearer_token: None,
+            allowed_origins: vec![
+                "http://127.0.0.1".to_string(),
+                "http://localhost".to_string(),
+            ],
+        }
+    }
+
+    fn write_config() -> McpConfig {
+        McpConfig {
+            enabled: true,
+            write_enabled: true,
+            bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![
                 "http://127.0.0.1".to_string(),
                 "http://localhost".to_string(),
@@ -172,6 +185,15 @@ mod tests {
         .await
     }
 
+    async fn post_json_with_auth(state: AppState, payload: Value, config: McpConfig) -> Response {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        handle_mcp_post(state, &headers, Bytes::from(payload.to_string()), &config).await
+    }
+
     #[tokio::test]
     async fn mcp_disabled_returns_not_found() {
         let (state, _tmp) = test_state();
@@ -180,6 +202,7 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
             McpConfig {
                 enabled: false,
+                write_enabled: false,
                 bearer_token: None,
                 allowed_origins: vec![],
             },
@@ -336,6 +359,87 @@ mod tests {
         assert_eq!(refresh["annotations"]["destructiveHint"], false);
         assert_eq!(refresh["annotations"]["idempotentHint"], true);
         assert_eq!(refresh["annotations"]["openWorldHint"], false);
+    }
+
+    #[tokio::test]
+    async fn write_mode_requires_bearer_token_config() {
+        let (state, _tmp) = test_state();
+        let response = post_json(
+            state,
+            json!({"jsonrpc":"2.0","id":50,"method":"tools/list"}),
+            McpConfig {
+                enabled: true,
+                write_enabled: true,
+                bearer_token: None,
+                allowed_origins: vec![],
+            },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32001);
+    }
+
+    #[tokio::test]
+    async fn write_mode_exposes_mutation_tools() {
+        let (state, _tmp) = test_state();
+        let response = post_json_with_auth(
+            state,
+            json!({"jsonrpc":"2.0","id":51,"method":"tools/list"}),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let names: Vec<&str> = body["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+
+        assert!(names.contains(&"create_note"));
+        assert!(names.contains(&"update_note"));
+        assert!(names.contains(&"move_rename_note"));
+        assert!(names.contains(&"delete_note"));
+    }
+
+    #[tokio::test]
+    async fn write_tool_creates_note_and_refreshes_cache() {
+        let (state, _tmp) = test_state();
+        let response = post_json_with_auth(
+            state.clone(),
+            json!({
+                "jsonrpc":"2.0",
+                "id":52,
+                "method":"tools/call",
+                "params": {
+                    "name": "create_note",
+                    "arguments": {
+                        "relative_path": "Projects/New.md",
+                        "content": "# New\ncreated from MCP"
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["structuredContent"]["ok"], true);
+        assert!(state.vault_path.join("Projects/New.md").exists());
+
+        let cache = state.cache.read().await;
+        let note = cache
+            .sqlite
+            .read_note_by_slug("new")
+            .expect("read from refreshed cache")
+            .expect("new note");
+        assert_eq!(note.relative_path, "Projects/New");
+        assert_eq!(note.content, "# New\ncreated from MCP");
     }
 
     #[tokio::test]

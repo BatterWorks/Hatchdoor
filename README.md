@@ -1,13 +1,13 @@
 # Hatchdoor
 
-Rust backend + React/Vite frontend for browsing an Obsidian vault in read-only mode.
+Rust backend + React/Vite frontend for browsing an Obsidian vault, with optional write-capable MCP access.
 
 ## Features
 
 - Explorer tree from vault folders/files
 - Open notes via route (`/n/:slug`)
 - Obsidian wikilinks (`[[Note]]`, `[[Note|Alias]]`) resolved through backend API
-- Persistent SQLite cache/read model for fast API, UI, search, links, and MCP reads
+- Persistent SQLite cache/read model for fast API, UI, search, links, and MCP access
 - SQLite FTS5 search over note title, relative path, and Markdown content
 - Cached headings, tags, wikilinks, and backlinks
 - Markdown rendering with:
@@ -75,6 +75,13 @@ The embedded MCP endpoint is disabled by default. Enable it only when OpenClaw s
 HATCHDOOR_MCP_ENABLED=true
 ```
 
+Write-capable MCP tools are a separate opt-in and require bearer auth:
+
+```env
+HATCHDOOR_MCP_WRITE_ENABLED=true
+HATCHDOOR_MCP_BEARER_TOKEN=change-me
+```
+
 If Hatchdoor is reachable beyond localhost, set a bearer token and configure OpenClaw to send it:
 
 ```env
@@ -128,7 +135,7 @@ The container uses:
 ## API
 
 - `GET /api/tree` -> explorer tree JSON
-- `GET /api/note/:slug` -> note JSON (`title`, `slug`, `content`)
+- `GET /api/note/:slug` -> note JSON (`title`, `slug`, `content`, `content_hash`)
 - `GET /api/resolve?target=...` -> single wikilink resolution (`slug` or `null`)
 - `POST /api/resolve-batch` -> batch wikilink resolution
 - `GET /api/search?q=...` -> note search results
@@ -152,6 +159,13 @@ Enable it:
 HATCHDOOR_MCP_ENABLED=true
 ```
 
+Enable write tools:
+
+```env
+HATCHDOOR_MCP_WRITE_ENABLED=true
+HATCHDOOR_MCP_BEARER_TOKEN=change-me
+```
+
 Register it in OpenClaw:
 
 ```bash
@@ -172,13 +186,20 @@ MCP transport behaviour:
 Vault-safe MCP tools:
 
 - `search_notes` -> compact SQLite search results; prefer this before fetching full note content
-- `get_note` -> fetch one note by slug with Markdown content from SQLite cache
+- `get_note` -> fetch one note by slug with Markdown content and `content_hash` from SQLite cache
 - `get_note_links` -> fetch outgoing links and backlinks for a slug
 - `resolve_wikilink` -> resolve an Obsidian wikilink target to a slug
 - `get_tree` -> fetch the explorer tree; potentially larger response
 - `refresh_index` -> force Hatchdoor to refresh its SQLite view of the vault without modifying vault content
+- `create_note` -> create a Markdown note when write mode is enabled
+- `update_note` -> replace note content with `expected_content_hash`
+- `append_to_note` -> append Markdown with `expected_content_hash`
+- `rename_note` -> rename a note, rewrite wikilink backlinks, and move referenced assets
+- `move_note` -> move a note folder, rewrite wikilink backlinks, and move referenced assets
+- `move_rename_note` -> move and rename in one operation
+- `delete_note` -> move a note and referenced assets to `.hatchdoor-trash`
 
-The MCP endpoint does not expose write, delete, shell, or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
+Write tools modify Markdown files as the source of truth, then force a SQLite cache refresh. They do not expose shell or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
 
 ## Frontend Dev Mode
 

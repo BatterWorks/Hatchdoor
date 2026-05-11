@@ -15,7 +15,7 @@ impl SqliteCache {
         let conn = self.connection()?;
         conn.query_row(
             r#"
-            SELECT title, slug, relative_path, content
+            SELECT title, slug, relative_path, content, content_hash
             FROM notes
             WHERE slug = ?1
             "#,
@@ -26,6 +26,7 @@ impl SqliteCache {
                     slug: row.get(1)?,
                     relative_path: row.get(2)?,
                     content: row.get(3)?,
+                    content_hash: row.get(4)?,
                 })
             },
         )

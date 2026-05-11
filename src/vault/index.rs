@@ -13,6 +13,7 @@ use super::paths::{
 use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
 };
+use crate::cache::parse::content_hash;
 
 impl VaultIndex {
     pub fn build(root: impl AsRef<Path>) -> io::Result<Self> {
@@ -23,7 +24,10 @@ impl VaultIndex {
         let mut ordered_slugs = Vec::new();
         let mut markdown_paths = Vec::new();
 
-        for entry in WalkDir::new(&root) {
+        for entry in WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| entry.file_name() != ".hatchdoor-trash")
+        {
             let entry = entry.map_err(io::Error::other)?;
             let path = entry.path();
 
@@ -138,6 +142,7 @@ impl VaultIndex {
             title: entry.title.clone(),
             slug: entry.slug.clone(),
             relative_path: entry.relative_path.clone(),
+            content_hash: content_hash(&content),
             content,
         }))
     }
