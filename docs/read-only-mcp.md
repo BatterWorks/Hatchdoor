@@ -206,10 +206,10 @@ Write tools are exposed only when `HATCHDOOR_MCP_WRITE_ENABLED=true`.
 - `create_note` creates a Markdown note at a vault-relative path.
 - `update_note` replaces note content and requires `expected_content_hash`.
 - `append_to_note` appends Markdown and requires `expected_content_hash`.
-- `rename_note` renames a note in its current folder, rewrites wikilink backlinks, and moves referenced assets.
-- `move_note` moves a note to another vault-relative folder, rewrites wikilink backlinks, and moves referenced assets.
+- `rename_note` renames a note in its current folder, rewrites wikilink backlinks, moves referenced assets, and rewrites other asset references.
+- `move_note` moves a note to another vault-relative folder, rewrites wikilink backlinks, moves referenced assets, and rewrites other asset references.
 - `move_rename_note` moves and renames a note in one operation.
-- `delete_note` trashes the note and referenced assets under `.hatchdoor-trash`.
+- `delete_note` trashes the note and referenced assets under `.hatchdoor-trash`, rewrites other asset references, and removes backlinks to the deleted note.
 
 Write rules:
 
