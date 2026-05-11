@@ -31,6 +31,8 @@ fn build_indexes_markdown_files_only() {
     let dir = tempdir().expect("temp dir");
     fs::write(dir.path().join("Home.md"), "# Home").expect("write note");
     fs::write(dir.path().join("readme.txt"), "ignore").expect("write text");
+    fs::create_dir_all(dir.path().join(".hatchdoor-trash")).expect("create trash");
+    fs::write(dir.path().join(".hatchdoor-trash/Deleted.md"), "# Deleted").expect("write trash");
 
     let vault = VaultIndex::build(dir.path()).expect("build vault");
     assert_eq!(vault.total_notes(), 1);

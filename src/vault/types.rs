@@ -17,6 +17,7 @@ pub struct Note {
     pub slug: String,
     pub relative_path: String,
     pub content: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone)]

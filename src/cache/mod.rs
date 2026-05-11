@@ -1,4 +1,4 @@
-mod parse;
+pub(crate) mod parse;
 mod populate;
 mod queries;
 mod schema;

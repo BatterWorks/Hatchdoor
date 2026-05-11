@@ -150,6 +150,7 @@ mod tests {
             slug: "readme".to_string(),
             relative_path: "Docs/README".to_string(),
             content: "# Readme".to_string(),
+            content_hash: "fnv1a64:0000000000000000".to_string(),
         };
 
         assert_eq!(download_filename_for_note(&note), "README.md");
