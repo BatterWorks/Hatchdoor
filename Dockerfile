@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.95-slim-trixie AS chef
+FROM rust:1.95-slim AS chef
 WORKDIR /app
 RUN cargo install cargo-chef --locked
 
@@ -16,7 +16,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --bin hatchdoor
 
-FROM node:24-trixie-slim AS frontend-builder
+FROM node:24-slim AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
