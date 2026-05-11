@@ -277,9 +277,10 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
     let args: AppendNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid append_to_note arguments: {error}"))
     })?;
+    let content = non_empty_argument("content", args.content)?;
     let index = current_index(&state)?;
     let entry = note_entry(&index, &args.slug)?;
-    let outcome = append_note(&entry, &args.content, &args.expected_content_hash)
+    let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     Ok(write_success(outcome))
