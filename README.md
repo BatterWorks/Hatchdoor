@@ -194,10 +194,10 @@ Vault-safe MCP tools:
 - `create_note` -> create a Markdown note when write mode is enabled
 - `update_note` -> replace note content with `expected_content_hash`
 - `append_to_note` -> append Markdown with `expected_content_hash`
-- `rename_note` -> rename a note, rewrite wikilink backlinks, and move referenced assets
-- `move_note` -> move a note folder, rewrite wikilink backlinks, and move referenced assets
+- `rename_note` -> rename a note, rewrite wikilink backlinks, move referenced assets, and rewrite other asset references
+- `move_note` -> move a note folder, rewrite wikilink backlinks, move referenced assets, and rewrite other asset references
 - `move_rename_note` -> move and rename in one operation
-- `delete_note` -> move a note and referenced assets to `.hatchdoor-trash`
+- `delete_note` -> move a note and referenced assets to `.hatchdoor-trash`, rewrite other asset references, and remove backlinks to the deleted note
 
 Write tools modify Markdown files as the source of truth, then force a SQLite cache refresh. They do not expose shell or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
 

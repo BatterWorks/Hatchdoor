@@ -530,7 +530,7 @@ fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_note",
-            "description": "Rename a note within its current folder, rewrite wikilink backlinks, and move referenced assets with the note. Requires expected_content_hash from get_note.",
+            "description": "Rename a note within its current folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -545,7 +545,7 @@ fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_note",
-            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, and move referenced assets with the note. Requires expected_content_hash from get_note.",
+            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -560,7 +560,7 @@ fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_rename_note",
-            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, and move referenced assets with the note. Requires expected_content_hash from get_note.",
+            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -575,7 +575,7 @@ fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_note",
-            "description": "Trash a note by moving it to .hatchdoor-trash, rewrite wikilink backlinks to the trashed path, and move referenced assets with it. Requires expected_content_hash from get_note.",
+            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, move referenced assets with it, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
