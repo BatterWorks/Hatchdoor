@@ -127,7 +127,7 @@ where
                     }
                     out.push_str("[[");
                     out.push_str(&rewritten_body);
-                    out.push_str("]] ".trim_end());
+                    out.push_str("]]");
                 }
                 idx = end + 2;
                 continue;
