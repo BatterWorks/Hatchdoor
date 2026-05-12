@@ -1,4 +1,5 @@
 use std::env;
+use std::path::PathBuf;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -13,6 +14,10 @@ pub(crate) const SERVER_INSTRUCTIONS: &str = "Hatchdoor provides tools for query
 pub(crate) struct McpConfig {
     pub(crate) enabled: bool,
     pub(crate) write_enabled: bool,
+    pub(crate) attachment_staging_path: Option<PathBuf>,
+    pub(crate) host_attachment_staging_path: Option<String>,
+    pub(crate) advertise_host_paths: bool,
+    pub(crate) max_attachment_bytes: u64,
     pub(crate) bearer_token: Option<String>,
     pub(crate) allowed_origins: Vec<String>,
 }
@@ -25,6 +30,22 @@ impl McpConfig {
         let write_enabled = env::var("HATCHDOOR_MCP_WRITE_ENABLED")
             .map(|value| is_truthy(&value))
             .unwrap_or(false);
+        let attachment_staging_path = env::var("HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let host_attachment_staging_path = env::var("HOST_ATTACHMENT_STAGING_PATH")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let advertise_host_paths = env::var("HATCHDOOR_MCP_ADVERTISE_HOST_PATHS")
+            .map(|value| is_truthy(&value))
+            .unwrap_or(false);
+        let max_attachment_bytes = env::var("HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(10 * 1024 * 1024);
         let bearer_token = env::var("HATCHDOOR_MCP_BEARER_TOKEN")
             .ok()
             .map(|value| value.trim().to_string())
@@ -40,6 +61,10 @@ impl McpConfig {
         Self {
             enabled,
             write_enabled,
+            attachment_staging_path,
+            host_attachment_staging_path,
+            advertise_host_paths,
+            max_attachment_bytes,
             bearer_token,
             allowed_origins,
         }

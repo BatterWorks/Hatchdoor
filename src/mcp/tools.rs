@@ -5,16 +5,18 @@ use crate::api_types::RefreshResponse;
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 use crate::vault::VaultIndex;
 use crate::vault::{
-    WriteError, WriteOutcome, append_note, create_note, delete_note, move_or_rename_note,
-    update_note,
+    AttachmentOutcome, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
+    create_note, delete_attachment, delete_note, import_attachment, list_note_attachments,
+    move_attachment, move_or_rename_note, rename_attachment, update_note,
 };
 
+use super::config::McpConfig;
 use super::protocol::{JsonRpcFailure, tool_error, tool_success};
 
 pub(crate) async fn handle_tools_call(
     state: AppState,
     params: Option<Value>,
-    write_enabled: bool,
+    config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
     let params =
         params.ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool call params"))?;
@@ -34,15 +36,39 @@ pub(crate) async fn handle_tools_call(
         "resolve_wikilink" => resolve_wikilink_tool(state, arguments).await,
         "get_tree" => get_tree_tool(state, arguments).await,
         "refresh_index" => refresh_index_tool(state, arguments).await,
-        "create_note" if write_enabled => create_note_tool(state, arguments).await,
-        "update_note" if write_enabled => update_note_tool(state, arguments).await,
-        "append_to_note" if write_enabled => append_to_note_tool(state, arguments).await,
-        "rename_note" if write_enabled => rename_note_tool(state, arguments).await,
-        "move_note" if write_enabled => move_note_tool(state, arguments).await,
-        "move_rename_note" if write_enabled => move_rename_note_tool(state, arguments).await,
-        "delete_note" if write_enabled => delete_note_tool(state, arguments).await,
-        "create_note" | "update_note" | "append_to_note" | "rename_note" | "move_note"
-        | "move_rename_note" | "delete_note" => Err(JsonRpcFailure::invalid_params(
+        "get_attachment_import_config" => get_attachment_import_config_tool(config),
+        "create_note" if config.write_enabled => create_note_tool(state, arguments).await,
+        "update_note" if config.write_enabled => update_note_tool(state, arguments).await,
+        "append_to_note" if config.write_enabled => append_to_note_tool(state, arguments).await,
+        "rename_note" if config.write_enabled => rename_note_tool(state, arguments).await,
+        "move_note" if config.write_enabled => move_note_tool(state, arguments).await,
+        "move_rename_note" if config.write_enabled => move_rename_note_tool(state, arguments).await,
+        "delete_note" if config.write_enabled => delete_note_tool(state, arguments).await,
+        "import_attachment" if config.write_enabled => {
+            import_attachment_tool(state, arguments, config).await
+        }
+        "move_attachment" if config.write_enabled => move_attachment_tool(state, arguments).await,
+        "rename_attachment" if config.write_enabled => {
+            rename_attachment_tool(state, arguments).await
+        }
+        "delete_attachment" if config.write_enabled => {
+            delete_attachment_tool(state, arguments).await
+        }
+        "list_note_attachments" if config.write_enabled => {
+            list_note_attachments_tool(state, arguments).await
+        }
+        "create_note"
+        | "update_note"
+        | "append_to_note"
+        | "rename_note"
+        | "move_note"
+        | "move_rename_note"
+        | "delete_note"
+        | "import_attachment"
+        | "move_attachment"
+        | "rename_attachment"
+        | "delete_attachment"
+        | "list_note_attachments" => Err(JsonRpcFailure::invalid_params(
             "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
         )),
         other => Err(JsonRpcFailure::invalid_params(format!(
@@ -51,7 +77,7 @@ pub(crate) async fn handle_tools_call(
     }
 }
 
-pub(crate) fn tools_list(write_enabled: bool) -> Vec<Value> {
+pub(crate) fn tools_list(config: &McpConfig) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "search_notes",
@@ -152,8 +178,18 @@ pub(crate) fn tools_list(write_enabled: bool) -> Vec<Value> {
             },
             "annotations": refresh_tool_annotations()
         }),
+        json!({
+            "name": "get_attachment_import_config",
+            "description": "Return MCP attachment staging configuration, allowed extensions, max size, and usage guidance. Use before importing attachments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_only_tool_annotations()
+        }),
     ];
-    if write_enabled {
+    if config.write_enabled {
         tools.extend(write_tools_list());
     }
     tools
@@ -247,6 +283,27 @@ async fn refresh_index_tool(state: AppState, arguments: Value) -> Result<Value, 
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
     Ok(tool_success(json!(RefreshResponse { refreshed: true })))
+}
+
+fn get_attachment_import_config_tool(config: &McpConfig) -> Result<Value, JsonRpcFailure> {
+    let host_staging_path = if config.advertise_host_paths {
+        config.host_attachment_staging_path.clone()
+    } else {
+        None
+    };
+    Ok(tool_success(json!({
+        "enabled": config.write_enabled && config.attachment_staging_path.is_some(),
+        "staging_path": config
+            .attachment_staging_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        "staging_path_kind": "container",
+        "host_staging_path": host_staging_path,
+        "host_staging_path_kind": if config.advertise_host_paths { "host_hint" } else { "hidden" },
+        "allowed_extensions": allowed_attachment_extensions(),
+        "max_bytes": config.max_attachment_bytes,
+        "usage": "Place files in the advertised staging folder, then call import_attachment with staged_filename and target_relative_path."
+    })))
 }
 
 async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -377,6 +434,105 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     Ok(write_success(outcome))
 }
 
+async fn import_attachment_tool(
+    state: AppState,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ImportAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid import_attachment arguments: {error}"))
+    })?;
+    let staging_path = config.attachment_staging_path.as_ref().ok_or_else(|| {
+        JsonRpcFailure::invalid_params("HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH is not configured")
+    })?;
+    let staged_filename = non_empty_argument("staged_filename", args.staged_filename)?;
+    let target_relative_path =
+        non_empty_argument("target_relative_path", args.target_relative_path)?;
+    let overwrite = args.overwrite.unwrap_or(false);
+    let outcome = import_attachment(
+        &state.vault_path,
+        staging_path,
+        &staged_filename,
+        &target_relative_path,
+        config.max_attachment_bytes,
+        overwrite,
+    )
+    .map_err(write_error_to_jsonrpc)?;
+    Ok(attachment_success(outcome))
+}
+
+async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: MoveAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid move_attachment arguments: {error}"))
+    })?;
+    let source_relative_path =
+        non_empty_argument("source_relative_path", args.source_relative_path)?;
+    let target_relative_path =
+        non_empty_argument("target_relative_path", args.target_relative_path)?;
+    let index = current_index(&state)?;
+    let outcome = move_attachment(
+        &state.vault_path,
+        &index,
+        &source_relative_path,
+        &target_relative_path,
+    )
+    .map_err(write_error_to_jsonrpc)?;
+    refresh_after_write(&state).await?;
+    Ok(attachment_success(outcome))
+}
+
+async fn rename_attachment_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: RenameAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid rename_attachment arguments: {error}"))
+    })?;
+    let source_relative_path =
+        non_empty_argument("source_relative_path", args.source_relative_path)?;
+    let new_filename = non_empty_argument("new_filename", args.new_filename)?;
+    let index = current_index(&state)?;
+    let outcome = rename_attachment(
+        &state.vault_path,
+        &index,
+        &source_relative_path,
+        &new_filename,
+    )
+    .map_err(write_error_to_jsonrpc)?;
+    refresh_after_write(&state).await?;
+    Ok(attachment_success(outcome))
+}
+
+async fn delete_attachment_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: DeleteAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid delete_attachment arguments: {error}"))
+    })?;
+    let source_relative_path =
+        non_empty_argument("source_relative_path", args.source_relative_path)?;
+    let index = current_index(&state)?;
+    let outcome = delete_attachment(&state.vault_path, &index, &source_relative_path)
+        .map_err(write_error_to_jsonrpc)?;
+    refresh_after_write(&state).await?;
+    Ok(attachment_success(outcome))
+}
+
+async fn list_note_attachments_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid list_note_attachments arguments: {error}"))
+    })?;
+    let index = current_index(&state)?;
+    let entry = note_entry(&index, &args.slug)?;
+    let attachments =
+        list_note_attachments(&state.vault_path, &entry).map_err(write_error_to_jsonrpc)?;
+    Ok(tool_success(json!({ "attachments": attachments })))
+}
+
 fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
     VaultIndex::build(&state.vault_path).map_err(|error| {
         JsonRpcFailure::internal(format!(
@@ -419,6 +575,15 @@ fn write_success(outcome: WriteOutcome) -> Value {
         "content_hash": outcome.content_hash,
         "rewritten_notes": outcome.rewritten_notes,
         "moved_assets": outcome.moved_assets,
+        "trashed_path": outcome.trashed_path,
+    }))
+}
+
+fn attachment_success(outcome: AttachmentOutcome) -> Value {
+    tool_success(json!({
+        "ok": true,
+        "attachment": outcome.attachment,
+        "rewritten_notes": outcome.rewritten_notes,
         "trashed_path": outcome.trashed_path,
     }))
 }
@@ -588,6 +753,75 @@ fn write_tools_list() -> Vec<Value> {
             },
             "annotations": write_tool_annotations(true, false)
         }),
+        json!({
+            "name": "import_attachment",
+            "description": "Import an attachment from the configured staging folder into the vault. staged_filename must be a filename only. Returns compact metadata for the imported file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "staged_filename": {"type": "string", "minLength": 1},
+                    "target_relative_path": {"type": "string", "minLength": 1},
+                    "overwrite": {"type": "boolean", "default": false}
+                },
+                "required": ["staged_filename", "target_relative_path"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "move_attachment",
+            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_relative_path": {"type": "string", "minLength": 1},
+                    "target_relative_path": {"type": "string", "minLength": 1}
+                },
+                "required": ["source_relative_path", "target_relative_path"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "rename_attachment",
+            "description": "Rename an existing attachment in its current folder and rewrite all note references to it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_relative_path": {"type": "string", "minLength": 1},
+                    "new_filename": {"type": "string", "minLength": 1}
+                },
+                "required": ["source_relative_path", "new_filename"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "delete_attachment",
+            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_relative_path": {"type": "string", "minLength": 1}
+                },
+                "required": ["source_relative_path"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
+            "name": "list_note_attachments",
+            "description": "List existing attachments referenced by a note without returning full note content.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1}
+                },
+                "required": ["slug"],
+                "additionalProperties": false
+            },
+            "annotations": read_only_tool_annotations()
+        }),
     ]
 }
 
@@ -667,4 +901,33 @@ struct MoveRenameNoteArgs {
 struct DeleteNoteArgs {
     slug: String,
     expected_content_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportAttachmentArgs {
+    staged_filename: String,
+    target_relative_path: String,
+    #[serde(default)]
+    overwrite: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MoveAttachmentArgs {
+    source_relative_path: String,
+    target_relative_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameAttachmentArgs {
+    source_relative_path: String,
+    new_filename: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteAttachmentArgs {
+    source_relative_path: String,
 }

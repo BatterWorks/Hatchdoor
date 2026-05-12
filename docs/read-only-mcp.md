@@ -66,6 +66,9 @@ Environment variables:
 ```env
 HATCHDOOR_MCP_ENABLED=false
 HATCHDOOR_MCP_WRITE_ENABLED=false
+HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH=/data/attachments-inbox
+HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10485760
+HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=false
 HATCHDOOR_MCP_BEARER_TOKEN=
 HATCHDOOR_MCP_ALLOWED_ORIGINS=http://127.0.0.1,http://localhost
 ```
@@ -75,6 +78,8 @@ Rules:
 - MCP is disabled by default.
 - MCP write tools are disabled by default.
 - If `HATCHDOOR_MCP_WRITE_ENABLED=true`, `HATCHDOOR_MCP_BEARER_TOKEN` must be set.
+- Attachment import reads only from `HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH`.
+- Host staging paths are advertised only when `HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=true`.
 - Disabled `/mcp` returns `404`.
 - If `HATCHDOOR_MCP_BEARER_TOKEN` is set, `/mcp` requires `Authorization: Bearer <token>`.
 - Browser-originated requests are checked against `HATCHDOOR_MCP_ALLOWED_ORIGINS`.
@@ -210,14 +215,23 @@ Write tools are exposed only when `HATCHDOOR_MCP_WRITE_ENABLED=true`.
 - `move_note` moves a note to another vault-relative folder, rewrites wikilink backlinks, moves referenced assets, and rewrites other asset references.
 - `move_rename_note` moves and renames a note in one operation.
 - `delete_note` trashes the note and referenced assets under `.hatchdoor-trash`, rewrites other asset references, and removes backlinks to the deleted note.
+- `get_attachment_import_config` returns attachment staging config, allowed extensions, max size, and usage guidance.
+- `import_attachment` imports a staged attachment into the vault.
+- `move_attachment` moves an attachment and rewrites all note references.
+- `rename_attachment` renames an attachment in-place and rewrites all note references.
+- `delete_attachment` trashes an attachment and rewrites all note references to the trashed path.
+- `list_note_attachments` lists attachments referenced by one note without returning note content.
 
 Write rules:
 
 - Markdown files remain the source of truth; SQLite is refreshed after successful writes.
+- Attachments remain vault files; SQLite never stores attachment binary content.
 - Existing destination notes are not replaced by move/rename.
 - Existing notes require `expected_content_hash` to protect against concurrent edits.
 - Tool paths are vault-relative Markdown paths, never raw filesystem paths.
 - Absolute paths, traversal, non-Markdown note paths, and vault escapes are rejected.
+- Attachment import accepts a staging filename only, not a source path.
+- Attachment extensions are allowlisted to image formats plus PDF.
 
 ## JSON-RPC methods
 
