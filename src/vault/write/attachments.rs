@@ -7,9 +7,10 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
 use super::fs_ops::import_attachment_file;
 use super::paths::{
-    create_parent_dir_inside_root, ensure_allowed_attachment_path, ensure_existing_path_inside_root,
-    normalize_attachment_relative_path, normalize_staged_filename, resolve_existing_attachment_path,
-    resolve_new_attachment_path, resolve_staged_attachment_path, unique_trash_attachment_relative_path,
+    create_parent_dir_inside_root, ensure_allowed_attachment_path,
+    ensure_existing_path_inside_root, normalize_attachment_relative_path,
+    normalize_staged_filename, resolve_existing_attachment_path, resolve_new_attachment_path,
+    resolve_staged_attachment_path, unique_trash_attachment_relative_path,
     vault_relative_file_path,
 };
 use super::rewrites::{apply_rewrites, rollback_rewrites};

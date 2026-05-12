@@ -121,7 +121,10 @@ pub(super) fn normalize_staged_filename(input: &str) -> Result<String, WriteErro
     Ok(trimmed.to_string())
 }
 
-pub(super) fn resolve_new_note_path(vault_root: &Path, relative_path: &str) -> Result<PathBuf, WriteError> {
+pub(super) fn resolve_new_note_path(
+    vault_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, WriteError> {
     let root = canonical_root(vault_root)?;
     let normalized = normalize_note_relative_path(relative_path)?;
     let path = vault_root.join(&normalized);
@@ -259,7 +262,11 @@ pub(super) fn same_existing_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-pub(super) fn relative_link_target(vault_root: &Path, from_note: &Path, target: &Path) -> Option<String> {
+pub(super) fn relative_link_target(
+    vault_root: &Path,
+    from_note: &Path,
+    target: &Path,
+) -> Option<String> {
     let from_dir = from_note.parent().unwrap_or(vault_root);
     let from_relative = from_dir.strip_prefix(vault_root).ok()?;
     let target_relative = target.strip_prefix(vault_root).ok()?;
@@ -292,7 +299,10 @@ fn path_parts(path: &Path) -> Option<Vec<String>> {
     Some(parts)
 }
 
-pub(super) fn vault_relative_file_path(vault_root: &Path, path: &Path) -> Result<Option<String>, WriteError> {
+pub(super) fn vault_relative_file_path(
+    vault_root: &Path,
+    path: &Path,
+) -> Result<Option<String>, WriteError> {
     let root = canonical_root(vault_root)?;
     let path = fs::canonicalize(path).map_err(|error| {
         WriteError::Io(format!(
