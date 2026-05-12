@@ -82,6 +82,15 @@ HATCHDOOR_MCP_WRITE_ENABLED=true
 HATCHDOOR_MCP_BEARER_TOKEN=change-me
 ```
 
+Attachment import uses a staging folder outside the vault:
+
+```env
+HOST_ATTACHMENT_STAGING_PATH=/home/battermanz/coding/hatchdoor/data/attachments-inbox
+HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH=/data/attachments-inbox
+HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10485760
+HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=true
+```
+
 If Hatchdoor is reachable beyond localhost, set a bearer token and configure OpenClaw to send it:
 
 ```env
@@ -124,12 +133,14 @@ docker compose up -d
 Compose uses `.env` via `env_file` for container runtime variables.
 Use `HOST_VAULT_PATH` in `.env` for the host vault directory.
 Use `HOST_CACHE_PATH` in `.env` for the host SQLite cache directory.
+Use `HOST_ATTACHMENT_STAGING_PATH` in `.env` for the host-side attachment import inbox.
 
 The container uses:
 
 ```text
-/data/vault  = Markdown vault, source of truth
-/data/cache  = generated SQLite cache
+/data/vault               = Markdown vault, source of truth
+/data/cache               = generated SQLite cache
+/data/attachments-inbox   = temporary attachment import staging folder
 ```
 
 ## API
@@ -191,6 +202,7 @@ Vault-safe MCP tools:
 - `resolve_wikilink` -> resolve an Obsidian wikilink target to a slug
 - `get_tree` -> fetch the explorer tree; potentially larger response
 - `refresh_index` -> force Hatchdoor to refresh its SQLite view of the vault without modifying vault content
+- `get_attachment_import_config` -> report attachment staging config, allowed extensions, max size, and usage guidance
 - `create_note` -> create a Markdown note when write mode is enabled
 - `update_note` -> replace note content with `expected_content_hash`
 - `append_to_note` -> append Markdown with `expected_content_hash`
@@ -198,6 +210,10 @@ Vault-safe MCP tools:
 - `move_note` -> move a note folder, rewrite wikilink backlinks, move referenced assets, and rewrite other asset references
 - `move_rename_note` -> move and rename in one operation
 - `delete_note` -> move a note and referenced assets to `.hatchdoor-trash`, rewrite other asset references, and remove backlinks to the deleted note
+- `import_attachment` -> import a staged attachment into the vault
+- `move_attachment` / `rename_attachment` -> move or rename an attachment and rewrite note references
+- `delete_attachment` -> move an attachment to `.hatchdoor-trash` and rewrite note references
+- `list_note_attachments` -> list attachments referenced by one note
 
 Write tools modify Markdown files as the source of truth, then force a SQLite cache refresh. They do not expose shell or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
 

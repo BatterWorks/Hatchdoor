@@ -12,4 +12,5 @@ services:
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
       - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
+      - ${HOST_ATTACHMENT_STAGING_PATH:-./data/attachments-inbox}:/data/attachments-inbox
     restart: unless-stopped

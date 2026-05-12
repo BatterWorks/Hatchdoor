@@ -88,8 +88,8 @@ async fn handle_mcp_post(
     let result = match request.method.as_str() {
         "initialize" => Ok(handle_initialize()),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools_list(config.write_enabled) })),
-        "tools/call" => handle_tools_call(state, request.params, config.write_enabled).await,
+        "tools/list" => Ok(json!({ "tools": tools_list(config) })),
+        "tools/call" => handle_tools_call(state, request.params, config).await,
         method => Err(JsonRpcFailure::method_not_found(format!(
             "Unsupported MCP method: {method}"
         ))),
@@ -132,6 +132,10 @@ mod tests {
         McpConfig {
             enabled: true,
             write_enabled: false,
+            attachment_staging_path: None,
+            host_attachment_staging_path: None,
+            advertise_host_paths: false,
+            max_attachment_bytes: 10 * 1024 * 1024,
             bearer_token: None,
             allowed_origins: vec![
                 "http://127.0.0.1".to_string(),
@@ -144,6 +148,10 @@ mod tests {
         McpConfig {
             enabled: true,
             write_enabled: true,
+            attachment_staging_path: None,
+            host_attachment_staging_path: None,
+            advertise_host_paths: false,
+            max_attachment_bytes: 10 * 1024 * 1024,
             bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![
                 "http://127.0.0.1".to_string(),
@@ -203,6 +211,10 @@ mod tests {
             McpConfig {
                 enabled: false,
                 write_enabled: false,
+                attachment_staging_path: None,
+                host_attachment_staging_path: None,
+                advertise_host_paths: false,
+                max_attachment_bytes: 10 * 1024 * 1024,
                 bearer_token: None,
                 allowed_origins: vec![],
             },
@@ -338,7 +350,8 @@ mod tests {
                 "get_note_links",
                 "resolve_wikilink",
                 "get_tree",
-                "refresh_index"
+                "refresh_index",
+                "get_attachment_import_config"
             ]
         );
         assert!(
@@ -353,12 +366,18 @@ mod tests {
             assert_eq!(tool["annotations"]["idempotentHint"], true);
             assert_eq!(tool["annotations"]["openWorldHint"], false);
         }
-        let refresh = tools.last().expect("refresh tool");
+        let refresh = tools
+            .iter()
+            .find(|tool| tool["name"] == "refresh_index")
+            .expect("refresh tool");
         assert_eq!(refresh["name"], "refresh_index");
         assert_eq!(refresh["annotations"]["readOnlyHint"], false);
         assert_eq!(refresh["annotations"]["destructiveHint"], false);
         assert_eq!(refresh["annotations"]["idempotentHint"], true);
         assert_eq!(refresh["annotations"]["openWorldHint"], false);
+        let attachment_config = tools.last().expect("attachment config tool");
+        assert_eq!(attachment_config["name"], "get_attachment_import_config");
+        assert_eq!(attachment_config["annotations"]["readOnlyHint"], true);
     }
 
     #[tokio::test]
@@ -370,6 +389,10 @@ mod tests {
             McpConfig {
                 enabled: true,
                 write_enabled: true,
+                attachment_staging_path: None,
+                host_attachment_staging_path: None,
+                advertise_host_paths: false,
+                max_attachment_bytes: 10 * 1024 * 1024,
                 bearer_token: None,
                 allowed_origins: vec![],
             },
@@ -404,6 +427,88 @@ mod tests {
         assert!(names.contains(&"update_note"));
         assert!(names.contains(&"move_rename_note"));
         assert!(names.contains(&"delete_note"));
+        assert!(names.contains(&"import_attachment"));
+        assert!(names.contains(&"move_attachment"));
+        assert!(names.contains(&"rename_attachment"));
+        assert!(names.contains(&"delete_attachment"));
+        assert!(names.contains(&"list_note_attachments"));
+    }
+
+    #[tokio::test]
+    async fn attachment_config_advertises_host_path_only_when_enabled() {
+        let (state, tmp) = test_state();
+        let staging = tmp.path().join("inbox");
+        std::fs::create_dir_all(&staging).expect("staging");
+        let mut config = write_config();
+        config.attachment_staging_path = Some(staging.clone());
+        config.host_attachment_staging_path = Some("/host/inbox".to_string());
+        config.advertise_host_paths = true;
+        config.max_attachment_bytes = 42;
+
+        let response = post_json_with_auth(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":53,
+                "method":"tools/call",
+                "params": {
+                    "name": "get_attachment_import_config",
+                    "arguments": {}
+                }
+            }),
+            config,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let config = &body["result"]["structuredContent"];
+        assert_eq!(config["enabled"], true);
+        assert_eq!(config["staging_path"], staging.display().to_string());
+        assert_eq!(config["host_staging_path"], "/host/inbox");
+        assert_eq!(config["max_bytes"], 42);
+        assert!(
+            config["allowed_extensions"]
+                .as_array()
+                .expect("extensions")
+                .contains(&json!("png"))
+        );
+    }
+
+    #[tokio::test]
+    async fn import_attachment_moves_from_staging_to_vault() {
+        let (state, tmp) = test_state();
+        let staging = tmp.path().join("inbox");
+        std::fs::create_dir_all(&staging).expect("staging");
+        std::fs::write(staging.join("diagram.png"), b"png-bytes").expect("staged file");
+        let mut config = write_config();
+        config.attachment_staging_path = Some(staging.clone());
+
+        let response = post_json_with_auth(
+            state.clone(),
+            json!({
+                "jsonrpc":"2.0",
+                "id":54,
+                "method":"tools/call",
+                "params": {
+                    "name": "import_attachment",
+                    "arguments": {
+                        "staged_filename": "diagram.png",
+                        "target_relative_path": "Assets/diagram.png"
+                    }
+                }
+            }),
+            config,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let attachment = &body["result"]["structuredContent"]["attachment"];
+        assert_eq!(attachment["relative_path"], "Assets/diagram.png");
+        assert_eq!(attachment["size_bytes"], 9);
+        assert!(state.vault_path.join("Assets/diagram.png").exists());
+        assert!(!staging.join("diagram.png").exists());
     }
 
     #[tokio::test]

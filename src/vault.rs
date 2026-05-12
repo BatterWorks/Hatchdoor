@@ -13,6 +13,7 @@ pub use types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
 };
 pub(crate) use write::{
-    WriteError, WriteOutcome, append_note, create_note, delete_note, move_or_rename_note,
-    update_note,
+    AttachmentOutcome, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
+    create_note, delete_attachment, delete_note, import_attachment, list_note_attachments,
+    move_attachment, move_or_rename_note, rename_attachment, update_note,
 };

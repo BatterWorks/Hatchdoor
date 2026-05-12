@@ -18,6 +18,20 @@ pub(crate) struct WriteOutcome {
     pub(crate) trashed_path: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct AttachmentInfo {
+    pub(crate) relative_path: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachmentOutcome {
+    pub(crate) attachment: AttachmentInfo,
+    pub(crate) rewritten_notes: usize,
+    pub(crate) trashed_path: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WriteError {
     Conflict(String),
@@ -203,6 +217,165 @@ pub(crate) fn delete_note(
     })
 }
 
+pub(crate) fn list_note_attachments(
+    vault_root: &Path,
+    entry: &NoteEntry,
+) -> Result<Vec<AttachmentInfo>, WriteError> {
+    let content = fs::read_to_string(&entry.path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to read note '{}' for attachments: {error}",
+            entry.relative_path
+        ))
+    })?;
+    let note_dir = entry.path.parent().unwrap_or(vault_root);
+    let mut attachments = Vec::new();
+    let mut seen = HashSet::new();
+    for relative_asset in referenced_assets(&content) {
+        let path = note_dir.join(relative_asset);
+        if !path.exists() || !path.is_file() {
+            continue;
+        }
+        ensure_existing_path_inside_root(vault_root, &path)?;
+        let Some(relative_path) = vault_relative_file_path(vault_root, &path)? else {
+            continue;
+        };
+        if seen.insert(relative_path.clone()) {
+            attachments.push(attachment_info(vault_root, &path)?);
+        }
+    }
+    Ok(attachments)
+}
+
+pub(crate) fn import_attachment(
+    vault_root: &Path,
+    staging_root: &Path,
+    staged_filename: &str,
+    target_relative_path: &str,
+    max_bytes: u64,
+    overwrite: bool,
+) -> Result<AttachmentOutcome, WriteError> {
+    let source_path = resolve_staged_attachment_path(staging_root, staged_filename)?;
+    ensure_allowed_attachment_path(&source_path)?;
+    let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
+    ensure_allowed_attachment_path(&target_path)?;
+    create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
+
+    let metadata = fs::metadata(&source_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to read staged attachment '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+    if metadata.len() > max_bytes {
+        return Err(WriteError::InvalidInput(format!(
+            "attachment exceeds max size: {} > {max_bytes}",
+            metadata.len()
+        )));
+    }
+    if target_path.exists() && !overwrite {
+        return Err(WriteError::Conflict(format!(
+            "Attachment already exists: {}",
+            normalize_attachment_relative_path(target_relative_path)?
+        )));
+    }
+
+    fs::copy(&source_path, &target_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to import attachment '{}' to '{}': {error}",
+            source_path.display(),
+            target_path.display()
+        ))
+    })?;
+    fs::remove_file(&source_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to remove staged attachment '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+
+    Ok(AttachmentOutcome {
+        attachment: attachment_info(vault_root, &target_path)?,
+        rewritten_notes: 0,
+        trashed_path: None,
+    })
+}
+
+pub(crate) fn move_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    target_relative_path: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
+    let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
+    if target_path.exists() {
+        return Err(WriteError::Conflict(format!(
+            "Destination attachment already exists: {}",
+            normalize_attachment_relative_path(target_relative_path)?
+        )));
+    }
+    ensure_allowed_attachment_path(&source_path)?;
+    ensure_allowed_attachment_path(&target_path)?;
+    create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
+
+    let rewrites =
+        asset_reference_rewrite_plan(vault_root, index, "", &source_path, &target_path, &[])?;
+    fs::rename(&source_path, &target_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to move attachment '{}' to '{}': {error}",
+            source_path.display(),
+            target_path.display()
+        ))
+    })?;
+    let rewritten_notes = apply_rewrites(rewrites)?;
+    Ok(AttachmentOutcome {
+        attachment: attachment_info(vault_root, &target_path)?,
+        rewritten_notes,
+        trashed_path: None,
+    })
+}
+
+pub(crate) fn rename_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    new_filename: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
+    let filename = normalize_staged_filename(new_filename)?;
+    let target_path = source_path.parent().unwrap_or(vault_root).join(filename);
+    move_attachment_by_paths(vault_root, index, &source_path, &target_path)
+}
+
+pub(crate) fn delete_attachment(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+) -> Result<AttachmentOutcome, WriteError> {
+    let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
+    ensure_allowed_attachment_path(&source_path)?;
+    let trash_relative = unique_trash_attachment_relative_path(vault_root, source_relative_path)?;
+    let trash_path = vault_root.join(&trash_relative);
+    ensure_allowed_attachment_path(&trash_path)?;
+    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
+    let rewrites =
+        asset_reference_rewrite_plan(vault_root, index, "", &source_path, &trash_path, &[])?;
+
+    fs::rename(&source_path, &trash_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to trash attachment '{}' to '{}': {error}",
+            source_path.display(),
+            trash_path.display()
+        ))
+    })?;
+    let rewritten_notes = apply_rewrites(rewrites)?;
+    Ok(AttachmentOutcome {
+        attachment: attachment_info(vault_root, &trash_path)?,
+        rewritten_notes,
+        trashed_path: Some(trash_relative),
+    })
+}
+
 pub(crate) fn normalize_note_relative_path(input: &str) -> Result<String, WriteError> {
     let trimmed = input.trim().replace('\\', "/");
     if trimmed.is_empty() {
@@ -257,6 +430,72 @@ pub(crate) fn normalize_note_relative_path(input: &str) -> Result<String, WriteE
     Ok(normalized)
 }
 
+pub(crate) fn allowed_attachment_extensions() -> &'static [&'static str] {
+    &[
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf",
+    ]
+}
+
+fn normalize_attachment_relative_path(input: &str) -> Result<String, WriteError> {
+    let trimmed = input.trim().replace('\\', "/");
+    if trimmed.is_empty() {
+        return Err(WriteError::InvalidInput(
+            "attachment path cannot be empty".to_string(),
+        ));
+    }
+    let path = Path::new(&trimmed);
+    if path.is_absolute() {
+        return Err(WriteError::InvalidInput(
+            "attachment path must be vault-relative".to_string(),
+        ));
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let Some(part) = value.to_str() else {
+                    return Err(WriteError::InvalidInput(
+                        "attachment path must be valid UTF-8".to_string(),
+                    ));
+                };
+                if part.is_empty() {
+                    return Err(WriteError::InvalidInput(
+                        "attachment path cannot contain empty segments".to_string(),
+                    ));
+                }
+                parts.push(part.to_string());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(WriteError::InvalidInput(
+                    "attachment path cannot escape the vault".to_string(),
+                ));
+            }
+        }
+    }
+    let normalized = parts.join("/");
+    if normalized.is_empty() {
+        return Err(WriteError::InvalidInput(
+            "attachment path cannot be empty".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_staged_filename(input: &str) -> Result<String, WriteError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || Path::new(trimmed).components().count() != 1
+    {
+        return Err(WriteError::InvalidInput(
+            "staged_filename must be a filename, not a path".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn resolve_new_note_path(vault_root: &Path, relative_path: &str) -> Result<PathBuf, WriteError> {
     let root = canonical_root(vault_root)?;
     let normalized = normalize_note_relative_path(relative_path)?;
@@ -267,6 +506,69 @@ fn resolve_new_note_path(vault_root: &Path, relative_path: &str) -> Result<PathB
         ensure_existing_path_inside_root(&root, parent)?;
     }
     Ok(path)
+}
+
+fn resolve_new_attachment_path(
+    vault_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, WriteError> {
+    let root = canonical_root(vault_root)?;
+    let normalized = normalize_attachment_relative_path(relative_path)?;
+    let path = vault_root.join(normalized);
+    if let Some(parent) = path.parent()
+        && parent.exists()
+    {
+        ensure_existing_path_inside_root(&root, parent)?;
+    }
+    Ok(path)
+}
+
+fn resolve_existing_attachment_path(
+    vault_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, WriteError> {
+    let path = resolve_new_attachment_path(vault_root, relative_path)?;
+    if !path.exists() || !path.is_file() {
+        return Err(WriteError::InvalidInput(format!(
+            "Attachment not found: {}",
+            normalize_attachment_relative_path(relative_path)?
+        )));
+    }
+    ensure_existing_path_inside_root(vault_root, &path)?;
+    Ok(path)
+}
+
+fn resolve_staged_attachment_path(
+    staging_root: &Path,
+    staged_filename: &str,
+) -> Result<PathBuf, WriteError> {
+    let filename = normalize_staged_filename(staged_filename)?;
+    let staging_root = canonical_root(staging_root)?;
+    let path = staging_root.join(filename);
+    if !path.exists() || !path.is_file() {
+        return Err(WriteError::InvalidInput(format!(
+            "Staged attachment not found: {staged_filename}"
+        )));
+    }
+    ensure_existing_path_inside_root(&staging_root, &path)?;
+    Ok(path)
+}
+
+fn ensure_allowed_attachment_path(path: &Path) -> Result<(), WriteError> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            WriteError::InvalidInput("attachment must have an allowed extension".to_string())
+        })?;
+    if allowed_attachment_extensions().contains(&extension.as_str()) {
+        Ok(())
+    } else {
+        Err(WriteError::InvalidInput(format!(
+            "unsupported attachment extension: {extension}"
+        )))
+    }
 }
 
 fn canonical_root(root: &Path) -> Result<PathBuf, WriteError> {
@@ -870,6 +1172,39 @@ fn move_assets(moves: &[AssetMove]) -> Result<usize, WriteError> {
     Ok(moves.len())
 }
 
+fn move_attachment_by_paths(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_path: &Path,
+    target_path: &Path,
+) -> Result<AttachmentOutcome, WriteError> {
+    if target_path.exists() {
+        return Err(WriteError::Conflict(format!(
+            "Destination attachment already exists: {}",
+            target_path.display()
+        )));
+    }
+    ensure_existing_path_inside_root(vault_root, source_path)?;
+    ensure_allowed_attachment_path(source_path)?;
+    ensure_allowed_attachment_path(target_path)?;
+    create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
+    let rewrites =
+        asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
+    fs::rename(source_path, target_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to move attachment '{}' to '{}': {error}",
+            source_path.display(),
+            target_path.display()
+        ))
+    })?;
+    let rewritten_notes = apply_rewrites(rewrites)?;
+    Ok(AttachmentOutcome {
+        attachment: attachment_info(vault_root, target_path)?,
+        rewritten_notes,
+        trashed_path: None,
+    })
+}
+
 fn apply_rewrites(rewrites: Vec<TextRewrite>) -> Result<usize, WriteError> {
     let mut changed = 0usize;
     for rewrite in rewrites {
@@ -941,6 +1276,85 @@ fn path_parts(path: &Path) -> Option<Vec<String>> {
         }
     }
     Some(parts)
+}
+
+fn vault_relative_file_path(vault_root: &Path, path: &Path) -> Result<Option<String>, WriteError> {
+    let root = canonical_root(vault_root)?;
+    let path = fs::canonicalize(path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to canonicalize attachment '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !path.starts_with(&root) {
+        return Ok(None);
+    }
+    let relative = path.strip_prefix(&root).ok().and_then(|path| {
+        let parts = path_parts(path)?;
+        Some(parts.join("/"))
+    });
+    Ok(relative)
+}
+
+fn attachment_info(vault_root: &Path, path: &Path) -> Result<AttachmentInfo, WriteError> {
+    let relative_path = vault_relative_file_path(vault_root, path)?.ok_or_else(|| {
+        WriteError::InvalidInput("attachment path cannot escape the vault".to_string())
+    })?;
+    let bytes = fs::read(path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to read attachment '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(AttachmentInfo {
+        relative_path,
+        size_bytes: bytes.len().min(u64::MAX as usize) as u64,
+        content_hash: bytes_hash(&bytes),
+    })
+}
+
+fn bytes_hash(bytes: &[u8]) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn unique_trash_attachment_relative_path(
+    vault_root: &Path,
+    relative_path: &str,
+) -> Result<String, WriteError> {
+    let normalized = normalize_attachment_relative_path(relative_path)?;
+    let base = format!(".hatchdoor-trash/{normalized}");
+    let mut candidate = base.clone();
+    let mut suffix = 2usize;
+    while vault_root.join(&candidate).exists() {
+        let path = Path::new(&base);
+        let stem = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("attachment");
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|extension| format!(".{extension}"))
+            .unwrap_or_default();
+        let parent = path
+            .parent()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(|parent| format!("{parent}/"))
+            .unwrap_or_default();
+        candidate = format!("{parent}{stem}-{suffix}{extension}");
+        suffix += 1;
+    }
+    Ok(candidate)
 }
 
 fn extract_markdown_assets(line: &str, assets: &mut Vec<PathBuf>) {
@@ -1149,5 +1563,83 @@ mod tests {
         assert!(root.join(".hatchdoor-trash/asset.pdf").exists());
         let backlink = fs::read_to_string(root.join("Backlink.md")).expect("backlink");
         assert_eq!(backlink, "before  after ![](.hatchdoor-trash/asset.pdf)");
+    }
+
+    #[test]
+    fn import_attachment_uses_staging_filename_only_and_size_limit() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().join("vault");
+        let staging = tmp.path().join("inbox");
+        fs::create_dir_all(&root).expect("vault");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::write(staging.join("diagram.png"), b"png").expect("staged");
+
+        assert!(matches!(
+            import_attachment(
+                &root,
+                &staging,
+                "../diagram.png",
+                "Assets/diagram.png",
+                10,
+                false
+            ),
+            Err(WriteError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            import_attachment(
+                &root,
+                &staging,
+                "diagram.png",
+                "Assets/diagram.png",
+                2,
+                false
+            ),
+            Err(WriteError::InvalidInput(_))
+        ));
+
+        let outcome = import_attachment(
+            &root,
+            &staging,
+            "diagram.png",
+            "Assets/diagram.png",
+            10,
+            false,
+        )
+        .expect("import");
+        assert_eq!(outcome.attachment.relative_path, "Assets/diagram.png");
+        assert_eq!(outcome.attachment.size_bytes, 3);
+        assert!(root.join("Assets/diagram.png").exists());
+        assert!(!staging.join("diagram.png").exists());
+    }
+
+    #[test]
+    fn move_and_delete_attachment_rewrite_note_references() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Assets")).expect("assets");
+        fs::create_dir_all(root.join("Notes")).expect("notes");
+        fs::write(root.join("Assets/diagram.png"), b"png").expect("asset");
+        fs::write(
+            root.join("Notes/Home.md"),
+            "![](../Assets/diagram.png) and [[../Assets/diagram.png]]",
+        )
+        .expect("note");
+        let index = build(root);
+
+        let moved = move_attachment(root, &index, "Assets/diagram.png", "Media/diagram.png")
+            .expect("move attachment");
+        assert_eq!(moved.rewritten_notes, 1);
+        assert!(root.join("Media/diagram.png").exists());
+        let home = fs::read_to_string(root.join("Notes/Home.md")).expect("home");
+        assert!(home.contains("![](../Media/diagram.png)"));
+        assert!(home.contains("[[../Media/diagram.png]]"));
+
+        let index = build(root);
+        let deleted = delete_attachment(root, &index, "Media/diagram.png").expect("delete");
+        assert_eq!(deleted.rewritten_notes, 1);
+        assert!(root.join(".hatchdoor-trash/Media/diagram.png").exists());
+        let home = fs::read_to_string(root.join("Notes/Home.md")).expect("home");
+        assert!(home.contains("![](../.hatchdoor-trash/Media/diagram.png)"));
+        assert!(home.contains("[[../.hatchdoor-trash/Media/diagram.png]]"));
     }
 }
