@@ -231,7 +231,7 @@ Write rules:
 - Tool paths are vault-relative Markdown paths, never raw filesystem paths.
 - Absolute paths, traversal, non-Markdown note paths, and vault escapes are rejected.
 - Attachment import accepts a staging filename only, not a source path.
-- Attachment extensions are allowlisted to image formats plus PDF.
+- Attachment extensions are allowlisted to image formats except SVG, plus PDF.
 
 ## JSON-RPC methods
 

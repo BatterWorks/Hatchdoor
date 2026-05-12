@@ -378,6 +378,27 @@ mod tests {
         let attachment_config = tools.last().expect("attachment config tool");
         assert_eq!(attachment_config["name"], "get_attachment_import_config");
         assert_eq!(attachment_config["annotations"]["readOnlyHint"], true);
+
+        let response = post_json(
+            test_state().0,
+            json!({
+                "jsonrpc":"2.0",
+                "id":55,
+                "method":"tools/call",
+                "params": {
+                    "name": "get_attachment_import_config",
+                    "arguments": {}
+                }
+            }),
+            enabled_config(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let config = &body["result"]["structuredContent"];
+        assert_eq!(config["enabled"], false);
+        assert_eq!(config["staging_path"], Value::Null);
+        assert_eq!(config["host_staging_path"], Value::Null);
     }
 
     #[tokio::test]

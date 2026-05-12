@@ -217,6 +217,8 @@ Vault-safe MCP tools:
 
 Write tools modify Markdown files as the source of truth, then force a SQLite cache refresh. They do not expose shell or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
 
+MCP attachment imports allow image formats except SVG, plus PDF. Existing SVG files may still be served from a vault, but MCP cannot import or move SVG attachments.
+
 ## Frontend Dev Mode
 
 ```bash
