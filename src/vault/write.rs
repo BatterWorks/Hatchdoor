@@ -843,6 +843,9 @@ fn asset_move_plan(
             continue;
         }
         ensure_existing_path_inside_root(vault_root, &source_asset)?;
+        if is_trashed_path(vault_root, &source_asset)? {
+            continue;
+        }
         let destination_asset = destination_dir.join(&relative_asset);
         create_parent_dir_inside_root(vault_root, &destination_asset, "asset")?;
         if destination_asset.exists() {
@@ -1324,6 +1327,14 @@ fn vault_relative_file_path(vault_root: &Path, path: &Path) -> Result<Option<Str
     Ok(relative)
 }
 
+fn is_trashed_path(vault_root: &Path, path: &Path) -> Result<bool, WriteError> {
+    Ok(vault_relative_file_path(vault_root, path)?
+        .as_deref()
+        .is_some_and(|relative| {
+            relative == ".hatchdoor-trash" || relative.starts_with(".hatchdoor-trash/")
+        }))
+}
+
 fn attachment_info(vault_root: &Path, path: &Path) -> Result<AttachmentInfo, WriteError> {
     let relative_path = vault_relative_file_path(vault_root, path)?.ok_or_else(|| {
         WriteError::InvalidInput("attachment path cannot escape the vault".to_string())
@@ -1591,6 +1602,34 @@ mod tests {
         assert!(root.join(".hatchdoor-trash/asset.pdf").exists());
         let backlink = fs::read_to_string(root.join("Backlink.md")).expect("backlink");
         assert_eq!(backlink, "before  after ![](.hatchdoor-trash/asset.pdf)");
+    }
+
+    #[test]
+    fn delete_note_does_not_move_already_trashed_attachment_again() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Notes/Media")).expect("media");
+        fs::write(root.join("Notes/Target.md"), "body ![](Media/image.png)").expect("target");
+        fs::write(root.join("Notes/Media/image.png"), "png").expect("asset");
+
+        let index = build(root);
+        delete_attachment(root, &index, "Notes/Media/image.png").expect("delete attachment");
+        let rewritten = fs::read_to_string(root.join("Notes/Target.md")).expect("target");
+        assert!(rewritten.contains("![](../.hatchdoor-trash/Notes/Media/image.png)"));
+
+        let index = build(root);
+        let entry = index.find_by_slug("target").expect("target");
+        let outcome =
+            delete_note(root, &index, entry, &content_hash(&rewritten)).expect("delete note");
+
+        assert_eq!(outcome.moved_assets, 0);
+        assert!(root.join(".hatchdoor-trash/Notes/Media/image.png").exists());
+        assert!(
+            !root
+                .join(".hatchdoor-trash/.hatchdoor-trash/Notes/Media/image.png")
+                .exists()
+        );
+        assert!(root.join(".hatchdoor-trash/Notes/Target.md").exists());
     }
 
     #[test]
