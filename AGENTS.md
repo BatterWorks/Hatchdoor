@@ -1,7 +1,7 @@
 # AGENTS.md — Minimal AI Agent Protocol
 
-Version: 2.5
-Last updated: 2026-05-08
+Version: 2.6
+Last updated: 2026-05-12
 Scope: Entire repository (unless a subdirectory explicitly overrides this file)
 
 This protocol exists to:
@@ -28,6 +28,11 @@ This protocol exists to:
 
 5. **Keep it operational.**  
    Prefer concrete next steps, exact commands, and minimal necessary reasoning.
+
+6. **No responsibility creep.**
+   Do not add new responsibilities to large or mixed-purpose production files by default.
+   If editing such a file, briefly explain why the change belongs there, or propose a small extraction.
+   Prefer one file/module per coherent responsibility, not per function.
 
 ---
 
