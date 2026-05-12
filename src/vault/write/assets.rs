@@ -150,7 +150,10 @@ where
             out.push_str(line_ending);
             continue;
         }
-        out.push_str(&transform_asset_references_in_line(line_body, &transform_target));
+        out.push_str(&transform_asset_references_in_line(
+            line_body,
+            &transform_target,
+        ));
         out.push_str(line_ending);
     }
     out

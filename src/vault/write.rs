@@ -1,3 +1,4 @@
+mod assets;
 mod attachments;
 mod fs_ops;
 mod notes;
@@ -9,8 +10,7 @@ mod types;
 mod tests;
 
 pub(crate) use attachments::{
-    delete_attachment, import_attachment, list_note_attachments, move_attachment,
-    rename_attachment,
+    delete_attachment, import_attachment, list_note_attachments, move_attachment, rename_attachment,
 };
 pub(crate) use notes::{append_note, create_note, delete_note, move_or_rename_note, update_note};
 pub(crate) use paths::allowed_attachment_extensions;

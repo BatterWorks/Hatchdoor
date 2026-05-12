@@ -125,8 +125,7 @@ fn delete_note_does_not_move_already_trashed_attachment_again() {
 
     let index = build(root);
     let entry = index.find_by_slug("target").expect("target");
-    let outcome =
-        delete_note(root, &index, entry, &content_hash(&rewritten)).expect("delete note");
+    let outcome = delete_note(root, &index, entry, &content_hash(&rewritten)).expect("delete note");
 
     assert_eq!(outcome.moved_assets, 0);
     assert!(root.join(".hatchdoor-trash/Notes/Media/image.png").exists());

@@ -174,7 +174,12 @@ pub(super) fn apply_rewrites(rewrites: Vec<TextRewrite>) -> Result<usize, WriteE
     Ok(changed)
 }
 
-pub(super) fn rollback_rewrites(vault_root: &Path, index: &VaultIndex, from_path: &Path, to_path: &Path) {
+pub(super) fn rollback_rewrites(
+    vault_root: &Path,
+    index: &VaultIndex,
+    from_path: &Path,
+    to_path: &Path,
+) {
     if let Ok(rewrites) =
         asset_reference_rewrite_plan(vault_root, index, "", from_path, to_path, &[])
     {
@@ -197,7 +202,10 @@ pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) ->
     merged
 }
 
-pub(super) fn rewrite_content_or_read(path: &Path, rewrites: &[TextRewrite]) -> Result<String, io::Error> {
+pub(super) fn rewrite_content_or_read(
+    path: &Path,
+    rewrites: &[TextRewrite],
+) -> Result<String, io::Error> {
     rewrites
         .iter()
         .rev()
