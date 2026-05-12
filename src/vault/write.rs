@@ -30,6 +30,7 @@ pub(crate) struct AttachmentOutcome {
     pub(crate) attachment: AttachmentInfo,
     pub(crate) rewritten_notes: usize,
     pub(crate) trashed_path: Option<String>,
+    pub(crate) cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,24 +280,13 @@ pub(crate) fn import_attachment(
         )));
     }
 
-    fs::copy(&source_path, &target_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to import attachment '{}' to '{}': {error}",
-            source_path.display(),
-            target_path.display()
-        ))
-    })?;
-    fs::remove_file(&source_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to remove staged attachment '{}': {error}",
-            source_path.display()
-        ))
-    })?;
+    let cleanup_warning = import_attachment_file(&source_path, &target_path)?;
 
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, &target_path)?,
         rewritten_notes: 0,
         trashed_path: None,
+        cleanup_warning,
     })
 }
 
@@ -320,18 +310,20 @@ pub(crate) fn move_attachment(
 
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", &source_path, &target_path, &[])?;
+    let rewritten_notes = apply_rewrites(rewrites)?;
     fs::rename(&source_path, &target_path).map_err(|error| {
+        rollback_rewrites(vault_root, index, &target_path, &source_path);
         WriteError::Io(format!(
             "failed to move attachment '{}' to '{}': {error}",
             source_path.display(),
             target_path.display()
         ))
     })?;
-    let rewritten_notes = apply_rewrites(rewrites)?;
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, &target_path)?,
         rewritten_notes,
         trashed_path: None,
+        cleanup_warning: None,
     })
 }
 
@@ -361,18 +353,20 @@ pub(crate) fn delete_attachment(
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", &source_path, &trash_path, &[])?;
 
+    let rewritten_notes = apply_rewrites(rewrites)?;
     fs::rename(&source_path, &trash_path).map_err(|error| {
+        rollback_rewrites(vault_root, index, &trash_path, &source_path);
         WriteError::Io(format!(
             "failed to trash attachment '{}' to '{}': {error}",
             source_path.display(),
             trash_path.display()
         ))
     })?;
-    let rewritten_notes = apply_rewrites(rewrites)?;
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, &trash_path)?,
         rewritten_notes,
         trashed_path: Some(trash_relative),
+        cleanup_warning: None,
     })
 }
 
@@ -431,9 +425,7 @@ pub(crate) fn normalize_note_relative_path(input: &str) -> Result<String, WriteE
 }
 
 pub(crate) fn allowed_attachment_extensions() -> &'static [&'static str] {
-    &[
-        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf",
-    ]
+    &["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "pdf"]
 }
 
 fn normalize_attachment_relative_path(input: &str) -> Result<String, WriteError> {
@@ -1172,6 +1164,32 @@ fn move_assets(moves: &[AssetMove]) -> Result<usize, WriteError> {
     Ok(moves.len())
 }
 
+fn import_attachment_file(
+    source_path: &Path,
+    target_path: &Path,
+) -> Result<Option<String>, WriteError> {
+    match fs::rename(source_path, target_path) {
+        Ok(()) => return Ok(None),
+        Err(rename_error) => {
+            fs::copy(source_path, target_path).map_err(|copy_error| {
+                WriteError::Io(format!(
+                    "failed to import attachment '{}' to '{}': rename failed: {rename_error}; copy failed: {copy_error}",
+                    source_path.display(),
+                    target_path.display()
+                ))
+            })?;
+        }
+    }
+
+    match fs::remove_file(source_path) {
+        Ok(()) => Ok(None),
+        Err(error) => Ok(Some(format!(
+            "import succeeded but failed to remove staged attachment '{}': {error}",
+            source_path.display()
+        ))),
+    }
+}
+
 fn move_attachment_by_paths(
     vault_root: &Path,
     index: &VaultIndex,
@@ -1190,18 +1208,20 @@ fn move_attachment_by_paths(
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
+    let rewritten_notes = apply_rewrites(rewrites)?;
     fs::rename(source_path, target_path).map_err(|error| {
+        rollback_rewrites(vault_root, index, target_path, source_path);
         WriteError::Io(format!(
             "failed to move attachment '{}' to '{}': {error}",
             source_path.display(),
             target_path.display()
         ))
     })?;
-    let rewritten_notes = apply_rewrites(rewrites)?;
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, target_path)?,
         rewritten_notes,
         trashed_path: None,
+        cleanup_warning: None,
     })
 }
 
@@ -1212,6 +1232,14 @@ fn apply_rewrites(rewrites: Vec<TextRewrite>) -> Result<usize, WriteError> {
         changed += 1;
     }
     Ok(changed)
+}
+
+fn rollback_rewrites(vault_root: &Path, index: &VaultIndex, from_path: &Path, to_path: &Path) {
+    if let Ok(rewrites) =
+        asset_reference_rewrite_plan(vault_root, index, "", from_path, to_path, &[])
+    {
+        let _ = apply_rewrites(rewrites);
+    }
 }
 
 fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) -> Vec<TextRewrite> {
@@ -1592,6 +1620,17 @@ mod tests {
                 "diagram.png",
                 "Assets/diagram.png",
                 2,
+                false
+            ),
+            Err(WriteError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            import_attachment(
+                &root,
+                &staging,
+                "diagram.svg",
+                "Assets/diagram.svg",
+                10,
                 false
             ),
             Err(WriteError::InvalidInput(_))

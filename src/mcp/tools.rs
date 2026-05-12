@@ -36,7 +36,19 @@ pub(crate) async fn handle_tools_call(
         "resolve_wikilink" => resolve_wikilink_tool(state, arguments).await,
         "get_tree" => get_tree_tool(state, arguments).await,
         "refresh_index" => refresh_index_tool(state, arguments).await,
-        "get_attachment_import_config" => get_attachment_import_config_tool(config),
+        "get_attachment_import_config" if config.write_enabled => {
+            get_attachment_import_config_tool(config)
+        }
+        "get_attachment_import_config" => Ok(tool_success(json!({
+            "enabled": false,
+            "staging_path": null,
+            "staging_path_kind": "hidden",
+            "host_staging_path": null,
+            "host_staging_path_kind": "hidden",
+            "allowed_extensions": allowed_attachment_extensions(),
+            "max_bytes": config.max_attachment_bytes,
+            "usage": "Enable HATCHDOOR_MCP_WRITE_ENABLED to use staged attachment imports."
+        }))),
         "create_note" if config.write_enabled => create_note_tool(state, arguments).await,
         "update_note" if config.write_enabled => update_note_tool(state, arguments).await,
         "append_to_note" if config.write_enabled => append_to_note_tool(state, arguments).await,
@@ -585,6 +597,7 @@ fn attachment_success(outcome: AttachmentOutcome) -> Value {
         "attachment": outcome.attachment,
         "rewritten_notes": outcome.rewritten_notes,
         "trashed_path": outcome.trashed_path,
+        "cleanup_warning": outcome.cleanup_warning,
     }))
 }
 
