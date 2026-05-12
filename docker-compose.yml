@@ -4,9 +4,6 @@ services:
     container_name: hatchdoor
     env_file:
       - .env
-    environment:
-      VAULT_PATH: /data/vault
-      HATCHDOOR_CACHE_DB: /data/cache/hatchdoor-cache.sqlite3
     ports:
       - "42824:42824"
     volumes:
