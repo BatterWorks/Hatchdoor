@@ -12,6 +12,7 @@ type TopbarProps = {
   onToggleActionsMenu: () => void;
   onCloseActionsMenu: () => void;
   onRefreshVault: () => void;
+  onCopyPageContent: () => void;
   onCopyNoteLink: () => void;
   onDownloadMarkdown: () => void;
   onToggleProperties: () => void;
@@ -28,6 +29,7 @@ export function AppTopbar({
   onToggleActionsMenu,
   onCloseActionsMenu,
   onRefreshVault,
+  onCopyPageContent,
   onCopyNoteLink,
   onDownloadMarkdown,
   onToggleProperties,
@@ -115,10 +117,10 @@ export function AppTopbar({
                   role="menuitem"
                   onClick={() => {
                     onCloseActionsMenu();
-                    onCopyNoteLink();
+                    onCopyPageContent();
                   }}
                 >
-                  Copy note link
+                  Copy page content
                 </UiButton>
               ) : null}
               {activeNote ? (
@@ -131,6 +133,18 @@ export function AppTopbar({
                   }}
                 >
                   Download .md
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onCopyNoteLink();
+                  }}
+                >
+                  Copy note link
                 </UiButton>
               ) : null}
               <UiButton
@@ -154,7 +168,9 @@ export function AppTopbar({
             type="button"
             className="topbar-mobile-path"
             onClick={onOpenSearch}
-            title={activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
+            title={
+              activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"
+            }
           >
             {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
           </button>

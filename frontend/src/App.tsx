@@ -358,6 +358,22 @@ function App() {
       // Ignore clipboard errors in unsupported contexts.
     }
   }, [activeNote]);
+  const copyPageContent = useCallback(async () => {
+    if (!activeNote) {
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/note/${encodeURIComponent(activeNote.slug)}/download`,
+      );
+      if (!res.ok) {
+        throw new Error(`Failed loading note export: ${res.status}`);
+      }
+      await navigator.clipboard.writeText(await res.text());
+    } catch {
+      // Ignore clipboard errors in unsupported contexts.
+    }
+  }, [activeNote]);
   const toggleProperties = useCallback(() => {
     window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
   }, []);
@@ -388,6 +404,7 @@ function App() {
         onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}
         onCloseActionsMenu={() => setActionsMenuOpen(false)}
         onRefreshVault={() => void refreshVault()}
+        onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
         onToggleProperties={toggleProperties}

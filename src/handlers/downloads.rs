@@ -31,7 +31,7 @@ pub(crate) async fn note_download_handler(
     let filename = download_filename_for_note(&note);
     let content_disposition = build_download_content_disposition(&filename);
 
-    let mut response = Response::new(note.content.into());
+    let mut response = Response::new(clean_markdown_export(&note.content).into());
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -113,6 +113,65 @@ fn build_download_content_disposition(filename: &str) -> String {
     )
 }
 
+fn clean_markdown_export(input: &str) -> String {
+    let lines = input.lines().collect::<Vec<_>>();
+    if lines.len() < 3 || lines.first().is_none_or(|line| line.trim() != "---") {
+        return input.to_string();
+    }
+
+    let Some(end) = lines
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(idx, line)| (line.trim() == "---").then_some(idx))
+    else {
+        return input.to_string();
+    };
+
+    let header = &lines[1..end];
+    if !looks_like_frontmatter_header(header) {
+        return input.to_string();
+    }
+
+    lines[end + 1..].join("\n")
+}
+
+fn looks_like_frontmatter_header(lines: &[&str]) -> bool {
+    if lines.is_empty() {
+        return false;
+    }
+
+    let mut has_property = false;
+    let mut list_allowed = false;
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with("- ") {
+            if !list_allowed {
+                return false;
+            }
+            has_property = true;
+            continue;
+        }
+
+        let Some(colon_idx) = trimmed.find(':') else {
+            return false;
+        };
+        if colon_idx == 0 {
+            return false;
+        }
+
+        has_property = true;
+        list_allowed = trimmed.ends_with(':');
+    }
+
+    has_property
+}
+
 fn percent_encode_filename(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len());
     for byte in input.bytes() {
@@ -163,5 +222,19 @@ mod tests {
             value,
             "attachment; filename=\"Homelab Atlas.md\"; filename*=UTF-8''Homelab%20Atlas.md"
         );
+    }
+
+    #[test]
+    fn clean_markdown_export_strips_leading_frontmatter() {
+        let content = "---\ntags: [vault/sort, status/active]\narea: Home\n---\n# Home\n\nBody";
+
+        assert_eq!(clean_markdown_export(content), "# Home\n\nBody");
+    }
+
+    #[test]
+    fn clean_markdown_export_keeps_markdown_horizontal_rules() {
+        let content = "---\nplain markdown\n---\n# Home";
+
+        assert_eq!(clean_markdown_export(content), content);
     }
 }
