@@ -466,6 +466,79 @@ Body`,
     });
   });
 
+  it("keeps note prose paragraph styles out of mermaid labels", async () => {
+    mermaidRender.mockClear();
+    mermaidRender.mockImplementation(async (id: string, chart: string) => ({
+      svg: [
+        `<svg id="${id}" data-chart="${chart}">`,
+        '<foreignObject width="100" height="24">',
+        "<div>",
+        "<p>Diagram Label</p>",
+        "</div>",
+        "</foreignObject>",
+        "</svg>",
+      ].join(""),
+    }));
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Atlas", slug: "atlas" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/atlas")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Atlas",
+                slug: "atlas",
+                relative_path: "Notes/40-reference/Homelab Atlas",
+                content: [
+                  "# Atlas",
+                  "",
+                  "```mermaid",
+                  "graph TD",
+                  "A-->B",
+                  "```",
+                ].join("\n"),
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/atlas"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Atlas" });
+    const label = await waitFor(() => {
+      const paragraph = document.querySelector(".mermaid foreignObject p");
+      expect(paragraph).not.toBeNull();
+      return paragraph as HTMLParagraphElement;
+    });
+
+    expect(getComputedStyle(label).marginBottom).toBe("0px");
+  });
+
   it("waits for web fonts before rendering mermaid diagrams", async () => {
     mermaidRender.mockClear();
 

@@ -466,6 +466,13 @@
   overflow: auto;
 }
 
+.note-body .mermaid p {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  margin: 0;
+}
+
 /* Note metadata properties panel */
 .note-properties {
   border: 0;
