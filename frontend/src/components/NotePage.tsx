@@ -13,7 +13,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { parseFrontmatter } from "../markdown";
+import { parseFrontmatter, stripVaultNoteLinks } from "../markdown";
 import { extractMarkdownHeadings } from "../noteHeadings";
 import {
   createSearchHighlightPlugin,
@@ -149,7 +149,7 @@ export function NotePage({
       title: note.title,
       slug: note.slug,
       relativePath: note.relative_path,
-      exportContent: parsed.body,
+      exportContent: stripVaultNoteLinks(parsed.body),
     });
   }, [note, onActiveNoteChange, parsed.body]);
 
