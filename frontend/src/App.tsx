@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -70,6 +71,7 @@ function App() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -77,6 +79,7 @@ function App() {
     null,
   );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const topbarRef = useRef<HTMLElement | null>(null);
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
@@ -173,6 +176,37 @@ function App() {
     }
     setActionsMenuOpen(false);
   }, [location.pathname, isMobile]);
+
+  useLayoutEffect(() => {
+    if (!isMobile) {
+      setMobileDrawerTop(0);
+      return;
+    }
+
+    const updateDrawerTop = () => {
+      const nextTop = topbarRef.current?.getBoundingClientRect().bottom ?? 0;
+      setMobileDrawerTop(Math.ceil(nextTop));
+    };
+
+    updateDrawerTop();
+
+    const resizeObserver =
+      "ResizeObserver" in window ? new ResizeObserver(updateDrawerTop) : null;
+    if (topbarRef.current) {
+      resizeObserver?.observe(topbarRef.current);
+    }
+
+    window.addEventListener("resize", updateDrawerTop);
+    window.addEventListener("scroll", updateDrawerTop, { passive: true });
+    window.visualViewport?.addEventListener("resize", updateDrawerTop);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateDrawerTop);
+      window.removeEventListener("scroll", updateDrawerTop);
+      window.visualViewport?.removeEventListener("resize", updateDrawerTop);
+    };
+  }, [isMobile]);
 
   useEffect(() => {
     if (location.pathname === "/") {
@@ -383,13 +417,21 @@ function App() {
   }, [activeNote]);
 
   return (
-    <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
+    <div
+      className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}
+      style={
+        {
+          "--mobile-drawer-top": `${mobileDrawerTop}px`,
+        } as CSSProperties
+      }
+    >
       <AppTopbar
         activeNote={activeNote}
         isMobile={isMobile}
         isOnline={isOnline}
         treeIsStale={treeIsStale}
         actionsMenuOpen={actionsMenuOpen}
+        topbarRef={topbarRef}
         onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
         onOpenSearch={() => setSearchOpen(true)}
         onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}

@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("App mobile and topbar actions", () => {
-  it("opens and closes the mobile drawer via topbar controls", async () => {
+  it("opens the mobile drawer from the measured topbar edge", async () => {
     vi.spyOn(window, "matchMedia").mockImplementation(
       ((query: string) =>
         ({
@@ -41,6 +41,35 @@ describe("App mobile and topbar actions", () => {
           removeEventListener: () => {},
           dispatchEvent: () => false,
         }) as MediaQueryList) as typeof window.matchMedia,
+    );
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        if (this.classList.contains("app-topbar")) {
+          return {
+            x: 0,
+            y: 0,
+            width: 390,
+            height: 104,
+            top: 0,
+            right: 390,
+            bottom: 104,
+            left: 0,
+            toJSON: () => ({}),
+          } as DOMRect;
+        }
+
+        return {
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+          top: 0,
+          right: 0,
+          bottom: 0,
+          left: 0,
+          toJSON: () => ({}),
+        } as DOMRect;
+      },
     );
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -62,6 +91,9 @@ describe("App mobile and topbar actions", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "Toggle explorer" }),
     );
+    expect(document.querySelector<HTMLElement>(".app-shell")).toHaveStyle({
+      "--mobile-drawer-top": "104px",
+    });
     expect(
       await screen.findByRole("button", { name: "Close explorer" }),
     ).toBeInTheDocument();
