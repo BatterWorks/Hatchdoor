@@ -42,7 +42,7 @@
 
 /* ── Note body prose ── */
 .note-body {
-  max-width: 36rem;
+  max-width: 100%;
 }
 
 .note-body p {
