@@ -1,123 +1,220 @@
+/* 3px accent rule sits above the topbar */
+.hotbar {
+  height: 3px;
+  background: var(--hot);
+}
+
 .app-topbar {
   position: sticky;
   top: 0;
   z-index: 40;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(12rem, 20rem) auto;
-  gap: 0.65rem;
+  grid-template-columns: 280px minmax(0, 1fr) auto;
+  gap: 1.5rem;
   align-items: center;
-  min-height: 49px;
-  padding: calc(0.3rem + env(safe-area-inset-top)) 0.85rem 0.3rem;
-  border-bottom: 1px solid var(--color-border);
-  background: rgba(247, 246, 243, 0.96);
+  padding: calc(0.9rem + env(safe-area-inset-top)) 1.25rem 0.9rem;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
 }
 
-.topbar-left {
+/* Brand mark — col 1 */
+.topbar-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 78, "wght" 800;
+  font-size: 1.05rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink);
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.topbar-brand-dot {
+  width: 9px;
+  height: 9px;
+  background: var(--hot);
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+/* Breadcrumb — col 2 */
+.topbar-crumb {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 96, "wght" 400;
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  min-width: 0;
+  gap: 0;
 }
 
-.topbar-context {
-  min-width: 0;
+.topbar-crumb-sep {
+  color: var(--tertiary);
+  margin: 0 0.35rem;
 }
 
-.topbar-left h1 {
-  margin: 0;
-  max-width: 26rem;
-  font-size: 1.01rem;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
+.topbar-crumb-here {
+  color: var(--ink);
+  font-variation-settings: "wdth" 96, "wght" 500;
+  min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 
-.topbar-subtitle {
-  margin: 0.08rem 0 0;
-  font-size: 0.74rem;
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 26rem;
-}
-
-.topbar-center {
+/* Actions — col 3 */
+.topbar-actions {
   display: flex;
-  gap: 0.35rem;
-  justify-content: flex-start;
-}
-
-.topbar-right {
-  position: relative;
-  display: flex;
-  gap: 0.35rem;
   align-items: center;
-  justify-content: flex-end;
+  gap: 0.4rem;
+  flex-shrink: 0;
 }
 
-.topbar-mobile-meta {
-  display: none;
-}
-
+/* Search trigger button */
 .topbar-search-trigger {
   display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  min-height: 30px;
-  border: 1px solid var(--color-border);
-  background: var(--color-bg-surface);
-  color: var(--color-text-muted);
-  box-shadow: none;
+  gap: 0.65rem;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 96, "wght" 500;
+  font-size: 0.86rem;
+  color: var(--muted);
+  border: 1px solid var(--rule-strong);
+  background: var(--bg);
+  padding: 0.36rem 0.85rem;
+  min-width: 13rem;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  border-radius: 0;
+}
+
+.topbar-search-trigger:hover {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.topbar-search-trigger:hover .shortcut-hint {
+  color: var(--bg);
+  border-color: var(--bg);
 }
 
 .shortcut-hint {
-  display: inline-flex;
-  align-items: center;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 4px;
-  padding: 0.06rem 0.25rem;
-  font-size: 0.7rem;
-  color: var(--color-text-tertiary);
-  margin-left: 0.5rem;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  padding: 0.05rem 0.36rem;
+  border-radius: var(--radius-pill);
 }
 
+/* Icon button — square, 2.1rem */
+.icon-button {
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-family: var(--font-display);
+  font-variation-settings: "wght" 600;
+  font-size: 1.1rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  border-radius: 0;
+  padding: 0;
+}
+
+.icon-button:hover {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+.icon-button:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Status badges */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--radius-pill);
+  padding: 0.15rem 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 600;
+  border: 1px solid;
+  letter-spacing: 0.02em;
+}
+
+.status-badge.warn {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn-fg);
+}
+
+.status-badge.error {
+  background: var(--err-bg);
+  border-color: var(--err-border);
+  color: var(--err-fg);
+}
+
+/* Popover menu */
 .topbar-menu {
   position: absolute;
   right: 0;
   top: calc(100% + 0.3rem);
   display: grid;
   gap: 0.3rem;
-  min-width: 11rem;
+  min-width: 12rem;
   padding: 0.45rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-surface);
+  border: 1px solid var(--rule-strong);
+  background: var(--bg);
   box-shadow: var(--shadow-float);
   z-index: 70;
 }
 
-.status-badge {
-  display: inline-flex;
-  align-items: center;
-  border-radius: 999px;
-  padding: 0.15rem 0.5rem;
-  font-size: 0.72rem;
-  font-weight: 500;
-  border: 1px solid;
+/* Mobile meta row (below topbar) */
+.topbar-mobile-meta {
+  display: none;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+  padding: 0.32rem 0.75rem;
 }
 
-.status-badge.warn {
-  background: #fff6e7;
-  border-color: #f0ddb7;
-  color: #7d5b1a;
+.topbar-mobile-path {
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 96, "wght" 400;
+  font-size: 0.82rem;
+  line-height: 1.28;
+  padding: 0.12rem 0.2rem;
+  width: 100%;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
 }
 
-.status-badge.error {
-  background: #fdeeee;
-  border-color: #efc7c7;
-  color: #8f2f2f;
+.topbar-mobile-path:hover {
+  background: var(--paper-2);
 }

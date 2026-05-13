@@ -34,131 +34,131 @@ export function AppTopbar({
   onDownloadMarkdown,
   onToggleProperties,
 }: TopbarProps) {
+  const crumbText = activeNote
+    ? activeNote.relativePath.replace(/\//g, " / ")
+    : "Notes Explorer";
+
   return (
     <>
+      <div className="hotbar" aria-hidden="true" />
       <header className="app-topbar">
-        <div className="topbar-left">
+        {/* Col 1 — Brand */}
+        <div className="topbar-brand">
           {isMobile ? (
-            <UiButton
+            <button
+              type="button"
               className="icon-button"
               onClick={onToggleDrawer}
               aria-label="Toggle explorer"
+              style={{ marginRight: "0.5rem" }}
             >
               ☰
-            </UiButton>
+            </button>
           ) : null}
-          <div className="topbar-context">
-            <h1>{activeNote?.title ?? "Hatchdoor"}</h1>
-            <p className="topbar-subtitle">
-              {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
-            </p>
-          </div>
+          <span className="topbar-brand-dot" aria-hidden="true" />
+          HATCHDOOR
         </div>
 
-        <div className="topbar-center">
+        {/* Col 2 — Breadcrumb */}
+        <div className="topbar-crumb">
+          <span className="topbar-crumb-here">{crumbText}</span>
+          {!isOnline && (
+            <span style={{ marginLeft: "0.5rem" }}>
+              <StatusBadge tone="error" text="Offline" />
+            </span>
+          )}
+          {treeIsStale && (
+            <span style={{ marginLeft: "0.5rem" }}>
+              <StatusBadge tone="warn" text="Tree Stale" />
+            </span>
+          )}
+        </div>
+
+        {/* Col 3 — Actions */}
+        <div className="topbar-actions">
           {!isMobile ? (
-            <UiButton className="topbar-search-trigger" onClick={onOpenSearch}>
-              Search
-              <span className="shortcut-hint" aria-hidden="true">
-                ⌘K
-              </span>
-            </UiButton>
-          ) : null}
-          {!isOnline ? <StatusBadge tone="error" text="Offline" /> : null}
-          {treeIsStale ? <StatusBadge tone="warn" text="Tree Stale" /> : null}
-        </div>
-
-        <div className="topbar-right">
-          {isMobile ? (
-            <UiButton
+            <button
+              type="button"
+              className="topbar-search-trigger"
+              onClick={onOpenSearch}
+            >
+              <span>Search</span>
+              <span className="shortcut-hint" aria-hidden="true">⌘K</span>
+            </button>
+          ) : (
+            <button
+              type="button"
               className="icon-button"
               onClick={onOpenSearch}
               aria-label="Search notes"
             >
-              <span className="topbar-search-icon" aria-hidden="true">
-                ⌕
-              </span>
-            </UiButton>
-          ) : null}
-          <UiButton
-            className="icon-button"
-            onClick={onToggleActionsMenu}
-            aria-haspopup="menu"
-            aria-expanded={actionsMenuOpen}
-            aria-label="More actions"
-          >
-            ...
-          </UiButton>
-          {actionsMenuOpen ? (
-            <div className="topbar-menu" role="menu">
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  onCloseActionsMenu();
-                  onOpenSearch();
-                }}
-              >
-                Search
-              </UiButton>
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  onCloseActionsMenu();
-                  onRefreshVault();
-                }}
-              >
-                Refresh vault
-              </UiButton>
-              {activeNote ? (
+              ⌕
+            </button>
+          )}
+          <div style={{ position: "relative" }}>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={onToggleActionsMenu}
+              aria-haspopup="menu"
+              aria-expanded={actionsMenuOpen}
+              aria-label="More actions"
+            >
+              ···
+            </button>
+            {actionsMenuOpen ? (
+              <div className="topbar-menu" role="menu">
                 <UiButton
                   className="close-note"
                   role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onCopyPageContent();
-                  }}
+                  onClick={() => { onCloseActionsMenu(); onOpenSearch(); }}
                 >
-                  Copy page content
+                  Search
                 </UiButton>
-              ) : null}
-              {activeNote ? (
                 <UiButton
                   className="close-note"
                   role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onDownloadMarkdown();
-                  }}
+                  onClick={() => { onCloseActionsMenu(); onRefreshVault(); }}
                 >
-                  Download .md
+                  Refresh vault
                 </UiButton>
-              ) : null}
-              {activeNote ? (
+                {activeNote ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => { onCloseActionsMenu(); onCopyPageContent(); }}
+                  >
+                    Copy page content
+                  </UiButton>
+                ) : null}
+                {activeNote ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => { onCloseActionsMenu(); onDownloadMarkdown(); }}
+                  >
+                    Download .md
+                  </UiButton>
+                ) : null}
+                {activeNote ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => { onCloseActionsMenu(); onCopyNoteLink(); }}
+                  >
+                    Copy note link
+                  </UiButton>
+                ) : null}
                 <UiButton
                   className="close-note"
                   role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onCopyNoteLink();
-                  }}
+                  onClick={() => { onCloseActionsMenu(); onToggleProperties(); }}
                 >
-                  Copy note link
+                  Toggle properties
                 </UiButton>
-              ) : null}
-              <UiButton
-                className="close-note"
-                role="menuitem"
-                onClick={() => {
-                  onCloseActionsMenu();
-                  onToggleProperties();
-                }}
-              >
-                Toggle properties
-              </UiButton>
-            </div>
-          ) : null}
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -168,9 +168,7 @@ export function AppTopbar({
             type="button"
             className="topbar-mobile-path"
             onClick={onOpenSearch}
-            title={
-              activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"
-            }
+            title={activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
           >
             {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
           </button>
