@@ -1,7 +1,10 @@
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    Config, Event, RecommendedWatcher, RecursiveMode, Watcher,
+    event::{MetadataKind, ModifyKind},
+};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -82,10 +85,25 @@ async fn debounce_events(
 }
 
 pub(crate) fn should_refresh_for_event(event: &Event, cache_db_path: &Path) -> bool {
+    if !refreshable_event_kind(event) {
+        return false;
+    }
+
     event
         .paths
         .iter()
         .any(|path| !is_cache_path(path, cache_db_path))
+}
+
+fn refreshable_event_kind(event: &Event) -> bool {
+    match event.kind {
+        notify::EventKind::Access(_) => false,
+        notify::EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)) => false,
+        notify::EventKind::Create(_)
+        | notify::EventKind::Modify(_)
+        | notify::EventKind::Remove(_) => true,
+        notify::EventKind::Any | notify::EventKind::Other => false,
+    }
 }
 
 fn is_cache_path(path: &Path, cache_db_path: &Path) -> bool {
@@ -142,7 +160,10 @@ fn absolute_clean_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::{EventKind, event::ModifyKind};
+    use notify::{
+        EventKind,
+        event::{AccessKind, AccessMode, ModifyKind},
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -195,6 +216,38 @@ mod tests {
         let cache = dir.path().join("cache.sqlite3");
         let event = Event::new(EventKind::Modify(ModifyKind::Data(
             notify::event::DataChange::Content,
+        )))
+        .add_path(dir.path().join("Home.md"));
+
+        assert!(should_refresh_for_event(&event, &cache));
+    }
+
+    #[test]
+    fn should_refresh_for_event_ignores_non_mutating_access_events() {
+        let dir = tempdir().expect("temp dir");
+        let cache = dir.path().join("cache.sqlite3");
+
+        for kind in [
+            EventKind::Access(AccessKind::Read),
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::AccessTime)),
+        ] {
+            let event = Event::new(kind).add_path(dir.path().join("Home.md"));
+
+            assert!(
+                !should_refresh_for_event(&event, &cache),
+                "{kind:?} should be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn should_refresh_for_event_accepts_write_metadata_changes() {
+        let dir = tempdir().expect("temp dir");
+        let cache = dir.path().join("cache.sqlite3");
+        let event = Event::new(EventKind::Modify(ModifyKind::Metadata(
+            MetadataKind::WriteTime,
         )))
         .add_path(dir.path().join("Home.md"));
 
