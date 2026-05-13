@@ -19,9 +19,9 @@ use tracing::{error, info};
 use crate::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
 use crate::cache::SqliteCache;
 use crate::handlers::{
-    health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
-    resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, tree_handler,
-    vault_asset_handler,
+    health_handler, note_download_handler, note_handler, note_links_handler,
+    recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
+    search_handler, spa_index_handler, tree_handler, vault_asset_handler,
 };
 use crate::mcp::{mcp_get_handler, mcp_post_handler};
 
@@ -30,6 +30,7 @@ fn build_router(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .route("/api/tree", get(tree_handler))
+        .route("/api/recently-modified", get(recently_modified_handler))
         .route("/api/note/{slug}", get(note_handler))
         .route("/api/note/{slug}/download", get(note_download_handler))
         .route("/api/note/{slug}/links", get(note_links_handler))
@@ -218,6 +219,7 @@ mod tests {
         assert_eq!(note.status(), StatusCode::OK);
 
         let resolve_batch = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/resolve-batch")
@@ -229,5 +231,22 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resolve_batch.status(), StatusCode::OK);
+
+        let modified = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/recently-modified?limit=5")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(modified.status(), StatusCode::OK);
+        let body = to_bytes(modified.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["notes"][0]["slug"], "home");
     }
 }

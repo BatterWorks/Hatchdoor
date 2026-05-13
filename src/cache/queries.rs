@@ -3,8 +3,8 @@ use std::collections::{BTreeMap, HashSet};
 use rusqlite::{OptionalExtension, params};
 
 use crate::vault::{
-    ExplorerFolder, ExplorerNote, Note, NoteLink, NoteLinks, SearchHit, content_snippet,
-    normalize_link_target, normalize_title, slugify,
+    ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteLink, NoteLinks, SearchHit,
+    content_snippet, normalize_link_target, normalize_title, slugify,
 };
 
 use super::SqliteCache;
@@ -54,6 +54,40 @@ impl SqliteCache {
         }
 
         Ok(root.build("Vault"))
+    }
+
+    pub(crate) fn recently_modified_notes(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ModifiedNote>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT title, slug, relative_path, mtime_ns
+                FROM notes
+                ORDER BY mtime_ns DESC, relative_path ASC
+                LIMIT ?1
+                "#,
+            )
+            .map_err(|error| format!("failed to prepare recently modified query: {error}"))?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok(ModifiedNote {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    mtime_ns: row.get(3)?,
+                })
+            })
+            .map_err(|error| format!("failed to query recently modified notes: {error}"))?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("failed to read recently modified notes: {error}"))
     }
 
     pub(crate) fn search(
@@ -387,6 +421,7 @@ fn escape_like(input: &str) -> String {
 mod tests {
     use crate::cache::SqliteCache;
     use crate::vault::VaultIndex;
+    use rusqlite::params;
     use std::fs;
     use tempfile::tempdir;
 
@@ -405,5 +440,47 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].match_kind, "content");
         assert_eq!(hits[0].snippet.as_deref(), Some("alpha context only"));
+    }
+
+    #[test]
+    fn recently_modified_notes_returns_newest_source_files_first() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(dir.path().join("Alpha.md"), "alpha").expect("write alpha");
+        fs::write(dir.path().join("Bravo.md"), "bravo").expect("write bravo");
+        fs::write(dir.path().join("Charlie.md"), "charlie").expect("write charlie");
+
+        let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache.replace_from_index(&index).expect("populate cache");
+        {
+            let conn = cache.connection().expect("connection");
+            conn.execute(
+                "UPDATE notes SET mtime_ns = ?1 WHERE slug = ?2",
+                params![10_i64, "alpha"],
+            )
+            .expect("set alpha mtime");
+            conn.execute(
+                "UPDATE notes SET mtime_ns = ?1 WHERE slug = ?2",
+                params![30_i64, "bravo"],
+            )
+            .expect("set bravo mtime");
+            conn.execute(
+                "UPDATE notes SET mtime_ns = ?1 WHERE slug = ?2",
+                params![20_i64, "charlie"],
+            )
+            .expect("set charlie mtime");
+        }
+
+        let notes = cache
+            .recently_modified_notes(2)
+            .expect("recently modified notes");
+
+        assert_eq!(
+            notes
+                .iter()
+                .map(|note| note.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bravo", "charlie"]
+        );
     }
 }

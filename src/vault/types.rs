@@ -46,6 +46,14 @@ pub struct ExplorerNote {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModifiedNote {
+    pub title: String,
+    pub slug: String,
+    pub relative_path: String,
+    pub mtime_ns: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SearchHit {
     pub title: String,
     pub slug: String,

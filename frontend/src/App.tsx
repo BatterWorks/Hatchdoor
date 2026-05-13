@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import "./App.css";
@@ -30,6 +36,8 @@ import { isExplorerTreeEqual } from "./stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
+  ModifiedNote,
+  RecentlyModifiedResponse,
   RecentNote,
   SearchResponse,
   SearchResult,
@@ -50,9 +58,10 @@ function App() {
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
-  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>(
-    () => getStoredExpandedFolders(),
-  );
+  const [modifiedNotes, setModifiedNotes] = useState<ModifiedNote[]>([]);
+  const [expandedFolders, setExpandedFolders] = useState<
+    Record<string, boolean>
+  >(() => getStoredExpandedFolders());
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
@@ -63,7 +72,9 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
-  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
+    null,
+  );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
@@ -77,9 +88,27 @@ function App() {
         throw new Error(`Failed loading tree: ${res.status}`);
       }
       const nextTree = (await res.json()) as ExplorerFolder;
-      setTree((prev) => (isExplorerTreeEqual(prev, nextTree) ? prev : nextTree));
+      setTree((prev) =>
+        isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
+      );
     } catch (err) {
-      setTreeError(err instanceof Error ? err.message : "Unknown tree loading error");
+      setTreeError(
+        err instanceof Error ? err.message : "Unknown tree loading error",
+      );
+    }
+  }, []);
+
+  const loadModifiedNotes = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: "5" });
+      const res = await fetch(`/api/recently-modified?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error(`Failed loading modified notes: ${res.status}`);
+      }
+      const json = (await res.json()) as RecentlyModifiedResponse;
+      setModifiedNotes(json.notes.slice(0, 5));
+    } catch {
+      setModifiedNotes([]);
     }
   }, []);
 
@@ -87,19 +116,21 @@ function App() {
     void (async () => {
       setLoadingTree(true);
       await loadTree();
+      await loadModifiedNotes();
       setLoadingTree(false);
     })();
-  }, [loadTree]);
+  }, [loadModifiedNotes, loadTree]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
       void loadTree();
+      void loadModifiedNotes();
     }, 10_000);
 
     return () => {
       window.clearInterval(id);
     };
-  }, [loadTree]);
+  }, [loadModifiedNotes, loadTree]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -154,7 +185,9 @@ function App() {
     }
 
     setRecentNotes((prev) => {
-      const withoutCurrent = prev.filter((item) => item.slug !== activeNote.slug);
+      const withoutCurrent = prev.filter(
+        (item) => item.slug !== activeNote.slug,
+      );
       const next: RecentNote[] = [
         { ...activeNote, viewedAt: Date.now() },
         ...withoutCurrent,
@@ -313,7 +346,8 @@ function App() {
       // Fall back to tree refresh even if force refresh endpoint fails.
     }
     await loadTree();
-  }, [loadTree]);
+    await loadModifiedNotes();
+  }, [loadModifiedNotes, loadTree]);
   const copyNoteLink = useCallback(async () => {
     if (!activeNote) {
       return;
@@ -368,15 +402,22 @@ function App() {
           drawerOpen={drawerOpen}
           locationPathname={location.pathname}
           recentNotes={recentNotes}
+          modifiedNotes={modifiedNotes}
           loadingTree={loadingTree}
           treeError={treeError}
           tree={tree}
           expandedFolders={expandedFolders}
           onExpandedFoldersChange={setExpandedFolders}
           onCloseDrawer={() => setDrawerOpen(false)}
-          onRefreshTree={() => void loadTree()}
+          onRefreshTree={() => {
+            void loadTree();
+            void loadModifiedNotes();
+          }}
           onScrollTopChange={(current) => {
-            window.localStorage.setItem(EXPLORER_SCROLL_TOP_KEY, String(current));
+            window.localStorage.setItem(
+              EXPLORER_SCROLL_TOP_KEY,
+              String(current),
+            );
           }}
         />
 
