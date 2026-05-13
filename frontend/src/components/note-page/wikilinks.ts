@@ -1,9 +1,6 @@
 import { useEffect, useState } from "react";
 
-import {
-  escapeMarkdownLabel,
-  parseWikilinkTarget,
-} from "../../markdown";
+import { escapeMarkdownLabel, parseWikilinkTarget } from "../../markdown";
 import type { ResolveBatchResponse } from "../../types";
 
 export function useResolvedWikilinks(

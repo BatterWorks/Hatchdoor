@@ -5,7 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SearchResult } from "../types";
 import { SearchDialog } from "./SearchDialog";
 
-function renderDialog(overrides?: Partial<ComponentProps<typeof SearchDialog>>) {
+function renderDialog(
+  overrides?: Partial<ComponentProps<typeof SearchDialog>>,
+) {
   const onClose = vi.fn();
   const onQueryChange = vi.fn();
   const onIncludeContentChange = vi.fn();
