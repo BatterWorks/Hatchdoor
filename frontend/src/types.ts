@@ -88,6 +88,7 @@ export type MermaidApi = {
   initialize: (config: {
     startOnLoad: boolean;
     securityLevel: "strict";
+    fontFamily?: string;
     themeVariables?: {
       fontFamily?: string;
     };

@@ -11,13 +11,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
 const mermaidInitialize = vi.fn();
+const mermaidRender = vi.fn(async (id: string, chart: string) => ({
+  svg: `<svg id="${id}" data-chart="${chart}"></svg>`,
+}));
 
 vi.mock("mermaid", () => ({
   default: {
     initialize: mermaidInitialize,
-    render: vi.fn(async (id: string, chart: string) => ({
-      svg: `<svg id="${id}" data-chart="${chart}"></svg>`,
-    })),
+    render: mermaidRender,
   },
 }));
 
@@ -458,9 +459,95 @@ Body`,
     expect(mermaidInitialize).toHaveBeenCalledWith({
       startOnLoad: false,
       securityLevel: "strict",
+      fontFamily: "Inter Tight, system-ui, sans-serif",
       themeVariables: {
         fontFamily: "Inter Tight, system-ui, sans-serif",
       },
     });
+  });
+
+  it("waits for web fonts before rendering mermaid diagrams", async () => {
+    mermaidRender.mockClear();
+
+    let fontsReady = false;
+    let resolveFonts: () => void = () => {};
+    const fontReadyPromise = new Promise<void>((resolve) => {
+      resolveFonts = () => {
+        fontsReady = true;
+        resolve();
+      };
+    });
+
+    Object.defineProperty(document, "fonts", {
+      configurable: true,
+      value: {
+        ready: fontReadyPromise,
+      },
+    });
+
+    mermaidRender.mockImplementation(async (id: string, chart: string) => {
+      expect(fontsReady).toBe(true);
+      return { svg: `<svg id="${id}" data-chart="${chart}"></svg>` };
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Atlas", slug: "atlas" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/atlas")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Atlas",
+                slug: "atlas",
+                relative_path: "Notes/40-reference/Homelab Atlas",
+                content: [
+                  "# Atlas",
+                  "",
+                  "```mermaid",
+                  "graph TD",
+                  "A-->B",
+                  "```",
+                ].join("\n"),
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/atlas"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Atlas" });
+    await Promise.resolve();
+    expect(mermaidRender).not.toHaveBeenCalled();
+
+    resolveFonts();
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".mermaid")).toHaveLength(1);
+    });
+    expect(mermaidRender).toHaveBeenCalled();
   });
 });

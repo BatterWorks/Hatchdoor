@@ -28,6 +28,7 @@ async function getMermaidApi(): Promise<MermaidApi> {
     api.initialize({
       startOnLoad: false,
       securityLevel: "strict",
+      fontFamily: mermaidFontFamily,
       themeVariables: {
         fontFamily: mermaidFontFamily,
       },
@@ -36,6 +37,10 @@ async function getMermaidApi(): Promise<MermaidApi> {
   }
 
   return api;
+}
+
+async function waitForDocumentFonts(): Promise<void> {
+  await document.fonts?.ready;
 }
 
 export function CalloutOrQuote({ children }: { children: ReactNode }) {
@@ -132,6 +137,7 @@ export function MermaidDiagram({ chart }: { chart: string }) {
     void (async () => {
       try {
         const api = await getMermaidApi();
+        await waitForDocumentFonts();
         const id = `m-${Math.random().toString(36).slice(2)}`;
         const { svg: rendered } = await api.render(id, chart);
         if (mounted) {
