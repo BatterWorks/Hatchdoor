@@ -12,6 +12,27 @@ export function escapeMarkdownLabel(input: string): string {
   return input.replace(/[\\`*_[\]{}()#+.!|]/g, "\\$&");
 }
 
+export function stripVaultNoteLinks(markdown: string): string {
+  return stripInternalMarkdownLinks(stripNoteWikilinks(markdown));
+}
+
+function stripNoteWikilinks(markdown: string): string {
+  return markdown.replace(/(?<!!)\[\[([^\]]+)\]\]/g, (_whole, body: string) => {
+    const parsed = parseWikilinkTarget(body);
+    if (body.includes("|")) {
+      return parsed.label;
+    }
+    return parsed.target.split(/[#^]/, 1)[0].trim();
+  });
+}
+
+function stripInternalMarkdownLinks(markdown: string): string {
+  return markdown.replace(
+    /(?<!!)\[([^\]]+)\]\((\/n\/[^)]+|\/__missing__\/[^)]+)\)/g,
+    (_whole, label: string) => label,
+  );
+}
+
 export type FrontmatterValue = string | string[];
 
 export function parseFrontmatter(input: string): {
