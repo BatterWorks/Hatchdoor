@@ -35,6 +35,7 @@ export type ActiveNoteMeta = {
   title: string;
   slug: string;
   relativePath: string;
+  exportContent?: string;
 };
 
 export type RecentNote = ActiveNoteMeta & {

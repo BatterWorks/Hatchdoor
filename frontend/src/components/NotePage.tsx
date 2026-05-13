@@ -124,19 +124,6 @@ export function NotePage({
   }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
-    if (!note) {
-      onActiveNoteChange(null);
-      return;
-    }
-
-    onActiveNoteChange({
-      title: note.title,
-      slug: note.slug,
-      relativePath: note.relative_path,
-    });
-  }, [note, onActiveNoteChange]);
-
-  useEffect(() => {
     window.localStorage.setItem(
       propertiesCollapsedStorageKey,
       propertiesCollapsed ? "1" : "0",
@@ -151,6 +138,21 @@ export function NotePage({
   }, []);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
+
+  useEffect(() => {
+    if (!note) {
+      onActiveNoteChange(null);
+      return;
+    }
+
+    onActiveNoteChange({
+      title: note.title,
+      slug: note.slug,
+      relativePath: note.relative_path,
+      exportContent: parsed.body,
+    });
+  }, [note, onActiveNoteChange, parsed.body]);
+
   const markdown = useResolvedWikilinks(parsed.body, note?.relative_path ?? "");
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
