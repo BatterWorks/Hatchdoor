@@ -43,10 +43,12 @@ export function NotePage({
   onActiveNoteChange,
   onTagSelect,
   propertiesCollapsedStorageKey,
+  vaultRevision,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   onTagSelect: (tag: string) => void;
   propertiesCollapsedStorageKey: string;
+  vaultRevision: number;
 }) {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
@@ -113,15 +115,13 @@ export function NotePage({
   }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      void loadNote(false);
-      void loadNoteLinks();
-    }, 10_000);
+    if (vaultRevision === 0) {
+      return;
+    }
 
-    return () => {
-      window.clearInterval(id);
-    };
-  }, [loadNote, loadNoteLinks]);
+    void loadNote(false);
+    void loadNoteLinks();
+  }, [loadNote, loadNoteLinks, vaultRevision]);
 
   useEffect(() => {
     window.localStorage.setItem(

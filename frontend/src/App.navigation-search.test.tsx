@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
   within,
+  act,
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -115,6 +116,141 @@ describe("App navigation/search", () => {
         screen.getByRole("heading", { level: 2, name: "Home" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("reloads visible vault data when a vault revision event arrives", async () => {
+    let treeCalls = 0;
+    let modifiedCalls = 0;
+    let noteCalls = 0;
+    let linksCalls = 0;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          treeCalls += 1;
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes:
+                treeCalls === 1
+                  ? [{ title: "Home", slug: "home" }]
+                  : [
+                      { title: "Home", slug: "home" },
+                      { title: "Project", slug: "project" },
+                    ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/recently-modified")) {
+          modifiedCalls += 1;
+          return new Response(
+            JSON.stringify({
+              notes:
+                modifiedCalls === 1
+                  ? []
+                  : [
+                      {
+                        title: "Project",
+                        slug: "project",
+                        relative_path: "Project",
+                        mtime_ns: 40,
+                      },
+                    ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home/links")) {
+          linksCalls += 1;
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          noteCalls += 1;
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content:
+                  noteCalls === 1
+                    ? "# Home\n\nVersion 1"
+                    : "# Home\n\nVersion 2",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Version 1")).toBeInTheDocument();
+    expect(window.__hatchdoorEventSources[0]?.url).toBe("/api/vault-events");
+
+    act(() => {
+      window.__hatchdoorEventSources[0].emit(
+        "vault-revision",
+        JSON.stringify({ revision: 1 }),
+      );
+    });
+
+    expect(await screen.findByText("Version 2")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(treeCalls).toBeGreaterThanOrEqual(2);
+      expect(modifiedCalls).toBeGreaterThanOrEqual(2);
+      expect(linksCalls).toBeGreaterThanOrEqual(2);
+    });
+    expect(
+      screen.getAllByRole("link", { name: "Project" }).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("does not install the old vault polling interval", async () => {
+    const setIntervalSpy = vi.spyOn(window, "setInterval");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: "Vault",
+          folders: [],
+          notes: [],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Notes Explorer" }),
+    ).toBeInTheDocument();
+    expect(
+      setIntervalSpy.mock.calls.some(([, delay]) => delay === 10_000),
+    ).toBe(false);
   });
 
   it("renders folders collapsed by default on explorer root", async () => {

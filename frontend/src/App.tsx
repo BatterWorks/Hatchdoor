@@ -72,6 +72,7 @@ function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
+  const [vaultRevision, setVaultRevision] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -126,15 +127,41 @@ function App() {
   }, [loadModifiedNotes, loadTree]);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      void loadTree();
-      void loadModifiedNotes();
-    }, 10_000);
+    if (!("EventSource" in window)) {
+      return;
+    }
+
+    const events = new EventSource("/api/vault-events");
+    const onVaultRevision = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { revision?: unknown };
+        if (typeof payload.revision === "number") {
+          const revision = payload.revision;
+          setVaultRevision((current) =>
+            revision > current ? revision : current,
+          );
+        }
+      } catch {
+        // Ignore malformed event payloads; the next valid revision will resync.
+      }
+    };
+
+    events.addEventListener("vault-revision", onVaultRevision);
 
     return () => {
-      window.clearInterval(id);
+      events.removeEventListener("vault-revision", onVaultRevision);
+      events.close();
     };
-  }, [loadModifiedNotes, loadTree]);
+  }, []);
+
+  useEffect(() => {
+    if (vaultRevision === 0) {
+      return;
+    }
+
+    void loadTree();
+    void loadModifiedNotes();
+  }, [loadModifiedNotes, loadTree, vaultRevision]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -496,6 +523,7 @@ function App() {
                   onActiveNoteChange={setActiveNote}
                   onTagSelect={openSearchForTag}
                   propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
+                  vaultRevision={vaultRevision}
                 />
               }
             />

@@ -2,11 +2,12 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::http::StatusCode;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -68,6 +69,8 @@ pub(crate) struct AppState {
     pub(crate) vault_path: PathBuf,
     pub(crate) refresh_interval: Duration,
     pub(crate) cache: Arc<RwLock<VaultCache>>,
+    pub(crate) vault_revision: Arc<AtomicU64>,
+    pub(crate) vault_events: broadcast::Sender<u64>,
 }
 
 pub(crate) struct VaultCache {
@@ -109,7 +112,6 @@ pub(crate) fn build_cache_with_sqlite(
 pub(crate) async fn sqlite_cache(
     state: &AppState,
 ) -> Result<Arc<SqliteCache>, (StatusCode, Json<ErrorResponse>)> {
-    refresh_if_needed(state, false).await?;
     let guard = state.cache.read().await;
     Ok(guard.sqlite.clone())
 }
@@ -146,6 +148,7 @@ pub(crate) async fn refresh_if_needed(
                 );
             }
             *guard = cache;
+            broadcast_vault_revision(state);
             Ok(())
         }
         Err(error) => {
@@ -163,6 +166,11 @@ pub(crate) async fn refresh_if_needed(
             ))
         }
     }
+}
+
+fn broadcast_vault_revision(state: &AppState) {
+    let revision = state.vault_revision.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = state.vault_events.send(revision);
 }
 
 #[cfg(test)]
@@ -208,10 +216,13 @@ mod tests {
 
     fn state_with_vault(vault_path: PathBuf, refresh_interval: Duration) -> AppState {
         let cache = build_cache(&vault_path).expect("build cache");
+        let (vault_events, _) = broadcast::channel(64);
         AppState {
             vault_path,
             refresh_interval,
             cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(AtomicU64::new(0)),
+            vault_events,
         }
     }
 
@@ -244,7 +255,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlite_cache_returns_refresh_error_when_reindex_fails() {
+    async fn sqlite_cache_returns_current_cache_without_reindexing() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -254,6 +265,21 @@ mod tests {
         state.vault_path = dir.path().join("missing-vault");
 
         let result = sqlite_cache(&state).await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn refresh_if_needed_broadcasts_revision_after_successful_refresh() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+        let state = state_with_vault(vault_path.clone(), Duration::from_secs(3600));
+        let mut events = state.vault_events.subscribe();
+
+        std::fs::write(vault_path.join("Second.md"), "second").expect("write note");
+        refresh_if_needed(&state, true).await.expect("refresh");
+
+        assert_eq!(events.recv().await.expect("revision"), 1);
     }
 }

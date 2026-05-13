@@ -48,6 +48,11 @@ pub(crate) struct RefreshResponse {
     pub(crate) refreshed: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct VaultEventResponse {
+    pub(crate) revision: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct RecentlyModifiedQuery {
     pub(crate) limit: Option<usize>,
