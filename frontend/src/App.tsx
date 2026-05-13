@@ -29,6 +29,7 @@ import {
   isEditableTarget,
 } from "./app/storage";
 import { useIsMobile } from "./app/useIsMobile";
+import { copyText } from "./clipboard";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
 import { StateBlock } from "./components/ui";
@@ -362,17 +363,7 @@ function App() {
     if (!activeNote) {
       return;
     }
-    try {
-      const res = await fetch(
-        `/api/note/${encodeURIComponent(activeNote.slug)}/download`,
-      );
-      if (!res.ok) {
-        throw new Error(`Failed loading note export: ${res.status}`);
-      }
-      await navigator.clipboard.writeText(await res.text());
-    } catch {
-      // Ignore clipboard errors in unsupported contexts.
-    }
+    await copyText(activeNote.exportContent ?? "");
   }, [activeNote]);
   const toggleProperties = useCallback(() => {
     window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));

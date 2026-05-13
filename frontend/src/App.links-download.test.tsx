@@ -258,7 +258,7 @@ describe("App links/download", () => {
     expect(clickSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("copies the same cleaned markdown served by the download endpoint", async () => {
+  it("copies cleaned markdown from the loaded note without fetching first", async () => {
     const clipboardWrite = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -280,7 +280,7 @@ describe("App links/download", () => {
         }
 
         if (url.includes("/api/note/home/download")) {
-          return new Response("# Home\n\nClean body", { status: 200 });
+          throw new Error("copy should not fetch the download endpoint");
         }
 
         if (url.includes("/api/note/home")) {
