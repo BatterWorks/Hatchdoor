@@ -168,10 +168,13 @@ mod tests {
             .expect("write home");
         std::fs::write(vault_root.join("Plan.md"), "# Plan\nlinked note").expect("write plan");
         let cache = build_cache(&vault_root).expect("build cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
             refresh_interval: Duration::from_secs(60),
             cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
         };
         (state, tmp)
     }

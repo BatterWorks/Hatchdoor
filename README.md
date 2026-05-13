@@ -34,7 +34,7 @@ Copy `.env.example` to `.env`:
 - `HATCHDOOR_MCP_ALLOWED_ORIGINS=http://127.0.0.1,http://localhost`
 - `RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn`
 
-`VAULT_REFRESH_SECONDS` controls how often API/UI/MCP requests may trigger a fresh vault scan.
+`VAULT_REFRESH_SECONDS` is kept for compatibility with forced refresh internals. Normal cache updates are driven by the recursive vault watcher.
 `HATCHDOOR_CACHE_DB` points to Hatchdoor's generated SQLite cache. Keep it outside the Markdown vault.
 `RUST_LOG` controls structured backend log verbosity.
 
@@ -55,7 +55,8 @@ Hatchdoor stores this in SQLite:
 
 Refresh behaviour:
 
-- API/UI/MCP requests trigger refresh only when `VAULT_REFRESH_SECONDS` has elapsed.
+- A recursive vault watcher refreshes the cache after Markdown or asset file changes.
+- Browser clients subscribe to `/api/vault-events` and reload visible vault data when a refreshed revision is broadcast.
 - Changed/new/deleted note rows are updated incrementally using file metadata plus stable content hash.
 - Link relationships are rebuilt from the current vault index on refresh so backlinks stay correct after note renames, additions, or deletions.
 - `/api/refresh` and MCP `refresh_index` force an immediate refresh.
@@ -151,6 +152,7 @@ The container uses:
 - `POST /api/resolve-batch` -> batch wikilink resolution
 - `GET /api/search?q=...` -> note search results
 - `POST /api/refresh` -> force SQLite cache refresh from Markdown vault
+- `GET /api/vault-events` -> Server-Sent Events stream for refreshed vault revisions
 - `GET /vault-assets/*path` -> image assets from vault (`png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`)
 - `GET /health` -> `ok`
 

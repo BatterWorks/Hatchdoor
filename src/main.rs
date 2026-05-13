@@ -4,6 +4,7 @@ mod cache;
 mod handlers;
 mod mcp;
 mod vault;
+mod vault_watcher;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +22,7 @@ use crate::cache::SqliteCache;
 use crate::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
-    search_handler, spa_index_handler, tree_handler, vault_asset_handler,
+    search_handler, spa_index_handler, tree_handler, vault_asset_handler, vault_events_handler,
 };
 use crate::mcp::{mcp_get_handler, mcp_post_handler};
 
@@ -30,6 +31,7 @@ fn build_router(state: AppState) -> Router {
         .route("/health", get(health_handler))
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .route("/api/tree", get(tree_handler))
+        .route("/api/vault-events", get(vault_events_handler))
         .route("/api/recently-modified", get(recently_modified_handler))
         .route("/api/note/{slug}", get(note_handler))
         .route("/api/note/{slug}/download", get(note_download_handler))
@@ -89,11 +91,20 @@ async fn main() {
         std::process::exit(1);
     });
 
+    let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let state = AppState {
         vault_path: config.vault_path.clone(),
         refresh_interval: Duration::from_secs(config.refresh_seconds),
         cache: Arc::new(RwLock::new(cache)),
+        vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        vault_events,
     };
+
+    vault_watcher::spawn_vault_watcher(
+        state.clone(),
+        config.vault_path.clone(),
+        config.cache_db_path.clone(),
+    );
 
     let app = build_router(state);
 
@@ -142,10 +153,13 @@ mod tests {
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
         let cache = build_cache(&vault_root).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
             refresh_interval: Duration::from_secs(60),
             cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
         };
 
         (build_router(state), tmp)
@@ -199,6 +213,24 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(refresh_get.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn router_serves_vault_events_stream() {
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vault-events")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
     }
 
     #[tokio::test]

@@ -2,12 +2,17 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use std::convert::Infallible;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
 
 use crate::api_types::{
     ErrorResponse, NoteLinksResponse, NoteResponse, RecentlyModifiedQuery,
     RecentlyModifiedResponse, RefreshResponse, ResolveBatchRequest, ResolveBatchResponse,
     ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, SearchResponse,
+    VaultEventResponse,
 };
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 
@@ -103,6 +108,22 @@ pub(crate) async fn refresh_handler(State(state): State<AppState>) -> impl IntoR
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
     }
+}
+
+pub(crate) async fn vault_events_handler(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let stream =
+        BroadcastStream::new(state.vault_events.subscribe()).filter_map(|event| match event {
+            Ok(revision) => {
+                let payload = serde_json::to_string(&VaultEventResponse { revision })
+                    .unwrap_or_else(|_| format!(r#"{{"revision":{revision}}}"#));
+                Some(Ok(Event::default().event("vault-revision").data(payload)))
+            }
+            Err(_) => None,
+        });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 pub(crate) async fn recently_modified_handler(
