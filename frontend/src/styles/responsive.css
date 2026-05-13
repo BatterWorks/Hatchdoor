@@ -17,16 +17,16 @@ body.resizing {
 
   .app-layout {
     grid-template-columns: minmax(0, 1fr);
-    min-height: calc(100dvh - 3px - 88px - env(safe-area-inset-top));
+    min-height: calc(100dvh - var(--mobile-drawer-top, 0px));
   }
 
   .explorer-pane {
     position: fixed;
-    top: calc(3px + 88px);
+    top: var(--mobile-drawer-top, 0px);
     bottom: auto;
     left: 0;
-    height: calc(100dvh - 3px - 88px);
-    max-height: calc(100dvh - 3px - 88px);
+    height: calc(100dvh - var(--mobile-drawer-top, 0px));
+    max-height: calc(100dvh - var(--mobile-drawer-top, 0px));
     width: min(88vw, 340px);
     max-width: 340px;
     transform: translateX(-105%);
@@ -38,7 +38,7 @@ body.resizing {
   }
 
   .drawer-backdrop {
-    inset: calc(3px + 88px) 0 0 0;
+    inset: var(--mobile-drawer-top, 0px) 0 0 0;
   }
 
   .topbar-mobile-meta {

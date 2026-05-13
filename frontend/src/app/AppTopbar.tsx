@@ -1,3 +1,5 @@
+import type { Ref } from "react";
+
 import { StatusBadge, UiButton } from "../components/ui";
 import type { ActiveNoteMeta } from "../types";
 
@@ -7,6 +9,7 @@ type TopbarProps = {
   isOnline: boolean;
   treeIsStale: boolean;
   actionsMenuOpen: boolean;
+  topbarRef?: Ref<HTMLElement>;
   onToggleDrawer: () => void;
   onOpenSearch: () => void;
   onToggleActionsMenu: () => void;
@@ -24,6 +27,7 @@ export function AppTopbar({
   isOnline,
   treeIsStale,
   actionsMenuOpen,
+  topbarRef,
   onToggleDrawer,
   onOpenSearch,
   onToggleActionsMenu,
@@ -41,7 +45,7 @@ export function AppTopbar({
   return (
     <>
       <div className="hotbar" aria-hidden="true" />
-      <header className="app-topbar">
+      <header className="app-topbar" ref={topbarRef}>
         {/* Col 1 — Brand */}
         <div className="topbar-brand">
           {isMobile ? (
@@ -83,7 +87,9 @@ export function AppTopbar({
               onClick={onOpenSearch}
             >
               <span>Search</span>
-              <span className="shortcut-hint" aria-hidden="true">⌘K</span>
+              <span className="shortcut-hint" aria-hidden="true">
+                ⌘K
+              </span>
             </button>
           ) : (
             <button
@@ -111,14 +117,20 @@ export function AppTopbar({
                 <UiButton
                   className="close-note"
                   role="menuitem"
-                  onClick={() => { onCloseActionsMenu(); onOpenSearch(); }}
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onOpenSearch();
+                  }}
                 >
                   Search
                 </UiButton>
                 <UiButton
                   className="close-note"
                   role="menuitem"
-                  onClick={() => { onCloseActionsMenu(); onRefreshVault(); }}
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onRefreshVault();
+                  }}
                 >
                   Refresh vault
                 </UiButton>
@@ -126,7 +138,10 @@ export function AppTopbar({
                   <UiButton
                     className="close-note"
                     role="menuitem"
-                    onClick={() => { onCloseActionsMenu(); onCopyPageContent(); }}
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onCopyPageContent();
+                    }}
                   >
                     Copy page content
                   </UiButton>
@@ -135,7 +150,10 @@ export function AppTopbar({
                   <UiButton
                     className="close-note"
                     role="menuitem"
-                    onClick={() => { onCloseActionsMenu(); onDownloadMarkdown(); }}
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onDownloadMarkdown();
+                    }}
                   >
                     Download .md
                   </UiButton>
@@ -144,7 +162,10 @@ export function AppTopbar({
                   <UiButton
                     className="close-note"
                     role="menuitem"
-                    onClick={() => { onCloseActionsMenu(); onCopyNoteLink(); }}
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onCopyNoteLink();
+                    }}
                   >
                     Copy note link
                   </UiButton>
@@ -152,7 +173,10 @@ export function AppTopbar({
                 <UiButton
                   className="close-note"
                   role="menuitem"
-                  onClick={() => { onCloseActionsMenu(); onToggleProperties(); }}
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onToggleProperties();
+                  }}
                 >
                   Toggle properties
                 </UiButton>
@@ -168,7 +192,9 @@ export function AppTopbar({
             type="button"
             className="topbar-mobile-path"
             onClick={onOpenSearch}
-            title={activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
+            title={
+              activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"
+            }
           >
             {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
           </button>
