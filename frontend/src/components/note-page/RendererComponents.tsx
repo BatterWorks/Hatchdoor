@@ -14,6 +14,7 @@ import { flattenText } from "./text";
 
 let mermaidModulePromise: Promise<MermaidApi> | null = null;
 let mermaidInitialized = false;
+const mermaidFontFamily = "Inter Tight, system-ui, sans-serif";
 
 async function getMermaidApi(): Promise<MermaidApi> {
   if (!mermaidModulePromise) {
@@ -24,7 +25,13 @@ async function getMermaidApi(): Promise<MermaidApi> {
 
   const api = await mermaidModulePromise;
   if (!mermaidInitialized) {
-    api.initialize({ startOnLoad: false, securityLevel: "strict" });
+    api.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      themeVariables: {
+        fontFamily: mermaidFontFamily,
+      },
+    });
     mermaidInitialized = true;
   }
 

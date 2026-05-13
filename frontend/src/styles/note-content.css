@@ -460,7 +460,7 @@
   background: var(--paper);
   padding: 1rem;
   margin: 1.6rem 0;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   color: var(--muted);
   text-align: center;
   overflow: auto;

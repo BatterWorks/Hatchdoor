@@ -10,9 +10,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 
+const mermaidInitialize = vi.fn();
+
 vi.mock("mermaid", () => ({
   default: {
-    initialize: vi.fn(),
+    initialize: mermaidInitialize,
     render: vi.fn(async (id: string, chart: string) => ({
       svg: `<svg id="${id}" data-chart="${chart}"></svg>`,
     })),
@@ -452,6 +454,13 @@ Body`,
     await screen.findByRole("heading", { level: 2, name: "Atlas" });
     await waitFor(() => {
       expect(document.querySelectorAll(".mermaid")).toHaveLength(2);
+    });
+    expect(mermaidInitialize).toHaveBeenCalledWith({
+      startOnLoad: false,
+      securityLevel: "strict",
+      themeVariables: {
+        fontFamily: "Inter Tight, system-ui, sans-serif",
+      },
     });
   });
 });

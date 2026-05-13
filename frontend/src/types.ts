@@ -88,6 +88,9 @@ export type MermaidApi = {
   initialize: (config: {
     startOnLoad: boolean;
     securityLevel: "strict";
+    themeVariables?: {
+      fontFamily?: string;
+    };
   }) => void;
   render: (id: string, chart: string) => Promise<{ svg: string }>;
 };
