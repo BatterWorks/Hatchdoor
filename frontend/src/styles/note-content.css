@@ -1,7 +1,7 @@
 .note-pane {
   --reader-font-size: 16px;
   --reader-line-height: 1.4;
-  --reader-max-width: 860px;
+  --reader-max-width: 1120px;
   background: var(--color-bg-surface);
   padding: 0.95rem 1.85rem calc(2.5rem + env(safe-area-inset-bottom));
   max-width: 100%;
@@ -456,4 +456,3 @@
     linear-gradient(#9a978f, #9a978f) 0.11rem 0.45rem / 0.3rem 1.1px no-repeat,
     #fff;
 }
-
