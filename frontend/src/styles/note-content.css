@@ -7,13 +7,14 @@
   min-width: 0;
 }
 
-/* Two-col layout: body + TOC — centered, capped at 1120px */
+/* Two-col layout: body + TOC
+   max-width = 1120px note + gap + 220px TOC, so the note column is exactly 1120px */
 .note-page-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;
   gap: 1.4rem;
   align-items: start;
-  max-width: 1120px;
+  max-width: calc(1120px + 1.4rem + 220px);
   margin: 0 auto;
 }
 
