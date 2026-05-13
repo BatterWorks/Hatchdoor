@@ -255,6 +255,7 @@
 @media (max-width: 1160px) {
   .note-page-layout {
     grid-template-columns: minmax(0, 1fr);
+    max-width: 1120px;
   }
 
   .note-toc-desktop {
