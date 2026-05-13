@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
@@ -89,12 +89,54 @@ pub(crate) fn should_refresh_for_event(event: &Event, cache_db_path: &Path) -> b
 }
 
 fn is_cache_path(path: &Path, cache_db_path: &Path) -> bool {
-    path == cache_db_path
-        || path
-            .canonicalize()
-            .ok()
-            .zip(cache_db_path.canonicalize().ok())
-            .is_some_and(|(path, cache)| path == cache)
+    let path = absolute_clean_path(path);
+    let cache = absolute_clean_path(cache_db_path);
+    if path == cache {
+        return true;
+    }
+
+    let Some(path_parent) = path.parent() else {
+        return false;
+    };
+    let Some(cache_parent) = cache.parent() else {
+        return false;
+    };
+    if path_parent != cache_parent {
+        return false;
+    }
+
+    let Some(cache_file_name) = cache.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(path_file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    ["journal", "wal", "shm"]
+        .iter()
+        .any(|suffix| path_file_name == format!("{cache_file_name}-{suffix}"))
+}
+
+fn absolute_clean_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+
+    let mut clean = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                clean.pop();
+            }
+            _ => clean.push(component.as_os_str()),
+        }
+    }
+    clean
 }
 
 #[cfg(test)]
@@ -113,6 +155,38 @@ mod tests {
         .add_path(cache.clone());
 
         assert!(!should_refresh_for_event(&event, &cache));
+    }
+
+    #[test]
+    fn should_refresh_for_event_ignores_sqlite_cache_sidecars() {
+        let dir = tempdir().expect("temp dir");
+        let cache = dir.path().join("cache.sqlite3");
+
+        for suffix in ["journal", "wal", "shm"] {
+            let event = Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )))
+            .add_path(dir.path().join(format!("cache.sqlite3-{suffix}")));
+
+            assert!(
+                !should_refresh_for_event(&event, &cache),
+                "{suffix} should be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn should_refresh_for_event_ignores_relative_cache_path() {
+        let relative_cache = PathBuf::from("./data/cache/cache.sqlite3");
+        let absolute_sidecar = std::env::current_dir()
+            .expect("current dir")
+            .join("data/cache/cache.sqlite3-wal");
+        let event = Event::new(EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )))
+        .add_path(absolute_sidecar);
+
+        assert!(!should_refresh_for_event(&event, &relative_cache));
     }
 
     #[test]
