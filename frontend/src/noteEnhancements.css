@@ -1,10 +1,4 @@
-/* Desktop: note body + TOC column */
-.note-page-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 220px;
-  gap: 1.4rem;
-  align-items: start;
-}
+/* note-page-layout defined in note-content.css — responsive overrides only here */
 
 /* In-note search nav */
 .note-search-nav {

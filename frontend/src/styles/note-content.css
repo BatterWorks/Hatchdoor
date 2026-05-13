@@ -7,12 +7,14 @@
   min-width: 0;
 }
 
-/* Two-col layout: body + TOC */
+/* Two-col layout: body + TOC — centered, capped at 1120px */
 .note-page-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 220px;
   gap: 1.4rem;
   align-items: start;
+  max-width: 1120px;
+  margin: 0 auto;
 }
 
 /* Article wrapper */
@@ -312,10 +314,30 @@
   border-radius: 0;
 }
 
+/* COPY button lives on the dark code-block header — invert it */
+.code-block .ui-button,
+.code-block .close-note {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 92, "wght" 600;
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--bg);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  padding: 0.18rem 0.5rem;
+  min-height: unset;
+}
+
+.code-block .ui-button:hover,
+.code-block .close-note:hover {
+  background: var(--hot);
+  border-color: var(--hot);
+  color: var(--bg);
+}
+
 /* Inline code outside code blocks */
-.note-body code:not(.code-block code),
-.note-content > pre code,
-.note-pane pre code {
+.note-body code {
   font-family: var(--font-mono);
   font-size: 0.86em;
   background: var(--paper-2);
@@ -323,8 +345,17 @@
   color: var(--ink);
 }
 
-.note-pane pre,
-.note-content > pre {
+/* Reset inline code style when inside a code block */
+.code-block code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* Bare pre/code not inside a .code-block wrapper */
+.note-content > pre,
+.note-pane > pre {
   width: 100%;
   max-width: 100%;
   overflow: auto;
@@ -336,6 +367,7 @@
   font-family: var(--font-mono);
   font-size: 0.82rem;
   line-height: 1.6;
+  margin: 1.6rem 0;
 }
 
 /* Callouts */
