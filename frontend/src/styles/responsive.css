@@ -22,9 +22,11 @@ body.resizing {
 
   .explorer-pane {
     position: fixed;
-    top: calc(3px + 88px + env(safe-area-inset-top));
-    bottom: 0;
+    top: calc(3px + 88px);
+    bottom: auto;
     left: 0;
+    height: calc(100dvh - 3px - 88px);
+    max-height: calc(100dvh - 3px - 88px);
     width: min(88vw, 340px);
     max-width: 340px;
     transform: translateX(-105%);
@@ -36,7 +38,7 @@ body.resizing {
   }
 
   .drawer-backdrop {
-    inset: calc(3px + 88px + env(safe-area-inset-top)) 0 0 0;
+    inset: calc(3px + 88px) 0 0 0;
   }
 
   .topbar-mobile-meta {
@@ -76,7 +78,8 @@ body.resizing {
     max-height: 100dvh;
     width: 100%;
     border: 0;
-    padding: calc(0.9rem + env(safe-area-inset-top)) 0.9rem calc(0.9rem + env(safe-area-inset-bottom));
+    padding: calc(0.9rem + env(safe-area-inset-top)) 0.9rem
+      calc(0.9rem + env(safe-area-inset-bottom));
   }
 
   .explorer-pane[data-open="true"] {

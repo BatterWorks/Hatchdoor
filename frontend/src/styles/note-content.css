@@ -32,7 +32,9 @@
 /* Note page title — Forge .ty-title */
 .note-page-title {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 85, "wght" 700;
+  font-variation-settings:
+    "wdth" 85,
+    "wght" 700;
   font-size: clamp(2.4rem, 5vw, 3.6rem);
   line-height: 0.98;
   letter-spacing: -0.032em;
@@ -55,7 +57,9 @@
 
 .note-body h1 {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 88, "wght" 700;
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
   font-size: 1.7rem;
   text-transform: uppercase;
   letter-spacing: -0.012em;
@@ -74,7 +78,9 @@
 
 .note-body h3 {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 92, "wght" 600;
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
   font-size: 0.95rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -83,7 +89,9 @@
 
 .note-body h4 {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 96, "wght" 600;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 600;
   font-size: 0.88rem;
   margin: 1.4rem 0 0.4rem;
 }
@@ -110,7 +118,9 @@
   background-repeat: no-repeat;
   background-position: 0 100%;
   padding-bottom: 1px;
-  transition: background-color var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition:
+    background-color var(--dur) var(--ease),
+    color var(--dur) var(--ease);
 }
 
 .note-body a:hover {
@@ -158,6 +168,16 @@
   position: relative;
 }
 
+.note-body li > ul,
+.note-body li > ol {
+  margin: 0.35rem 0 0.65rem;
+}
+
+.note-body li > ul li,
+.note-body li > ol li {
+  margin-bottom: 0.18rem;
+}
+
 .note-body ul li::before {
   content: "";
   position: absolute;
@@ -202,7 +222,9 @@
 .note-body blockquote cite {
   display: block;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 88, "wght" 600;
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 600;
   font-style: normal;
   font-size: 0.7rem;
   letter-spacing: 0.18em;
@@ -242,6 +264,9 @@
   color: var(--muted);
   border-bottom: 1px solid var(--rule-strong);
   padding: 0.55rem 0.7rem 0.55rem 0;
+  overflow-wrap: normal;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .note-body td {
@@ -250,7 +275,9 @@
   vertical-align: top;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: normal;
   white-space: nowrap;
+  word-break: normal;
 }
 
 .note-body tr:last-child td {
@@ -319,7 +346,9 @@
 .code-block .ui-button,
 .code-block .close-note {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 92, "wght" 600;
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
   font-size: 0.66rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -388,7 +417,9 @@
 
 .callout-title {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 88, "wght" 700;
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
   font-style: normal;
   font-size: 0.72rem;
   letter-spacing: 0.16em;
@@ -548,7 +579,9 @@
 .tag-chip {
   display: inline-block;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 96, "wght" 500;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 500;
   font-size: 0.76rem;
   padding: 0.05rem 0.55rem 0.1rem;
   background: var(--hot-soft);
