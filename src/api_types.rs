@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::vault::{Note, NoteLinks, SearchHit};
+use crate::vault::{ModifiedNote, Note, NoteLinks, SearchHit};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ErrorResponse {
@@ -46,6 +46,16 @@ pub(crate) struct ResolveTargetResult {
 #[derive(Debug, Serialize)]
 pub(crate) struct RefreshResponse {
     pub(crate) refreshed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RecentlyModifiedQuery {
+    pub(crate) limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct RecentlyModifiedResponse {
+    pub(crate) notes: Vec<ModifiedNote>,
 }
 
 #[derive(Debug, Deserialize)]

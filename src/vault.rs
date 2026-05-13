@@ -10,7 +10,8 @@ mod write;
 pub(crate) use paths::strip_md_extension;
 pub(crate) use paths::{content_snippet, normalize_link_target, normalize_title, slugify};
 pub use types::{
-    ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
+    ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit,
+    VaultIndex,
 };
 pub(crate) use write::{
     AttachmentOutcome, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,

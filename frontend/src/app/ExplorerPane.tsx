@@ -1,14 +1,19 @@
 import type { RefObject } from "react";
 
-import { FolderTree, RecentNotesList } from "../components/Explorer";
+import {
+  FolderTree,
+  LastModifiedNotesList,
+  RecentNotesList,
+} from "../components/Explorer";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
-import type { ExplorerFolder, RecentNote } from "../types";
+import type { ExplorerFolder, ModifiedNote, RecentNote } from "../types";
 
 type ExplorerPaneProps = {
   explorerPaneRef: RefObject<HTMLElement | null>;
   drawerOpen: boolean;
   locationPathname: string;
   recentNotes: RecentNote[];
+  modifiedNotes: ModifiedNote[];
   loadingTree: boolean;
   treeError: string | null;
   tree: ExplorerFolder | null;
@@ -24,6 +29,7 @@ export function ExplorerPane({
   drawerOpen,
   locationPathname,
   recentNotes,
+  modifiedNotes,
   loadingTree,
   treeError,
   tree,
@@ -53,6 +59,12 @@ export function ExplorerPane({
 
       <RecentNotesList
         notes={recentNotes}
+        currentPath={locationPathname}
+        onNavigate={onCloseDrawer}
+      />
+
+      <LastModifiedNotesList
+        notes={modifiedNotes}
         currentPath={locationPathname}
         onNavigate={onCloseDrawer}
       />

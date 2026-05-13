@@ -72,6 +72,10 @@ describe("App navigation/search", () => {
           );
         }
 
+        if (url.includes("/api/recently-modified")) {
+          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        }
+
         if (url.includes("/api/note/home")) {
           return new Response(
             JSON.stringify({
@@ -242,11 +246,72 @@ describe("App navigation/search", () => {
     );
 
     const recent = await screen.findByTestId("recent-notes");
+    expect(within(recent).getByText("Recently Viewed")).toBeInTheDocument();
     await waitFor(() => {
       expect(
         within(recent).getByRole("link", { name: "Home" }),
       ).toBeInTheDocument();
     });
+  });
+
+  it("shows last modified notes from source file metadata", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [
+                { title: "Home", slug: "home" },
+                { title: "Project", slug: "project" },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/recently-modified")) {
+          return new Response(
+            JSON.stringify({
+              notes: [
+                {
+                  title: "Project",
+                  slug: "project",
+                  relative_path: "Projects/Project",
+                  mtime_ns: 30,
+                },
+                {
+                  title: "Home",
+                  slug: "home",
+                  relative_path: "Home",
+                  mtime_ns: 20,
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const modified = await screen.findByTestId("last-modified-notes");
+    expect(within(modified).getByText("Last Modified")).toBeInTheDocument();
+    expect(
+      within(modified).getByRole("link", { name: "Project" }),
+    ).toHaveAttribute("href", "/n/project");
+    expect(
+      within(modified).getByRole("link", { name: "Home" }),
+    ).toHaveAttribute("title", "Home.md");
   });
 
   it("opens search and lists matches", async () => {

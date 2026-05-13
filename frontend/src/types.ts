@@ -41,6 +41,17 @@ export type RecentNote = ActiveNoteMeta & {
   viewedAt: number;
 };
 
+export type ModifiedNote = {
+  title: string;
+  slug: string;
+  relative_path: string;
+  mtime_ns: number;
+};
+
+export type RecentlyModifiedResponse = {
+  notes: ModifiedNote[];
+};
+
 export type ReadPrefs = {
   fontSize: number;
   lineHeight: number;

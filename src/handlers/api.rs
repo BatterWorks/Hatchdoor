@@ -5,9 +5,9 @@ use axum::response::IntoResponse;
 use tracing::{debug, warn};
 
 use crate::api_types::{
-    ErrorResponse, NoteLinksResponse, NoteResponse, RefreshResponse, ResolveBatchRequest,
-    ResolveBatchResponse, ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery,
-    SearchResponse,
+    ErrorResponse, NoteLinksResponse, NoteResponse, RecentlyModifiedQuery,
+    RecentlyModifiedResponse, RefreshResponse, ResolveBatchRequest, ResolveBatchResponse,
+    ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, SearchResponse,
 };
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 
@@ -102,6 +102,22 @@ pub(crate) async fn refresh_handler(State(state): State<AppState>) -> impl IntoR
     match refresh_if_needed(&state, true).await {
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
+    }
+}
+
+pub(crate) async fn recently_modified_handler(
+    Query(query): Query<RecentlyModifiedQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    let limit = query.limit.unwrap_or(5).clamp(1, 25);
+    match cache.recently_modified_notes(limit) {
+        Ok(notes) => (StatusCode::OK, Json(RecentlyModifiedResponse { notes })).into_response(),
+        Err(error) => internal_error_response(error),
     }
 }
 
