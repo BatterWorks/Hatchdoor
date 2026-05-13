@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use std::convert::Infallible;
+use std::sync::atomic::Ordering;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
@@ -113,17 +114,25 @@ pub(crate) async fn refresh_handler(State(state): State<AppState>) -> impl IntoR
 pub(crate) async fn vault_events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let stream =
+    let current_revision = state.vault_revision.load(Ordering::SeqCst);
+    let current_event = tokio_stream::once(Ok(vault_revision_event(current_revision)));
+    let live_events =
         BroadcastStream::new(state.vault_events.subscribe()).filter_map(|event| match event {
-            Ok(revision) => {
-                let payload = serde_json::to_string(&VaultEventResponse { revision })
-                    .unwrap_or_else(|_| format!(r#"{{"revision":{revision}}}"#));
-                Some(Ok(Event::default().event("vault-revision").data(payload)))
-            }
+            Ok(revision) => Some(Ok(vault_revision_event(revision))),
             Err(_) => None,
         });
 
+    let stream = current_event.chain(live_events);
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn vault_revision_event(revision: u64) -> Event {
+    let payload = serde_json::to_string(&VaultEventResponse { revision })
+        .unwrap_or_else(|_| format!(r#"{{"revision":{revision}}}"#));
+    Event::default()
+        .event("vault-revision")
+        .id(revision.to_string())
+        .data(payload)
 }
 
 pub(crate) async fn recently_modified_handler(

@@ -140,14 +140,21 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
     use crate::app_state::build_cache;
 
     fn app_for_tests() -> (Router, TempDir) {
+        let (app, tmp, _state) = app_for_tests_with_state();
+        (app, tmp)
+    }
+
+    fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -162,7 +169,7 @@ mod tests {
             vault_events,
         };
 
-        (build_router(state), tmp)
+        (build_router(state.clone()), tmp, state)
     }
 
     #[tokio::test]
@@ -217,7 +224,8 @@ mod tests {
 
     #[tokio::test]
     async fn router_serves_vault_events_stream() {
-        let (app, _tmp) = app_for_tests();
+        let (app, _tmp, state) = app_for_tests_with_state();
+        state.vault_revision.store(7, Ordering::SeqCst);
         let response = app
             .oneshot(
                 Request::builder()
@@ -231,6 +239,16 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("first SSE event")
+            .expect("stream item")
+            .expect("body chunk");
+        let event = std::str::from_utf8(&chunk).expect("utf8 event");
+        assert!(event.contains("event: vault-revision"));
+        assert!(event.contains("id: 7"));
+        assert!(event.contains(r#"data: {"revision":7}"#));
     }
 
     #[tokio::test]
