@@ -66,6 +66,8 @@ export function NotePage({
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
+  const currentSlugRef = useRef(slug);
+  currentSlugRef.current = slug;
 
   const loadNote = useCallback(
     async (hardReload: boolean) => {
@@ -80,8 +82,10 @@ export function NotePage({
           throw new Error(`Failed loading note: ${res.status}`);
         }
         const json = (await res.json()) as { note: Note };
+        if (slug !== currentSlugRef.current) return;
         setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
       } catch (err) {
+        if (slug !== currentSlugRef.current) return;
         setError(
           err instanceof Error ? err.message : "Unknown note loading error",
         );
@@ -97,21 +101,31 @@ export function NotePage({
         throw new Error(`Failed loading note links: ${res.status}`);
       }
       const json = (await res.json()) as NoteLinksResponse;
+      if (slug !== currentSlugRef.current) return;
       setNoteLinks((prev) =>
         isNoteLinksEqual(prev, json.links) ? prev : json.links,
       );
     } catch {
+      if (slug !== currentSlugRef.current) return;
       setNoteLinks(null);
     }
   }, [slug]);
 
   useEffect(() => {
+    let cancelled = false;
+
     void (async () => {
       setLoading(true);
       await loadNote(true);
       await loadNoteLinks();
-      setLoading(false);
+      if (!cancelled) {
+        setLoading(false);
+      }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
@@ -166,6 +180,10 @@ export function NotePage({
     () => [rehypeKatex, createSearchHighlightPlugin(searchQuery)],
     [searchQuery],
   );
+  const markdownComponents = useMemo(() => {
+    const headingCounts = new Map<string, number>();
+    return createNoteMarkdownComponents(note?.relative_path ?? "", headingCounts);
+  }, [note?.relative_path, markdown]);
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
@@ -216,8 +234,6 @@ export function NotePage({
     );
   }
 
-  const headingCounts = new Map<string, number>();
-
   return (
     <div className="note-page-layout">
       <article className="note-content">
@@ -249,10 +265,7 @@ export function NotePage({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={rehypePlugins}
-            components={createNoteMarkdownComponents(
-              note.relative_path,
-              headingCounts,
-            )}
+            components={markdownComponents}
           >
             {markdown}
           </ReactMarkdown>

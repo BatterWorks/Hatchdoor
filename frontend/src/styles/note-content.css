@@ -366,15 +366,6 @@
   color: var(--bg);
 }
 
-/* Inline code outside code blocks */
-.note-body code {
-  font-family: var(--font-mono);
-  font-size: 0.86em;
-  background: var(--paper-2);
-  padding: 0.05rem 0.35rem;
-  color: var(--ink);
-}
-
 /* Reset inline code style when inside a code block */
 .code-block code {
   background: transparent;
@@ -426,8 +417,7 @@
   text-transform: uppercase;
   position: absolute;
   left: 0.9rem;
-  top: 50%;
-  transform: translateY(-50%);
+  top: 0.9rem;
   width: 1.5rem;
   height: 1.5rem;
   display: flex;

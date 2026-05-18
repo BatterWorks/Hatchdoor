@@ -1,4 +1,4 @@
-import type { ReactNode, RefObject } from "react";
+import { useRef, type ReactNode, type RefObject } from "react";
 
 import type { SearchResult, SearchSelection } from "../types";
 import { UiButton, UiPanel } from "./ui";
@@ -27,6 +27,7 @@ export function SearchDialog({
   onSelect: (selection: SearchSelection) => void;
 }) {
   const trimmedQuery = query.trim();
+  const resultsListRef = useRef<HTMLUListElement | null>(null);
 
   return (
     <div
@@ -44,6 +45,29 @@ export function SearchDialog({
       <UiPanel
         className="search-panel"
         onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key !== "Tab") return;
+          const panel = event.currentTarget;
+          const focusable = Array.from(
+            panel.querySelectorAll<HTMLElement>(
+              "button:not([disabled]), input:not([disabled])",
+            ),
+          );
+          if (focusable.length === 0) return;
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey) {
+            if (document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            }
+          } else {
+            if (document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }
+        }}
       >
         <header className="search-header">
           <h2>Search</h2>
@@ -58,6 +82,14 @@ export function SearchDialog({
           placeholder="Search notes (title, path, content)"
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowDown" && results.length > 0) {
+              event.preventDefault();
+              resultsListRef.current
+                ?.querySelector<HTMLButtonElement>("button")
+                ?.focus();
+            }
+          }}
         />
 
         <label className="search-toggle">
@@ -78,7 +110,31 @@ export function SearchDialog({
           <p>No matching notes.</p>
         ) : null}
 
-        <ul className="search-results">
+        <ul
+          ref={resultsListRef}
+          className="search-results"
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+            event.preventDefault();
+            const list = resultsListRef.current;
+            if (!list) return;
+            const buttons = Array.from(
+              list.querySelectorAll<HTMLButtonElement>("button"),
+            );
+            const idx = buttons.indexOf(
+              document.activeElement as HTMLButtonElement,
+            );
+            if (event.key === "ArrowDown") {
+              (buttons[idx + 1] ?? buttons[0])?.focus();
+            } else {
+              if (idx <= 0) {
+                inputRef.current?.focus();
+              } else {
+                buttons[idx - 1].focus();
+              }
+            }
+          }}
+        >
           {results.map((result) => (
             <li key={`${result.slug}-${result.match_kind}`}>
               <UiButton
@@ -133,11 +189,11 @@ function highlightMatches(text: string, query: string): ReactNode {
   const queryLower = query.toLowerCase();
   return parts.map((part, index) =>
     part.toLowerCase() === queryLower ? (
-      <mark key={`${part}-${index}`} className="search-match">
+      <mark key={index} className="search-match">
         {part}
       </mark>
     ) : (
-      <span key={`${part}-${index}`}>{part}</span>
+      <span key={index}>{part}</span>
     ),
   );
 }
