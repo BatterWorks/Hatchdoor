@@ -72,6 +72,14 @@ export function createNoteMarkdownComponents(
         />
       );
     },
+    li(props: { children?: ReactNode; className?: string }) {
+      const isTask = props.className?.includes("task-list-item") ?? false;
+      return (
+        <li className={isTask ? "task-list-item" : undefined}>
+          {props.children}
+        </li>
+      );
+    },
     blockquote(props: { children?: ReactNode }) {
       return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
     },
