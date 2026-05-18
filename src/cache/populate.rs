@@ -3,7 +3,9 @@ use std::fs;
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::cache::chunk_ops::{ChunkRow, delete_orphan_vectors, existing_chunk_hashes, replace_chunks_for_note};
+use crate::cache::chunk_ops::{
+    ChunkRow, delete_orphan_vectors, existing_chunk_hashes, replace_chunks_for_note,
+};
 use crate::chunk::{ChunkOptions, chunk_note};
 use crate::embed::Embedder;
 use crate::vault::{NoteEntry, VaultIndex, normalize_title};
@@ -32,7 +34,8 @@ impl SqliteCache {
             .collect::<HashSet<_>>();
         let now = current_unix_timestamp();
         let mut conn = self.connection()?;
-        let tx = conn.transaction()
+        let tx = conn
+            .transaction()
             .map_err(|e| format!("failed to start SQLite cache refresh: {e}"))?;
 
         for cached_path in cached_relative_paths(&tx)? {
@@ -42,7 +45,10 @@ impl SqliteCache {
         }
 
         let started_at = std::time::Instant::now();
-        tracing::info!(notes = entries.len(), "Indexing vault: chunking and embedding");
+        tracing::info!(
+            notes = entries.len(),
+            "Indexing vault: chunking and embedding"
+        );
         let mut chunks_embedded: usize = 0;
         let mut chunks_reused: usize = 0;
         let mut per_note_failures: usize = 0;
@@ -77,7 +83,8 @@ impl SqliteCache {
             tracing::debug!(removed, "Swept orphan chunk vectors");
         }
 
-        tx.commit().map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
+        tx.commit()
+            .map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
         Ok(())
     }
 }
@@ -186,7 +193,9 @@ fn upsert_note_if_changed(
     }
 
     upsert_note_content(tx, entry, &content, &hash, snapshot, indexed_at)?;
-    Ok(UpsertOutcome::Wrote { slug: entry.slug.clone() })
+    Ok(UpsertOutcome::Wrote {
+        slug: entry.slug.clone(),
+    })
 }
 
 fn update_note_file_metadata(
@@ -433,13 +442,20 @@ fn chunk_and_embed_note(
     entry: &NoteEntry,
     embedder: &dyn Embedder,
 ) -> Result<ChunkStats, String> {
-    let content = fs::read_to_string(&entry.path)
-        .map_err(|e| format!("failed reading note for chunking '{}': {e}", entry.path.display()))?;
+    let content = fs::read_to_string(&entry.path).map_err(|e| {
+        format!(
+            "failed reading note for chunking '{}': {e}",
+            entry.path.display()
+        )
+    })?;
     let tokenizer = embedder.tokenizer();
     let chunking = chunk_note(&content, tokenizer, ChunkOptions::default());
     if chunking.chunks.is_empty() {
         replace_chunks_for_note(tx, slug, &[], None, None)?;
-        return Ok(ChunkStats { embedded: 0, reused: 0 });
+        return Ok(ChunkStats {
+            embedded: 0,
+            reused: 0,
+        });
     }
 
     let existing = existing_chunk_hashes(tx, slug)?;
@@ -470,14 +486,16 @@ fn chunk_and_embed_note(
     };
 
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunking.chunks.len());
-    let mut need_new: std::collections::HashSet<usize> = indices_needing_embed.iter().copied().collect();
+    let mut need_new: std::collections::HashSet<usize> =
+        indices_needing_embed.iter().copied().collect();
     let mut new_iter = new_vectors.into_iter();
     for (idx, chunk) in chunking.chunks.iter().enumerate() {
         if need_new.remove(&idx) {
             vectors.push(new_iter.next().ok_or("embedder returned too few vectors")?);
         } else {
             vectors.push(
-                preserved.get(&chunk.content_hash)
+                preserved
+                    .get(&chunk.content_hash)
                     .cloned()
                     .ok_or("preserved vector missing for unchanged chunk")?,
             );
@@ -486,10 +504,20 @@ fn chunk_and_embed_note(
 
     let tags_json = serde_json::to_string(&chunking.tags).ok();
     let aliases_json = serde_json::to_string(&chunking.aliases).ok();
-    let rows: Vec<ChunkRow<'_>> = chunking.chunks.iter().zip(vectors.iter())
-        .map(|(chunk, vector)| ChunkRow { chunk, vector }).collect();
+    let rows: Vec<ChunkRow<'_>> = chunking
+        .chunks
+        .iter()
+        .zip(vectors.iter())
+        .map(|(chunk, vector)| ChunkRow { chunk, vector })
+        .collect();
 
-    replace_chunks_for_note(tx, slug, &rows, tags_json.as_deref(), aliases_json.as_deref())?;
+    replace_chunks_for_note(
+        tx,
+        slug,
+        &rows,
+        tags_json.as_deref(),
+        aliases_json.as_deref(),
+    )?;
     Ok(ChunkStats {
         embedded: indices_needing_embed.len(),
         reused: chunking.chunks.len() - indices_needing_embed.len(),
@@ -503,11 +531,13 @@ fn preserve_existing_vectors(
     existing: &std::collections::HashMap<String, i64>,
 ) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
     let mut out = std::collections::HashMap::new();
-    let mut stmt = tx.prepare("SELECT embedding FROM chunk_vectors WHERE chunk_id = ?1")
+    let mut stmt = tx
+        .prepare("SELECT embedding FROM chunk_vectors WHERE chunk_id = ?1")
         .map_err(|e| format!("prepare vector lookup: {e}"))?;
     for chunk in chunks {
         if let Some(chunk_id) = existing.get(&chunk.content_hash) {
-            let bytes: Vec<u8> = stmt.query_row(rusqlite::params![chunk_id], |row| row.get(0))
+            let bytes: Vec<u8> = stmt
+                .query_row(rusqlite::params![chunk_id], |row| row.get(0))
                 .map_err(|e| format!("read preserved vector: {e}"))?;
             let floats: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
             out.insert(chunk.content_hash.clone(), floats);
@@ -519,10 +549,10 @@ fn preserve_existing_vectors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[test]
@@ -534,7 +564,9 @@ mod tests {
         let cache = SqliteCache::in_memory().expect("sqlite cache");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build original index");
-        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("initial populate");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("initial populate");
 
         fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
         let snapshot = file_snapshot(&note_path).expect("file snapshot");
@@ -589,14 +621,22 @@ mod chunk_integration_tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build");
 
-        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("replace");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("replace");
 
         let conn = cache.connection().expect("conn");
-        let note_count: i64 = conn.query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0)).expect("count");
+        let note_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+            .expect("count");
         assert_eq!(note_count, 2);
-        let chunk_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).expect("count");
+        let chunk_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count");
         assert!(chunk_count >= 2);
-        let vector_count: i64 = conn.query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0)).expect("count");
+        let vector_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
+            .expect("count");
         assert_eq!(vector_count, chunk_count);
     }
 
@@ -608,25 +648,40 @@ mod chunk_integration_tests {
         }
         impl Embedder for CountingEmbedder {
             fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-                self.calls.fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+                self.calls
+                    .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
                 self.inner.embed(texts)
             }
-            fn embedding_dim(&self) -> usize { self.inner.embedding_dim() }
-            fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> { self.inner.tokenizer() }
+            fn embedding_dim(&self) -> usize {
+                self.inner.embedding_dim()
+            }
+            fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
+                self.inner.tokenizer()
+            }
         }
 
         let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
         let cache = SqliteCache::in_memory().expect("open");
-        let embedder = Arc::new(CountingEmbedder { inner: StubEmbedder::new(384), calls: 0.into() });
+        let embedder = Arc::new(CountingEmbedder {
+            inner: StubEmbedder::new(384),
+            calls: 0.into(),
+        });
 
         let index = VaultIndex::build(dir.path()).expect("build");
-        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("first");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("first");
         let first_calls = embedder.calls.load(std::sync::atomic::Ordering::SeqCst);
         assert!(first_calls >= 1);
 
-        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("second");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("second");
         let second_calls = embedder.calls.load(std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(second_calls, first_calls, "unchanged note must not re-embed");
+        assert_eq!(
+            second_calls, first_calls,
+            "unchanged note must not re-embed"
+        );
     }
 
     #[test]
@@ -636,18 +691,34 @@ mod chunk_integration_tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
 
         let index1 = VaultIndex::build(dir.path()).expect("build1");
-        cache.replace_from_index_with_embedder(&index1, embedder.as_ref()).expect("first");
+        cache
+            .replace_from_index_with_embedder(&index1, embedder.as_ref())
+            .expect("first");
 
         std::fs::remove_file(dir.path().join("b.md")).expect("remove");
         let index2 = VaultIndex::build(dir.path()).expect("build2");
-        cache.replace_from_index_with_embedder(&index2, embedder.as_ref()).expect("second");
+        cache
+            .replace_from_index_with_embedder(&index2, embedder.as_ref())
+            .expect("second");
 
         let conn = cache.connection().expect("conn");
-        let chunks_for_b: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE note_slug = 'b'", [], |r| r.get(0)).expect("count");
+        let chunks_for_b: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = 'b'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
         assert_eq!(chunks_for_b, 0);
-        let total_vectors: i64 = conn.query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0)).expect("count");
-        let total_chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0)).expect("count");
-        assert_eq!(total_vectors, total_chunks, "no orphan vectors after delete");
+        let total_vectors: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
+            .expect("count");
+        let total_chunks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            total_vectors, total_chunks,
+            "no orphan vectors after delete"
+        );
     }
 }

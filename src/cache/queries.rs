@@ -368,6 +368,7 @@ impl SqliteCache {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) struct SemanticHit {
     pub chunk_id: i64,
     pub note_slug: String,
@@ -377,19 +378,24 @@ pub(crate) struct SemanticHit {
 }
 
 impl SqliteCache {
+    #[allow(dead_code)]
     pub(crate) fn semantic_search(
         &self,
         embedder: &dyn Embedder,
         query: &str,
         k: usize,
     ) -> Result<Vec<SemanticHit>, String> {
-        let query_vec = embedder.embed(&[query.to_string()])?
-            .into_iter().next().ok_or("embedder returned no vectors")?;
+        let query_vec = embedder
+            .embed(&[query.to_string()])?
+            .into_iter()
+            .next()
+            .ok_or("embedder returned no vectors")?;
         let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
 
         let conn = self.connection()?;
-        let mut stmt = conn.prepare(
-            r#"
+        let mut stmt = conn
+            .prepare(
+                r#"
             SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance
             FROM chunk_vectors v
             JOIN chunks c ON c.id = v.chunk_id
@@ -397,16 +403,19 @@ impl SqliteCache {
               AND v.k = ?2
             ORDER BY v.distance
             "#,
-        ).map_err(|e| format!("prepare semantic_search: {e}"))?;
-        let rows = stmt.query_map(rusqlite::params![query_bytes, k as i64], |row| {
-            Ok(SemanticHit {
-                chunk_id: row.get(0)?,
-                note_slug: row.get(1)?,
-                heading_path: row.get(2)?,
-                content: row.get(3)?,
-                distance: row.get::<_, f64>(4)? as f32,
+            )
+            .map_err(|e| format!("prepare semantic_search: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![query_bytes, k as i64], |row| {
+                Ok(SemanticHit {
+                    chunk_id: row.get(0)?,
+                    note_slug: row.get(1)?,
+                    heading_path: row.get(2)?,
+                    content: row.get(3)?,
+                    distance: row.get::<_, f64>(4)? as f32,
+                })
             })
-        }).map_err(|e| format!("query semantic_search: {e}"))?;
+            .map_err(|e| format!("query semantic_search: {e}"))?;
         let mut hits = Vec::new();
         for row in rows {
             hits.push(row.map_err(|e| format!("read semantic_search row: {e}"))?);
@@ -469,9 +478,11 @@ fn escape_like(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::cache::SqliteCache;
+    use crate::embed::StubEmbedder;
     use crate::vault::VaultIndex;
     use rusqlite::params;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[test]
@@ -479,8 +490,11 @@ mod tests {
         let dir = tempdir().expect("temp dir");
         fs::write(dir.path().join("Home.md"), "alpha context only").expect("write note");
         let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build index");
-        cache.replace_from_index(&index).expect("populate cache");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate cache");
 
         let hits = cache
             .search("alpha missing", true, 10)
@@ -499,8 +513,11 @@ mod tests {
         fs::write(dir.path().join("Charlie.md"), "charlie").expect("write charlie");
 
         let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build index");
-        cache.replace_from_index(&index).expect("populate cache");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate cache");
         {
             let conn = cache.connection().expect("connection");
             conn.execute(
@@ -560,10 +577,14 @@ mod semantic_search_tests {
         ]);
         let cache = SqliteCache::in_memory().expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let index = VaultIndex::build(&dir.path().to_path_buf()).expect("build");
-        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("index");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("index");
 
-        let hits = cache.semantic_search(embedder.as_ref(), "apples and oranges", 5).expect("search");
+        let hits = cache
+            .semantic_search(embedder.as_ref(), "apples and oranges", 5)
+            .expect("search");
         assert!(!hits.is_empty());
         for w in hits.windows(2) {
             assert!(w[0].distance <= w[1].distance);
@@ -579,10 +600,14 @@ mod semantic_search_tests {
         ]);
         let cache = SqliteCache::in_memory().expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let index = VaultIndex::build(&dir.path().to_path_buf()).expect("build");
-        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("index");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("index");
 
-        let hits = cache.semantic_search(embedder.as_ref(), "anything", 2).expect("search");
+        let hits = cache
+            .semantic_search(embedder.as_ref(), "anything", 2)
+            .expect("search");
         assert_eq!(hits.len(), 2);
     }
 
@@ -590,7 +615,9 @@ mod semantic_search_tests {
     fn semantic_search_returns_empty_when_no_chunks() {
         let cache = SqliteCache::in_memory().expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let hits = cache.semantic_search(embedder.as_ref(), "anything", 5).expect("search");
+        let hits = cache
+            .semantic_search(embedder.as_ref(), "anything", 5)
+            .expect("search");
         assert!(hits.is_empty());
     }
 }

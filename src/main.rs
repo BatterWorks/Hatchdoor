@@ -93,21 +93,21 @@ async fn run_server() {
         }),
     );
 
-    let embedder: Arc<dyn crate::embed::Embedder> = Arc::new(
-        crate::embed::ArcticEmbedder::load().unwrap_or_else(|e| {
+    let embedder: Arc<dyn crate::embed::Embedder> =
+        Arc::new(crate::embed::ArcticEmbedder::load().unwrap_or_else(|e| {
             error!("Failed to load embedder: {e}");
             std::process::exit(1);
-        }),
-    );
+        }));
 
-    let cache = build_cache_with_sqlite(&config.vault_path, sqlite, embedder.as_ref()).unwrap_or_else(|e| {
-        error!(
-            "Failed to index vault at {} into SQLite cache {}: {e}",
-            config.vault_path.display(),
-            config.cache_db_path.display()
-        );
-        std::process::exit(1);
-    });
+    let cache = build_cache_with_sqlite(&config.vault_path, sqlite, embedder.as_ref())
+        .unwrap_or_else(|e| {
+            error!(
+                "Failed to index vault at {} into SQLite cache {}: {e}",
+                config.vault_path.display(),
+                config.cache_db_path.display()
+            );
+            std::process::exit(1);
+        });
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let state = AppState {
@@ -222,7 +222,8 @@ mod tests {
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let embedder: Arc<dyn crate::embed::Embedder> = Arc::new(crate::embed::StubEmbedder::new(384));
+        let embedder: Arc<dyn crate::embed::Embedder> =
+            Arc::new(crate::embed::StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {

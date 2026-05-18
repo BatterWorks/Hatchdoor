@@ -19,11 +19,17 @@ pub(crate) fn replace_chunks_for_note(
     tx.execute(
         "DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE note_slug = ?1)",
         params![note_slug],
-    ).map_err(|e| format!("failed to clear chunk_vectors for {note_slug}: {e}"))?;
-    tx.execute("DELETE FROM chunks WHERE note_slug = ?1", params![note_slug])
-        .map_err(|e| format!("failed to clear chunks for {note_slug}: {e}"))?;
+    )
+    .map_err(|e| format!("failed to clear chunk_vectors for {note_slug}: {e}"))?;
+    tx.execute(
+        "DELETE FROM chunks WHERE note_slug = ?1",
+        params![note_slug],
+    )
+    .map_err(|e| format!("failed to clear chunks for {note_slug}: {e}"))?;
 
-    if rows.is_empty() { return Ok(()); }
+    if rows.is_empty() {
+        return Ok(());
+    }
 
     let mut insert_chunk = tx.prepare(
         r#"INSERT INTO chunks
@@ -31,27 +37,30 @@ pub(crate) fn replace_chunks_for_note(
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
            RETURNING id"#,
     ).map_err(|e| format!("prepare chunk insert: {e}"))?;
-    let mut insert_vector = tx.prepare(
-        "INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?1, ?2)",
-    ).map_err(|e| format!("prepare vector insert: {e}"))?;
+    let mut insert_vector = tx
+        .prepare("INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?1, ?2)")
+        .map_err(|e| format!("prepare vector insert: {e}"))?;
 
     for row in rows {
-        let chunk_id: i64 = insert_chunk.query_row(
-            params![
-                note_slug,
-                row.chunk.ordinal as i64,
-                row.chunk.heading_path,
-                row.chunk.content,
-                row.chunk.byte_start as i64,
-                row.chunk.byte_end as i64,
-                row.chunk.content_hash,
-                tags_json,
-                aliases_json,
-            ],
-            |r| r.get(0),
-        ).map_err(|e| format!("insert chunk: {e}"))?;
+        let chunk_id: i64 = insert_chunk
+            .query_row(
+                params![
+                    note_slug,
+                    row.chunk.ordinal as i64,
+                    row.chunk.heading_path,
+                    row.chunk.content,
+                    row.chunk.byte_start as i64,
+                    row.chunk.byte_end as i64,
+                    row.chunk.content_hash,
+                    tags_json,
+                    aliases_json,
+                ],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("insert chunk: {e}"))?;
         let vector_bytes: &[u8] = bytemuck::cast_slice(row.vector);
-        insert_vector.execute(params![chunk_id, vector_bytes])
+        insert_vector
+            .execute(params![chunk_id, vector_bytes])
             .map_err(|e| format!("insert vector: {e}"))?;
     }
     Ok(())
@@ -62,12 +71,14 @@ pub(crate) fn existing_chunk_hashes(
     tx: &Transaction<'_>,
     note_slug: &str,
 ) -> Result<std::collections::HashMap<String, i64>, String> {
-    let mut stmt = tx.prepare(
-        "SELECT content_hash, id FROM chunks WHERE note_slug = ?1"
-    ).map_err(|e| format!("prepare hash query: {e}"))?;
-    let rows = stmt.query_map(params![note_slug], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-    }).map_err(|e| format!("query chunk hashes: {e}"))?;
+    let mut stmt = tx
+        .prepare("SELECT content_hash, id FROM chunks WHERE note_slug = ?1")
+        .map_err(|e| format!("prepare hash query: {e}"))?;
+    let rows = stmt
+        .query_map(params![note_slug], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| format!("query chunk hashes: {e}"))?;
     let mut map = std::collections::HashMap::new();
     for row in rows {
         let (hash, id) = row.map_err(|e| format!("read chunk hash row: {e}"))?;
@@ -78,9 +89,12 @@ pub(crate) fn existing_chunk_hashes(
 
 #[allow(dead_code)]
 pub(crate) fn delete_orphan_vectors(tx: &Transaction<'_>) -> Result<usize, String> {
-    let removed = tx.execute(
-        "DELETE FROM chunk_vectors WHERE chunk_id NOT IN (SELECT id FROM chunks)", [],
-    ).map_err(|e| format!("delete orphan vectors: {e}"))?;
+    let removed = tx
+        .execute(
+            "DELETE FROM chunk_vectors WHERE chunk_id NOT IN (SELECT id FROM chunks)",
+            [],
+        )
+        .map_err(|e| format!("delete orphan vectors: {e}"))?;
     Ok(removed)
 }
 
@@ -108,7 +122,8 @@ mod tests {
                 mtime_ns, size_bytes, indexed_at)
                VALUES (?, 'T', 't', ?, ?, '/abs', 'c', 'h', 0, 0, 0)"#,
             params![slug, format!("{slug}.md"), format!("{slug}.md")],
-        ).expect("insert note");
+        )
+        .expect("insert note");
     }
 
     #[test]
@@ -121,17 +136,32 @@ mod tests {
         {
             let mut conn = cache.connection().expect("conn");
             let tx = conn.transaction().expect("tx");
-            replace_chunks_for_note(&tx, "n1",
-                &[ChunkRow { chunk: &chunk, vector: &vector }], None, None).expect("replace");
+            replace_chunks_for_note(
+                &tx,
+                "n1",
+                &[ChunkRow {
+                    chunk: &chunk,
+                    vector: &vector,
+                }],
+                None,
+                None,
+            )
+            .expect("replace");
             tx.commit().expect("commit");
         }
 
         let conn = cache.connection().expect("conn");
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE note_slug = 'n1'", [], |r| r.get(0)).expect("count");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = 'n1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
         assert_eq!(count, 1);
-        let vec_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0)).expect("count");
+        let vec_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
+            .expect("count");
         assert_eq!(vec_count, 1);
     }
 
@@ -144,27 +174,55 @@ mod tests {
         {
             let mut conn = cache.connection().expect("conn");
             let tx = conn.transaction().expect("tx");
-            replace_chunks_for_note(&tx, "n1",
-                &[ChunkRow { chunk: &fake_chunk(0, "old"), vector: &vector }], None, None).expect("write");
+            replace_chunks_for_note(
+                &tx,
+                "n1",
+                &[ChunkRow {
+                    chunk: &fake_chunk(0, "old"),
+                    vector: &vector,
+                }],
+                None,
+                None,
+            )
+            .expect("write");
             tx.commit().expect("commit");
         }
 
         {
             let mut conn = cache.connection().expect("conn");
             let tx = conn.transaction().expect("tx");
-            replace_chunks_for_note(&tx, "n1", &[
-                ChunkRow { chunk: &fake_chunk(0, "fresh-1"), vector: &vector },
-                ChunkRow { chunk: &fake_chunk(1, "fresh-2"), vector: &vector },
-            ], None, None).expect("rewrite");
+            replace_chunks_for_note(
+                &tx,
+                "n1",
+                &[
+                    ChunkRow {
+                        chunk: &fake_chunk(0, "fresh-1"),
+                        vector: &vector,
+                    },
+                    ChunkRow {
+                        chunk: &fake_chunk(1, "fresh-2"),
+                        vector: &vector,
+                    },
+                ],
+                None,
+                None,
+            )
+            .expect("rewrite");
             tx.commit().expect("commit");
         }
 
         let conn = cache.connection().expect("conn");
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunks WHERE note_slug = 'n1'", [], |r| r.get(0)).expect("count");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = 'n1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
         assert_eq!(count, 2);
-        let vec_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0)).expect("count");
+        let vec_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
+            .expect("count");
         assert_eq!(vec_count, 2);
     }
 
@@ -177,8 +235,17 @@ mod tests {
 
         let mut conn = cache.connection().expect("conn");
         let tx = conn.transaction().expect("tx");
-        replace_chunks_for_note(&tx, "n1",
-            &[ChunkRow { chunk: &chunk, vector: &vector }], None, None).expect("write");
+        replace_chunks_for_note(
+            &tx,
+            "n1",
+            &[ChunkRow {
+                chunk: &chunk,
+                vector: &vector,
+            }],
+            None,
+            None,
+        )
+        .expect("write");
 
         let map = existing_chunk_hashes(&tx, "n1").expect("read");
         assert_eq!(map.len(), 1);
@@ -191,12 +258,16 @@ mod tests {
         let mut conn = cache.connection().expect("conn");
         let tx = conn.transaction().expect("tx");
         let vec_bytes = bytemuck::cast_slice(&vec![0.1f32; 384]).to_vec();
-        tx.execute("INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)",
-            params![9999i64, vec_bytes]).expect("insert orphan");
+        tx.execute(
+            "INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)",
+            params![9999i64, vec_bytes],
+        )
+        .expect("insert orphan");
         let removed = delete_orphan_vectors(&tx).expect("sweep");
         assert_eq!(removed, 1);
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0)).expect("count");
+        let count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
+            .expect("count");
         assert_eq!(count, 0);
     }
 }

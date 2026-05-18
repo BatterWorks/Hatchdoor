@@ -51,7 +51,10 @@ pub(crate) fn extract_frontmatter_metadata(content: &str) -> FrontmatterMetadata
     if !content.starts_with("---") {
         return FrontmatterMetadata { tags, aliases };
     }
-    let after_open = content.strip_prefix("---").unwrap_or("").trim_start_matches(['\r', '\n']);
+    let after_open = content
+        .strip_prefix("---")
+        .unwrap_or("")
+        .trim_start_matches(['\r', '\n']);
     let end = match after_open.find("\n---") {
         Some(idx) => idx,
         None => return FrontmatterMetadata { tags, aliases },
