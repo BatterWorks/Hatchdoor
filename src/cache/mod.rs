@@ -1,4 +1,5 @@
 pub(crate) mod parse;
+mod chunk_ops;
 mod populate;
 mod queries;
 mod schema;
