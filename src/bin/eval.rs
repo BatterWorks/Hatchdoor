@@ -1,5 +1,16 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use hatchdoor::embed::{Embedder, FastembedEmbedder};
+
+fn load_embedder(id: &str) -> Result<Arc<dyn Embedder>, String> {
+    match id {
+        "BGESmallENV15" => Ok(Arc::new(FastembedEmbedder::bge_small()?)),
+        "NomicEmbedTextV15" => Ok(Arc::new(FastembedEmbedder::nomic_v1_5()?)),
+        "MxbaiEmbedLargeV1" => Ok(Arc::new(FastembedEmbedder::mxbai_large()?)),
+        other => Err(format!("unknown model id: {other}")),
+    }
+}
 
 fn print_usage() {
     eprintln!(
@@ -53,9 +64,49 @@ fn main() -> ExitCode {
         }
     };
     match cmd {
-        Cmd::Build { .. } => {
-            eprintln!("build: not yet implemented");
-            ExitCode::from(1)
+        Cmd::Build { model, cache } => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .init();
+
+            let vault_path = std::env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
+            let vault_path = std::path::PathBuf::from(vault_path);
+
+            let embedder = match load_embedder(&model) {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+
+            if cache.exists() {
+                eprintln!("error: cache file already exists at {}. Delete it before rebuilding.", cache.display());
+                return ExitCode::from(1);
+            }
+
+            let sqlite = match hatchdoor::cache::SqliteCache::open(&cache, embedder.embedding_dim()) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("error opening cache: {e}"); return ExitCode::from(1); }
+            };
+
+            let index = match hatchdoor::vault::VaultIndex::build(&vault_path) {
+                Ok(i) => i,
+                Err(e) => { eprintln!("error building vault index: {e}"); return ExitCode::from(1); }
+            };
+
+            let started = std::time::Instant::now();
+            if let Err(e) = sqlite.replace_from_index_with_embedder_stamped(&index, embedder.as_ref(), &model) {
+                eprintln!("error populating cache: {e}");
+                return ExitCode::from(1);
+            }
+            let elapsed = started.elapsed();
+            println!("build complete: model={model} cache={} elapsed={:.1}s",
+                cache.display(), elapsed.as_secs_f64());
+            ExitCode::SUCCESS
         }
         Cmd::Run { .. } => {
             eprintln!("run: not yet implemented");
