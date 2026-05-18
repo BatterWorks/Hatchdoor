@@ -1,7 +1,5 @@
-pub mod arctic;
 pub mod embedder;
+pub mod fastembed_embedder;
 
-#[allow(unused_imports)]
-pub use arctic::ArcticEmbedder;
-#[allow(unused_imports)]
 pub use embedder::{Embedder, StubEmbedder};
+pub use fastembed_embedder::FastembedEmbedder;
