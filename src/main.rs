@@ -10,7 +10,7 @@ use tracing::{error, info};
 
 use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
 use hatchdoor::cache::SqliteCache;
-use hatchdoor::embed::{ArcticEmbedder, Embedder};
+use hatchdoor::embed::{Embedder, FastembedEmbedder};
 use hatchdoor::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
@@ -86,7 +86,7 @@ async fn run_server() {
     );
 
     let embedder: Arc<dyn Embedder> =
-        Arc::new(ArcticEmbedder::load().unwrap_or_else(|e| {
+        Arc::new(FastembedEmbedder::bge_small().unwrap_or_else(|e| {
             error!("Failed to load embedder: {e}");
             std::process::exit(1);
         }));
@@ -146,7 +146,7 @@ async fn run_server() {
 
 fn run_prefetch() {
     info!("Pre-fetching BGE-small-EN weights and tokenizer");
-    match ArcticEmbedder::load() {
+    match FastembedEmbedder::bge_small() {
         Ok(_) => info!("Pre-fetch complete"),
         Err(e) => {
             error!("Pre-fetch failed: {e}");
