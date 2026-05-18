@@ -5,21 +5,21 @@ use super::SqliteCache;
 const SCHEMA_VERSION: &str = "3";
 
 impl SqliteCache {
-    pub fn ensure_schema(&self) -> Result<(), String> {
+    pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
         let conn = self.connection()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|error| format!("failed to enable SQLite foreign keys: {error}"))?;
 
         match existing_schema_version(&conn)? {
             Some(version) if version == SCHEMA_VERSION => {
-                create_schema(&conn)?;
+                create_schema(&conn, embedding_dim)?;
                 Ok(())
             }
             Some(version) => Err(format!(
                 "unsupported SQLite cache schema version '{version}' for expected version '{SCHEMA_VERSION}'. Delete the cache DB and restart Hatchdoor to rebuild it from Markdown."
             )),
             None => {
-                create_schema(&conn)?;
+                create_schema(&conn, embedding_dim)?;
                 Ok(())
             }
         }
@@ -70,8 +70,8 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>
     }
 }
 
-fn create_schema(conn: &rusqlite::Connection) -> Result<(), String> {
-    conn.execute_batch(
+fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<(), String> {
+    let sql = format!(
         r#"
         PRAGMA foreign_keys = ON;
 
@@ -153,15 +153,17 @@ fn create_schema(conn: &rusqlite::Connection) -> Result<(), String> {
 
         CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
             chunk_id  INTEGER PRIMARY KEY,
-            embedding FLOAT[384]
+            embedding FLOAT[{dim}]
         );
 
         INSERT INTO metadata(key, value)
         VALUES ('schema_version', '3')
         ON CONFLICT(key) DO NOTHING;
         "#,
-    )
-    .map_err(|error| format!("failed to initialise SQLite cache schema: {error}"))?;
+        dim = embedding_dim
+    );
+    conn.execute_batch(&sql)
+        .map_err(|error| format!("failed to initialise SQLite cache schema: {error}"))?;
     Ok(())
 }
 
@@ -171,7 +173,7 @@ mod tests {
 
     #[test]
     fn fresh_cache_creates_chunks_and_chunk_vectors_tables() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let conn = cache.connection().expect("conn");
 
         let chunks: i64 = conn
@@ -195,7 +197,7 @@ mod tests {
 
     #[test]
     fn fresh_cache_records_schema_version_3() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let conn = cache.connection().expect("conn");
         let version: String = conn
             .query_row(
@@ -205,5 +207,19 @@ mod tests {
             )
             .expect("query");
         assert_eq!(version, "3");
+    }
+
+    #[test]
+    fn schema_creates_chunk_vectors_with_requested_dim() {
+        let cache = SqliteCache::in_memory_with_dim(768).expect("open cache");
+        let conn = cache.connection().expect("connection");
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'chunk_vectors'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query sql");
+        assert!(sql.contains("FLOAT[768]"), "expected FLOAT[768] in schema, got: {sql}");
     }
 }

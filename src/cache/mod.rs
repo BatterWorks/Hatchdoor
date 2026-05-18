@@ -32,7 +32,7 @@ fn register_sqlite_vec() {
 }
 
 impl SqliteCache {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn open(path: impl AsRef<Path>, embedding_dim: usize) -> Result<Self, String> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -50,19 +50,24 @@ impl SqliteCache {
         let cache = Self {
             conn: Mutex::new(conn),
         };
-        cache.ensure_schema()?;
+        cache.ensure_schema(embedding_dim)?;
         Ok(cache)
     }
 
-    pub fn in_memory() -> Result<Self, String> {
+    pub fn in_memory(embedding_dim: usize) -> Result<Self, String> {
         register_sqlite_vec();
         let conn = Connection::open_in_memory()
             .map_err(|error| format!("failed to open in-memory SQLite cache: {error}"))?;
         let cache = Self {
             conn: Mutex::new(conn),
         };
-        cache.ensure_schema()?;
+        cache.ensure_schema(embedding_dim)?;
         Ok(cache)
+    }
+
+    #[cfg(test)]
+    pub fn in_memory_with_dim(embedding_dim: usize) -> Result<Self, String> {
+        Self::in_memory(embedding_dim)
     }
 
     pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {

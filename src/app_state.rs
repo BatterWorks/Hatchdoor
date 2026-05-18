@@ -82,7 +82,7 @@ pub fn build_cache(
     vault_path: &PathBuf,
     embedder: &dyn Embedder,
 ) -> Result<VaultCache, String> {
-    let sqlite = Arc::new(SqliteCache::in_memory()?);
+    let sqlite = Arc::new(SqliteCache::in_memory(384)?);
     build_cache_with_sqlite(vault_path, sqlite, embedder)
 }
 
