@@ -15,12 +15,12 @@ Turn the vault from a text-searchable cache into a semantically-searchable one. 
 | Area | Decision | Rationale |
 |---|---|---|
 | Embedding location | Local, in-process via `fastembed-rs` | Keeps single-binary deployment, no API cost, no network dependency. |
-| Embedding model | Snowflake Arctic Embed M (`SnowflakeArcticEmbedM` in fastembed-rs), 768-dim `f32` | Highest English retrieval score among fastembed-rs models under 500M params. Trained specifically for retrieval, not general-purpose embedding. ~700 MB resident RAM, comfortable on the 4 vCPU / 4 GB VM. |
+| Embedding model | Snowflake Arctic Embed S (`SnowflakeArcticEmbedS` in fastembed-rs), 384-dim `f32` | Smallest retrieval-tuned model in fastembed-rs. ~300 MB resident RAM, ~60 s cold reindex for the current vault. Marginally better than BGE-small-en-v1.5 at identical footprint. Chosen as a cheap, fast starting point; Phase 1.5 eval drives any later upgrade (Arctic-M, mxbai-large), which is a one-line swap via the `Embedder` trait plus a one-time reindex. |
 | Vector storage | `sqlite-vec` extension (`vec0` virtual table) inside existing `hatchdoor-cache.sqlite3` | One source of truth, atomic backup, makes Phase 2 hybrid retrieval a single SQL JOIN. No Chroma / Qdrant / second container. |
-| Chunker | `text-splitter` crate, configured with the Arctic-M tokenizer | Markdown-aware, tokenizer-accurate splitting (same tokenizer as the embedder, so "800 tokens" means the same thing in both stages), recursive fallback through headings → paragraphs → sentences → words → chars. Avoids reimplementing a well-tested library. |
+| Chunker | `text-splitter` crate, configured with the Arctic-S tokenizer | Markdown-aware, tokenizer-accurate splitting (same tokenizer as the embedder, so "800 tokens" means the same thing in both stages), recursive fallback through headings → paragraphs → sentences → words → chars. Avoids reimplementing a well-tested library. |
 | Chunking strategy | Hybrid structural — split on H1/H2/H3 headings; sub-split sections over ~800 tokens on paragraph boundaries with ~50-token overlap; fall back to a fixed-size token window if a single paragraph itself exceeds the cap. Heading path preserved as metadata. | Respects author intent for small notes; bounds chunk size for long ones; guarantees no chunk exceeds the cap regardless of input shape. |
 | Pre-embed normalization | Strip YAML frontmatter; strip code-block fences (keep code contents); keep wikilinks (`[[X]]`) literal; lift frontmatter `tags`/`aliases` to a separate metadata column. | Frontmatter degrades embeddings (structured-data noise). Code identifiers carry semantic value. Wikilinks left literal so Phase 2 context assembly can resolve them. Tags/aliases are first-class filter dimensions. |
-| Deployment shape | Unchanged single Rust binary in Docker; image grows ~500 MB (ONNX runtime + Arctic-M weights). | No new operational moving parts. |
+| Deployment shape | Unchanged single Rust binary in Docker; image grows ~200 MB (ONNX runtime + Arctic-S weights). | No new operational moving parts. |
 | Public API surface in Phase 1 | Unchanged | Phase 1 is additive infrastructure; consumers arrive in Phase 2. |
 
 ## 3. Module layout
@@ -30,7 +30,7 @@ Two new modules; three existing files touched.
 | Path | Kind | Purpose |
 |---|---|---|
 | `src/chunk/mod.rs`, `src/chunk/chunker.rs` | NEW | Thin wrapper around `text-splitter::MarkdownSplitter` configured with the embedder's tokenizer. Handles normalization (frontmatter strip, code-fence strip, tags/aliases lift), then delegates the actual splitting. Returns ordered chunks with heading paths, byte ranges, and content hashes. No IO, no state. |
-| `src/embed/mod.rs`, `src/embed/embedder.rs` | NEW | Owns the loaded `fastembed::TextEmbedding` (Arctic-M). Exposes an `Embedder` trait + concrete `ArcticEmbedder` and a test-only `StubEmbedder`. Held by `AppState` as `Arc<dyn Embedder>`. Also exposes the tokenizer so the chunker can borrow it. |
+| `src/embed/mod.rs`, `src/embed/embedder.rs` | NEW | Owns the loaded `fastembed::TextEmbedding` (Arctic-S). Exposes an `Embedder` trait + concrete `ArcticEmbedder` and a test-only `StubEmbedder`. Held by `AppState` as `Arc<dyn Embedder>`. Also exposes the tokenizer so the chunker can borrow it. |
 | `src/cache/schema.rs` | TOUCH | Add `chunks` table, indexes, and `chunk_vectors` virtual table. |
 | `src/cache/populate.rs` | TOUCH | After inserting a note, call chunker, then embedder (in `spawn_blocking`), then write chunks + vectors in the same transaction. |
 | `src/cache/queries.rs` | TOUCH | Add `chunks_for_note(slug)` and `chunk_count()` — minimal surface for Phase 1 tests; Phase 2 will add the hybrid retrieval queries. |
@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
   chunk_id  INTEGER PRIMARY KEY,
-  embedding FLOAT[768]
+  embedding FLOAT[384]
 );
 ```
 
@@ -76,7 +76,7 @@ Design notes:
 - `byte_start` / `byte_end` are not used in Phase 1; they avoid a schema migration when Phase 2 needs to highlight matching snippets.
 - `tags` / `aliases` as JSON columns: idiomatic in SQLite, filterable via `json_each()`, fast enough at our scale (~1,500 chunks).
 
-Estimated storage cost for the current vault (286 notes, ~1,500 chunks at 768-dim): ~7 MB added to the cache file.
+Estimated storage cost for the current vault (286 notes, ~1,500 chunks at 384-dim): ~3.5 MB added to the cache file.
 
 ## 5. Indexing flow
 
@@ -101,7 +101,7 @@ COMMIT
 
 All-or-nothing per note. A failed embed leaves the prior chunks intact.
 
-Cold-start cost on the target VM (4 vCPU, Arctic Embed M): ~3 min for 1,500 chunks (one-time per fresh cache). Steady-state per-edit cost: ~100 ms for typical single-paragraph edits.
+Cold-start cost on the target VM (4 vCPU, Arctic Embed S): ~60 s for 1,500 chunks (one-time per fresh cache). Steady-state per-edit cost: ~30 ms for typical single-paragraph edits.
 
 The decision to delay HTTP-server start until cold indexing completes is deliberate: Phase 2 will make `/api/search` route through the semantic index, and serving a half-built index would silently degrade quality. After first boot the cache file persists, so subsequent restarts are immediate.
 
@@ -120,7 +120,7 @@ The decision to delay HTTP-server start until cold indexing completes is deliber
 Unit tests (pure, no IO):
 
 - `chunk/chunker.rs` fixtures cover: small note, large note, heading-heavy, frontmatter-heavy, code-block-heavy, no-headings, single oversized paragraph. Assertions cover chunk count, boundaries, heading paths, byte ranges, hash determinism, and that frontmatter / code fences are stripped while wikilinks survive.
-- `embed/embedder.rs`: a real-model test gated behind `cfg(feature = "embedder-tests")` asserting dim = 768, finite values, deterministic for identical input. Default `cargo test` uses the stub.
+- `embed/embedder.rs`: a real-model test gated behind `cfg(feature = "embedder-tests")` asserting dim = 384, finite values, deterministic for identical input. Default `cargo test` uses the stub.
 
 Integration tests (extend the existing `app_for_tests` pattern):
 
