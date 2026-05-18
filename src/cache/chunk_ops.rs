@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn replace_chunks_inserts_new_chunks_and_vectors() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         insert_minimal_note(&cache, "n1");
         let chunk = fake_chunk(0, "hello");
         let vector = vec![0.1f32; 384];
@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn replace_chunks_drops_previous_chunks_and_vectors_for_note() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         insert_minimal_note(&cache, "n1");
         let vector = vec![0.1f32; 384];
 
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn existing_chunk_hashes_returns_hash_to_id_map() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         insert_minimal_note(&cache, "n1");
         let chunk = fake_chunk(0, "hello");
         let vector = vec![0.1f32; 384];
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn delete_orphan_vectors_removes_vectors_without_chunks() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let mut conn = cache.connection().expect("conn");
         let tx = conn.transaction().expect("tx");
         let vec_bytes = bytemuck::cast_slice(&vec![0.1f32; 384]).to_vec();

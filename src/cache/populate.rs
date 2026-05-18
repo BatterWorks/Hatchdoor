@@ -561,7 +561,7 @@ mod tests {
         let note_path = dir.path().join("Home.md");
         fs::write(&note_path, "# Home\nalpha token").expect("write original note");
 
-        let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let cache = SqliteCache::in_memory(384).expect("sqlite cache");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build original index");
         cache
@@ -617,7 +617,7 @@ mod chunk_integration_tests {
     #[test]
     fn replace_from_index_chunks_and_embeds_every_note() {
         let dir = make_vault(&[("a.md", "# A\n\nbody A"), ("b.md", "# B\n\nbody B")]);
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build");
 
@@ -661,7 +661,7 @@ mod chunk_integration_tests {
         }
 
         let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let embedder = Arc::new(CountingEmbedder {
             inner: StubEmbedder::new(384),
             calls: 0.into(),
@@ -687,7 +687,7 @@ mod chunk_integration_tests {
     #[test]
     fn deleting_a_note_removes_its_chunks_and_vectors() {
         let dir = make_vault(&[("a.md", "# A\n\nbody A"), ("b.md", "# B\n\nbody B")]);
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
 
         let index1 = VaultIndex::build(dir.path()).expect("build1");

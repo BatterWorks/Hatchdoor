@@ -489,7 +489,7 @@ mod tests {
     fn content_search_snippet_falls_back_to_matched_query_token() {
         let dir = tempdir().expect("temp dir");
         fs::write(dir.path().join("Home.md"), "alpha context only").expect("write note");
-        let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let cache = SqliteCache::in_memory(384).expect("sqlite cache");
         let embedder = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build index");
         cache
@@ -512,7 +512,7 @@ mod tests {
         fs::write(dir.path().join("Bravo.md"), "bravo").expect("write bravo");
         fs::write(dir.path().join("Charlie.md"), "charlie").expect("write charlie");
 
-        let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let cache = SqliteCache::in_memory(384).expect("sqlite cache");
         let embedder = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build index");
         cache
@@ -575,7 +575,7 @@ mod semantic_search_tests {
             ("a.md", "# Apples\n\napples and oranges"),
             ("b.md", "# Bicycles\n\nspokes and wheels"),
         ]);
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build");
         cache
@@ -598,7 +598,7 @@ mod semantic_search_tests {
             ("b.md", "# B\n\nsecond"),
             ("c.md", "# C\n\nthird"),
         ]);
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build");
         cache
@@ -613,7 +613,7 @@ mod semantic_search_tests {
 
     #[test]
     fn semantic_search_returns_empty_when_no_chunks() {
-        let cache = SqliteCache::in_memory().expect("open");
+        let cache = SqliteCache::in_memory(384).expect("open");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let hits = cache
             .semantic_search(embedder.as_ref(), "anything", 5)
