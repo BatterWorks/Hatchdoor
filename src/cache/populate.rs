@@ -87,6 +87,20 @@ impl SqliteCache {
             .map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
         Ok(())
     }
+
+    pub fn replace_from_index_with_embedder_stamped(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        embedder_id: &str,
+    ) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        self.replace_from_index_with_embedder(index, embedder)?;
+        let secs = started.elapsed().as_secs_f64();
+        self.set_metadata("embedder_id", embedder_id)?;
+        self.set_metadata("build_duration_secs", &format!("{secs:.3}"))?;
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -554,6 +568,35 @@ mod tests {
     use crate::vault::VaultIndex;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn replace_from_index_stamps_embedder_id_and_build_duration() {
+        use crate::embed::StubEmbedder;
+        use crate::vault::VaultIndex;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.md"), "# A\nhello").unwrap();
+        let index = VaultIndex::build(dir.path()).expect("index");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+
+        cache
+            .replace_from_index_with_embedder_stamped(&index, &embedder, "TestStub")
+            .expect("populate");
+
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("TestStub")
+        );
+        let dur = cache
+            .get_metadata("build_duration_secs")
+            .expect("get")
+            .expect("present");
+        assert!(
+            dur.parse::<f64>().is_ok(),
+            "duration should parse as f64, got {dur}"
+        );
+    }
 
     #[test]
     fn refresh_updates_content_even_when_cached_file_snapshot_matches() {
