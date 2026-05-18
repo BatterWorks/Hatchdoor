@@ -54,7 +54,6 @@ impl SqliteCache {
         Ok(cache)
     }
 
-    #[cfg(test)]
     pub fn in_memory() -> Result<Self, String> {
         register_sqlite_vec();
         let conn = Connection::open_in_memory()

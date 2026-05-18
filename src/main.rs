@@ -10,12 +10,14 @@ use tracing::{error, info};
 
 use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
 use hatchdoor::cache::SqliteCache;
+use hatchdoor::embed::{ArcticEmbedder, Embedder};
 use hatchdoor::handlers::{
     health_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
     search_handler, spa_index_handler, tree_handler, vault_asset_handler, vault_events_handler,
 };
 use hatchdoor::mcp::{mcp_get_handler, mcp_post_handler};
+use hatchdoor::vault_watcher::spawn_vault_watcher;
 
 enum RunMode {
     Serve,
@@ -83,8 +85,8 @@ async fn run_server() {
         }),
     );
 
-    let embedder: Arc<dyn hatchdoor::embed::Embedder> =
-        Arc::new(hatchdoor::embed::ArcticEmbedder::load().unwrap_or_else(|e| {
+    let embedder: Arc<dyn Embedder> =
+        Arc::new(ArcticEmbedder::load().unwrap_or_else(|e| {
             error!("Failed to load embedder: {e}");
             std::process::exit(1);
         }));
@@ -108,7 +110,7 @@ async fn run_server() {
         embedder,
     };
 
-    hatchdoor::vault_watcher::spawn_vault_watcher(
+    spawn_vault_watcher(
         state.clone(),
         config.vault_path.clone(),
         config.cache_db_path.clone(),
@@ -143,7 +145,6 @@ async fn run_server() {
 }
 
 fn run_prefetch() {
-    use hatchdoor::embed::ArcticEmbedder;
     info!("Pre-fetching BGE-small-EN weights and tokenizer");
     match ArcticEmbedder::load() {
         Ok(_) => info!("Pre-fetch complete"),
@@ -183,6 +184,7 @@ mod tests {
     use tower::ServiceExt;
 
     use hatchdoor::app_state::build_cache;
+    use hatchdoor::embed::{Embedder, StubEmbedder};
 
     #[test]
     fn cli_recognises_prefetch_embedder_flag() {
@@ -212,8 +214,8 @@ mod tests {
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let embedder: Arc<dyn hatchdoor::embed::Embedder> =
-            Arc::new(hatchdoor::embed::StubEmbedder::new(384));
+        let embedder: Arc<dyn Embedder> =
+            Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
