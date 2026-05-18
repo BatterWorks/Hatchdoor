@@ -1,6 +1,7 @@
 mod api_types;
 mod app_state;
 mod cache;
+mod chunk;
 mod embed;
 mod handlers;
 mod mcp;
