@@ -171,3 +171,91 @@ Skipped models (and why):
 - **Jina v2 base-en** — 8K-token context wasted on short notes.
 - **Nomic v2 MoE** — multilingual feature wasted on an English vault; behind a feature flag.
 - **AllMiniLM-L6-v2** — clearly weaker than Arctic-S at the same size; older.
+
+## 11. Implementation gotchas
+
+Decisions made during a pre-implementation pass through the spec. Recorded here so the implementation plan inherits them and doesn't re-discover them mid-coding.
+
+### 11.1 `sqlite-vec` integration via static init, not `load_extension`
+
+Use the `sqlite-vec` Rust crate's static-init path. After `Connection::open(path)?` in `SqliteCache::open`, call `unsafe { sqlite_vec::sqlite3_vec_init(conn.handle()); }` once. This registers the `vec0` virtual-table type for the lifetime of the connection.
+
+Do **not** ship a separate `vec0.so` or use `Connection::load_extension`. Reasons:
+
+- Avoids requiring the `load_extension` feature on rusqlite.
+- No filesystem dependency, no path-discovery code, no extra Dockerfile copy step.
+- Keeps the single-binary deployment property.
+
+The `unsafe` is the standard C-ABI extension-registration call and is the only `unsafe` block introduced by Phase 1.
+
+### 11.2 Model weights baked at image build time
+
+Add a `--prefetch-embedder` flag to the main binary that constructs the `TextEmbedding` once and exits. The `Dockerfile` invokes it after `cargo build` so model weights are downloaded into the image's filesystem cache:
+
+```dockerfile
+RUN ./target/release/hatchdoor --prefetch-embedder
+```
+
+Final image is ~500 MB instead of ~300 MB. Tradeoffs accepted: deterministic startup, no Hugging Face dependency at runtime, works on air-gapped VMs, no need for a model-cache volume in `docker-compose.yml`.
+
+Rejected alternatives: lazy download with a mounted cache volume (operational fragility, fresh-container re-pulls if the volume is missing); lazy download without a volume (wasteful re-pulls).
+
+### 11.3 Internal `semantic_search` for Phase 1.5
+
+Add to `cache/queries.rs`:
+
+```rust
+pub(crate) struct SemanticHit {
+    pub chunk_id: i64,
+    pub note_slug: String,
+    pub heading_path: Option<String>,
+    pub content: String,
+    pub distance: f32,
+}
+
+impl SqliteCache {
+    pub(crate) fn semantic_search(
+        &self,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<SemanticHit>, String> { … }
+}
+```
+
+Internally: embed the query, then `SELECT … FROM chunk_vectors JOIN chunks USING (chunk_id) ORDER BY vec_distance(embedding, ?) LIMIT k`. Not wired to any HTTP route or MCP tool — callable only from tests and the Phase 1.5 eval harness. Phase 2's hybrid retrieval builds on top of it.
+
+This unblocks Phase 1.5 without leaking a half-finished public surface.
+
+### 11.4 Orphan-vector cleanup: per-note pre-delete + global sweep
+
+`chunk_vectors` is a virtual table and does not participate in `ON DELETE CASCADE`. Two cleanup paths are needed:
+
+- **Per-note** (already in §5): inside the per-note refresh transaction, `DELETE FROM chunk_vectors WHERE chunk_id IN (SELECT id FROM chunks WHERE note_slug = ?)` before deleting the note's chunks. Makes the watcher path atomic and self-contained.
+- **Global sweep** (new): at the end of `replace_from_index`, in the same transaction, `DELETE FROM chunk_vectors WHERE chunk_id NOT IN (SELECT id FROM chunks)`. Catches the cold-start / full-rebuild path which bypasses any per-note logic when entire notes are removed from the vault between runs.
+
+Cost of the global sweep at 1,500 chunks: microseconds. The two together make orphan vectors structurally impossible.
+
+### 11.5 `Embedder::tokenizer()` on the trait
+
+`fastembed-rs` does not currently expose its internal tokenizer on its public API, but `text-splitter` needs a tokenizer instance to count tokens accurately. The `Embedder` trait gains a method:
+
+```rust
+fn tokenizer(&self) -> Arc<tokenizers::Tokenizer>;
+```
+
+- `ArcticEmbedder` loads the matching tokenizer file (alongside the model weights, already on disk after the Dockerfile prefetch step) via the `tokenizers` crate at startup. Resident cost: ~5 MB.
+- `StubEmbedder` returns a trivial whitespace tokenizer for tests.
+
+The chunker borrows this `Arc<Tokenizer>` and passes it to `text-splitter`'s `MarkdownSplitter`. Same tokenizer in chunker and embedder → "800 tokens" means the same thing in both stages, so chunks never silently exceed the embedder's context.
+
+### 11.6 Logging policy for indexing
+
+Cold indexing takes ~60 s; without logs it looks like a hang. The policy:
+
+- `INFO` at indexing start: total note count, estimated chunk count, model name, rough duration estimate.
+- `INFO` at indexing end: actual duration, chunks embedded, chunks skipped via `content_hash`, error count.
+- `DEBUG` every 100 chunks (or every batch boundary): progress with current rate. Off by default; enabled with `RUST_LOG=hatchdoor=debug`.
+- `WARN` per per-note embedding failure (transaction rolls back for that note; run continues).
+
+No metrics endpoint, no SSE progress channel, no progress bar. Overkill at the current scale.
