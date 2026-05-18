@@ -5,12 +5,31 @@ mod schema;
 
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
 
 pub(crate) struct SqliteCache {
     pub(crate) conn: Mutex<Connection>,
+}
+
+static SQLITE_VEC_INIT: Once = Once::new();
+
+fn register_sqlite_vec() {
+    SQLITE_VEC_INIT.call_once(|| {
+        unsafe {
+            rusqlite::ffi::sqlite3_auto_extension(Some(
+                std::mem::transmute::<
+                    *const (),
+                    unsafe extern "C" fn(
+                        *mut rusqlite::ffi::sqlite3,
+                        *mut *mut i8,
+                        *const rusqlite::ffi::sqlite3_api_routines,
+                    ) -> i32,
+                >(sqlite_vec::sqlite3_vec_init as *const ()),
+            ));
+        }
+    });
 }
 
 impl SqliteCache {
@@ -25,6 +44,7 @@ impl SqliteCache {
             })?;
         }
 
+        register_sqlite_vec();
         let conn = Connection::open(path).map_err(|error| {
             format!("failed to open SQLite cache '{}': {error}", path.display())
         })?;
@@ -37,6 +57,7 @@ impl SqliteCache {
 
     #[cfg(test)]
     pub(crate) fn in_memory() -> Result<Self, String> {
+        register_sqlite_vec();
         let conn = Connection::open_in_memory()
             .map_err(|error| format!("failed to open in-memory SQLite cache: {error}"))?;
         let cache = Self {
