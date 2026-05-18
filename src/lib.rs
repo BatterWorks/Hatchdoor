@@ -1,0 +1,9 @@
+pub mod api_types;
+pub mod app_state;
+pub mod cache;
+pub mod chunk;
+pub mod embed;
+pub mod handlers;
+pub mod mcp;
+pub mod vault;
+pub mod vault_watcher;

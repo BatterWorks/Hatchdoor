@@ -3,13 +3,13 @@ use rusqlite::{Transaction, params};
 use crate::chunk::Chunk;
 
 #[allow(dead_code)]
-pub(crate) struct ChunkRow<'a> {
+pub struct ChunkRow<'a> {
     pub chunk: &'a Chunk,
     pub vector: &'a [f32],
 }
 
 #[allow(dead_code)]
-pub(crate) fn replace_chunks_for_note(
+pub fn replace_chunks_for_note(
     tx: &Transaction<'_>,
     note_slug: &str,
     rows: &[ChunkRow<'_>],
@@ -67,7 +67,7 @@ pub(crate) fn replace_chunks_for_note(
 }
 
 #[allow(dead_code)]
-pub(crate) fn existing_chunk_hashes(
+pub fn existing_chunk_hashes(
     tx: &Transaction<'_>,
     note_slug: &str,
 ) -> Result<std::collections::HashMap<String, i64>, String> {
@@ -88,7 +88,7 @@ pub(crate) fn existing_chunk_hashes(
 }
 
 #[allow(dead_code)]
-pub(crate) fn delete_orphan_vectors(tx: &Transaction<'_>) -> Result<usize, String> {
+pub fn delete_orphan_vectors(tx: &Transaction<'_>) -> Result<usize, String> {
     let removed = tx
         .execute(
             "DELETE FROM chunk_vectors WHERE chunk_id NOT IN (SELECT id FROM chunks)",

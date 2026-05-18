@@ -12,12 +12,12 @@ use super::protocol::{
 };
 use super::tools::{handle_tools_call, tools_list};
 
-pub(crate) async fn mcp_get_handler(headers: HeaderMap) -> Response {
+pub async fn mcp_get_handler(headers: HeaderMap) -> Response {
     let config = McpConfig::from_env();
     handle_mcp_get(&headers, &config).await
 }
 
-pub(crate) async fn mcp_post_handler(
+pub async fn mcp_post_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,

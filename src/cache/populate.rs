@@ -16,13 +16,13 @@ use super::parse::{
     file_snapshot,
 };
 
-pub(crate) enum UpsertOutcome {
+pub enum UpsertOutcome {
     Wrote { slug: String },
     Unchanged,
 }
 
 impl SqliteCache {
-    pub(crate) fn replace_from_index_with_embedder(
+    pub fn replace_from_index_with_embedder(
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
@@ -429,7 +429,7 @@ fn rebuild_links(
     Ok(())
 }
 
-pub(crate) struct ChunkStats {
+pub struct ChunkStats {
     #[allow(dead_code)]
     pub embedded: usize,
     #[allow(dead_code)]

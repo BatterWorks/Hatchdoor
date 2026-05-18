@@ -14,7 +14,7 @@ use super::paths::{
 use super::rewrites::{apply_rewrites, backlink_rewrite_plan, merge_rewrites};
 use super::types::{WriteError, WriteOutcome};
 
-pub(crate) fn create_note(
+pub fn create_note(
     vault_root: &Path,
     relative_path: &str,
     content: &str,
@@ -42,7 +42,7 @@ pub(crate) fn create_note(
     })
 }
 
-pub(crate) fn update_note(
+pub fn update_note(
     entry: &NoteEntry,
     content: &str,
     expected_content_hash: &str,
@@ -59,7 +59,7 @@ pub(crate) fn update_note(
     })
 }
 
-pub(crate) fn append_note(
+pub fn append_note(
     entry: &NoteEntry,
     content: &str,
     expected_content_hash: &str,
@@ -86,7 +86,7 @@ pub(crate) fn append_note(
     })
 }
 
-pub(crate) fn move_or_rename_note(
+pub fn move_or_rename_note(
     vault_root: &Path,
     index: &VaultIndex,
     entry: &NoteEntry,
@@ -140,7 +140,7 @@ pub(crate) fn move_or_rename_note(
     })
 }
 
-pub(crate) fn delete_note(
+pub fn delete_note(
     vault_root: &Path,
     index: &VaultIndex,
     entry: &NoteEntry,

@@ -13,7 +13,7 @@ use crate::api_types::ErrorResponse;
 use crate::app_state::{AppState, sqlite_cache};
 use crate::vault::Note;
 
-pub(crate) async fn note_download_handler(
+pub async fn note_download_handler(
     Path(slug): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {

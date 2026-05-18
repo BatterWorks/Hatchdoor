@@ -16,7 +16,7 @@ use super::paths::{
 use super::rewrites::{apply_rewrites, rollback_rewrites};
 use super::types::{AttachmentInfo, AttachmentOutcome, WriteError};
 
-pub(crate) fn list_note_attachments(
+pub fn list_note_attachments(
     vault_root: &Path,
     entry: &NoteEntry,
 ) -> Result<Vec<AttachmentInfo>, WriteError> {
@@ -45,7 +45,7 @@ pub(crate) fn list_note_attachments(
     Ok(attachments)
 }
 
-pub(crate) fn import_attachment(
+pub fn import_attachment(
     vault_root: &Path,
     staging_root: &Path,
     staged_filename: &str,
@@ -88,7 +88,7 @@ pub(crate) fn import_attachment(
     })
 }
 
-pub(crate) fn move_attachment(
+pub fn move_attachment(
     vault_root: &Path,
     index: &VaultIndex,
     source_relative_path: &str,
@@ -125,7 +125,7 @@ pub(crate) fn move_attachment(
     })
 }
 
-pub(crate) fn rename_attachment(
+pub fn rename_attachment(
     vault_root: &Path,
     index: &VaultIndex,
     source_relative_path: &str,
@@ -137,7 +137,7 @@ pub(crate) fn rename_attachment(
     move_attachment_by_paths(vault_root, index, &source_path, &target_path)
 }
 
-pub(crate) fn delete_attachment(
+pub fn delete_attachment(
     vault_root: &Path,
     index: &VaultIndex,
     source_relative_path: &str,

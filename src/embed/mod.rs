@@ -1,7 +1,7 @@
-pub(crate) mod arctic;
-pub(crate) mod embedder;
+pub mod arctic;
+pub mod embedder;
 
 #[allow(unused_imports)]
-pub(crate) use arctic::ArcticEmbedder;
+pub use arctic::ArcticEmbedder;
 #[allow(unused_imports)]
-pub(crate) use embedder::{Embedder, StubEmbedder};
+pub use embedder::{Embedder, StubEmbedder};

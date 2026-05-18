@@ -1,5 +1,5 @@
-pub(crate) mod chunker;
-pub(crate) mod normalize;
+pub mod chunker;
+pub mod normalize;
 
 #[allow(unused_imports)]
-pub(crate) use chunker::{Chunk, ChunkOptions, NoteChunking, chunk_note};
+pub use chunker::{Chunk, ChunkOptions, NoteChunking, chunk_note};

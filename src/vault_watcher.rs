@@ -10,9 +10,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::app_state::{AppState, refresh_if_needed};
 
-pub(crate) const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 
-pub(crate) fn spawn_vault_watcher(state: AppState, vault_path: PathBuf, cache_db_path: PathBuf) {
+pub fn spawn_vault_watcher(state: AppState, vault_path: PathBuf, cache_db_path: PathBuf) {
     tokio::spawn(async move {
         if let Err(error) = run_vault_watcher(state, vault_path, cache_db_path).await {
             warn!("Vault watcher disabled: {error}");
@@ -84,7 +84,7 @@ async fn debounce_events(
     }
 }
 
-pub(crate) fn should_refresh_for_event(event: &Event, cache_db_path: &Path) -> bool {
+pub fn should_refresh_for_event(event: &Event, cache_db_path: &Path) -> bool {
     if !refreshable_event_kind(event) {
         return false;
     }

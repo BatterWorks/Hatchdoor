@@ -5,7 +5,7 @@ use super::SqliteCache;
 const SCHEMA_VERSION: &str = "3";
 
 impl SqliteCache {
-    pub(crate) fn ensure_schema(&self) -> Result<(), String> {
+    pub fn ensure_schema(&self) -> Result<(), String> {
         let conn = self.connection()?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(|error| format!("failed to enable SQLite foreign keys: {error}"))?;

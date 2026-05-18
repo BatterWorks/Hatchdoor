@@ -1,11 +1,11 @@
 #[allow(dead_code)]
-pub(crate) struct FrontmatterMetadata {
+pub struct FrontmatterMetadata {
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
 }
 
 #[allow(dead_code)]
-pub(crate) fn strip_frontmatter(content: &str) -> &str {
+pub fn strip_frontmatter(content: &str) -> &str {
     if !content.starts_with("---") {
         return content;
     }
@@ -33,7 +33,7 @@ pub(crate) fn strip_frontmatter(content: &str) -> &str {
 }
 
 #[allow(dead_code)]
-pub(crate) fn strip_code_fences(content: &str) -> String {
+pub fn strip_code_fences(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     for line in content.split_inclusive('\n') {
         if line.trim_start().starts_with("```") {
@@ -45,7 +45,7 @@ pub(crate) fn strip_code_fences(content: &str) -> String {
 }
 
 #[allow(dead_code)]
-pub(crate) fn extract_frontmatter_metadata(content: &str) -> FrontmatterMetadata {
+pub fn extract_frontmatter_metadata(content: &str) -> FrontmatterMetadata {
     let mut tags = Vec::new();
     let mut aliases = Vec::new();
     if !content.starts_with("---") {

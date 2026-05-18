@@ -22,14 +22,14 @@ pub struct Note {
 
 #[derive(Debug, Clone)]
 pub struct VaultIndex {
-    pub(crate) by_slug: HashMap<String, NoteEntry>,
+    pub by_slug: HashMap<String, NoteEntry>,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) by_title: HashMap<String, String>,
+    pub by_title: HashMap<String, String>,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) by_path_title: HashMap<String, String>,
-    pub(crate) ordered_slugs: Vec<String>,
-    pub(crate) outgoing_by_slug: HashMap<String, Vec<String>>,
-    pub(crate) backlinks_by_slug: HashMap<String, Vec<String>>,
+    pub by_path_title: HashMap<String, String>,
+    pub ordered_slugs: Vec<String>,
+    pub outgoing_by_slug: HashMap<String, Vec<String>>,
+    pub backlinks_by_slug: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -5,7 +5,7 @@ use tokenizers::Tokenizer;
 
 use super::Embedder;
 
-pub(crate) struct ArcticEmbedder {
+pub struct ArcticEmbedder {
     model: TextEmbedding,
     tokenizer: Arc<Tokenizer>,
     dim: usize,
@@ -23,7 +23,7 @@ const EMBEDDING_MODEL: EmbeddingModel = EmbeddingModel::BGESmallENV15;
 
 impl ArcticEmbedder {
     #[allow(dead_code)]
-    pub(crate) fn load() -> Result<Self, String> {
+    pub fn load() -> Result<Self, String> {
         let model = TextEmbedding::try_new(
             InitOptions::new(EMBEDDING_MODEL).with_show_download_progress(false),
         )

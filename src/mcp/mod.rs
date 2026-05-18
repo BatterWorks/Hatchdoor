@@ -1,6 +1,6 @@
-pub(crate) mod config;
-pub(crate) mod protocol;
-pub(crate) mod routes;
-pub(crate) mod tools;
+pub mod config;
+pub mod protocol;
+pub mod routes;
+pub mod tools;
 
-pub(crate) use routes::{mcp_get_handler, mcp_post_handler};
+pub use routes::{mcp_get_handler, mcp_post_handler};
