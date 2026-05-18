@@ -15,8 +15,8 @@ It should not include autonomous workflow orchestration for now.
 | **1. Source layer** | Holds the original content. | Implemented — markdown vault on disk. |
 | **2. Parsing layer** | Extracts structure from the source. | Implemented — `src/cache/parse.rs`, `src/vault/`. |
 | **3. Structured cache layer** | Stores metadata, relationships, state, and change tracking. | Implemented — SQLite at `data/cache/hatchdoor-cache.sqlite3`. |
-| **4. Chunking layer** | Splits content into retrieval units. | Planned — Phase 1. Hybrid structural + size-cap (see Phase 1 decisions). |
-| **5. Embedding layer** | Converts chunks into semantic representations. | Planned — Phase 1. Local in-process via `fastembed` + BGE-small-en-v1.5 (384-dim). |
+| **4. Chunking layer** | Splits content into retrieval units. | Planned — Phase 1. `text-splitter` crate with the embedder's tokenizer, hybrid structural + size-cap (see Phase 1 decisions). |
+| **5. Embedding layer** | Converts chunks into semantic representations. | Planned — Phase 1. Local in-process via `fastembed` + Snowflake Arctic Embed M (768-dim). |
 | **6. Semantic index layer** | Stores and searches semantic representations. | Planned — Phase 1. `sqlite-vec` extension on the existing SQLite file. |
 | **7. Exact search layer** | Searches precise terms and metadata. | Implemented — SQLite FTS5 via `cache/queries.rs::search`. |
 | **8. Hybrid retrieval layer** | Combines exact and semantic retrieval. | Planned — Phase 2. Single SQL query joining FTS5 with `vec0` results. |
@@ -89,9 +89,10 @@ The missing layers ship as a sequence of sub-projects, each with its own spec an
 
 Recorded here for downstream specs; full design lives in `docs/superpowers/specs/`.
 
-- **Embedding model:** `fastembed-rs` with BGE-small-en-v1.5, 384-dim `f32`. Runs in-process on CPU via ONNX Runtime, ~300 MB resident, no network or API dependency.
+- **Embedding model:** `fastembed-rs` with Snowflake Arctic Embed M, 768-dim `f32`. Runs in-process on CPU via ONNX Runtime, ~700 MB resident, no network or API dependency. Highest English retrieval score among fastembed-rs models under 500M params.
 - **Vector storage:** `sqlite-vec` extension on the existing `hatchdoor-cache.sqlite3` file. Adds a `vec0` virtual table for chunk embeddings. No second datastore, no Chroma/Qdrant container.
-- **Chunking strategy:** hybrid structural — split on H1/H2/H3 headings, sub-split sections over ~800 tokens with ~50-token overlap. Heading path stored as chunk metadata.
+- **Chunker implementation:** `text-splitter` crate configured with the embedder's tokenizer, so token counts in the chunker match token counts in the embedder.
+- **Chunking strategy:** hybrid structural — split on H1/H2/H3 headings, sub-split sections over ~800 tokens with ~50-token overlap, fixed-size token-window fallback for oversized single paragraphs. Heading path stored as chunk metadata.
 - **Pre-embed normalization:** strip YAML frontmatter and code-block fences (keep code contents). Keep wikilinks (`[[X]]`) literal. Lift frontmatter `tags`/`aliases` into a separate metadata column for SQL filtering rather than embedding them as text.
-- **Deployment shape unchanged:** still a single Rust binary in Docker. Image grows ~200 MB for ONNX runtime + model weights.
+- **Deployment shape unchanged:** still a single Rust binary in Docker. Image grows ~500 MB for ONNX runtime + Arctic-M model weights.
 - **Public API surface unchanged in Phase 1:** chunk/embed work is internal; consumers arrive in Phase 2.
