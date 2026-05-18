@@ -14,43 +14,12 @@ use super::parse::{
     file_snapshot,
 };
 
-#[allow(dead_code)]
 pub(crate) enum UpsertOutcome {
     Wrote { slug: String },
     Unchanged,
 }
 
 impl SqliteCache {
-    pub(crate) fn replace_from_index(&self, index: &VaultIndex) -> Result<(), String> {
-        let entries = index.ordered_entries();
-        let current_paths = entries
-            .iter()
-            .map(|entry| entry.relative_path.clone())
-            .collect::<HashSet<_>>();
-        let now = current_unix_timestamp();
-        let mut conn = self.connection()?;
-        let tx = conn
-            .transaction()
-            .map_err(|error| format!("failed to start SQLite cache refresh: {error}"))?;
-
-        for cached_path in cached_relative_paths(&tx)? {
-            if !current_paths.contains(&cached_path) {
-                delete_note_by_relative_path(&tx, &cached_path)?;
-            }
-        }
-
-        for entry in &entries {
-            upsert_note_if_changed(&tx, entry, now)?;
-        }
-
-        rebuild_links(&tx, index, &entries)?;
-
-        tx.commit()
-            .map_err(|error| format!("failed to commit SQLite cache refresh: {error}"))?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn replace_from_index_with_embedder(
         &self,
         index: &VaultIndex,
@@ -72,11 +41,35 @@ impl SqliteCache {
             }
         }
 
+        let started_at = std::time::Instant::now();
+        tracing::info!(notes = entries.len(), "Indexing vault: chunking and embedding");
+        let mut chunks_embedded: usize = 0;
+        let mut chunks_reused: usize = 0;
+        let mut per_note_failures: usize = 0;
+
         for entry in &entries {
             if let UpsertOutcome::Wrote { slug } = upsert_note_if_changed(&tx, entry, now)? {
-                chunk_and_embed_note(&tx, &slug, entry, embedder)?;
+                match chunk_and_embed_note(&tx, &slug, entry, embedder) {
+                    Ok(stats) => {
+                        chunks_embedded += stats.embedded;
+                        chunks_reused += stats.reused;
+                    }
+                    Err(e) => {
+                        per_note_failures += 1;
+                        tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; skipped");
+                    }
+                }
             }
         }
+
+        tracing::info!(
+            notes = entries.len(),
+            chunks_embedded,
+            chunks_reused,
+            per_note_failures,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "Indexing complete"
+        );
 
         rebuild_links(&tx, index, &entries)?;
         let removed = delete_orphan_vectors(&tx)?;
@@ -427,13 +420,13 @@ fn rebuild_links(
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(crate) struct ChunkStats {
+    #[allow(dead_code)]
     pub embedded: usize,
+    #[allow(dead_code)]
     pub reused: usize,
 }
 
-#[allow(dead_code)]
 fn chunk_and_embed_note(
     tx: &Transaction<'_>,
     slug: &str,
@@ -459,6 +452,15 @@ fn chunk_and_embed_note(
             texts_to_embed.push(chunk.content.clone());
             indices_needing_embed.push(idx);
         }
+    }
+
+    if !texts_to_embed.is_empty() {
+        tracing::debug!(
+            slug,
+            new = texts_to_embed.len(),
+            reused = chunking.chunks.len() - texts_to_embed.len(),
+            "Embedding chunks for note"
+        );
     }
 
     let new_vectors = if texts_to_embed.is_empty() {
@@ -494,7 +496,6 @@ fn chunk_and_embed_note(
     })
 }
 
-#[allow(dead_code)]
 fn preserve_existing_vectors(
     tx: &Transaction<'_>,
     _slug: &str,
@@ -518,7 +519,9 @@ fn preserve_existing_vectors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use crate::cache::SqliteCache;
+    use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
     use tempfile::tempdir;
 
@@ -529,8 +532,9 @@ mod tests {
         fs::write(&note_path, "# Home\nalpha token").expect("write original note");
 
         let cache = SqliteCache::in_memory().expect("sqlite cache");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let index = VaultIndex::build(dir.path()).expect("build original index");
-        cache.replace_from_index(&index).expect("initial populate");
+        cache.replace_from_index_with_embedder(&index, embedder.as_ref()).expect("initial populate");
 
         fs::write(&note_path, "# Home\nbravo token").expect("write changed note");
         let snapshot = file_snapshot(&note_path).expect("file snapshot");
@@ -545,7 +549,7 @@ mod tests {
 
         let refreshed_index = VaultIndex::build(dir.path()).expect("build refreshed index");
         cache
-            .replace_from_index(&refreshed_index)
+            .replace_from_index_with_embedder(&refreshed_index, embedder.as_ref())
             .expect("refresh populate");
 
         let note = cache
