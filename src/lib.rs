@@ -1,4 +1,5 @@
 pub mod api_types;
+pub mod eval;
 pub mod app_state;
 pub mod cache;
 pub mod chunk;
