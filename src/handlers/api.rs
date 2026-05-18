@@ -105,7 +105,7 @@ pub(crate) async fn resolve_batch_handler(
 }
 
 pub(crate) async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match refresh_if_needed(&state, true).await {
+    match refresh_if_needed(&state).await {
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
     }

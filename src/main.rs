@@ -7,7 +7,6 @@ mod vault;
 mod vault_watcher;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
 use axum::routing::{get, post};
@@ -94,7 +93,6 @@ async fn main() {
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let state = AppState {
         vault_path: config.vault_path.clone(),
-        refresh_interval: Duration::from_secs(config.refresh_seconds),
         cache: Arc::new(RwLock::new(cache)),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
@@ -116,7 +114,6 @@ async fn main() {
     info!(
         host = %config.host,
         port = config.port,
-        refresh_seconds = config.refresh_seconds,
         vault_path = %config.vault_path.display(),
         cache_db_path = %config.cache_db_path.display(),
         "Hatchdoor starting"
@@ -163,7 +160,6 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
-            refresh_interval: Duration::from_secs(60),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,

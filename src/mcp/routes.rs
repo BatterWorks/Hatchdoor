@@ -122,7 +122,6 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
@@ -171,7 +170,6 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
-            refresh_interval: Duration::from_secs(60),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
