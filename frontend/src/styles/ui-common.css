@@ -133,7 +133,6 @@
 /* Drawer backdrop */
 .drawer-backdrop {
   position: fixed;
-  inset: calc(3px + 52px + env(safe-area-inset-top)) 0 0 0;
   border: 0;
   background: var(--overlay-bg);
   z-index: 20;

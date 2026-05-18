@@ -84,6 +84,7 @@ function App() {
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
+  const prevFocusRef = useRef<Element | null>(null);
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -278,11 +279,16 @@ function App() {
   }, [location.pathname, navigate]);
 
   useEffect(() => {
-    if (!searchOpen) {
-      return;
+    if (searchOpen) {
+      prevFocusRef.current = document.activeElement;
+      const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+      return () => window.clearTimeout(id);
+    } else {
+      if (prevFocusRef.current instanceof HTMLElement) {
+        prevFocusRef.current.focus();
+      }
+      prevFocusRef.current = null;
     }
-    const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(id);
   }, [searchOpen]);
 
   useEffect(() => {
@@ -449,6 +455,7 @@ function App() {
       style={
         {
           "--mobile-drawer-top": `${mobileDrawerTop}px`,
+          "--sidebar-width": `${sidebarWidth}px`,
         } as CSSProperties
       }
     >
@@ -470,10 +477,7 @@ function App() {
         onToggleProperties={toggleProperties}
       />
 
-      <div
-        className="app-layout"
-        style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
-      >
+      <div className="app-layout">
         <ExplorerPane
           explorerPaneRef={explorerPaneRef}
           drawerOpen={drawerOpen}
@@ -503,12 +507,33 @@ function App() {
             className="sidebar-resizer"
             role="separator"
             aria-orientation="vertical"
+            aria-label="Sidebar width"
+            aria-valuenow={sidebarWidth}
+            aria-valuemin={220}
+            aria-valuemax={420}
+            tabIndex={0}
             onPointerDown={(event) => {
               resizingRef.current = {
                 startX: event.clientX,
                 startWidth: sidebarWidth,
               };
               document.body.classList.add("resizing");
+            }}
+            onKeyDown={(event) => {
+              const step = event.shiftKey ? 20 : 5;
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setSidebarWidth((w) => clampSidebarWidth(w + step));
+              } else if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setSidebarWidth((w) => clampSidebarWidth(w - step));
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                setSidebarWidth(220);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                setSidebarWidth(420);
+              }
             }}
           />
         ) : null}
