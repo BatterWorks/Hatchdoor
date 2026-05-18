@@ -57,7 +57,7 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
 
   if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
     const firstText = flattenText(first.props.children).trim();
-    const match = firstText.match(/^\[!([A-Za-z0-9_]+)\]([+-])?\s*(.*)$/);
+    const match = firstText.match(/^\[!([A-Za-z0-9_-]+)\]([+-])?\s*(.*)$/);
 
     if (match) {
       const kind = match[1].toLowerCase();
