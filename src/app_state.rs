@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
+use crate::embed::Embedder;
 use crate::vault::VaultIndex;
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ pub(crate) struct AppState {
     pub(crate) cache: Arc<RwLock<VaultCache>>,
     pub(crate) vault_revision: Arc<AtomicU64>,
     pub(crate) vault_events: broadcast::Sender<u64>,
+    pub(crate) embedder: Arc<dyn Embedder>,
 }
 
 pub(crate) struct VaultCache {
@@ -77,18 +79,19 @@ pub(crate) fn init_logging() {
 }
 
 #[cfg(test)]
-pub(crate) fn build_cache(vault_path: &PathBuf) -> Result<VaultCache, String> {
+pub(crate) fn build_cache(vault_path: &PathBuf, embedder: &dyn Embedder) -> Result<VaultCache, String> {
     let sqlite = Arc::new(SqliteCache::in_memory()?);
-    build_cache_with_sqlite(vault_path, sqlite)
+    build_cache_with_sqlite(vault_path, sqlite, embedder)
 }
 
 pub(crate) fn build_cache_with_sqlite(
     vault_path: &PathBuf,
     sqlite: Arc<SqliteCache>,
+    embedder: &dyn Embedder,
 ) -> Result<VaultCache, String> {
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
-    sqlite.replace_from_index(&index)?;
+    sqlite.replace_from_index_with_embedder(&index, embedder)?;
 
     Ok(VaultCache { sqlite })
 }
@@ -104,7 +107,7 @@ pub(crate) async fn refresh_if_needed(
     state: &AppState,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let mut guard = state.cache.write().await;
-    match build_cache_with_sqlite(&state.vault_path, guard.sqlite.clone()) {
+    match build_cache_with_sqlite(&state.vault_path, guard.sqlite.clone(), state.embedder.as_ref()) {
         Ok(cache) => {
             info!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
             *guard = cache;
@@ -130,6 +133,11 @@ pub(crate) async fn refresh_if_needed(
 fn broadcast_vault_revision(state: &AppState) {
     let revision = state.vault_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let _ = state.vault_events.send(revision);
+}
+
+#[cfg(test)]
+pub(crate) fn test_embedder() -> Arc<dyn Embedder> {
+    Arc::new(crate::embed::StubEmbedder::new(384))
 }
 
 #[cfg(test)]
@@ -162,13 +170,15 @@ mod tests {
     }
 
     fn state_with_vault(vault_path: PathBuf) -> AppState {
-        let cache = build_cache(&vault_path).expect("build cache");
+        let embedder = test_embedder();
+        let cache = build_cache(&vault_path, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = broadcast::channel(64);
         AppState {
             vault_path,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
+            embedder,
         }
     }
 

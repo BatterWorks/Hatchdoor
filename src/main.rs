@@ -93,7 +93,14 @@ async fn run_server() {
         }),
     );
 
-    let cache = build_cache_with_sqlite(&config.vault_path, sqlite).unwrap_or_else(|e| {
+    let embedder: Arc<dyn crate::embed::Embedder> = Arc::new(
+        crate::embed::ArcticEmbedder::load().unwrap_or_else(|e| {
+            error!("Failed to load embedder: {e}");
+            std::process::exit(1);
+        }),
+    );
+
+    let cache = build_cache_with_sqlite(&config.vault_path, sqlite, embedder.as_ref()).unwrap_or_else(|e| {
         error!(
             "Failed to index vault at {} into SQLite cache {}: {e}",
             config.vault_path.display(),
@@ -108,6 +115,7 @@ async fn run_server() {
         cache: Arc::new(RwLock::new(cache)),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
+        embedder,
     };
 
     vault_watcher::spawn_vault_watcher(
@@ -214,13 +222,15 @@ mod tests {
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let cache = build_cache(&vault_root).expect("cache");
+        let embedder: Arc<dyn crate::embed::Embedder> = Arc::new(crate::embed::StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            embedder,
         };
 
         (build_router(state.clone()), tmp, state)
