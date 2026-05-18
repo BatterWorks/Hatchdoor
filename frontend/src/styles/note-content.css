@@ -188,6 +188,26 @@
   background: var(--hot);
 }
 
+/* Task list items — suppress dash bullet, show checkbox instead */
+.note-body ul li.task-list-item {
+  padding-left: 0;
+  list-style: none;
+}
+
+.note-body ul li.task-list-item::before {
+  display: none;
+}
+
+.note-body ul li.task-list-item input[type="checkbox"] {
+  margin-right: 0.45rem;
+  accent-color: var(--hot);
+  width: 0.9em;
+  height: 0.9em;
+  vertical-align: middle;
+  position: relative;
+  top: -0.08em;
+}
+
 .note-body ol {
   counter-reset: olc;
 }
