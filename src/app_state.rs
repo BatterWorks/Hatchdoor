@@ -78,7 +78,6 @@ pub fn init_logging() {
         .init();
 }
 
-#[cfg(test)]
 pub fn build_cache(
     vault_path: &PathBuf,
     embedder: &dyn Embedder,
