@@ -79,7 +79,10 @@ pub(crate) fn init_logging() {
 }
 
 #[cfg(test)]
-pub(crate) fn build_cache(vault_path: &PathBuf, embedder: &dyn Embedder) -> Result<VaultCache, String> {
+pub(crate) fn build_cache(
+    vault_path: &PathBuf,
+    embedder: &dyn Embedder,
+) -> Result<VaultCache, String> {
     let sqlite = Arc::new(SqliteCache::in_memory()?);
     build_cache_with_sqlite(vault_path, sqlite, embedder)
 }
@@ -107,7 +110,11 @@ pub(crate) async fn refresh_if_needed(
     state: &AppState,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let mut guard = state.cache.write().await;
-    match build_cache_with_sqlite(&state.vault_path, guard.sqlite.clone(), state.embedder.as_ref()) {
+    match build_cache_with_sqlite(
+        &state.vault_path,
+        guard.sqlite.clone(),
+        state.embedder.as_ref(),
+    ) {
         Ok(cache) => {
             info!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
             *guard = cache;

@@ -174,14 +174,22 @@ mod tests {
         let cache = SqliteCache::in_memory().expect("open");
         let conn = cache.connection().expect("conn");
 
-        let chunks: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
-            [], |row| row.get(0)).expect("query");
+        let chunks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
         assert_eq!(chunks, 1, "chunks table must exist");
 
-        let chunk_vectors: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_vectors'",
-            [], |row| row.get(0)).expect("query");
+        let chunk_vectors: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_vectors'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
         assert_eq!(chunk_vectors, 1, "chunk_vectors virtual table must exist");
     }
 
@@ -189,9 +197,13 @@ mod tests {
     fn fresh_cache_records_schema_version_3() {
         let cache = SqliteCache::in_memory().expect("open");
         let conn = cache.connection().expect("conn");
-        let version: String = conn.query_row(
-            "SELECT value FROM metadata WHERE key = 'schema_version'",
-            [], |row| row.get(0)).expect("query");
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
         assert_eq!(version, "3");
     }
 }

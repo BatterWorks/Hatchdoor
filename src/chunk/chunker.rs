@@ -23,7 +23,12 @@ pub(crate) struct ChunkOptions {
 }
 
 impl Default for ChunkOptions {
-    fn default() -> Self { Self { max_tokens: 800, overlap_tokens: 50 } }
+    fn default() -> Self {
+        Self {
+            max_tokens: 800,
+            overlap_tokens: 50,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -68,10 +73,21 @@ pub(crate) fn chunk_note(
         let heading_path = derive_heading_path(&normalized, heading_scan_end);
         let content = piece.to_string();
         let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-        chunks.push(Chunk { ordinal, heading_path, content, byte_start, byte_end, content_hash });
+        chunks.push(Chunk {
+            ordinal,
+            heading_path,
+            content,
+            byte_start,
+            byte_end,
+            content_hash,
+        });
     }
 
-    NoteChunking { chunks, tags: metadata.tags, aliases: metadata.aliases }
+    NoteChunking {
+        chunks,
+        tags: metadata.tags,
+        aliases: metadata.aliases,
+    }
 }
 
 #[allow(dead_code)]
@@ -101,14 +117,24 @@ fn derive_heading_path(content: &str, byte_offset: usize) -> Option<String> {
     for line in prefix.lines() {
         let trimmed = line.trim_start();
         let level = trimmed.chars().take_while(|c| *c == '#').count();
-        if level == 0 || level > 3 { continue; }
+        if level == 0 || level > 3 {
+            continue;
+        }
         let text = trimmed[level..].trim();
-        if text.is_empty() { continue; }
+        if text.is_empty() {
+            continue;
+        }
         stack[level - 1] = Some(text.to_string());
-        for deeper in &mut stack[level..] { *deeper = None; }
+        for deeper in &mut stack[level..] {
+            *deeper = None;
+        }
     }
     let parts: Vec<String> = stack.iter().filter_map(Clone::clone).collect();
-    if parts.is_empty() { None } else { Some(parts.join(" > ")) }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" > "))
+    }
 }
 
 #[cfg(test)]
@@ -147,7 +173,14 @@ mod tests {
     #[test]
     fn ordinals_are_sequential_from_zero() {
         let content = "# A\nfirst\n\n# B\nsecond\n\n# C\nthird";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions { max_tokens: 5, overlap_tokens: 0 });
+        let result = chunk_note(
+            content,
+            stub_tokenizer(),
+            ChunkOptions {
+                max_tokens: 5,
+                overlap_tokens: 0,
+            },
+        );
         for (i, chunk) in result.chunks.iter().enumerate() {
             assert_eq!(chunk.ordinal, i);
         }
@@ -167,7 +200,12 @@ mod tests {
     fn frontmatter_is_stripped_before_chunking() {
         let content = "---\ntags: [x, y]\n---\n\n# A\n\nbody";
         let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
-        assert!(result.chunks.iter().all(|c| !c.content.contains("tags: [x, y]")));
+        assert!(
+            result
+                .chunks
+                .iter()
+                .all(|c| !c.content.contains("tags: [x, y]"))
+        );
         assert_eq!(result.tags, vec!["x", "y"]);
     }
 
@@ -192,11 +230,16 @@ mod tests {
     fn oversized_section_is_split_under_max_tokens() {
         let big = "para. ".repeat(2_000);
         let content = format!("# A\n\n{big}");
-        let opts = ChunkOptions { max_tokens: 50, overlap_tokens: 5 };
+        let opts = ChunkOptions {
+            max_tokens: 50,
+            overlap_tokens: 5,
+        };
         let result = chunk_note(&content, stub_tokenizer(), opts);
         let tokenizer = stub_tokenizer();
         for chunk in &result.chunks {
-            let encoding = tokenizer.encode(chunk.content.as_str(), false).expect("encode");
+            let encoding = tokenizer
+                .encode(chunk.content.as_str(), false)
+                .expect("encode");
             assert!(encoding.get_ids().len() <= opts.max_tokens + opts.overlap_tokens);
         }
     }

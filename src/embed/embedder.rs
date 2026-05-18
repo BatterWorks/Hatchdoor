@@ -50,9 +50,13 @@ impl Embedder for StubEmbedder {
         Ok(texts.iter().map(|t| hash_to_vector(t, self.dim)).collect())
     }
 
-    fn embedding_dim(&self) -> usize { self.dim }
+    fn embedding_dim(&self) -> usize {
+        self.dim
+    }
 
-    fn tokenizer(&self) -> Arc<Tokenizer> { self.tokenizer.clone() }
+    fn tokenizer(&self) -> Arc<Tokenizer> {
+        self.tokenizer.clone()
+    }
 }
 
 #[allow(dead_code)]
@@ -82,7 +86,9 @@ mod tests {
     #[test]
     fn stub_embedder_produces_fixed_dim_vectors() {
         let embedder = StubEmbedder::new(384);
-        let vectors = embedder.embed(&["hello".to_string(), "world".to_string()]).expect("embed");
+        let vectors = embedder
+            .embed(&["hello".to_string(), "world".to_string()])
+            .expect("embed");
         assert_eq!(vectors.len(), 2);
         assert_eq!(vectors[0].len(), 384);
         assert_eq!(vectors[1].len(), 384);

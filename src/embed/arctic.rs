@@ -34,7 +34,11 @@ impl ArcticEmbedder {
         // loading a second copy from disk.
         let tokenizer = Arc::new(model.tokenizer.clone());
 
-        Ok(Self { model, tokenizer, dim: ARCTIC_S_DIM })
+        Ok(Self {
+            model,
+            tokenizer,
+            dim: ARCTIC_S_DIM,
+        })
     }
 }
 
