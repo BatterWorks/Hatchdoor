@@ -146,3 +146,28 @@ None blocking. Two minor calls deferred to implementation:
 
 - Exact batch size for `fastembed` (default 32, may tune by measurement).
 - Whether `chunks_for_note` returns ordered by `ordinal` ASC at the SQL level or lets callers sort. Default: SQL.
+
+## 10. Considered embedding model alternatives
+
+Recorded here so Phase 1.5 eval has the candidate set without re-researching. All are fastembed-rs supported. Numbers are approximate and benchmark-dataset-dependent; the eval harness is the only reliable signal on the actual vault.
+
+| Model | Params | Dim | Disk | RAM | Cold reindex (1,500 chunks) | MTEB Retrieval (nDCG@10) | Notes |
+|---|---|---|---|---|---|---|---|
+| **Arctic Embed S** *(chosen)* | 33 M | 384 | ~130 MB | ~300 MB | ~60 s | ~52.0 | Cheap, retrieval-tuned, current Phase 1 starting point. |
+| BGE-small-en-v1.5 | 33 M | 384 | ~130 MB | ~300 MB | ~60 s | ~51.7 | Same footprint as Arctic-S but general-purpose and older training. Strictly dominated; not a candidate to swap to. |
+| Arctic Embed M | 109 M | 768 | ~430 MB | ~700 MB | ~3 min | ~54.9 | Moderate quality bump for ~3× the compute. First upgrade target if Arctic-S is the bottleneck. |
+| mxbai-embed-large-v1 | 335 M | 1024 | ~1.3 GB | ~1.8 GB | ~10 min | ~64.7 | Top quality available in fastembed-rs. ~10-point MTEB Retrieval gap over Arctic-S is significant; cost is ~6× the RAM and ~10× the cold reindex. May want VM RAM upgrade to 8 GB. |
+| Arctic Embed L | 335 M | 1024 | ~1.3 GB | ~1.8 GB | ~10 min | ~56.0 | Same size class as mxbai-large but retrieval-tuned. **Not in fastembed-rs catalog** — would require a different inference path. |
+
+**Swap procedure** (when eval picks a different model):
+
+1. Change the `Embedder` concrete type in `AppState` (one line).
+2. Update the `vec0` dimension in `schema.rs` if the new model has a different dim, and bump the schema version.
+3. Delete the cache file (or run a migration that drops `chunks` + `chunk_vectors`).
+4. Restart — cold-start path reindexes against the new model.
+
+Skipped models (and why):
+
+- **Jina v2 base-en** — 8K-token context wasted on short notes.
+- **Nomic v2 MoE** — multilingual feature wasted on an English vault; behind a feature flag.
+- **AllMiniLM-L6-v2** — clearly weaker than Arctic-S at the same size; older.
