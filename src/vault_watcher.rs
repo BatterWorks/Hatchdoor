@@ -45,7 +45,7 @@ async fn run_vault_watcher(
         match result {
             Ok(event) if should_refresh_for_event(&event, &cache_db_path) => {
                 debounce_events(&mut event_rx, &cache_db_path).await;
-                if let Err((status, body)) = refresh_if_needed(&state, true).await {
+                if let Err((status, body)) = refresh_if_needed(&state).await {
                     error!(
                         status = status.as_u16(),
                         error = %body.0.error,

@@ -29,7 +29,6 @@ WORKDIR /app
 ENV HOST=0.0.0.0 \
     PORT=42824 \
     VAULT_PATH=/data/vault \
-    VAULT_REFRESH_SECONDS=2 \
     RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn
 
 COPY --from=rust-builder /app/target/release/hatchdoor /app/hatchdoor

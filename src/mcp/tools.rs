@@ -290,7 +290,7 @@ async fn get_tree_tool(state: AppState, arguments: Value) -> Result<Value, JsonR
 
 async fn refresh_index_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
     reject_non_empty_arguments("refresh_index", &arguments)?;
-    refresh_if_needed(&state, true)
+    refresh_if_needed(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
@@ -566,7 +566,7 @@ fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry,
 }
 
 async fn refresh_after_write(state: &AppState) -> Result<(), JsonRpcFailure> {
-    refresh_if_needed(state, true)
+    refresh_if_needed(state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))
 }
