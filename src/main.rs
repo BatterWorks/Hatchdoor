@@ -26,6 +26,20 @@ use crate::handlers::{
 };
 use crate::mcp::{mcp_get_handler, mcp_post_handler};
 
+enum RunMode {
+    Serve,
+    PrefetchEmbedder,
+    Unknown(String),
+}
+
+fn parse_run_mode(args: &[String]) -> RunMode {
+    match args.get(1).map(String::as_str) {
+        None => RunMode::Serve,
+        Some("--prefetch-embedder") => RunMode::PrefetchEmbedder,
+        Some(other) => RunMode::Unknown(other.to_string()),
+    }
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
@@ -62,11 +76,7 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-#[tokio::main]
-async fn main() {
-    dotenv().ok();
-    init_logging();
-
+async fn run_server() {
     let config = AppConfig::from_env().unwrap_or_else(|e| {
         error!("Configuration error: {e}");
         std::process::exit(1);
@@ -133,6 +143,34 @@ async fn main() {
     });
 }
 
+fn run_prefetch() {
+    use crate::embed::ArcticEmbedder;
+    info!("Pre-fetching BGE-small-EN weights and tokenizer");
+    match ArcticEmbedder::load() {
+        Ok(_) => info!("Pre-fetch complete"),
+        Err(e) => {
+            error!("Pre-fetch failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    dotenv().ok();
+    init_logging();
+
+    let args: Vec<String> = std::env::args().collect();
+    match parse_run_mode(&args) {
+        RunMode::Serve => run_server().await,
+        RunMode::PrefetchEmbedder => run_prefetch(),
+        RunMode::Unknown(flag) => {
+            error!("Unknown flag: {flag}");
+            std::process::exit(2);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +184,24 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::app_state::build_cache;
+
+    #[test]
+    fn cli_recognises_prefetch_embedder_flag() {
+        let args = vec!["hatchdoor".to_string(), "--prefetch-embedder".to_string()];
+        assert!(matches!(parse_run_mode(&args), RunMode::PrefetchEmbedder));
+    }
+
+    #[test]
+    fn cli_defaults_to_serve_mode() {
+        let args = vec!["hatchdoor".to_string()];
+        assert!(matches!(parse_run_mode(&args), RunMode::Serve));
+    }
+
+    #[test]
+    fn cli_rejects_unknown_flags() {
+        let args = vec!["hatchdoor".to_string(), "--bogus".to_string()];
+        assert!(matches!(parse_run_mode(&args), RunMode::Unknown(_)));
+    }
 
     fn app_for_tests() -> (Router, TempDir) {
         let (app, tmp, _state) = app_for_tests_with_state();
