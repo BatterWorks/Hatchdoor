@@ -149,15 +149,15 @@ None blocking. Two minor calls deferred to implementation:
 
 ## 10. Considered embedding model alternatives
 
-Recorded here so Phase 1.5 eval has the candidate set without re-researching. All are fastembed-rs supported. Numbers are approximate and benchmark-dataset-dependent; the eval harness is the only reliable signal on the actual vault.
+Recorded here so Phase 1.5 eval has the candidate set without re-researching. Numbers are approximate and benchmark-dataset-dependent; the eval harness is the only reliable signal on the actual vault.
+
+> **Note on Arctic Embed S/M:** the Phase 1 spec was originally authored with `SnowflakeArcticEmbedS` as the chosen model and `SnowflakeArcticEmbedM` as the first upgrade candidate. However, fastembed-rs 4.9.1 (the pinned version in `Cargo.toml`) does **not** expose `SnowflakeArcticEmbedS` or `SnowflakeArcticEmbedM` in its `EmbeddingModel` enum. The production implementation uses `BGESmallENV15` (`BAAI/bge-small-en-v1.5`, 384-dim), which has the same footprint Arctic-S was chosen for. The Phase 1.5 eval trio below reflects what the pinned fastembed version actually supports.
 
 | Model | Params | Dim | Disk | RAM | Cold reindex (1,500 chunks) | MTEB Retrieval (nDCG@10) | Notes |
 |---|---|---|---|---|---|---|---|
-| **Arctic Embed S** *(chosen)* | 33 M | 384 | ~130 MB | ~300 MB | ~60 s | ~52.0 | Cheap, retrieval-tuned, current Phase 1 starting point. |
-| BGE-small-en-v1.5 | 33 M | 384 | ~130 MB | ~300 MB | ~60 s | ~51.7 | Same footprint as Arctic-S but general-purpose and older training. Strictly dominated; not a candidate to swap to. |
-| Arctic Embed M | 109 M | 768 | ~430 MB | ~700 MB | ~3 min | ~54.9 | Moderate quality bump for ~3× the compute. First upgrade target if Arctic-S is the bottleneck. |
-| mxbai-embed-large-v1 | 335 M | 1024 | ~1.3 GB | ~1.8 GB | ~10 min | ~64.7 | Top quality available in fastembed-rs. ~10-point MTEB Retrieval gap over Arctic-S is significant; cost is ~6× the RAM and ~10× the cold reindex. May want VM RAM upgrade to 8 GB. |
-| Arctic Embed L | 335 M | 1024 | ~1.3 GB | ~1.8 GB | ~10 min | ~56.0 | Same size class as mxbai-large but retrieval-tuned. **Not in fastembed-rs catalog** — would require a different inference path. |
+| **BGE-small-en-v1.5** (`BGESmallENV15`) *(current)* | 33 M | 384 | ~130 MB | ~300 MB | ~60 s | ~51.7 | General-purpose retrieval-tuned model. Current production starting point via `FastembedEmbedder::bge_small()`. |
+| Nomic Embed Text v1.5 (`NomicEmbedTextV15`) | 137 M | 768 | ~430 MB | ~700 MB | ~3 min | ~54.9 | 8192-token context; Matryoshka embeddings. First upgrade candidate if BGE-small is the retrieval bottleneck. |
+| mxbai-embed-large-v1 (`MxbaiEmbedLargeV1`) | 335 M | 1024 | ~1.3 GB | ~1.8 GB | ~10 min | ~64.7 | Top quality available in fastembed-rs 4.9.1. ~10-point MTEB Retrieval gap over BGE-small is significant; cost is ~6× the RAM and ~10× the cold reindex. May want VM RAM upgrade to 8 GB. |
 
 **Swap procedure** (when eval picks a different model):
 
