@@ -108,9 +108,85 @@ fn main() -> ExitCode {
                 cache.display(), elapsed.as_secs_f64());
             ExitCode::SUCCESS
         }
-        Cmd::Run { .. } => {
-            eprintln!("run: not yet implemented");
-            ExitCode::from(1)
+        Cmd::Run { model, cache, queries } => {
+            let embedder = match load_embedder(&model) {
+                Ok(e) => e,
+                Err(e) => { eprintln!("error: {e}"); return ExitCode::from(1); }
+            };
+
+            if !cache.exists() {
+                eprintln!("error: cache {} does not exist. Run `eval build` first.", cache.display());
+                return ExitCode::from(1);
+            }
+
+            let sqlite = match hatchdoor::cache::SqliteCache::open(&cache, embedder.embedding_dim()) {
+                Ok(s) => s,
+                Err(e) => { eprintln!("error opening cache: {e}"); return ExitCode::from(1); }
+            };
+
+            let stamped = sqlite.get_metadata("embedder_id").unwrap_or(None);
+            match stamped.as_deref() {
+                Some(id) if id == model => {}
+                Some(id) => {
+                    eprintln!(
+                        "error: cache was built with embedder {id} but --model is {model}. \
+                         Rebuild the cache or pass --model {id}."
+                    );
+                    return ExitCode::from(1);
+                }
+                None => {
+                    eprintln!("error: cache has no embedder_id stamp; rebuild it.");
+                    return ExitCode::from(1);
+                }
+            }
+
+            let build_dur: Option<f64> = sqlite
+                .get_metadata("build_duration_secs")
+                .ok()
+                .flatten()
+                .and_then(|s| s.parse::<f64>().ok());
+
+            let qs = match hatchdoor::eval::query::load_jsonl(&queries) {
+                Ok(qs) => qs,
+                Err(e) => { eprintln!("error: {e}"); return ExitCode::from(1); }
+            };
+
+            let mut results = Vec::with_capacity(qs.len());
+            for q in &qs {
+                match sqlite.semantic_search(embedder.as_ref(), &q.query, 10) {
+                    Ok(hits) => {
+                        let top_k: Vec<String> = hits.into_iter().map(|h| h.note_slug).collect();
+                        results.push(hatchdoor::eval::metrics::QueryResult {
+                            query_id: q.id.clone(),
+                            top_k,
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("warning: query {} failed: {e}", q.id);
+                        results.push(hatchdoor::eval::metrics::QueryResult {
+                            query_id: q.id.clone(),
+                            top_k: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            let report = hatchdoor::eval::metrics::aggregate(&model, &qs, &results);
+
+            println!("\nmodel: {}", report.model_id);
+            println!("queries: {}", qs.len());
+            println!("Recall@5  (any/all): {:.3} / {:.3}", report.recall_at_5_any, report.recall_at_5_all);
+            println!("Recall@10 (any/all): {:.3} / {:.3}", report.recall_at_10_any, report.recall_at_10_all);
+            println!("MRR:                 {:.3}", report.mrr);
+            println!("FP-rate@5:           {:.3}", report.fp_rate_at_5);
+
+            let report_path = std::path::PathBuf::from("eval/results.md");
+            if let Err(e) = hatchdoor::eval::report::append_section(&report_path, &report, build_dur) {
+                eprintln!("warning: failed to write report: {e}");
+            } else {
+                println!("\nappended to {}", report_path.display());
+            }
+            ExitCode::SUCCESS
         }
     }
 }
