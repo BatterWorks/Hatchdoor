@@ -4,7 +4,7 @@ use std::fs;
 use super::paths::{normalize_link_target, normalize_title, slugify};
 use super::types::NoteEntry;
 
-pub(crate) fn build_link_graph(
+pub fn build_link_graph(
     by_slug: &HashMap<String, NoteEntry>,
     by_title: &HashMap<String, String>,
     by_path_title: &HashMap<String, String>,

@@ -4,7 +4,7 @@ use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whites
 
 /// In-process text embedder. Loaded once at startup, shared via Arc.
 #[allow(dead_code)]
-pub(crate) trait Embedder: Send + Sync {
+pub trait Embedder: Send + Sync {
     /// Returns one embedding per input string, in order.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String>;
 
@@ -19,14 +19,14 @@ pub(crate) trait Embedder: Send + Sync {
 /// Deterministic test embedder. Hashes each input to a fixed-dim vector so
 /// tests can assert exact output without loading a real model.
 #[allow(dead_code)]
-pub(crate) struct StubEmbedder {
+pub struct StubEmbedder {
     dim: usize,
     tokenizer: Arc<Tokenizer>,
 }
 
 impl StubEmbedder {
     #[allow(dead_code)]
-    pub(crate) fn new(dim: usize) -> Self {
+    pub fn new(dim: usize) -> Self {
         use ahash::AHashMap;
         // WordLevel requires the unk token to be present in the vocab map.
         let mut vocab: AHashMap<String, u32> = AHashMap::new();

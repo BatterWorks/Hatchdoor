@@ -12,7 +12,7 @@ use super::SqliteCache;
 use super::parse::{build_fts_query, fts_query_terms};
 
 impl SqliteCache {
-    pub(crate) fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
+    pub fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
         let conn = self.connection()?;
         conn.query_row(
             r#"
@@ -35,7 +35,7 @@ impl SqliteCache {
         .map_err(|error| format!("failed to read note '{slug}' from SQLite cache: {error}"))
     }
 
-    pub(crate) fn explorer_tree(&self) -> Result<ExplorerFolder, String> {
+    pub fn explorer_tree(&self) -> Result<ExplorerFolder, String> {
         let rows = self.note_rows_ordered()?;
         let mut root = FolderBuilder::default();
 
@@ -57,7 +57,7 @@ impl SqliteCache {
         Ok(root.build("Vault"))
     }
 
-    pub(crate) fn recently_modified_notes(
+    pub fn recently_modified_notes(
         &self,
         limit: usize,
     ) -> Result<Vec<ModifiedNote>, String> {
@@ -91,7 +91,7 @@ impl SqliteCache {
             .map_err(|error| format!("failed to read recently modified notes: {error}"))
     }
 
-    pub(crate) fn search(
+    pub fn search(
         &self,
         query: &str,
         include_content: bool,
@@ -172,7 +172,7 @@ impl SqliteCache {
         Ok(results)
     }
 
-    pub(crate) fn note_links(&self, slug: &str) -> Result<Option<NoteLinks>, String> {
+    pub fn note_links(&self, slug: &str) -> Result<Option<NoteLinks>, String> {
         if !self.note_exists(slug)? {
             return Ok(None);
         }
@@ -204,7 +204,7 @@ impl SqliteCache {
         }))
     }
 
-    pub(crate) fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<String>, String> {
+    pub fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<String>, String> {
         let normalized_target = normalize_link_target(raw_target);
         let normalized_path = normalize_title(&normalized_target);
         let conn = self.connection()?;
@@ -369,7 +369,7 @@ impl SqliteCache {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub(crate) struct SemanticHit {
+pub struct SemanticHit {
     pub chunk_id: i64,
     pub note_slug: String,
     pub heading_path: Option<String>,
@@ -379,7 +379,7 @@ pub(crate) struct SemanticHit {
 
 impl SqliteCache {
     #[allow(dead_code)]
-    pub(crate) fn semantic_search(
+    pub fn semantic_search(
         &self,
         embedder: &dyn Embedder,
         query: &str,

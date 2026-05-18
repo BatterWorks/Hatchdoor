@@ -3,74 +3,74 @@ use serde::{Deserialize, Serialize};
 use crate::vault::{ModifiedNote, Note, NoteLinks, SearchHit};
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ErrorResponse {
-    pub(crate) error: String,
+pub struct ErrorResponse {
+    pub error: String,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct NoteResponse {
-    pub(crate) note: Note,
+pub struct NoteResponse {
+    pub note: Note,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct NoteLinksResponse {
-    pub(crate) links: NoteLinks,
+pub struct NoteLinksResponse {
+    pub links: NoteLinks,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ResolveQuery {
-    pub(crate) target: String,
+pub struct ResolveQuery {
+    pub target: String,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ResolveResponse {
-    pub(crate) slug: Option<String>,
+pub struct ResolveResponse {
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ResolveBatchRequest {
-    pub(crate) targets: Vec<String>,
+pub struct ResolveBatchRequest {
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ResolveBatchResponse {
-    pub(crate) results: Vec<ResolveTargetResult>,
+pub struct ResolveBatchResponse {
+    pub results: Vec<ResolveTargetResult>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct ResolveTargetResult {
-    pub(crate) target: String,
-    pub(crate) slug: Option<String>,
+pub struct ResolveTargetResult {
+    pub target: String,
+    pub slug: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct RefreshResponse {
-    pub(crate) refreshed: bool,
+pub struct RefreshResponse {
+    pub refreshed: bool,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct VaultEventResponse {
-    pub(crate) revision: u64,
+pub struct VaultEventResponse {
+    pub revision: u64,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct RecentlyModifiedQuery {
-    pub(crate) limit: Option<usize>,
+pub struct RecentlyModifiedQuery {
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct RecentlyModifiedResponse {
-    pub(crate) notes: Vec<ModifiedNote>,
+pub struct RecentlyModifiedResponse {
+    pub notes: Vec<ModifiedNote>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct SearchQuery {
-    pub(crate) q: String,
-    pub(crate) content: Option<bool>,
-    pub(crate) limit: Option<usize>,
+pub struct SearchQuery {
+    pub q: String,
+    pub content: Option<bool>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct SearchResponse {
-    pub(crate) results: Vec<SearchHit>,
+pub struct SearchResponse {
+    pub results: Vec<SearchHit>,
 }

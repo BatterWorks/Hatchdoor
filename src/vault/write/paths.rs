@@ -57,7 +57,7 @@ pub(super) fn normalize_note_relative_path(input: &str) -> Result<String, WriteE
     Ok(normalized)
 }
 
-pub(crate) fn allowed_attachment_extensions() -> &'static [&'static str] {
+pub fn allowed_attachment_extensions() -> &'static [&'static str] {
     &["png", "jpg", "jpeg", "gif", "webp", "avif", "bmp", "pdf"]
 }
 

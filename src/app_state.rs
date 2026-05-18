@@ -16,15 +16,15 @@ use crate::embed::Embedder;
 use crate::vault::VaultIndex;
 
 #[derive(Debug, Clone)]
-pub(crate) struct AppConfig {
-    pub(crate) vault_path: PathBuf,
-    pub(crate) cache_db_path: PathBuf,
-    pub(crate) host: String,
-    pub(crate) port: u16,
+pub struct AppConfig {
+    pub vault_path: PathBuf,
+    pub cache_db_path: PathBuf,
+    pub host: String,
+    pub port: u16,
 }
 
 impl AppConfig {
-    pub(crate) fn from_env() -> Result<Self, String> {
+    pub fn from_env() -> Result<Self, String> {
         let vault_path = env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
         let cache_db_path = env::var("HATCHDOOR_CACHE_DB")
             .unwrap_or_else(|_| "./data/cache/hatchdoor-cache.sqlite3".to_string());
@@ -41,33 +41,33 @@ impl AppConfig {
         })
     }
 
-    pub(crate) fn socket_addr(&self) -> Result<SocketAddr, String> {
+    pub fn socket_addr(&self) -> Result<SocketAddr, String> {
         format!("{}:{}", self.host, self.port)
             .parse::<SocketAddr>()
             .map_err(|e| format!("invalid bind address: {e}"))
     }
 }
 
-pub(crate) fn parse_port(input: &str) -> Result<u16, String> {
+pub fn parse_port(input: &str) -> Result<u16, String> {
     input
         .parse::<u16>()
         .map_err(|e| format!("invalid PORT '{input}': {e}"))
 }
 
 #[derive(Clone)]
-pub(crate) struct AppState {
-    pub(crate) vault_path: PathBuf,
-    pub(crate) cache: Arc<RwLock<VaultCache>>,
-    pub(crate) vault_revision: Arc<AtomicU64>,
-    pub(crate) vault_events: broadcast::Sender<u64>,
-    pub(crate) embedder: Arc<dyn Embedder>,
+pub struct AppState {
+    pub vault_path: PathBuf,
+    pub cache: Arc<RwLock<VaultCache>>,
+    pub vault_revision: Arc<AtomicU64>,
+    pub vault_events: broadcast::Sender<u64>,
+    pub embedder: Arc<dyn Embedder>,
 }
 
-pub(crate) struct VaultCache {
-    pub(crate) sqlite: Arc<SqliteCache>,
+pub struct VaultCache {
+    pub sqlite: Arc<SqliteCache>,
 }
 
-pub(crate) fn init_logging() {
+pub fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn"));
 
@@ -79,7 +79,7 @@ pub(crate) fn init_logging() {
 }
 
 #[cfg(test)]
-pub(crate) fn build_cache(
+pub fn build_cache(
     vault_path: &PathBuf,
     embedder: &dyn Embedder,
 ) -> Result<VaultCache, String> {
@@ -87,7 +87,7 @@ pub(crate) fn build_cache(
     build_cache_with_sqlite(vault_path, sqlite, embedder)
 }
 
-pub(crate) fn build_cache_with_sqlite(
+pub fn build_cache_with_sqlite(
     vault_path: &PathBuf,
     sqlite: Arc<SqliteCache>,
     embedder: &dyn Embedder,
@@ -99,14 +99,14 @@ pub(crate) fn build_cache_with_sqlite(
     Ok(VaultCache { sqlite })
 }
 
-pub(crate) async fn sqlite_cache(
+pub async fn sqlite_cache(
     state: &AppState,
 ) -> Result<Arc<SqliteCache>, (StatusCode, Json<ErrorResponse>)> {
     let guard = state.cache.read().await;
     Ok(guard.sqlite.clone())
 }
 
-pub(crate) async fn refresh_if_needed(
+pub async fn refresh_if_needed(
     state: &AppState,
 ) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let mut guard = state.cache.write().await;
@@ -143,7 +143,7 @@ fn broadcast_vault_revision(state: &AppState) {
 }
 
 #[cfg(test)]
-pub(crate) fn test_embedder() -> Arc<dyn Embedder> {
+pub fn test_embedder() -> Arc<dyn Embedder> {
     Arc::new(crate::embed::StubEmbedder::new(384))
 }
 

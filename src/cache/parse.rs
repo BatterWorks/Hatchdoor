@@ -6,27 +6,27 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::vault::slugify;
 
 #[derive(Debug)]
-pub(crate) struct HeadingRow {
-    pub(crate) level: usize,
-    pub(crate) text: String,
-    pub(crate) anchor: String,
-    pub(crate) position: usize,
+pub struct HeadingRow {
+    pub level: usize,
+    pub text: String,
+    pub anchor: String,
+    pub position: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FileSnapshot {
-    pub(crate) mtime_ns: i64,
-    pub(crate) size_bytes: i64,
+pub struct FileSnapshot {
+    pub mtime_ns: i64,
+    pub size_bytes: i64,
 }
 
-pub(crate) fn current_unix_timestamp() -> i64 {
+pub fn current_unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
 }
 
-pub(crate) fn file_snapshot(path: &Path) -> Result<FileSnapshot, String> {
+pub fn file_snapshot(path: &Path) -> Result<FileSnapshot, String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("failed reading metadata for '{}': {error}", path.display()))?;
     let modified = metadata.modified().map_err(|error| {
@@ -47,7 +47,7 @@ pub(crate) fn file_snapshot(path: &Path) -> Result<FileSnapshot, String> {
     })
 }
 
-pub(crate) fn content_hash(content: &str) -> String {
+pub fn content_hash(content: &str) -> String {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
@@ -60,7 +60,7 @@ pub(crate) fn content_hash(content: &str) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-pub(crate) fn extract_headings(content: &str) -> Vec<HeadingRow> {
+pub fn extract_headings(content: &str) -> Vec<HeadingRow> {
     content
         .lines()
         .enumerate()
@@ -87,7 +87,7 @@ pub(crate) fn extract_headings(content: &str) -> Vec<HeadingRow> {
         .collect()
 }
 
-pub(crate) fn extract_tags(content: &str) -> HashSet<String> {
+pub fn extract_tags(content: &str) -> HashSet<String> {
     content
         .split_whitespace()
         .filter_map(|token| {
@@ -114,7 +114,7 @@ pub(crate) fn extract_tags(content: &str) -> HashSet<String> {
         .collect()
 }
 
-pub(crate) fn build_fts_query(input: &str) -> Option<String> {
+pub fn build_fts_query(input: &str) -> Option<String> {
     let tokens = fts_query_terms(input)
         .into_iter()
         .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
@@ -127,7 +127,7 @@ pub(crate) fn build_fts_query(input: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn fts_query_terms(input: &str) -> Vec<String> {
+pub fn fts_query_terms(input: &str) -> Vec<String> {
     input
         .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '-'))
         .map(str::trim)

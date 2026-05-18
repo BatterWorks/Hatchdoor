@@ -6,7 +6,7 @@ use super::normalize::{extract_frontmatter_metadata, strip_code_fences, strip_fr
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Chunk {
+pub struct Chunk {
     pub ordinal: usize,
     pub heading_path: Option<String>,
     pub content: String,
@@ -17,7 +17,7 @@ pub(crate) struct Chunk {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ChunkOptions {
+pub struct ChunkOptions {
     pub max_tokens: usize,
     pub overlap_tokens: usize,
 }
@@ -32,14 +32,14 @@ impl Default for ChunkOptions {
 }
 
 #[allow(dead_code)]
-pub(crate) struct NoteChunking {
+pub struct NoteChunking {
     pub chunks: Vec<Chunk>,
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
 }
 
 #[allow(dead_code)]
-pub(crate) fn chunk_note(
+pub fn chunk_note(
     raw_content: &str,
     tokenizer: Arc<Tokenizer>,
     opts: ChunkOptions,

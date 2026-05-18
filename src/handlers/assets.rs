@@ -8,7 +8,7 @@ use axum::response::IntoResponse;
 use crate::api_types::ErrorResponse;
 use crate::app_state::AppState;
 
-pub(crate) async fn vault_asset_handler(
+pub async fn vault_asset_handler(
     Path(path): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {

@@ -13,7 +13,7 @@ use crate::vault::{
 use super::config::McpConfig;
 use super::protocol::{JsonRpcFailure, tool_error, tool_success};
 
-pub(crate) async fn handle_tools_call(
+pub async fn handle_tools_call(
     state: AppState,
     params: Option<Value>,
     config: &McpConfig,
@@ -89,7 +89,7 @@ pub(crate) async fn handle_tools_call(
     }
 }
 
-pub(crate) fn tools_list(config: &McpConfig) -> Vec<Value> {
+pub fn tools_list(config: &McpConfig) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "search_notes",

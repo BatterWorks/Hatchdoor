@@ -17,11 +17,11 @@ use crate::api_types::{
 };
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 
-pub(crate) async fn health_handler() -> impl IntoResponse {
+pub async fn health_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-pub(crate) async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
     let cache = match sqlite_cache(&state).await {
         Ok(cache) => cache,
         Err(err) => return err.into_response(),
@@ -33,7 +33,7 @@ pub(crate) async fn tree_handler(State(state): State<AppState>) -> impl IntoResp
     }
 }
 
-pub(crate) async fn note_handler(
+pub async fn note_handler(
     Path(slug): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -52,7 +52,7 @@ pub(crate) async fn note_handler(
     }
 }
 
-pub(crate) async fn note_links_handler(
+pub async fn note_links_handler(
     Path(slug): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -68,7 +68,7 @@ pub(crate) async fn note_links_handler(
     }
 }
 
-pub(crate) async fn resolve_handler(
+pub async fn resolve_handler(
     Query(query): Query<ResolveQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -83,7 +83,7 @@ pub(crate) async fn resolve_handler(
     }
 }
 
-pub(crate) async fn resolve_batch_handler(
+pub async fn resolve_batch_handler(
     State(state): State<AppState>,
     Json(payload): Json<ResolveBatchRequest>,
 ) -> impl IntoResponse {
@@ -104,14 +104,14 @@ pub(crate) async fn resolve_batch_handler(
     (StatusCode::OK, Json(ResolveBatchResponse { results })).into_response()
 }
 
-pub(crate) async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
     match refresh_if_needed(&state).await {
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
     }
 }
 
-pub(crate) async fn vault_events_handler(
+pub async fn vault_events_handler(
     State(state): State<AppState>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let current_revision = state.vault_revision.load(Ordering::SeqCst);
@@ -135,7 +135,7 @@ fn vault_revision_event(revision: u64) -> Event {
         .data(payload)
 }
 
-pub(crate) async fn recently_modified_handler(
+pub async fn recently_modified_handler(
     Query(query): Query<RecentlyModifiedQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
@@ -151,7 +151,7 @@ pub(crate) async fn recently_modified_handler(
     }
 }
 
-pub(crate) async fn search_handler(
+pub async fn search_handler(
     Query(query): Query<SearchQuery>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {

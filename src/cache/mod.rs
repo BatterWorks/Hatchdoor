@@ -1,5 +1,5 @@
 mod chunk_ops;
-pub(crate) mod parse;
+pub mod parse;
 mod populate;
 mod queries;
 mod schema;
@@ -10,8 +10,8 @@ use std::sync::{Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
 
-pub(crate) struct SqliteCache {
-    pub(crate) conn: Mutex<Connection>,
+pub struct SqliteCache {
+    pub conn: Mutex<Connection>,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -32,7 +32,7 @@ fn register_sqlite_vec() {
 }
 
 impl SqliteCache {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -55,7 +55,7 @@ impl SqliteCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn in_memory() -> Result<Self, String> {
+    pub fn in_memory() -> Result<Self, String> {
         register_sqlite_vec();
         let conn = Connection::open_in_memory()
             .map_err(|error| format!("failed to open in-memory SQLite cache: {error}"))?;
@@ -66,7 +66,7 @@ impl SqliteCache {
         Ok(cache)
     }
 
-    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+    pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
         self.conn
             .lock()
             .map_err(|_| "SQLite cache connection lock poisoned".to_string())
