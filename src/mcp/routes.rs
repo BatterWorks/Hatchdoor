@@ -125,7 +125,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
-    use crate::app_state::build_cache;
+    use crate::app_state::{build_cache, test_embedder};
 
     fn enabled_config() -> McpConfig {
         McpConfig {
@@ -166,13 +166,15 @@ mod tests {
         std::fs::write(vault_root.join("Home.md"), "# Home\nalpha token\n[[Plan]]")
             .expect("write home");
         std::fs::write(vault_root.join("Plan.md"), "# Plan\nlinked note").expect("write plan");
-        let cache = build_cache(&vault_root).expect("build cache");
+        let embedder = test_embedder();
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            embedder,
         };
         (state, tmp)
     }
