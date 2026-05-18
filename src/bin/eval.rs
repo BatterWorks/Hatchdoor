@@ -1,0 +1,105 @@
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+fn print_usage() {
+    eprintln!(
+        "usage:
+  eval build --model <id> --cache <path>
+  eval run --model <id> --cache <path> --queries <path>
+
+models: BGESmallENV15 | NomicEmbedTextV15 | MxbaiEmbedLargeV1"
+    );
+}
+
+#[derive(Debug)]
+enum Cmd {
+    Build { model: String, cache: PathBuf },
+    Run { model: String, cache: PathBuf, queries: PathBuf },
+}
+
+fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
+    let mut it = argv.into_iter().skip(1);
+    let sub = it.next().ok_or_else(|| "missing subcommand".to_string())?;
+    let mut model: Option<String> = None;
+    let mut cache: Option<PathBuf> = None;
+    let mut queries: Option<PathBuf> = None;
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--model" => model = Some(it.next().ok_or("missing value for --model")?),
+            "--cache" => cache = Some(PathBuf::from(it.next().ok_or("missing value for --cache")?)),
+            "--queries" => queries = Some(PathBuf::from(it.next().ok_or("missing value for --queries")?)),
+            other => return Err(format!("unknown flag: {other}")),
+        }
+    }
+    let model = model.ok_or("missing --model")?;
+    let cache = cache.ok_or("missing --cache")?;
+    match sub.as_str() {
+        "build" => Ok(Cmd::Build { model, cache }),
+        "run" => {
+            let queries = queries.ok_or("missing --queries")?;
+            Ok(Cmd::Run { model, cache, queries })
+        }
+        other => Err(format!("unknown subcommand: {other}")),
+    }
+}
+
+fn main() -> ExitCode {
+    let cmd = match parse_args(std::env::args().collect()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            print_usage();
+            return ExitCode::from(2);
+        }
+    };
+    match cmd {
+        Cmd::Build { .. } => {
+            eprintln!("build: not yet implemented");
+            ExitCode::from(1)
+        }
+        Cmd::Run { .. } => {
+            eprintln!("run: not yet implemented");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parses_build_command() {
+        let cmd = parse_args(argv(&["eval", "build", "--model", "BGESmallENV15", "--cache", "/tmp/x.db"])).expect("parse");
+        match cmd {
+            Cmd::Build { model, cache } => {
+                assert_eq!(model, "BGESmallENV15");
+                assert_eq!(cache, PathBuf::from("/tmp/x.db"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parses_run_command_with_queries() {
+        let cmd = parse_args(argv(&["eval", "run", "--model", "X", "--cache", "/c", "--queries", "/q"])).expect("parse");
+        match cmd {
+            Cmd::Run { model, cache, queries } => {
+                assert_eq!(model, "X");
+                assert_eq!(cache, PathBuf::from("/c"));
+                assert_eq!(queries, PathBuf::from("/q"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_subcommand() {
+        let err = parse_args(argv(&["eval", "wat", "--model", "x", "--cache", "/y"])).unwrap_err();
+        assert!(err.contains("unknown subcommand"));
+    }
+}
