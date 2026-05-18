@@ -1010,6 +1010,7 @@ dependencies = [
 name = "hatchdoor"
 version = "2.0.0"
 dependencies = [
+ "ahash",
  "axum",
  "blake3",
  "bytemuck",

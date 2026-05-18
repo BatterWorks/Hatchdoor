@@ -4,6 +4,7 @@ version = "2.0.0"
 edition = "2024"
 
 [dependencies]
+ahash = "0.8"
 axum = "0.8"
 blake3 = "1"
 bytemuck = "1"
