@@ -84,6 +84,8 @@ export function GraphPage() {
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
   const dragRef = useRef<{ node: SimNode; startX: number; startY: number } | null>(null);
   const panRef = useRef<{ startX: number; startY: number; ox: number; oy: number } | null>(null);
+  const zoomAnimRef = useRef<{ targetK: number; cx: number; cy: number } | null>(null);
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
 
   // keep activeTagsRef in sync
   useEffect(() => {
@@ -168,6 +170,23 @@ export function GraphPage() {
         // Re-centre world origin whenever the canvas is resized.
         transformRef.current = { x: cssW / 2, y: cssH / 2, k: transformRef.current.k };
       }
+    }
+
+    // Animate zoom — lerp in log-space each frame so speed is perceptually even.
+    if (zoomAnimRef.current) {
+      const anim = zoomAnimRef.current;
+      const t = transformRef.current;
+      const logCurrent = Math.log(t.k);
+      const logTarget = Math.log(anim.targetK);
+      const diff = logTarget - logCurrent;
+      const newK = Math.abs(diff) < 0.0008
+        ? (zoomAnimRef.current = null, anim.targetK)
+        : Math.exp(logCurrent + diff * 0.18);
+      transformRef.current = {
+        k: newK,
+        x: anim.cx - ((anim.cx - t.x) / t.k) * newK,
+        y: anim.cy - ((anim.cy - t.y) / t.k) * newK,
+      };
     }
 
     const W = canvas.width / dpr;
@@ -306,18 +325,22 @@ export function GraphPage() {
       ctx.globalAlpha = 1;
     }
 
-    // labels for hovered/selected node (show always at zoom >= 0.8)
+    // Show a label when the node's rendered radius (world-radius × zoom) is
+    // large enough to be worth reading, plus always for hovered/selected.
+    const LABEL_SCREEN_THRESHOLD = 8; // px on screen
+    const LABEL_SCREEN_SIZE = 12;     // px on screen — constant regardless of zoom
+
+    const seen = new Set<string>();
     const labelCandidates: SimNode[] = [];
-    if (hovered) labelCandidates.push(hovered);
-    if (selected && selected !== hovered) labelCandidates.push(selected);
-    if (k >= 0.8) {
-      // show labels for highly-linked nodes
-      for (const node of nodes) {
-        if (node.backlink_count >= 5 && isVisible(node)) {
-          if (!labelCandidates.find((n) => n.slug === node.slug)) {
-            labelCandidates.push(node);
-          }
-        }
+    const pushLabel = (n: SimNode) => {
+      if (!seen.has(n.slug)) { seen.add(n.slug); labelCandidates.push(n); }
+    };
+
+    if (hovered) pushLabel(hovered);
+    if (selected && selected !== hovered) pushLabel(selected);
+    for (const node of nodes) {
+      if (isVisible(node) && nodeRadius(node.backlink_count) * k >= LABEL_SCREEN_THRESHOLD) {
+        pushLabel(node);
       }
     }
 
@@ -325,7 +348,7 @@ export function GraphPage() {
       const r = nodeRadius(node.backlink_count);
       const isHov = node.slug === hovered?.slug;
       const isSel = node.slug === selected?.slug;
-      const fontSize = Math.max(10, Math.min(14, 11 / k));
+      const fontSize = LABEL_SCREEN_SIZE / k; // constant screen size
 
       ctx.save();
       ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -465,7 +488,9 @@ export function GraphPage() {
       return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
     };
 
-    const onMouseMove = (e: MouseEvent) => {
+    // window-level move handler used during drag/pan so events keep firing
+    // even when the cursor leaves the canvas element.
+    const onWindowMouseMove = (e: MouseEvent) => {
       const { cx, cy } = getPos(e);
 
       if (panRef.current) {
@@ -487,7 +512,12 @@ export function GraphPage() {
         simRef.current?.alphaTarget(0.1).restart();
         return;
       }
+    };
 
+    const onMouseMove = (e: MouseEvent) => {
+      if (panRef.current || dragRef.current) return; // handled by window listener
+
+      const { cx, cy } = getPos(e);
       const hit = hitTest(cx, cy);
       if (hit !== hoveredRef.current) {
         hoveredRef.current = hit;
@@ -558,14 +588,12 @@ export function GraphPage() {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const { cx, cy } = getPos(e);
-      const factor = e.deltaY < 0 ? 1.1 : 0.9;
-      const t = transformRef.current;
-      const newK = Math.max(0.1, Math.min(8, t.k * factor));
-      transformRef.current = {
-        k: newK,
-        x: cx - ((cx - t.x) / t.k) * newK,
-        y: cy - ((cy - t.y) / t.k) * newK,
-      };
+      // Proportional factor: works naturally for both mouse wheels (~120/notch)
+      // and trackpad gestures (small continuous deltas).
+      const factor = Math.pow(0.999, e.deltaY);
+      const baseK = zoomAnimRef.current?.targetK ?? transformRef.current.k;
+      const targetK = Math.max(0.1, Math.min(8, baseK * factor));
+      zoomAnimRef.current = { targetK, cx, cy };
     };
 
     const onMouseLeave = () => {
@@ -574,18 +602,166 @@ export function GraphPage() {
       panRef.current = null;
     };
 
+    // ── touch helpers ────────────────────────────────────────────────────────
+
+    const getTouchPos = (t: Touch) => {
+      const rect = canvas.getBoundingClientRect();
+      return { cx: t.clientX - rect.left, cy: t.clientY - rect.top };
+    };
+
+    const onTouchStart = (e: TouchEvent) => {
+      e.preventDefault();
+
+      if (e.touches.length === 2) {
+        // Begin pinch — cancel any ongoing pan/drag
+        dragRef.current = null;
+        panRef.current = null;
+        zoomAnimRef.current = null;
+        const a = getTouchPos(e.touches[0]);
+        const b = getTouchPos(e.touches[1]);
+        pinchRef.current = {
+          dist: Math.hypot(b.cx - a.cx, b.cy - a.cy),
+          cx: (a.cx + b.cx) / 2,
+          cy: (a.cy + b.cy) / 2,
+        };
+        return;
+      }
+
+      if (e.touches.length === 1) {
+        pinchRef.current = null;
+        const { cx, cy } = getTouchPos(e.touches[0]);
+        const hit = hitTest(cx, cy);
+        if (hit) {
+          dragRef.current = { node: hit, startX: cx, startY: cy };
+        } else {
+          panRef.current = {
+            startX: cx, startY: cy,
+            ox: transformRef.current.x,
+            oy: transformRef.current.y,
+          };
+        }
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+
+      if (e.touches.length === 2 && pinchRef.current) {
+        const a = getTouchPos(e.touches[0]);
+        const b = getTouchPos(e.touches[1]);
+        const newDist = Math.hypot(b.cx - a.cx, b.cy - a.cy);
+        const midCx = (a.cx + b.cx) / 2;
+        const midCy = (a.cy + b.cy) / 2;
+        const factor = newDist / pinchRef.current.dist;
+        const t = transformRef.current;
+        const newK = Math.max(0.1, Math.min(8, t.k * factor));
+        // Also pan with the midpoint so two-finger drag works simultaneously
+        const panDx = midCx - pinchRef.current.cx;
+        const panDy = midCy - pinchRef.current.cy;
+        transformRef.current = {
+          k: newK,
+          x: midCx - ((pinchRef.current.cx - t.x) / t.k) * newK + panDx,
+          y: midCy - ((pinchRef.current.cy - t.y) / t.k) * newK + panDy,
+        };
+        pinchRef.current = { dist: newDist, cx: midCx, cy: midCy };
+        return;
+      }
+
+      if (e.touches.length === 1) {
+        const { cx, cy } = getTouchPos(e.touches[0]);
+
+        if (panRef.current) {
+          transformRef.current.x = panRef.current.ox + (cx - panRef.current.startX);
+          transformRef.current.y = panRef.current.oy + (cy - panRef.current.startY);
+          return;
+        }
+
+        if (dragRef.current) {
+          const { k, x, y } = transformRef.current;
+          const wx = (cx - x) / k;
+          const wy = (cy - y) / k;
+          dragRef.current.node.x = wx;
+          dragRef.current.node.y = wy;
+          dragRef.current.node.fx = wx;
+          dragRef.current.node.fy = wy;
+          simRef.current?.alphaTarget(0.1).restart();
+        }
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      e.preventDefault();
+
+      if (e.touches.length >= 1) {
+        // One finger lifted while two were down — transition to single-finger pan
+        pinchRef.current = null;
+        const { cx, cy } = getTouchPos(e.touches[0]);
+        panRef.current = {
+          startX: cx, startY: cy,
+          ox: transformRef.current.x,
+          oy: transformRef.current.y,
+        };
+        return;
+      }
+
+      // All fingers lifted
+      pinchRef.current = null;
+      const last = e.changedTouches[0];
+      const { cx, cy } = getTouchPos(last);
+
+      if (dragRef.current) {
+        const moved = Math.abs(cx - dragRef.current.startX) > 8
+                   || Math.abs(cy - dragRef.current.startY) > 8;
+
+        if (!moved) {
+          const node = dragRef.current.node;
+          if (lastClickSlugRef.current === node.slug) {
+            void navigate(`/n/${node.slug}`);
+            lastClickSlugRef.current = null;
+          } else {
+            selectedRef.current = selectedRef.current?.slug === node.slug ? null : node;
+            lastClickSlugRef.current = node.slug;
+            setTimeout(() => {
+              if (lastClickSlugRef.current === node.slug) lastClickSlugRef.current = null;
+            }, 500);
+          }
+        }
+
+        dragRef.current.node.fx = null;
+        dragRef.current.node.fy = null;
+        simRef.current?.alphaTarget(0).restart();
+        dragRef.current = null;
+      } else if (panRef.current) {
+        const moved = Math.abs(cx - panRef.current.startX) > 8
+                   || Math.abs(cy - panRef.current.startY) > 8;
+        if (!moved) {
+          selectedRef.current = null;
+          lastClickSlugRef.current = null;
+        }
+        panRef.current = null;
+      }
+    };
+
     canvas.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onWindowMouseMove);
     window.addEventListener("mouseup", onMouseUp);
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.addEventListener("mouseleave", onMouseLeave);
+    canvas.addEventListener("touchstart", onTouchStart, { passive: false });
+    canvas.addEventListener("touchmove", onTouchMove, { passive: false });
+    canvas.addEventListener("touchend", onTouchEnd, { passive: false });
 
     return () => {
       canvas.removeEventListener("mousemove", onMouseMove);
       canvas.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onWindowMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
       canvas.removeEventListener("wheel", onWheel);
       canvas.removeEventListener("mouseleave", onMouseLeave);
+      canvas.removeEventListener("touchstart", onTouchStart);
+      canvas.removeEventListener("touchmove", onTouchMove);
+      canvas.removeEventListener("touchend", onTouchEnd);
     };
   }, [hitTest, navigate]);
 
@@ -602,23 +778,9 @@ export function GraphPage() {
 
   // ── render ───────────────────────────────────────────────────────────────────
 
-  if (loading) {
-    return (
-      <div className="graph-loading">
-        <div className="graph-loading-pulse" />
-        <div className="graph-loading-label">Mapping your vault…</div>
-      </div>
-    );
-  }
-
-  if (error || !graphData) {
-    return (
-      <StateBlock
-        title="Graph Unavailable"
-        description={error ?? "Could not load graph data."}
-      />
-    );
-  }
+  // NOTE: canvas is always in the DOM so that refs are valid on mount and
+  // effects (resize observer, event listeners) attach correctly.  Loading and
+  // error states are rendered as absolutely-positioned overlays instead.
 
   return (
     <div className="graph-page">
@@ -666,6 +828,22 @@ export function GraphPage() {
 
       <div className="graph-canvas-wrap" ref={wrapRef}>
         <canvas ref={canvasRef} className="graph-canvas" />
+
+        {loading && (
+          <div className="graph-overlay">
+            <div className="graph-loading-pulse" />
+            <div className="graph-loading-label">Mapping your vault…</div>
+          </div>
+        )}
+
+        {!loading && (error || !graphData) && (
+          <div className="graph-overlay">
+            <StateBlock
+              title="Graph Unavailable"
+              description={error ?? "Could not load graph data."}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
