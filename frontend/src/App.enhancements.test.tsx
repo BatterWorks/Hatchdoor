@@ -193,13 +193,17 @@ describe("App enhancements", () => {
         if (url.includes("/api/search")) {
           return new Response(
             JSON.stringify({
+              mode: "semantic",
               results: [
                 {
-                  title: "Home",
-                  slug: "home",
-                  relative_path: "Home",
-                  match_kind: "content",
-                  snippet: "token found here",
+                  chunk_id: 1,
+                  note_slug: "home",
+                  note_title: "Home",
+                  note_path: "Home",
+                  heading_path: null,
+                  content: "token found here",
+                  score: 0.9,
+                  outbound_links: [],
                 },
               ],
             }),

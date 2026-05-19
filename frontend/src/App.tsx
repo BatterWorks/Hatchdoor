@@ -333,8 +333,9 @@ function App() {
         try {
           const params = new URLSearchParams({
             q: query,
-            content: String(searchIncludeContent),
+            mode: searchIncludeContent ? "keyword" : "semantic",
             limit: "30",
+            per_note_cap: "2",
           });
           const res = await fetch(`/api/search?${params.toString()}`);
           if (!res.ok) {

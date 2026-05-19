@@ -59,11 +59,14 @@ describe("SearchDialog", () => {
   it("highlights literal query matches and emits selection/toggle events", () => {
     const results: SearchResult[] = [
       {
-        title: "a.b",
-        slug: "ab",
-        relative_path: "Notes/a.b",
-        match_kind: "title",
-        snippet: "line a.b",
+        chunk_id: 1,
+        note_slug: "ab",
+        note_title: "a.b",
+        note_path: "Notes/a.b",
+        heading_path: null,
+        content: "line a.b",
+        score: 0.9,
+        outbound_links: [],
       },
     ];
     const { props, getByRole } = renderDialog({ query: ".", results });
@@ -73,7 +76,7 @@ describe("SearchDialog", () => {
     expect(props.onSelect).toHaveBeenCalledWith({
       slug: "ab",
       query: ".",
-      matchKind: "title",
+      matchKind: "",
     });
 
     fireEvent.click(getByRole("checkbox"));

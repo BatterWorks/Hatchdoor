@@ -468,13 +468,17 @@ describe("App navigation/search", () => {
         if (url.includes("/api/search")) {
           return new Response(
             JSON.stringify({
+              mode: "semantic",
               results: [
                 {
-                  title: "Plan",
-                  slug: "plan",
-                  relative_path: "Projects/Plan",
-                  match_kind: "title",
-                  snippet: null,
+                  chunk_id: 1,
+                  note_slug: "plan",
+                  note_title: "Plan",
+                  note_path: "Projects/Plan",
+                  heading_path: null,
+                  content: "Plan body text",
+                  score: 0.9,
+                  outbound_links: [],
                 },
               ],
             }),
@@ -503,6 +507,10 @@ describe("App navigation/search", () => {
         (_value, element) => element?.textContent === "Projects/Plan.md",
       ),
     ).toBeInTheDocument();
-    expect(await screen.findByText("title")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        (_value, element) => element?.textContent === "Plan body text",
+      ),
+    ).toBeInTheDocument();
   });
 });
