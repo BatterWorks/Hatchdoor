@@ -262,7 +262,10 @@ Body`,
         }
 
         if (url.includes("/api/search")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+          return new Response(
+            JSON.stringify({ mode: "keyword", results: [] }),
+            { status: 200 },
+          );
         }
 
         if (url.includes("/api/resolve-batch")) {
@@ -291,7 +294,7 @@ Body`,
     expect(includeContent).toBeChecked();
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
-        String(call[0]).includes("/api/search?q=type%2Freference&content=true"),
+        String(call[0]).includes("/api/search?q=type%2Freference&mode=keyword"),
       );
       expect(called).toBe(true);
     });

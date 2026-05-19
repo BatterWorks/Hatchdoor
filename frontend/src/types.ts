@@ -66,13 +66,23 @@ export type ResolveBatchResponse = {
   }>;
 };
 
-export type SearchResult = {
-  title: string;
+export type SearchMode = "semantic" | "keyword";
+
+export interface OutboundLink {
   slug: string;
-  relative_path: string;
-  match_kind: string;
-  snippet: string | null;
-};
+  title: string;
+}
+
+export interface SearchResult {
+  chunk_id: number;
+  note_slug: string;
+  note_title: string;
+  note_path: string;
+  heading_path: string | null;
+  content: string;
+  score: number;
+  outbound_links: OutboundLink[];
+}
 
 export type SearchSelection = {
   slug: string;
@@ -80,9 +90,10 @@ export type SearchSelection = {
   matchKind: string;
 };
 
-export type SearchResponse = {
+export interface SearchResponse {
+  mode: SearchMode;
   results: SearchResult[];
-};
+}
 
 export type TagStat = { tag: string; note_count: number };
 export type NoteRef = { title: string; slug: string };

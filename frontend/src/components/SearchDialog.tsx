@@ -98,7 +98,7 @@ export function SearchDialog({
             checked={includeContent}
             onChange={(event) => onIncludeContentChange(event.target.checked)}
           />
-          Include content matches
+          Keyword mode
         </label>
 
         {loading ? <p>Searching…</p> : null}
@@ -136,34 +136,39 @@ export function SearchDialog({
           }}
         >
           {results.map((result) => (
-            <li key={`${result.slug}-${result.match_kind}`}>
+            <li key={`${result.note_slug}-${result.chunk_id}`}>
               <UiButton
                 className="search-result"
                 onClick={() =>
                   onSelect({
-                    slug: result.slug,
+                    slug: result.note_slug,
                     query: trimmedQuery,
-                    matchKind: result.match_kind,
+                    matchKind: result.heading_path ?? "",
                   })
                 }
               >
                 <div className="search-main">
                   <strong>
-                    {highlightMatches(result.title, trimmedQuery)}
+                    {highlightMatches(result.note_title, trimmedQuery)}
                   </strong>
                   <span>
                     {highlightMatches(
-                      `${result.relative_path}.md`,
+                      `${result.note_path}.md`,
                       trimmedQuery,
                     )}
                   </span>
                 </div>
-                <span className="search-kind">{result.match_kind}</span>
-                {result.snippet ? (
-                  <p className="search-snippet">
-                    {highlightMatches(result.snippet, trimmedQuery)}
-                  </p>
+                {result.heading_path ? (
+                  <span className="search-kind">{result.heading_path}</span>
                 ) : null}
+                <p className="search-snippet">
+                  {highlightMatches(
+                    result.content.length > 240
+                      ? result.content.slice(0, 240) + "…"
+                      : result.content,
+                    trimmedQuery,
+                  )}
+                </p>
               </UiButton>
             </li>
           ))}
