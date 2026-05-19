@@ -415,15 +415,10 @@
 .callout {
   border: 1px solid var(--rule-strong);
   background: var(--paper);
-  padding: 0.9rem 1.1rem 0.9rem 3.1rem;
+  padding: 0;
   margin: 1.6rem 0;
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-size: 1.02rem;
-  line-height: 1.55;
   color: var(--ink-soft);
-  position: relative;
-  border-radius: 0;
+  overflow: hidden;
 }
 
 .callout-title {
@@ -435,21 +430,16 @@
   font-size: 0.72rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  position: absolute;
-  left: 0.9rem;
-  top: 0.9rem;
-  width: 1.5rem;
-  height: 1.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--bg);
+  display: block;
+  padding: 0.45rem 1.1rem;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule-strong);
 }
 
 .callout-collapsible > .callout-title {
   cursor: pointer;
   list-style: none;
-  position: absolute;
+  display: block;
 }
 
 .callout-collapsible > .callout-title::-webkit-details-marker {
@@ -461,6 +451,7 @@
   font-style: italic;
   font-size: 1.02rem;
   line-height: 1.55;
+  padding: 0.9rem 1.1rem;
 }
 
 .callout-note {
@@ -471,6 +462,8 @@
 
 .callout-note .callout-title {
   background: var(--info-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
 }
 
 .callout-warning {
@@ -481,6 +474,8 @@
 
 .callout-warning .callout-title {
   background: var(--warn-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
 }
 
 .callout-danger,
@@ -493,6 +488,8 @@
 .callout-danger .callout-title,
 .callout-error .callout-title {
   background: var(--err-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
 }
 
 /* Mermaid diagrams */
