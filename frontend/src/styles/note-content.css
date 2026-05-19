@@ -5,6 +5,8 @@
   max-width: 100%;
   box-sizing: border-box;
   min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Two-col layout: body + TOC
@@ -191,7 +193,7 @@
   margin-bottom: 0.18rem;
 }
 
-.note-body ul li::before {
+.note-body ul > li::before {
   content: "";
   position: absolute;
   left: 0;
@@ -201,12 +203,12 @@
   background: var(--hot);
 }
 
-.note-body ul ul li::before {
+.note-body ul ul > li::before {
   width: 0.42rem;
   background: var(--muted);
 }
 
-.note-body ul ul ul li::before {
+.note-body ul ul ul > li::before {
   width: 4px;
   height: 4px;
   border-radius: 50%;
@@ -215,16 +217,16 @@
 }
 
 /* Task list items — suppress dash bullet, show checkbox instead */
-.note-body ul li.task-list-item {
+.note-body ul > li.task-list-item {
   padding-left: 0;
   list-style: none;
 }
 
-.note-body ul li.task-list-item::before {
+.note-body ul > li.task-list-item::before {
   display: none;
 }
 
-.note-body ul li.task-list-item input[type="checkbox"] {
+.note-body ul > li.task-list-item input[type="checkbox"] {
   margin-right: 0.45rem;
   accent-color: var(--hot);
   width: 0.9em;
@@ -238,11 +240,13 @@
   counter-reset: olc;
 }
 
-.note-body ol li {
+/* Use > so only direct ol children get the counter — prevents ul sub-items
+   inside an ol from being counted and styled as ordered list items. */
+.note-body ol > li {
   counter-increment: olc;
 }
 
-.note-body ol li::before {
+.note-body ol > li::before {
   content: counter(olc) ".";
   position: absolute;
   left: 0;
@@ -253,13 +257,31 @@
   font-weight: 600;
 }
 
-.note-body ol ol li::before {
+.note-body ol ol > li::before {
   content: counter(olc, lower-alpha) ".";
 }
 
-.note-body ol ol ol li::before {
+.note-body ol ol ol > li::before {
   content: counter(olc, lower-roman) ".";
   color: var(--muted);
+}
+
+/* ul items nested inside an ol must show a bullet, not the ol counter */
+.note-body ol ul > li::before {
+  content: "";
+  top: 0.72em;
+  width: 0.7rem;
+  height: 1px;
+  background: var(--hot);
+  font-family: unset;
+  font-size: unset;
+  color: unset;
+  font-weight: unset;
+}
+
+.note-body ol ul ul > li::before {
+  width: 0.42rem;
+  background: var(--muted);
 }
 
 /* Blockquote */

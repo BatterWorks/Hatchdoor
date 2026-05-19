@@ -88,30 +88,79 @@ pub fn extract_headings(content: &str) -> Vec<HeadingRow> {
 }
 
 pub fn extract_tags(content: &str) -> HashSet<String> {
-    content
-        .split_whitespace()
-        .filter_map(|token| {
-            let token = token.trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}'
-                )
-            });
-            let tag = token.strip_prefix('#')?;
-            if tag.is_empty() || tag.starts_with('#') || tag.chars().all(|ch| ch == '-') {
-                return None;
+    let mut tags = HashSet::new();
+    let (frontmatter, body) = split_frontmatter(content);
+    extract_frontmatter_tags(frontmatter, &mut tags);
+    extract_inline_tags(body, &mut tags);
+    tags
+}
+
+fn split_frontmatter(content: &str) -> (&str, &str) {
+    let lines: Vec<&str> = content.splitn(3, '\n').collect();
+    if lines.len() < 2 || lines[0].trim() != "---" {
+        return ("", content);
+    }
+    let rest = &content[lines[0].len() + 1..];
+    if let Some(end) = rest.find("\n---") {
+        let fm_end = lines[0].len() + 1 + end;
+        let body_start = fm_end + 4; // skip "\n---"
+        let body = if body_start < content.len() { &content[body_start..] } else { "" };
+        (&content[lines[0].len() + 1..fm_end], body)
+    } else {
+        ("", content)
+    }
+}
+
+fn extract_frontmatter_tags(frontmatter: &str, tags: &mut HashSet<String>) {
+    // Find a line starting with "tags:"
+    let mut in_tags = false;
+    for line in frontmatter.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("tags:") {
+            in_tags = true;
+            // Inline array form: tags: [a, b, c]
+            let rest = rest.trim();
+            if rest.starts_with('[') {
+                let inner = rest.trim_matches(|c| c == '[' || c == ']');
+                for item in inner.split(',') {
+                    push_tag(item.trim().trim_matches('"').trim_matches('\''), tags);
+                }
+                in_tags = false; // inline array is self-contained
             }
-            let cleaned = tag
-                .chars()
-                .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/'))
-                .collect::<String>();
-            if cleaned.is_empty() {
-                None
-            } else {
-                Some(cleaned.to_lowercase())
+            // else: block sequence follows on subsequent lines
+        } else if in_tags {
+            // Block sequence item: "  - tagname"
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                push_tag(item.trim().trim_matches('"').trim_matches('\''), tags);
+            } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                // Hit a non-list line — tags block is over
+                in_tags = false;
             }
-        })
-        .collect()
+        }
+    }
+}
+
+fn push_tag(raw: &str, tags: &mut HashSet<String>) {
+    let cleaned: String = raw
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/'))
+        .collect();
+    if !cleaned.is_empty() {
+        tags.insert(cleaned.to_lowercase());
+    }
+}
+
+fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
+    for token in body.split_whitespace() {
+        let token = token.trim_matches(|ch: char| {
+            matches!(ch, ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}')
+        });
+        let Some(tag) = token.strip_prefix('#') else { continue };
+        if tag.is_empty() || tag.starts_with('#') || tag.chars().all(|ch| ch == '-') {
+            continue;
+        }
+        push_tag(tag, tags);
+    }
 }
 
 pub fn build_fts_query(input: &str) -> Option<String> {
@@ -152,6 +201,31 @@ mod tests {
             build_fts_query("réseau dns"),
             Some("\"réseau\" OR \"dns\"".to_string())
         );
+    }
+
+    #[test]
+    fn extracts_frontmatter_tags_inline_array() {
+        let content = "---\ntags: [type/reference, topic/api, topic/foo-bar]\ncreated: 2026-01-01\n---\n\nBody text.";
+        let tags = extract_tags(content);
+        assert!(tags.contains("type/reference"), "missing type/reference");
+        assert!(tags.contains("topic/api"), "missing topic/api");
+        assert!(tags.contains("topic/foo-bar"), "missing topic/foo-bar");
+    }
+
+    #[test]
+    fn extracts_frontmatter_tags_block_sequence() {
+        let content = "---\ntags:\n  - programming\n  - philosophy\ncreated: 2026-01-01\n---\n\nBody text.";
+        let tags = extract_tags(content);
+        assert!(tags.contains("programming"), "missing programming");
+        assert!(tags.contains("philosophy"), "missing philosophy");
+    }
+
+    #[test]
+    fn inline_hashtags_still_work_in_body() {
+        let content = "---\ntags: [existing]\n---\n\nSome text with #inline-tag here.";
+        let tags = extract_tags(content);
+        assert!(tags.contains("existing"));
+        assert!(tags.contains("inline-tag"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::api_types::{
     ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, SearchResponse,
     VaultEventResponse,
 };
+
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 
 pub async fn health_handler() -> impl IntoResponse {
@@ -171,6 +172,30 @@ pub async fn search_handler(
     match cache.search(&search_query, include_content, limit) {
         Ok(results) => (StatusCode::OK, Json(SearchResponse { results })).into_response(),
         Err(error) => internal_error_response(format!("Search failed: {error}")),
+    }
+}
+
+pub async fn stats_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.vault_stats() {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+pub async fn graph_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.graph_data() {
+        Ok(data) => (StatusCode::OK, Json(data)).into_response(),
+        Err(error) => internal_error_response(error),
     }
 }
 
