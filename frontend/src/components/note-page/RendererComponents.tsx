@@ -62,12 +62,22 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
     if (match) {
       const kind = match[1].toLowerCase();
       const fold = match[2] ?? null;
-      const title = match[3] || kind[0].toUpperCase() + kind.slice(1);
+      const attribution = match[3].trim();
+      const title = attribution || kind[0].toUpperCase() + kind.slice(1);
       const bodyNodes = nodes
         .slice(firstContentIndex + 1)
         .filter(
           (node) => !(typeof node === "string" && node.trim().length === 0),
         );
+
+      if (kind === "quote" || kind === "cite") {
+        return (
+          <figure className="pullquote">
+            <blockquote>{bodyNodes}</blockquote>
+            {attribution && <figcaption>{attribution}</figcaption>}
+          </figure>
+        );
+      }
 
       if (fold) {
         return (

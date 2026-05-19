@@ -474,7 +474,7 @@
 .callout-collapsible > .callout-title {
   cursor: pointer;
   list-style: none;
-  display: block;
+  display: list-item;
 }
 
 .callout-collapsible > .callout-title::-webkit-details-marker {
@@ -647,18 +647,31 @@
   border-bottom-color: transparent;
 }
 
-.callout-quote,
-.callout-cite {
-  background: var(--paper-2);
-  border-color: var(--rule-strong);
-  color: var(--muted);
+/* Pull-quote (rendered from [!quote] and [!cite] callouts) */
+.note-body .pullquote {
+  margin: 1.8rem 0;
+  padding: 0;
+  border: none;
 }
 
-.callout-quote .callout-title,
-.callout-cite .callout-title {
-  background: var(--muted);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.note-body .pullquote blockquote {
+  margin: 0;
+}
+
+.note-body .pullquote figcaption {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 88, "wght" 600;
+  font-style: normal;
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 0.65rem;
+  padding-left: 1.4rem;
+}
+
+.note-body .pullquote figcaption::before {
+  content: "— ";
 }
 
 /* Mermaid diagrams */
