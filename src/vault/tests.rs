@@ -53,6 +53,23 @@ fn resolve_wikilink_supports_title_slug_and_md_suffix() {
 }
 
 #[test]
+fn resolve_wikilink_strips_heading_and_block_anchors() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("My Quotes.md"), "content").expect("write note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let result = vault
+        .resolve_wikilink("My Quotes#Marcus Aurelius")
+        .expect("heading anchor should resolve to note");
+    assert_eq!(result.slug, "my-quotes");
+
+    let result = vault
+        .resolve_wikilink("My Quotes^block-id")
+        .expect("block anchor should resolve to note");
+    assert_eq!(result.slug, "my-quotes");
+}
+
+#[test]
 fn duplicate_titles_get_unique_slugs() {
     let dir = tempdir().expect("temp dir");
     fs::create_dir(dir.path().join("a")).expect("create dir a");

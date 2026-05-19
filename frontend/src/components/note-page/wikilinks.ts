@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { escapeMarkdownLabel, parseWikilinkTarget } from "../../markdown";
+import { slugifyHeading } from "../../noteHeadings";
 import type { ResolveBatchResponse } from "../../types";
 
 export function useResolvedWikilinks(
@@ -60,7 +61,9 @@ export function useResolvedWikilinks(
 
           const slug = map.get(parsed.target) ?? null;
           if (slug) {
-            return `[${escapeMarkdownLabel(parsed.label)}](/n/${slug})`;
+            const anchor = extractAnchor(parsed.target);
+            const hash = anchor ? `#${anchor}` : "";
+            return `[${escapeMarkdownLabel(parsed.label)}](/n/${slug}${hash})`;
           }
           return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
         },
@@ -111,6 +114,18 @@ function dirname(relativePath: string): string {
   const parts = relativePath.split("/").filter((part) => part.length > 0);
   parts.pop();
   return parts.join("/");
+}
+
+function extractAnchor(target: string): string {
+  const hashIdx = target.indexOf("#");
+  if (hashIdx >= 0) {
+    return slugifyHeading(target.slice(hashIdx + 1));
+  }
+  const caretIdx = target.indexOf("^");
+  if (caretIdx >= 0) {
+    return target.slice(caretIdx + 1);
+  }
+  return "";
 }
 
 function normalizeRelativePath(baseDir: string, target: string): string {
