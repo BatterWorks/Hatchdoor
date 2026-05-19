@@ -767,6 +767,8 @@ export function GraphPage() {
 
   // ── tag filter toggle ────────────────────────────────────────────────────────
 
+  const [filterOpen, setFilterOpen] = useState(false);
+
   const toggleTag = useCallback((tag: string) => {
     setActiveTags((prev) => {
       const next = new Set(prev);
@@ -782,10 +784,31 @@ export function GraphPage() {
   // effects (resize observer, event listeners) attach correctly.  Loading and
   // error states are rendered as absolutely-positioned overlays instead.
 
+  const tagChips = allTags.length > 0 && (
+    <div className="graph-tag-filter">
+      {allTags.map((tag) => {
+        const hue = tagHue(tag);
+        const active = activeTags.has(tag);
+        return (
+          <button
+            key={tag}
+            className={`graph-tag-chip${active ? " active" : ""}`}
+            style={active ? { "--chip-hue": String(hue) } as React.CSSProperties : undefined}
+            onClick={() => toggleTag(tag)}
+          >
+            {active && <span className="graph-tag-dot" style={{ background: `hsl(${hue}, 60%, 58%)` }} />}
+            {tag}
+          </button>
+        );
+      })}
+    </div>
+  );
+
   return (
     <div className="graph-page">
       <div className="graph-header">
         <p className="graph-eyebrow">Vault · Knowledge Graph</p>
+
         <div className="graph-header-row">
           <h1 className="graph-title">Graph</h1>
           <div className="graph-meta-strip">
@@ -799,31 +822,39 @@ export function GraphPage() {
               <span className="graph-meta-lbl">edges</span>
             </span>
           </div>
+
+          {allTags.length > 0 && (
+            <button
+              className={`graph-filter-toggle${activeTags.size > 0 ? " has-active" : ""}${filterOpen ? " is-open" : ""}`}
+              onClick={() => setFilterOpen((o) => !o)}
+              aria-expanded={filterOpen}
+            >
+              <span className="graph-filter-toggle-label">
+                Tags{activeTags.size > 0 && <span className="graph-filter-badge">{activeTags.size}</span>}
+              </span>
+              <span className="graph-filter-caret" aria-hidden>▾</span>
+            </button>
+          )}
         </div>
-        {allTags.length > 0 && (
-          <div className="graph-tag-filter">
-            {allTags.map((tag) => {
-              const hue = tagHue(tag);
-              const active = activeTags.has(tag);
-              return (
-                <button
-                  key={tag}
-                  className={`graph-tag-chip${active ? " active" : ""}`}
-                  style={active ? {
-                    "--chip-hue": String(hue),
-                  } as React.CSSProperties : undefined}
-                  onClick={() => toggleTag(tag)}
-                >
-                  {active && <span className="graph-tag-dot" style={{ background: `hsl(${hue}, 60%, 58%)` }} />}
-                  {tag}
-                </button>
-              );
-            })}
-          </div>
-        )}
+
+        {/* Desktop: always visible inline. Mobile: hidden, rendered as overlay below. */}
+        <div className="graph-tags-desktop">{tagChips}</div>
+
         <p className="graph-hint">
           Scroll to zoom · Drag background to pan · Click node to select · Double-click to open
         </p>
+      </div>
+
+      {/* Mobile-only filter overlay — sits on top of canvas, doesn't push it */}
+      {filterOpen && (
+        <button
+          className="graph-filter-backdrop"
+          aria-label="Close filter"
+          onClick={() => setFilterOpen(false)}
+        />
+      )}
+      <div className="graph-tags-mobile" aria-hidden={!filterOpen}>
+        {tagChips}
       </div>
 
       <div className="graph-canvas-wrap" ref={wrapRef}>
