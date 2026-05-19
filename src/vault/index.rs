@@ -113,7 +113,15 @@ impl VaultIndex {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn resolve_wikilink(&self, raw_target: &str) -> Option<&NoteEntry> {
-        let normalized_target = normalize_link_target(raw_target);
+        // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
+        let note_target = raw_target
+            .split('#')
+            .next()
+            .unwrap_or(raw_target)
+            .split('^')
+            .next()
+            .unwrap_or(raw_target);
+        let normalized_target = normalize_link_target(note_target);
 
         if let Some(slug) = self.by_path_title.get(&normalize_title(&normalized_target)) {
             return self.by_slug.get(slug);

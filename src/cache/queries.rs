@@ -205,7 +205,15 @@ impl SqliteCache {
     }
 
     pub fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<String>, String> {
-        let normalized_target = normalize_link_target(raw_target);
+        // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
+        let note_target = raw_target
+            .split('#')
+            .next()
+            .unwrap_or(raw_target)
+            .split('^')
+            .next()
+            .unwrap_or(raw_target);
+        let normalized_target = normalize_link_target(note_target);
         let normalized_path = normalize_title(&normalized_target);
         let conn = self.connection()?;
 
@@ -385,8 +393,9 @@ impl SqliteCache {
         query: &str,
         k: usize,
     ) -> Result<Vec<SemanticHit>, String> {
+        let prefixed_query = format!("{}{}", embedder.query_prefix(), query);
         let query_vec = embedder
-            .embed(&[query.to_string()])?
+            .embed(&[prefixed_query])?
             .into_iter()
             .next()
             .ok_or("embedder returned no vectors")?;
