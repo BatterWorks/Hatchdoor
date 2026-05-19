@@ -489,18 +489,6 @@
   padding: 0.9rem 1.1rem;
 }
 
-.callout-note {
-  background: var(--info-bg);
-  border-color: var(--info-border);
-  color: var(--info-fg);
-}
-
-.callout-note .callout-title {
-  background: var(--info-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
 .callout-warning {
   background: var(--warn-bg);
   border-color: var(--warn-border);
@@ -527,12 +515,14 @@
   border-bottom-color: transparent;
 }
 
+.callout-note,
 .callout-info {
   background: var(--info-bg);
   border-color: var(--info-border);
   color: var(--info-fg);
 }
 
+.callout-note .callout-title,
 .callout-info .callout-title {
   background: var(--info-fg);
   color: var(--bg);
