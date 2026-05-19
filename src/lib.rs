@@ -4,6 +4,7 @@ pub mod app_state;
 pub mod cache;
 pub mod chunk;
 pub mod embed;
+pub mod rerank;
 pub mod handlers;
 pub mod mcp;
 pub mod vault;
