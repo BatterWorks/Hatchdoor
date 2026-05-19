@@ -7,3 +7,4 @@ frontend/dist
 /data
 /.fastembed_cache
 .claude/
+.superpowers/

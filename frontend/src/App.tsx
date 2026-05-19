@@ -33,6 +33,8 @@ import { useIsMobile } from "./app/useIsMobile";
 import { copyText } from "./clipboard";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
+import { GraphPage } from "./components/GraphPage";
+import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
 import type {
@@ -538,9 +540,11 @@ function App() {
           />
         ) : null}
 
-        <main className="note-pane">
+        <main className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}>
           <Routes>
             <Route path="/" element={<EmptyState />} />
+            <Route path="/stats" element={<StatsPage />} />
+            <Route path="/graph" element={<GraphPage />} />
             <Route
               path="/n/:slug"
               element={

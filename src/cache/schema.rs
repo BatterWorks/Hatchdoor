@@ -1,8 +1,11 @@
 use rusqlite::OptionalExtension;
+use tracing::warn;
 
 use super::SqliteCache;
 
-const SCHEMA_VERSION: &str = "3";
+// Bump this when the schema structure or data-population logic changes to force
+// a full cache rebuild on next startup.
+const SCHEMA_VERSION: &str = "4";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -15,9 +18,16 @@ impl SqliteCache {
                 create_schema(&conn, embedding_dim)?;
                 Ok(())
             }
-            Some(version) => Err(format!(
-                "unsupported SQLite cache schema version '{version}' for expected version '{SCHEMA_VERSION}'. Delete the cache DB and restart Hatchdoor to rebuild it from Markdown."
-            )),
+            Some(version) => {
+                warn!(
+                    old = %version,
+                    new = SCHEMA_VERSION,
+                    "SQLite cache schema version mismatch; wiping cache for full rebuild"
+                );
+                wipe_schema(&conn)?;
+                create_schema(&conn, embedding_dim)?;
+                Ok(())
+            }
             None => {
                 create_schema(&conn, embedding_dim)?;
                 Ok(())
@@ -68,6 +78,22 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>
                 .to_string(),
         ),
     }
+}
+
+fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS chunk_vectors;
+        DROP TABLE IF EXISTS chunks;
+        DROP TABLE IF EXISTS headings;
+        DROP TABLE IF EXISTS tags;
+        DROP TABLE IF EXISTS note_links;
+        DROP TABLE IF EXISTS note_fts;
+        DROP TABLE IF EXISTS notes;
+        DROP TABLE IF EXISTS metadata;
+        "#,
+    )
+    .map_err(|e| format!("failed to wipe stale SQLite cache: {e}"))
 }
 
 fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<(), String> {
@@ -157,10 +183,11 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         );
 
         INSERT INTO metadata(key, value)
-        VALUES ('schema_version', '3')
+        VALUES ('schema_version', '{version}')
         ON CONFLICT(key) DO NOTHING;
         "#,
-        dim = embedding_dim
+        dim = embedding_dim,
+        version = SCHEMA_VERSION
     );
     conn.execute_batch(&sql)
         .map_err(|error| format!("failed to initialise SQLite cache schema: {error}"))?;
@@ -196,7 +223,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_cache_records_schema_version_3() {
+    fn fresh_cache_records_current_schema_version() {
         let cache = SqliteCache::in_memory(384).expect("open");
         let conn = cache.connection().expect("conn");
         let version: String = conn
@@ -206,7 +233,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("query");
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
     }
 
     #[test]
