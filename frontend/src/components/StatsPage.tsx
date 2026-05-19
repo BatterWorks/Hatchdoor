@@ -90,6 +90,7 @@ function ActivityChart({ months }: { months: MonthActivity[] }) {
       <div className="stats-activity">
         {months.map((m) => (
           <div key={m.month} className="stats-act-col">
+            <span className="stats-act-count">{m.modified_count}</span>
             <div
               className="stats-act-bar"
               style={{
