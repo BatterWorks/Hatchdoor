@@ -4,6 +4,20 @@ Developer harness for comparing embedding models against a labelled query set
 from the real vault. See `docs/superpowers/specs/2026-05-18-phase-1.5-eval-design.md`
 for the full design.
 
+## Vault path
+
+The eval binary indexes the vault at `VAULT_PATH`, falling back to `./vault`
+(the 2-note placeholder in the repo). It loads `.env` from the repo root on
+startup, so if your `.env` sets `VAULT_PATH=/path/to/notes` you're done. To
+override for a single run, prefix the command:
+
+```
+VAULT_PATH=/path/to/notes cargo run --release --bin eval -- build ...
+```
+
+Sanity-check the indexing log: `notes=2` means it's still pointing at the
+placeholder vault.
+
 ## Build the three caches (one-time, ~2 h total)
 
 ```

@@ -55,6 +55,7 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
 }
 
 fn main() -> ExitCode {
+    dotenvy::dotenv().ok();
     let cmd = match parse_args(std::env::args().collect()) {
         Ok(c) => c,
         Err(e) => {
