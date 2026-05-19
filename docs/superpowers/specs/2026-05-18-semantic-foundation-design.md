@@ -4,6 +4,8 @@
 **Date:** 2026-05-18.
 **Scope:** Implement the chunking, embedding, and semantic-index layers from `docs/hatchdoor-architecture-layers.md`. No new public HTTP routes, no MCP tool changes, no hybrid retrieval — those belong to Phase 2.
 
+> **Amendment (2026-05-19):** Phase 2 will **no longer ship hybrid retrieval**. The Phase 1.6 eval (see `2026-05-19-phase-1.6-outcome.md`) found pure semantic retrieval beats hybrid (Nomic + FTS5 BM25 RRF) on aggregate MRR and on the per-query diff, and beats the cross-encoder rerankers categorically. Phase 2 ships pure semantic retrieval + context assembly only. References to "Phase 2's hybrid retrieval" below should be read as "Phase 2's semantic retrieval"; the SQL JOIN shape described in §2 is no longer the target — Phase 2 will query the vector index directly.
+
 ---
 
 ## 1. Goal
