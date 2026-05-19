@@ -41,6 +41,28 @@ cargo run --release --bin eval -- run \
 
 Metrics print to stdout. A section is appended to `eval/results.md`.
 
+## Rerank an existing cache
+
+The `rerank` subcommand applies a cross-encoder reranker on top of an existing
+embedding cache. It does **not** rebuild anything — the cache stays untouched.
+
+```
+cargo run --release --bin eval -- rerank \
+  --model NomicEmbedTextV15 \
+  --cache data/cache/hatchdoor-cache-nomic-v1-5.sqlite3 \
+  --reranker JINARerankerV2BaseMultilingual \
+  --queries eval/queries.jsonl
+```
+
+Available rerankers:
+
+- `JINARerankerV1TurboEn` — 37.8M params, English only, fastest CPU option (~50–100 ms / 20 candidates on i5-class CPU).
+- `JINARerankerV2BaseMultilingual` — 278M params, 26 languages, the quality target.
+
+The first invocation per reranker downloads its ONNX weights (~150 MB and ~570 MB respectively) into the fastembed cache. Subsequent runs are fast.
+
+`--initial-k` controls how many embedding candidates are passed to the reranker; default is 20. Metrics are still scored at k=5 and k=10 against the post-rerank order. A section is appended to `eval/results.md` with rank-pre / rank-post / Δ columns and median / p90 / max latency stats.
+
 ## Adding queries
 
 Edit `eval/queries.jsonl`. One JSON object per line:
