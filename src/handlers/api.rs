@@ -12,8 +12,7 @@ use tracing::{debug, warn};
 use crate::api_types::{
     ErrorResponse, NoteLinksResponse, NoteResponse, RecentlyModifiedQuery,
     RecentlyModifiedResponse, RefreshResponse, ResolveBatchRequest, ResolveBatchResponse,
-    ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, SearchResponse,
-    VaultEventResponse,
+    ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, VaultEventResponse,
 };
 
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
@@ -160,17 +159,22 @@ pub async fn search_handler(
         Ok(cache) => cache,
         Err(err) => return err.into_response(),
     };
+    let embedder = state.embedder.as_ref();
 
-    let limit = query.limit.unwrap_or(25).clamp(1, 100);
-    let include_content = query.content.unwrap_or(false);
-    let search_query = query.q;
-    debug!(
-        query_len = search_query.len(),
-        include_content, limit, "Executing SQLite search"
-    );
+    let limit = query.limit.unwrap_or(10).clamp(1, 50);
+    let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
+    let mode = query.mode.unwrap_or_default();
+    let q_len = query.q.len();
+    debug!(query_len = q_len, ?mode, limit, per_note_cap, "Executing Phase 2 search");
 
-    match cache.search(&search_query, include_content, limit) {
-        Ok(results) => (StatusCode::OK, Json(SearchResponse { results })).into_response(),
+    let req = crate::search::SearchRequest {
+        query: query.q,
+        mode,
+        limit,
+        per_note_cap,
+    };
+    match crate::search::run(cache.as_ref(), embedder, req) {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => internal_error_response(format!("Search failed: {error}")),
     }
 }

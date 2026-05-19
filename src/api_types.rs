@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::vault::{ModifiedNote, Note, NoteLinks, SearchHit};
+use crate::search::SearchMode;
+use crate::vault::{ModifiedNote, Note, NoteLinks};
 
 #[derive(Debug, Serialize)]
 pub struct TagStat {
@@ -153,11 +154,10 @@ pub struct RecentlyModifiedResponse {
 #[derive(Debug, Deserialize)]
 pub struct SearchQuery {
     pub q: String,
-    pub content: Option<bool>,
+    #[serde(default)]
+    pub mode: Option<SearchMode>,
+    #[serde(default)]
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchResponse {
-    pub results: Vec<SearchHit>,
+    #[serde(default)]
+    pub per_note_cap: Option<usize>,
 }
