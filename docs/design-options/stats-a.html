@@ -1,0 +1,668 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stats — Option A: Ledger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,200..800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+/* ── TOKENS ─────────────────────────────────────────────────── */
+:root[data-theme="light"], :root[data-theme="auto"] {
+  --bg: #f4f1e8; --paper: #faf7ed; --paper-2: #f0ece0;
+  --ink: #0c0c0a; --ink-soft: #2a2a26; --muted: #6b675c; --tertiary: #a8a399;
+  --rule: #ddd8c9; --rule-strong: #c4beab;
+  --hot: #ff4d1c; --hot-soft: #ffeae0;
+  --shadow-float: 0 14px 32px rgba(12,12,10,.18);
+}
+:root[data-theme="dark"] {
+  --bg: #0c0c0a; --paper: #141412; --paper-2: #1a1a17;
+  --ink: #ece8d8; --ink-soft: #c4c0b0; --muted: #8a8678; --tertiary: #4a4842;
+  --rule: #232320; --rule-strong: #3a3933;
+  --hot: #ff5a2b; --hot-soft: #2a1410;
+  --shadow-float: 0 14px 32px rgba(0,0,0,.6);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --bg: #0c0c0a; --paper: #141412; --paper-2: #1a1a17;
+    --ink: #ece8d8; --ink-soft: #c4c0b0; --muted: #8a8678; --tertiary: #4a4842;
+    --rule: #232320; --rule-strong: #3a3933;
+    --hot: #ff5a2b; --hot-soft: #2a1410;
+    --shadow-float: 0 14px 32px rgba(0,0,0,.6);
+  }
+}
+:root {
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --font-serif: "Newsreader", Georgia, serif;
+  --font-sans: "Inter Tight", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --dur: 180ms; --ease: cubic-bezier(.2,.8,.2,1);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { min-height: 100vh; }
+body { background: var(--bg); color: var(--ink); font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+a { color: var(--hot); text-decoration: none; }
+a:hover { color: var(--ink); }
+
+/* ── CHROME ─────────────────────────────────────────────────── */
+.hotbar { height: 3px; background: var(--hot); }
+.topbar {
+  display: flex; align-items: center; gap: 1rem;
+  padding: 0 1.5rem; height: 52px;
+  background: var(--bg); border-bottom: 1px solid var(--rule);
+}
+.topbar-brand {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 78, "wght" 800;
+  font-size: 0.9rem; letter-spacing: 0.04em; text-transform: uppercase;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.topbar-brand .dot { width: 8px; height: 8px; background: var(--hot); display: inline-block; }
+.topbar-crumb {
+  font-family: var(--font-sans); font-size: 0.85rem; color: var(--muted);
+  display: flex; align-items: center; gap: 0.5rem;
+}
+.topbar-crumb .sep { color: var(--tertiary); }
+.topbar-crumb .here { color: var(--ink); font-weight: 500; }
+.theme-btns { margin-left: auto; display: flex; gap: 0.3rem; }
+.theme-btn {
+  font-family: var(--font-sans); font-size: 0.7rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 0.3rem 0.6rem; background: var(--bg); color: var(--muted);
+  border: 1px solid var(--rule); cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.theme-btn:hover { background: var(--paper-2); color: var(--ink); }
+.theme-btn.on { background: var(--hot); color: #fff; border-color: var(--hot); }
+
+/* ── PAGE WRAPPER ───────────────────────────────────────────── */
+.page { max-width: 960px; margin: 0 auto; padding: 2.5rem 1.5rem 5rem; }
+
+/* ── PAGE HEADER ────────────────────────────────────────────── */
+.page-header { margin-bottom: 2rem; }
+.page-eyebrow {
+  font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.2em;
+  text-transform: uppercase; color: var(--hot); margin-bottom: 0.35rem;
+}
+.page-title {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 85, "wght" 700;
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  text-transform: uppercase; letter-spacing: -0.02em; line-height: 0.96;
+}
+.page-subtitle {
+  font-family: var(--font-sans); font-size: 0.9rem; color: var(--muted);
+  margin-top: 0.5rem; line-height: 1.5;
+}
+
+/* ── METRIC STRIP ───────────────────────────────────────────── */
+.metric-strip {
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  border: 1px solid var(--rule-strong);
+  margin-bottom: 2.5rem;
+}
+.metric-cell {
+  padding: 1.1rem 1.1rem 1rem;
+  border-right: 1px solid var(--rule);
+  position: relative;
+}
+.metric-cell:last-child { border-right: none; }
+.metric-cell::before {
+  content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: var(--rule);
+}
+.metric-cell:first-child::before { background: var(--hot); }
+.metric-num {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 80, "wght" 700;
+  font-size: 2rem; line-height: 1; letter-spacing: -0.04em;
+  color: var(--ink); margin-bottom: 0.3rem;
+}
+.metric-cell:first-child .metric-num { color: var(--hot); }
+.metric-label {
+  font-family: var(--font-mono); font-size: 0.62rem;
+  letter-spacing: 0.2em; text-transform: uppercase; color: var(--muted);
+}
+
+/* ── SECTION GRID ───────────────────────────────────────────── */
+.sections { display: grid; gap: 2rem; }
+.two-col { grid-template-columns: 1fr 1fr; }
+.three-col { grid-template-columns: 1fr 1fr 1fr; }
+@media (max-width: 700px) {
+  .metric-strip { grid-template-columns: repeat(3, 1fr); }
+  .metric-cell:nth-child(3) { border-right: none; }
+  .two-col, .three-col { grid-template-columns: 1fr; }
+}
+
+/* ── SECTION BLOCK ──────────────────────────────────────────── */
+.section {
+  border-top: 1px solid var(--rule);
+  padding-top: 1.1rem;
+}
+.section-head {
+  display: flex; align-items: baseline; gap: 0.7rem; margin-bottom: 0.9rem;
+}
+.section-num {
+  font-family: var(--font-mono); font-size: 0.6rem;
+  color: var(--hot); letter-spacing: 0.1em;
+}
+.section-title {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 90, "wght" 700;
+  font-size: 0.78rem; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--ink);
+}
+
+/* ── BAR CHART (pure CSS) ───────────────────────────────────── */
+.bar-list { display: grid; gap: 0; }
+.bar-row {
+  display: grid; grid-template-columns: 8rem 1fr 2.5rem;
+  align-items: center; gap: 0.6rem;
+  padding: 0.28rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.bar-row:last-child { border-bottom: none; }
+.bar-label {
+  font-family: var(--font-sans); font-size: 0.82rem; color: var(--ink-soft);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.bar-track {
+  height: 6px; background: var(--paper-2); position: relative;
+}
+.bar-fill {
+  position: absolute; top: 0; left: 0; height: 100%;
+  background: var(--ink); opacity: 0.18;
+  transition: width 0.6s var(--ease);
+}
+.bar-fill.hot { background: var(--hot); opacity: 1; }
+.bar-count {
+  font-family: var(--font-mono); font-size: 0.72rem;
+  color: var(--muted); text-align: right;
+}
+
+/* ── RANKED LIST ────────────────────────────────────────────── */
+.ranked-list { display: grid; gap: 0; }
+.ranked-row {
+  display: grid; grid-template-columns: 1.4rem 1fr auto;
+  align-items: center; gap: 0.5rem;
+  padding: 0.32rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.ranked-row:last-child { border-bottom: none; }
+.ranked-rank {
+  font-family: var(--font-mono); font-size: 0.66rem; color: var(--tertiary);
+  text-align: right;
+}
+.ranked-title {
+  font-family: var(--font-sans); font-size: 0.85rem; color: var(--hot);
+}
+.ranked-title:hover { color: var(--ink); }
+.ranked-meta {
+  font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ── ACTIVITY CHART ─────────────────────────────────────────── */
+.activity-chart {
+  display: flex; align-items: flex-end; gap: 0.5rem; height: 80px;
+  padding-bottom: 1.4rem; position: relative;
+}
+.activity-chart::after {
+  content: ""; position: absolute; bottom: 1.2rem; left: 0; right: 0;
+  height: 1px; background: var(--rule);
+}
+.act-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 0.3rem; }
+.act-bar {
+  width: 100%; background: var(--ink); opacity: 0.12;
+  position: relative;
+}
+.act-bar.has-data { opacity: 1; background: var(--hot); }
+.act-month {
+  font-family: var(--font-mono); font-size: 0.58rem; color: var(--muted);
+  letter-spacing: 0.06em; white-space: nowrap;
+  position: absolute; bottom: 0; transform: translateY(1.3rem);
+}
+
+/* ── FOLDER LIST ────────────────────────────────────────────── */
+.folder-list { display: grid; gap: 0; }
+.folder-row {
+  display: grid; grid-template-columns: 1fr auto;
+  align-items: center; gap: 0.6rem;
+  padding: 0.28rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+.folder-row:last-child { border-bottom: none; }
+.folder-name {
+  font-family: var(--font-sans); font-size: 0.83rem; color: var(--ink-soft);
+}
+.folder-name .slash { color: var(--tertiary); }
+.folder-count {
+  font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted);
+}
+
+/* ── NOTE LIST (simple) ─────────────────────────────────────── */
+.note-list { display: grid; gap: 0; }
+.note-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+  padding: 0.28rem 0; border-bottom: 1px solid var(--rule);
+}
+.note-row:last-child { border-bottom: none; }
+.note-row-title { font-family: var(--font-sans); font-size: 0.85rem; color: var(--hot); }
+.note-row-title:hover { color: var(--ink); }
+.note-row-meta { font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); }
+
+/* ── PILL LIST (orphans / untagged) ─────────────────────────── */
+.pill-list { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.pill {
+  font-family: var(--font-sans); font-size: 0.78rem; color: var(--hot);
+  border: 1px solid var(--rule); background: var(--paper);
+  padding: 0.18rem 0.6rem;
+}
+.pill:hover { background: var(--paper-2); color: var(--ink); }
+
+/* ── TWIN COUNTER ───────────────────────────────────────────── */
+.twin-counter { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+.twin-cell { background: var(--paper); padding: 0.85rem 1rem; }
+.twin-num {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 82, "wght" 700;
+  font-size: 1.5rem; letter-spacing: -0.03em; line-height: 1;
+  margin-bottom: 0.2rem;
+}
+.twin-lbl { font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+
+/* ── SINGLE STAT ────────────────────────────────────────────── */
+.single-stat { padding: 0.75rem 0; }
+.single-num {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 82, "wght" 700;
+  font-size: 2.2rem; letter-spacing: -0.04em; line-height: 1;
+  color: var(--ink); margin-bottom: 0.2rem;
+}
+.single-lbl { font-family: var(--font-mono); font-size: 0.62rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="hotbar"></div>
+
+<header class="topbar">
+  <div class="topbar-brand">
+    <span class="dot"></span>Hatchdoor
+  </div>
+  <div class="topbar-crumb">
+    <span class="sep">/</span>
+    <span class="here">Stats</span>
+  </div>
+  <div class="theme-btns">
+    <button class="theme-btn on" onclick="setTheme('auto')">Auto</button>
+    <button class="theme-btn" onclick="setTheme('light')">Light</button>
+    <button class="theme-btn" onclick="setTheme('dark')">Dark</button>
+  </div>
+</header>
+
+<main class="page">
+
+  <div class="page-header">
+    <p class="page-eyebrow">Vault · 2026-05-19</p>
+    <h1 class="page-title">Stats</h1>
+    <p class="page-subtitle">A complete overview of your vault — notes, links, tags, and writing activity.</p>
+  </div>
+
+  <!-- ── METRIC STRIP ── -->
+  <div class="metric-strip">
+    <div class="metric-cell">
+      <div class="metric-num">142</div>
+      <div class="metric-label">Notes</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-num">84,320</div>
+      <div class="metric-label">Words</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-num">38</div>
+      <div class="metric-label">Tags</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-num">317</div>
+      <div class="metric-label">Links</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-num">54</div>
+      <div class="metric-label">Images</div>
+    </div>
+  </div>
+
+  <!-- ── ROW 1: Tags + Most Linked ── -->
+  <div class="sections two-col" style="margin-bottom:2rem">
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">01</span>
+        <span class="section-title">Top Tags</span>
+      </div>
+      <div class="bar-list">
+        <div class="bar-row">
+          <span class="bar-label">programming</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:100%"></div></div>
+          <span class="bar-count">24</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">philosophy</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:75%"></div></div>
+          <span class="bar-count">18</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">writing</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:62%"></div></div>
+          <span class="bar-count">15</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">mathematics</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:50%"></div></div>
+          <span class="bar-count">12</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">history</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:46%"></div></div>
+          <span class="bar-count">11</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">reading</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:37%"></div></div>
+          <span class="bar-count">9</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">projects</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:33%"></div></div>
+          <span class="bar-count">8</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">design</span>
+          <div class="bar-track"><div class="bar-fill hot" style="width:29%"></div></div>
+          <span class="bar-count">7</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">02</span>
+        <span class="section-title">Most Linked Notes</span>
+      </div>
+      <div class="ranked-list">
+        <div class="ranked-row">
+          <span class="ranked-rank">1</span>
+          <a class="ranked-title" href="#">Index</a>
+          <span class="ranked-meta">31 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">2</span>
+          <a class="ranked-title" href="#">Reading List</a>
+          <span class="ranked-meta">22 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">3</span>
+          <a class="ranked-title" href="#">Project Ideas</a>
+          <span class="ranked-meta">17 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">4</span>
+          <a class="ranked-title" href="#">Philosophy Notes</a>
+          <span class="ranked-meta">14 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">5</span>
+          <a class="ranked-title" href="#">Daily Log</a>
+          <span class="ranked-meta">11 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">6</span>
+          <a class="ranked-title" href="#">Rust Book Notes</a>
+          <span class="ranked-meta">9 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">7</span>
+          <a class="ranked-title" href="#">Concepts Map</a>
+          <span class="ranked-meta">7 backlinks</span>
+        </div>
+        <div class="ranked-row">
+          <span class="ranked-rank">8</span>
+          <a class="ranked-title" href="#">Contacts</a>
+          <span class="ranked-meta">5 backlinks</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── ROW 2: Activity ── -->
+  <div class="section" style="margin-bottom:2rem">
+    <div class="section-head">
+      <span class="section-num">03</span>
+      <span class="section-title">Writing Activity — last 6 months</span>
+    </div>
+    <div class="activity-chart" style="height:100px; padding-bottom: 1.6rem;">
+      <div class="act-col">
+        <div class="act-bar has-data" style="height:31%"></div>
+        <span class="act-month">Dec</span>
+      </div>
+      <div class="act-col">
+        <div class="act-bar has-data" style="height:55%"></div>
+        <span class="act-month">Jan</span>
+      </div>
+      <div class="act-col">
+        <div class="act-bar has-data" style="height:88%"></div>
+        <span class="act-month">Feb</span>
+      </div>
+      <div class="act-col">
+        <div class="act-bar has-data" style="height:35%"></div>
+        <span class="act-month">Mar</span>
+      </div>
+      <div class="act-col">
+        <div class="act-bar has-data" style="height:72%"></div>
+        <span class="act-month">Apr</span>
+      </div>
+      <div class="act-col">
+        <div class="act-bar has-data" style="height:44%"></div>
+        <span class="act-month">May</span>
+      </div>
+    </div>
+    <div style="display:flex; gap:1.5rem; margin-top:0.5rem;">
+      <span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted)">Peak: Feb · 22 notes</span>
+      <span style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted)">Avg: 13.7 / month</span>
+    </div>
+  </div>
+
+  <!-- ── ROW 3: Folders + Word lengths ── -->
+  <div class="sections two-col" style="margin-bottom:2rem">
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">04</span>
+        <span class="section-title">Notes per Folder</span>
+      </div>
+      <div class="folder-list">
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">/</span>Projects</span>
+          <span class="folder-count">42</span>
+        </div>
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">/</span>Reading</span>
+          <span class="folder-count">28</span>
+        </div>
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">/</span>Archive</span>
+          <span class="folder-count">21</span>
+        </div>
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">/</span>Journal</span>
+          <span class="folder-count">18</span>
+        </div>
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">/</span>Concepts</span>
+          <span class="folder-count">15</span>
+        </div>
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">/</span>People</span>
+          <span class="folder-count">9</span>
+        </div>
+        <div class="folder-row">
+          <span class="folder-name"><span class="slash">·</span> root</span>
+          <span class="folder-count">9</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">05</span>
+        <span class="section-title">Word Count Extremes</span>
+      </div>
+      <p style="font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);margin-bottom:0.5rem;">Longest</p>
+      <div class="note-list" style="margin-bottom:1rem">
+        <div class="note-row">
+          <a class="note-row-title" href="#">Phenomenology Overview</a>
+          <span class="note-row-meta">4,200 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">Rust Book Notes</a>
+          <span class="note-row-meta">3,840 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">Reading List</a>
+          <span class="note-row-meta">2,910 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">History of Computing</a>
+          <span class="note-row-meta">2,480 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">Weekly Review Template</a>
+          <span class="note-row-meta">1,920 w</span>
+        </div>
+      </div>
+      <p style="font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);margin-bottom:0.5rem;">Shortest</p>
+      <div class="note-list">
+        <div class="note-row">
+          <a class="note-row-title" href="#">Stub</a>
+          <span class="note-row-meta">12 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">TODO</a>
+          <span class="note-row-meta">28 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">Scratch</a>
+          <span class="note-row-meta">45 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">Quick Ref</a>
+          <span class="note-row-meta">61 w</span>
+        </div>
+        <div class="note-row">
+          <a class="note-row-title" href="#">Draft Title</a>
+          <span class="note-row-meta">74 w</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── ROW 4: Summary stats ── -->
+  <div class="sections three-col" style="margin-bottom:2rem">
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">06</span>
+        <span class="section-title">Link Balance</span>
+      </div>
+      <div class="twin-counter">
+        <div class="twin-cell">
+          <div class="twin-num">317</div>
+          <div class="twin-lbl">Outgoing</div>
+        </div>
+        <div class="twin-cell">
+          <div class="twin-num">289</div>
+          <div class="twin-lbl">Backlinks</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">07</span>
+        <span class="section-title">Averages</span>
+      </div>
+      <div class="single-stat">
+        <div class="single-num">594</div>
+        <div class="single-lbl">Avg words / note</div>
+      </div>
+      <div style="margin-top:0.8rem;padding-top:0.8rem;border-top:1px solid var(--rule)">
+        <div style="font-family:var(--font-display);font-variation-settings:'wdth' 82,'wght' 700;font-size:1.3rem;letter-spacing:-0.02em;line-height:1;margin-bottom:0.2rem;">2.3 MB</div>
+        <div style="font-family:var(--font-mono);font-size:0.62rem;letter-spacing:0.18em;text-transform:uppercase;color:var(--muted)">Vault size on disk</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">08</span>
+        <span class="section-title">Modified This Week</span>
+      </div>
+      <div style="font-family:var(--font-display);font-variation-settings:'wdth' 82,'wght' 700;font-size:2rem;letter-spacing:-0.04em;line-height:1;margin-bottom:0.3rem;">7</div>
+      <div style="font-family:var(--font-mono);font-size:0.6rem;letter-spacing:0.16em;text-transform:uppercase;color:var(--muted);margin-bottom:0.7rem;">notes</div>
+      <div class="note-list">
+        <div class="note-row"><a class="note-row-title" href="#">Rust Book Notes</a></div>
+        <div class="note-row"><a class="note-row-title" href="#">Index</a></div>
+        <div class="note-row"><a class="note-row-title" href="#">Weekly Review</a></div>
+        <div class="note-row"><a class="note-row-title" href="#">Philosophy Notes</a></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── ROW 5: Orphans + No Tags ── -->
+  <div class="sections two-col">
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">09</span>
+        <span class="section-title">Orphan Notes</span>
+      </div>
+      <p style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);margin-bottom:0.7rem;line-height:1.5;">No incoming or outgoing links.</p>
+      <div class="pill-list">
+        <a class="pill" href="#">Draft Notes</a>
+        <a class="pill" href="#">Scratch Pad</a>
+        <a class="pill" href="#">Old Template</a>
+        <a class="pill" href="#">Untitled 3</a>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <span class="section-num">10</span>
+        <span class="section-title">Notes with No Tags</span>
+      </div>
+      <p style="font-family:var(--font-mono);font-size:0.68rem;color:var(--muted);margin-bottom:0.7rem;line-height:1.5;">Missing all tags.</p>
+      <div class="pill-list">
+        <a class="pill" href="#">Untagged Entry</a>
+        <a class="pill" href="#">Daily Log</a>
+        <a class="pill" href="#">Meeting Notes</a>
+        <a class="pill" href="#">Quick Thoughts</a>
+        <a class="pill" href="#">Inbox</a>
+      </div>
+    </div>
+
+  </div>
+
+</main>
+
+<script>
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('on', b.textContent.toLowerCase() === t));
+}
+</script>
+</body>
+</html>

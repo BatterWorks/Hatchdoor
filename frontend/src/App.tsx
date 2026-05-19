@@ -33,6 +33,7 @@ import { useIsMobile } from "./app/useIsMobile";
 import { copyText } from "./clipboard";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
+import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
 import type {
@@ -541,6 +542,7 @@ function App() {
         <main className="note-pane">
           <Routes>
             <Route path="/" element={<EmptyState />} />
+            <Route path="/stats" element={<StatsPage />} />
             <Route
               path="/n/:slug"
               element={
