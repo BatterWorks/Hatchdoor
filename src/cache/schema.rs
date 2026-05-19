@@ -177,6 +177,26 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         CREATE INDEX IF NOT EXISTS idx_chunks_note_slug ON chunks(note_slug);
         CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash);
 
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
+            content,
+            content='chunks',
+            content_rowid='id',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS chunk_fts_ai AFTER INSERT ON chunks BEGIN
+            INSERT INTO chunk_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chunk_fts_ad AFTER DELETE ON chunks BEGIN
+            INSERT INTO chunk_fts(chunk_fts, rowid, content) VALUES ('delete', old.id, old.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS chunk_fts_au AFTER UPDATE ON chunks BEGIN
+            INSERT INTO chunk_fts(chunk_fts, rowid, content) VALUES ('delete', old.id, old.content);
+            INSERT INTO chunk_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+
         CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
             chunk_id  INTEGER PRIMARY KEY,
             embedding FLOAT[{dim}]
@@ -234,6 +254,44 @@ mod tests {
             )
             .expect("query");
         assert_eq!(version, "4");
+    }
+
+    #[test]
+    fn fresh_cache_creates_chunk_fts_virtual_table() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let conn = cache.connection().expect("conn");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'chunk_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(count, 1, "chunk_fts virtual table must exist");
+    }
+
+    #[test]
+    fn chunk_fts_insert_trigger_syncs_new_chunk_rows() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let conn = cache.connection().expect("conn");
+        conn.execute(
+            "INSERT INTO notes(slug, title, normalized_title, relative_path, normalized_relative_path, absolute_path, content, content_hash, mtime_ns, size_bytes, indexed_at) \
+             VALUES ('n1','N1','n1','n1.md','n1.md','/tmp/n1.md','','h',0,0,0)",
+            [],
+        ).expect("insert note");
+        conn.execute(
+            "INSERT INTO chunks(note_slug, ordinal, heading_path, content, byte_start, byte_end, content_hash) \
+             VALUES ('n1', 0, NULL, 'hello world', 0, 11, 'h0')",
+            [],
+        ).expect("insert chunk");
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_fts WHERE chunk_fts MATCH 'hello'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts query");
+        assert_eq!(hits, 1);
     }
 
     #[test]
