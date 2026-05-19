@@ -5,6 +5,7 @@ import {
   useEffect,
   useState,
   type ReactNode,
+  type ReactElement,
 } from "react";
 
 import type { MermaidApi } from "../../types";
@@ -71,9 +72,31 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
         );
 
       if (kind === "quote" || kind === "cite") {
+        // The marker and quote text are often in the same <p> (soft line break),
+        // so extract inline body from the first paragraph's children after the \n.
+        const pChildren = Children.toArray(
+          (first as ReactElement<{ children?: ReactNode }>).props.children,
+        );
+        const nlIdx = pChildren.findIndex(
+          (n) => typeof n === "string" && n.includes("\n"),
+        );
+        let inlineBody: ReactNode[] = [];
+        if (nlIdx !== -1) {
+          const pivot = pChildren[nlIdx] as string;
+          const pos = pivot.indexOf("\n");
+          const tail = pivot.slice(pos + 1);
+          inlineBody = [
+            ...(tail ? [tail] : []),
+            ...pChildren.slice(nlIdx + 1),
+          ].filter((n) => !(typeof n === "string" && n.trim() === ""));
+        }
+        const allBody =
+          inlineBody.length > 0
+            ? [<p key="q">{inlineBody}</p>, ...bodyNodes]
+            : bodyNodes;
         return (
           <figure className="pullquote">
-            <blockquote>{bodyNodes}</blockquote>
+            <blockquote>{allBody}</blockquote>
             {attribution && <figcaption>{attribution}</figcaption>}
           </figure>
         );
