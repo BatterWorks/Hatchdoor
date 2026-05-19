@@ -19,7 +19,7 @@ It should not include autonomous workflow orchestration for now.
 | **5. Embedding layer** | Converts chunks into semantic representations. | Planned — Phase 1. Local in-process via `fastembed` + Snowflake Arctic Embed S (384-dim). Phase 1.5 eval drives any later upgrade. |
 | **6. Semantic index layer** | Stores and searches semantic representations. | Planned — Phase 1. `sqlite-vec` extension on the existing SQLite file. |
 | **7. Exact search layer** | Searches precise terms and metadata. | Implemented — SQLite FTS5 via `cache/queries.rs::search`. |
-| **8. Hybrid retrieval layer** | Combines exact and semantic retrieval. | Planned — Phase 2. Single SQL query joining FTS5 with `vec0` results. |
+| **8. Hybrid retrieval layer** | Combines exact and semantic retrieval. | **Dropped from runtime path** — Phase 1.6 eval (see `docs/superpowers/specs/2026-05-19-phase-1.6-outcome.md`) found hybrid retrieval is net-negative vs pure semantic on the current corpus. Code remains in tree (`src/eval/hybrid_runner.rs`, `SqliteCache::fts_search_notes`, `eval hybrid` subcommand) for offline benchmarking only. |
 | **9. Context assembly layer** | Prepares useful context for agents. | Planned — Phase 2. Bundles chunks + parent headings + linked notes. |
 | **10. Tool interface layer** | Exposes Hatchdoor capabilities to agents. | Implemented — MCP server at `/mcp` (`src/mcp/`). |
 | **11. Permission layer** | Controls read/write/modification rights. | Planned — Phase 5. Deferred until multi-agent or multi-tenant use is real. |
@@ -34,7 +34,7 @@ It should not include autonomous workflow orchestration for now.
 |---|---|
 | **Source of truth** | Source layer, structured cache layer |
 | **Derived indexes** | Chunking layer, embedding layer, semantic index layer, exact search layer |
-| **Retrieval logic** | Hybrid retrieval layer, context assembly layer |
+| **Retrieval logic** | Semantic retrieval (Layer 6), context assembly layer |
 | **Agent access and control** | Tool interface layer, permission layer |
 | **Maintenance and quality** | Reindexing layer, evaluation layer |
 
@@ -57,8 +57,7 @@ source content
 → structured cache
 → chunks
 → embeddings
-→ semantic and exact search
-→ hybrid retrieval
+→ semantic search (exact search remains a separate keyword path)
 → assembled agent context
 → MCP/tool interface
 ```
@@ -79,7 +78,8 @@ The missing layers ship as a sequence of sub-projects, each with its own spec an
 |---|---|---|
 | **1. Semantic foundation** | 4, 5, 6 | Vault notes are chunked, embedded, and stored alongside existing FTS5. No new public API surface yet. |
 | **1.5. Evaluation harness** | 13 | Labelled query set + scoring script so Phase 2 tuning is measurable. |
-| **2. Hybrid retrieval + context assembly** | 8, 9 | New MCP tool returns ranked, assembled context for an agent query. |
+| **1.6. Retrieval-strategy bake-off** | 13 (extended) | Eval-only: compared pure semantic vs cross-encoder rerank vs hybrid RRF. Outcome: pure semantic wins; reranker and hybrid dropped from runtime. See `docs/superpowers/specs/2026-05-19-phase-1.6-outcome.md`. |
+| **2. Semantic retrieval + context assembly** | 6 (runtime exposure), 9 | New MCP tool returns ranked, assembled context for an agent query. Pure semantic only — no FTS5 fusion, no cross-encoder rerank. |
 | **3. Incremental reindexing** | 12 (full) | Watcher embeds only changed chunks instead of full reindex. |
 | **4. Permission layer** | 11 | Read/write gating per agent or path. Deferred until needed. |
 

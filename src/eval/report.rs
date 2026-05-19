@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::Path;
 
+use crate::eval::compare_runner::{CompareQueryResult, CompareSummary};
 use crate::eval::metrics::Report;
 
 pub fn append_section(path: &Path, report: &Report, build_duration_secs: Option<f64>) -> Result<(), String> {
@@ -197,6 +198,106 @@ pub fn append_hybrid_section(
         };
         writeln!(f, "| {} | {} | {} | {} |", pq.id, query_truncated, rank, anti).ok();
     }
+    Ok(())
+}
+
+pub fn append_compare_section(
+    path: &Path,
+    model: &str,
+    initial_k: usize,
+    rrf_k: usize,
+    results: &[CompareQueryResult],
+    summary: &CompareSummary,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    writeln!(f).ok();
+    writeln!(f, "## Compare — pure vs hybrid").map_err(|e| format!("write: {e}"))?;
+    writeln!(f).ok();
+    writeln!(f, "- Run timestamp: {now}").ok();
+    writeln!(f, "- Model: {model}").ok();
+    writeln!(f, "- Initial K: {initial_k}  RRF k: {rrf_k}").ok();
+    writeln!(f).ok();
+
+    writeln!(
+        f,
+        "| ID | Query | Rank pure | Rank hybrid | Δ (pure − hybrid, +ve = hybrid better) | Anti pure | Anti hybrid |"
+    )
+    .ok();
+    writeln!(f, "|---|---|---|---|---|---|---|").ok();
+
+    for r in results {
+        let rp = r.rank_pure.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
+        let rh = r.rank_hybrid.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
+        let delta = match (r.rank_pure, r.rank_hybrid) {
+            (Some(p), Some(h)) => {
+                let d = p as i64 - h as i64;
+                if d > 0 {
+                    format!("+{d}")
+                } else {
+                    d.to_string()
+                }
+            }
+            (None, Some(_)) => "+∞".to_string(),
+            (Some(_), None) => "-∞".to_string(),
+            (None, None) => "0".to_string(),
+        };
+        let ap = match r.anti_pure {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "—",
+        };
+        let ah = match r.anti_hybrid {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "—",
+        };
+        let q_trunc = if r.query_text.len() > 80 {
+            format!("{}…", &r.query_text[..77])
+        } else {
+            r.query_text.clone()
+        };
+        writeln!(f, "| {} | {} | {} | {} | {} | {} | {} |", r.query_id, q_trunc, rp, rh, delta, ap, ah).ok();
+    }
+
+    writeln!(f).ok();
+    writeln!(f, "### Summary").ok();
+    writeln!(f).ok();
+    writeln!(
+        f,
+        "- Hybrid wins (lower rank): **{}**",
+        summary.hybrid_wins
+    )
+    .ok();
+    writeln!(f, "- Ties: **{}**", summary.ties).ok();
+    writeln!(f, "- Pure wins (lower rank): **{}**", summary.pure_wins).ok();
+    writeln!(
+        f,
+        "- Anti improvements (hybrid drops anti pure had): **{}**",
+        summary.anti_improvements
+    )
+    .ok();
+    writeln!(
+        f,
+        "- Anti regressions (hybrid adds anti pure didn't have): **{}**",
+        summary.anti_regressions
+    )
+    .ok();
+    writeln!(f).ok();
+    let verdict = format!(
+        "**Verdict:** Hybrid wins on {} queries, loses on {}, ties on {}. Anti improvements: {}, anti regressions: {}.",
+        summary.hybrid_wins, summary.pure_wins, summary.ties, summary.anti_improvements, summary.anti_regressions
+    );
+    writeln!(f, "{verdict}").ok();
     Ok(())
 }
 

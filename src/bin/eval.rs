@@ -30,6 +30,7 @@ fn print_usage() {
   eval run --model <id> --cache <path> --queries <path>
   eval rerank --model <id> --cache <path> --reranker <id> --queries <path> [--initial-k <n>]
   eval hybrid --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
+  eval compare --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
 
 models:    BGESmallENV15 | NomicEmbedTextV15 | MxbaiEmbedLargeV1
 rerankers: JINARerankerV1TurboEn | JINARerankerV2BaseMultilingual"
@@ -48,6 +49,13 @@ enum Cmd {
         initial_k: usize,
     },
     Hybrid {
+        model: String,
+        cache: PathBuf,
+        queries: PathBuf,
+        initial_k: usize,
+        rrf_k: usize,
+    },
+    Compare {
         model: String,
         cache: PathBuf,
         queries: PathBuf,
@@ -107,6 +115,12 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
             let initial_k = initial_k.unwrap_or(20);
             let rrf_k = rrf_k.unwrap_or(60);
             Ok(Cmd::Hybrid { model, cache, queries, initial_k, rrf_k })
+        }
+        "compare" => {
+            let queries = queries.ok_or("missing --queries")?;
+            let initial_k = initial_k.unwrap_or(20);
+            let rrf_k = rrf_k.unwrap_or(60);
+            Ok(Cmd::Compare { model, cache, queries, initial_k, rrf_k })
         }
         other => Err(format!("unknown subcommand: {other}")),
     }
@@ -309,6 +323,89 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Cmd::Compare { model, cache, queries, initial_k, rrf_k } => {
+            if !cache.exists() {
+                eprintln!(
+                    "error: cache {} does not exist. Run `eval build` first.",
+                    cache.display()
+                );
+                return ExitCode::from(1);
+            }
+            let embedder = match load_embedder(&model) {
+                Ok(e) => e,
+                Err(e) => { eprintln!("error loading embedder: {e}"); return ExitCode::from(1); }
+            };
+            let sqlite = match hatchdoor::cache::SqliteCache::open(&cache, embedder.embedding_dim()) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("error opening cache: {e}"); return ExitCode::from(1); }
+            };
+            let qs = match hatchdoor::eval::query::load_jsonl(&queries) {
+                Ok(q) => q,
+                Err(e) => { eprintln!("error loading queries: {e}"); return ExitCode::from(1); }
+            };
+
+            let (compare_results, summary) = match hatchdoor::eval::compare_runner::run_compare_eval(
+                &sqlite,
+                embedder.as_ref(),
+                &qs,
+                initial_k,
+                rrf_k,
+            ) {
+                Ok(r) => r,
+                Err(e) => { eprintln!("error running compare eval: {e}"); return ExitCode::from(1); }
+            };
+
+            // Print per-query table to stdout
+            println!(
+                "| {:<4} | {:<60} | {:^10} | {:^12} | {:^40} | {:^10} | {:^12} |",
+                "ID", "Query", "Rank pure", "Rank hybrid", "Δ (pure−hybrid, +ve=hybrid better)", "Anti pure", "Anti hybrid"
+            );
+            println!("|---|---|---|---|---|---|---|");
+            for r in &compare_results {
+                let rp = r.rank_pure.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
+                let rh = r.rank_hybrid.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
+                let delta = match (r.rank_pure, r.rank_hybrid) {
+                    (Some(p), Some(h)) => {
+                        let d = p as i64 - h as i64;
+                        if d > 0 { format!("+{d}") } else { d.to_string() }
+                    }
+                    (None, Some(_)) => "+∞".to_string(),
+                    (Some(_), None) => "-∞".to_string(),
+                    (None, None) => "0".to_string(),
+                };
+                let ap = match r.anti_pure { Some(true) => "yes", Some(false) => "no", None => "—" };
+                let ah = match r.anti_hybrid { Some(true) => "yes", Some(false) => "no", None => "—" };
+                let q_trunc = if r.query_text.len() > 60 {
+                    format!("{}…", &r.query_text[..57])
+                } else {
+                    r.query_text.clone()
+                };
+                println!("| {} | {} | {} | {} | {} | {} | {} |",
+                    r.query_id, q_trunc, rp, rh, delta, ap, ah);
+            }
+            println!();
+            println!("Hybrid wins: {}  |  Ties: {}  |  Pure wins: {}", summary.hybrid_wins, summary.ties, summary.pure_wins);
+            println!("Anti improvements: {}  |  Anti regressions: {}", summary.anti_improvements, summary.anti_regressions);
+            println!(
+                "Verdict: Hybrid wins on {} queries, loses on {}, ties on {}. Anti improvements: {}, anti regressions: {}.",
+                summary.hybrid_wins, summary.pure_wins, summary.ties, summary.anti_improvements, summary.anti_regressions
+            );
+
+            let results_md = std::path::PathBuf::from("eval/results.md");
+            if let Err(e) = hatchdoor::eval::report::append_compare_section(
+                &results_md,
+                &model,
+                initial_k,
+                rrf_k,
+                &compare_results,
+                &summary,
+            ) {
+                eprintln!("warning: failed to append section to {}: {e}", results_md.display());
+            } else {
+                println!("\nappended to {}", results_md.display());
+            }
+            ExitCode::SUCCESS
+        }
         Cmd::Hybrid { model, cache, queries, initial_k, rrf_k } => {
             if !cache.exists() {
                 eprintln!(
@@ -405,6 +502,45 @@ mod tests {
                 assert_eq!(model, "X");
                 assert_eq!(cache, PathBuf::from("/c"));
                 assert_eq!(queries, PathBuf::from("/q"));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parses_compare_command() {
+        let cmd = parse_args(argv(&[
+            "eval", "compare",
+            "--model", "NomicEmbedTextV15",
+            "--cache", "/c.db",
+            "--queries", "/q.jsonl",
+            "--initial-k", "20",
+            "--rrf-k", "60",
+        ])).expect("parse");
+        match cmd {
+            Cmd::Compare { model, cache, queries, initial_k, rrf_k } => {
+                assert_eq!(model, "NomicEmbedTextV15");
+                assert_eq!(cache, PathBuf::from("/c.db"));
+                assert_eq!(queries, PathBuf::from("/q.jsonl"));
+                assert_eq!(initial_k, 20);
+                assert_eq!(rrf_k, 60);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parses_compare_command_defaults() {
+        let cmd = parse_args(argv(&[
+            "eval", "compare",
+            "--model", "NomicEmbedTextV15",
+            "--cache", "/c.db",
+            "--queries", "/q.jsonl",
+        ])).expect("parse");
+        match cmd {
+            Cmd::Compare { initial_k, rrf_k, .. } => {
+                assert_eq!(initial_k, 20);
+                assert_eq!(rrf_k, 60);
             }
             _ => panic!("wrong variant"),
         }
