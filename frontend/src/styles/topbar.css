@@ -9,7 +9,7 @@
   top: 0;
   z-index: 40;
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr) auto;
+  grid-template-columns: var(--sidebar-width, 280px) minmax(0, 1fr) auto;
   gap: 1.5rem;
   align-items: center;
   padding: calc(0.9rem + env(safe-area-inset-top)) 1.25rem 0.9rem;

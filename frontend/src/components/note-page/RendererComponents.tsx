@@ -5,6 +5,7 @@ import {
   useEffect,
   useState,
   type ReactNode,
+  type ReactElement,
 } from "react";
 
 import type { MermaidApi } from "../../types";
@@ -57,17 +58,49 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
 
   if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
     const firstText = flattenText(first.props.children).trim();
-    const match = firstText.match(/^\[!([A-Za-z0-9_]+)\]([+-])?\s*(.*)$/);
+    const match = firstText.match(/^\[!([A-Za-z0-9_-]+)\]([+-])?\s*(.*)$/m);
 
     if (match) {
       const kind = match[1].toLowerCase();
       const fold = match[2] ?? null;
-      const title = match[3] || kind[0].toUpperCase() + kind.slice(1);
+      const attribution = match[3].trim();
+      const title = attribution || kind[0].toUpperCase() + kind.slice(1);
       const bodyNodes = nodes
         .slice(firstContentIndex + 1)
         .filter(
           (node) => !(typeof node === "string" && node.trim().length === 0),
         );
+
+      if (kind === "quote" || kind === "cite") {
+        // The marker and quote text are often in the same <p> (soft line break),
+        // so extract inline body from the first paragraph's children after the \n.
+        const pChildren = Children.toArray(
+          (first as ReactElement<{ children?: ReactNode }>).props.children,
+        );
+        const nlIdx = pChildren.findIndex(
+          (n) => typeof n === "string" && n.includes("\n"),
+        );
+        let inlineBody: ReactNode[] = [];
+        if (nlIdx !== -1) {
+          const pivot = pChildren[nlIdx] as string;
+          const pos = pivot.indexOf("\n");
+          const tail = pivot.slice(pos + 1);
+          inlineBody = [
+            ...(tail ? [tail] : []),
+            ...pChildren.slice(nlIdx + 1),
+          ].filter((n) => !(typeof n === "string" && n.trim() === ""));
+        }
+        const allBody =
+          inlineBody.length > 0
+            ? [<p key="q">{inlineBody}</p>, ...bodyNodes]
+            : bodyNodes;
+        return (
+          <figure className="pullquote">
+            <blockquote>{allBody}</blockquote>
+            {attribution && <figcaption>{attribution}</figcaption>}
+          </figure>
+        );
+      }
 
       if (fold) {
         return (
@@ -76,7 +109,9 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
             open={fold === "+"}
           >
             <summary className="callout-title">{title}</summary>
-            <div className="callout-body">{bodyNodes}</div>
+            {bodyNodes.length > 0 && (
+              <div className="callout-body">{bodyNodes}</div>
+            )}
           </details>
         );
       }
@@ -84,7 +119,9 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
       return (
         <div className={`callout callout-${kind}`}>
           <div className="callout-title">{title}</div>
-          <div className="callout-body">{bodyNodes}</div>
+          {bodyNodes.length > 0 && (
+            <div className="callout-body">{bodyNodes}</div>
+          )}
         </div>
       );
     }

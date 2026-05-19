@@ -201,3 +201,11 @@
 .sidebar-resizer:hover::before {
   background: var(--rule-strong);
 }
+
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+.sidebar-resizer:focus-visible::before {
+  background: var(--hot);
+}
