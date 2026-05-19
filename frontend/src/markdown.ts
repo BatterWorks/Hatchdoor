@@ -4,12 +4,17 @@ export function parseWikilinkTarget(body: string): {
 } {
   const [targetRaw, aliasRaw] = body.split("|", 2);
   const target = (targetRaw || "").trim();
-  const label = (aliasRaw || "").trim() || target;
+  const label =
+    (aliasRaw || "").trim() || target.split(/[#^]/)[0].trim();
   return { target, label };
 }
 
 export function escapeMarkdownLabel(input: string): string {
   return input.replace(/[\\`*_[\]{}()#+.!|]/g, "\\$&");
+}
+
+export function stripBlockIds(markdown: string): string {
+  return markdown.replace(/ \^[a-zA-Z0-9-]+$/gm, "");
 }
 
 export function stripVaultNoteLinks(markdown: string): string {
