@@ -84,6 +84,10 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute_batch(
         r#"
         DROP TABLE IF EXISTS chunk_vectors;
+        DROP TRIGGER IF EXISTS chunk_fts_au;
+        DROP TRIGGER IF EXISTS chunk_fts_ad;
+        DROP TRIGGER IF EXISTS chunk_fts_ai;
+        DROP TABLE IF EXISTS chunk_fts;
         DROP TABLE IF EXISTS chunks;
         DROP TABLE IF EXISTS headings;
         DROP TABLE IF EXISTS tags;
