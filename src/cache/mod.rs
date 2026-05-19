@@ -4,6 +4,8 @@ mod populate;
 mod queries;
 mod schema;
 
+pub use queries::SemanticHit;
+
 use std::fs;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, Once};
