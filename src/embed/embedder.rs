@@ -14,6 +14,17 @@ pub trait Embedder: Send + Sync {
     /// The exact tokenizer the embedder uses internally, so the chunker can
     /// pre-compute token counts that match the embedder's accounting.
     fn tokenizer(&self) -> Arc<Tokenizer>;
+
+    /// Task-instruction prefix prepended to documents before embedding.
+    /// Empty for models that don't use prefixes; required by Nomic v1.5.
+    fn doc_prefix(&self) -> &'static str {
+        ""
+    }
+
+    /// Task-instruction prefix prepended to queries before embedding.
+    fn query_prefix(&self) -> &'static str {
+        ""
+    }
 }
 
 /// Deterministic test embedder. Hashes each input to a fixed-dim vector so

@@ -475,11 +475,12 @@ fn chunk_and_embed_note(
     let existing = existing_chunk_hashes(tx, slug)?;
     let preserved = preserve_existing_vectors(tx, slug, &chunking.chunks, &existing)?;
 
+    let doc_prefix = embedder.doc_prefix();
     let mut texts_to_embed: Vec<String> = Vec::new();
     let mut indices_needing_embed: Vec<usize> = Vec::new();
     for (idx, chunk) in chunking.chunks.iter().enumerate() {
         if !preserved.contains_key(&chunk.content_hash) {
-            texts_to_embed.push(chunk.content.clone());
+            texts_to_embed.push(format!("{doc_prefix}{}", chunk.content));
             indices_needing_embed.push(idx);
         }
     }
