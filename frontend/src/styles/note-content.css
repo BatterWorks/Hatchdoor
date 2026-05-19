@@ -667,7 +667,7 @@
   text-transform: uppercase;
   color: var(--muted);
   margin-top: 0.65rem;
-  padding-left: 1.4rem;
+  text-align: right;
 }
 
 .note-body .pullquote figcaption::before {
