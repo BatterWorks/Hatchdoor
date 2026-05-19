@@ -13,7 +13,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { parseFrontmatter, stripVaultNoteLinks } from "../markdown";
+import { parseFrontmatter, stripBlockIds, stripVaultNoteLinks } from "../markdown";
 import { extractMarkdownHeadings } from "../noteHeadings";
 import {
   createSearchHighlightPlugin,
@@ -167,7 +167,7 @@ export function NotePage({
     });
   }, [note, onActiveNoteChange, parsed.body]);
 
-  const markdown = useResolvedWikilinks(parsed.body, note?.relative_path ?? "");
+  const markdown = useResolvedWikilinks(stripBlockIds(parsed.body), note?.relative_path ?? "");
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
