@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rusqlite::{OptionalExtension, params};
 
@@ -386,6 +386,20 @@ pub struct ChunkFtsHit {
 }
 
 #[derive(Debug, Clone)]
+pub struct OutboundLinkRow {
+    pub slug: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NoteWithLinks {
+    pub slug: String,
+    pub title: String,
+    pub relative_path: String,
+    pub outbound_links: Vec<OutboundLinkRow>,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct SemanticHit {
     pub chunk_id: i64,
@@ -521,6 +535,85 @@ impl SqliteCache {
             hits.push(row.map_err(|e| format!("read fts_search_chunks row: {e}"))?);
         }
         Ok(hits)
+    }
+
+    pub fn notes_with_outbound_links_batch(
+        &self,
+        slugs: &[String],
+    ) -> Result<HashMap<String, NoteWithLinks>, String> {
+        if slugs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self.connection()?;
+
+        let placeholders = std::iter::repeat_n("?", slugs.len())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let mut map: HashMap<String, NoteWithLinks> = HashMap::new();
+
+        // Note metadata
+        let sql_a = format!(
+            "SELECT slug, title, relative_path FROM notes WHERE slug IN ({placeholders})"
+        );
+        let mut stmt_a = conn
+            .prepare(&sql_a)
+            .map_err(|e| format!("prepare notes batch: {e}"))?;
+        let rows_a = stmt_a
+            .query_map(rusqlite::params_from_iter(slugs.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("query notes batch: {e}"))?;
+        for row in rows_a {
+            let (slug, title, relative_path) =
+                row.map_err(|e| format!("read notes batch row: {e}"))?;
+            map.insert(
+                slug.clone(),
+                NoteWithLinks {
+                    slug,
+                    title,
+                    relative_path,
+                    outbound_links: Vec::new(),
+                },
+            );
+        }
+
+        // Outbound links (only resolved targets — JOIN drops danglers)
+        let sql_b = format!(
+            "SELECT l.source_slug, t.slug, t.title \
+             FROM note_links l \
+             JOIN notes t ON t.slug = l.target_slug \
+             WHERE l.source_slug IN ({placeholders}) \
+             ORDER BY l.source_slug, t.relative_path"
+        );
+        let mut stmt_b = conn
+            .prepare(&sql_b)
+            .map_err(|e| format!("prepare links batch: {e}"))?;
+        let rows_b = stmt_b
+            .query_map(rusqlite::params_from_iter(slugs.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| format!("query links batch: {e}"))?;
+        for row in rows_b {
+            let (source_slug, target_slug, target_title) =
+                row.map_err(|e| format!("read links batch row: {e}"))?;
+            if let Some(entry) = map.get_mut(&source_slug) {
+                entry.outbound_links.push(OutboundLinkRow {
+                    slug: target_slug,
+                    title: target_title,
+                });
+            }
+        }
+
+        Ok(map)
     }
 }
 
@@ -1119,5 +1212,85 @@ mod fts_search_chunks_tests {
         ]);
         let hits = cache.fts_search_chunks("apples", 2).expect("search");
         assert_eq!(hits.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod notes_with_outbound_links_batch_tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use crate::cache::SqliteCache;
+    use crate::embed::{Embedder, StubEmbedder};
+    use crate::vault::VaultIndex;
+
+    fn vault_with(files: &[(&str, &str)]) -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).expect("write");
+        }
+        dir
+    }
+
+    fn build_cache(files: &[(&str, &str)]) -> SqliteCache {
+        let dir = vault_with(files);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("index");
+        cache
+    }
+
+    #[test]
+    fn batch_returns_note_metadata_for_each_slug() {
+        let cache = build_cache(&[
+            ("Alpha.md", "# Alpha\n\nbody"),
+            ("Bravo.md", "# Bravo\n\nbody"),
+        ]);
+        let map = cache
+            .notes_with_outbound_links_batch(&["alpha".to_string(), "bravo".to_string()])
+            .expect("batch");
+        assert_eq!(map.len(), 2);
+        let a = map.get("alpha").expect("alpha");
+        assert_eq!(a.title, "Alpha");
+        assert_eq!(a.relative_path, "Alpha");
+        assert!(a.outbound_links.is_empty());
+    }
+
+    #[test]
+    fn batch_returns_resolved_outbound_links_only() {
+        let cache = build_cache(&[
+            ("Alpha.md", "# Alpha\n\nlinks to [[Bravo]] and [[Ghost]]"),
+            ("Bravo.md", "# Bravo\n\nbody"),
+        ]);
+        let map = cache
+            .notes_with_outbound_links_batch(&["alpha".to_string()])
+            .expect("batch");
+        let a = map.get("alpha").expect("alpha");
+        assert_eq!(a.outbound_links.len(), 1);
+        assert_eq!(a.outbound_links[0].slug, "bravo");
+        assert_eq!(a.outbound_links[0].title, "Bravo");
+    }
+
+    #[test]
+    fn batch_omits_missing_slugs() {
+        let cache = build_cache(&[("Alpha.md", "# Alpha\n\nbody")]);
+        let map = cache
+            .notes_with_outbound_links_batch(&["alpha".to_string(), "ghost".to_string()])
+            .expect("batch");
+        assert!(map.contains_key("alpha"));
+        assert!(!map.contains_key("ghost"));
+    }
+
+    #[test]
+    fn batch_empty_input_returns_empty_map() {
+        let cache = build_cache(&[("Alpha.md", "# Alpha\n\nbody")]);
+        let map = cache
+            .notes_with_outbound_links_batch(&[])
+            .expect("batch");
+        assert!(map.is_empty());
     }
 }
