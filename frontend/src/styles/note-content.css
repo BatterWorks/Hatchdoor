@@ -6,6 +6,7 @@
   box-sizing: border-box;
   min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 /* Two-col layout: body + TOC
