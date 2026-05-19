@@ -592,8 +592,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         let result = &body["result"]["structuredContent"]["results"][0];
-        assert_eq!(result["slug"], "home");
-        assert!(result.get("content").is_none());
+        assert_eq!(result["note_slug"], "home");
+        assert!(result.get("chunk_id").is_some());
+        assert!(result.get("content").is_some());
+        assert!(result.get("score").is_some());
     }
 
     #[tokio::test]
