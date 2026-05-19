@@ -12,9 +12,10 @@ use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_lo
 use hatchdoor::cache::SqliteCache;
 use hatchdoor::embed::{Embedder, FastembedEmbedder};
 use hatchdoor::handlers::{
-    health_handler, note_download_handler, note_handler, note_links_handler,
+    graph_handler, health_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
-    search_handler, spa_index_handler, tree_handler, vault_asset_handler, vault_events_handler,
+    search_handler, spa_index_handler, stats_handler, tree_handler, vault_asset_handler,
+    vault_events_handler,
 };
 use hatchdoor::mcp::{mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
@@ -46,9 +47,13 @@ fn build_router(state: AppState) -> Router {
         .route("/api/resolve", get(resolve_handler))
         .route("/api/resolve-batch", post(resolve_batch_handler))
         .route("/api/search", get(search_handler))
+        .route("/api/stats", get(stats_handler))
+        .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
+        .route("/stats", get(spa_index_handler))
+        .route("/graph", get(spa_index_handler))
         .route("/vault-assets/{*path}", get(vault_asset_handler))
         .route_service(
             "/manifest.webmanifest",

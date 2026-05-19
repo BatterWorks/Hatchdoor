@@ -508,6 +508,344 @@ impl FolderBuilder {
     }
 }
 
+impl SqliteCache {
+    pub fn vault_stats(&self) -> Result<crate::api_types::VaultStatsResponse, String> {
+        use crate::api_types::{
+            FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
+            VaultStatsResponse,
+        };
+
+        let conn = self.connection()?;
+
+        let note_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .map_err(|e| format!("vault_stats note_count: {e}"))?;
+
+        let tag_count: i64 = conn
+            .query_row("SELECT COUNT(DISTINCT tag) FROM tags", [], |row| row.get(0))
+            .map_err(|e| format!("vault_stats tag_count: {e}"))?;
+
+        let link_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_links", [], |row| row.get(0))
+            .map_err(|e| format!("vault_stats link_count: {e}"))?;
+
+        let vault_size_bytes: i64 = conn
+            .query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM notes", [], |row| row.get(0))
+            .map_err(|e| format!("vault_stats vault_size_bytes: {e}"))?;
+
+        // Fetch all content for word/image count and word-rank computations.
+        struct ContentRow {
+            slug: String,
+            title: String,
+            content: String,
+        }
+        let mut content_stmt = conn
+            .prepare("SELECT slug, title, content FROM notes ORDER BY relative_path")
+            .map_err(|e| format!("vault_stats prepare content: {e}"))?;
+        let content_rows: Vec<ContentRow> = content_stmt
+            .query_map([], |row| {
+                Ok(ContentRow {
+                    slug: row.get(0)?,
+                    title: row.get(1)?,
+                    content: row.get(2)?,
+                })
+            })
+            .map_err(|e| format!("vault_stats query content: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read content: {e}"))?;
+        drop(content_stmt);
+
+        let mut total_word_count: usize = 0;
+        let mut total_image_count: usize = 0;
+        let mut word_counts: Vec<(String, String, usize)> = Vec::with_capacity(content_rows.len());
+        for row in &content_rows {
+            let wc = word_count_for_content(&row.content);
+            total_word_count += wc;
+            total_image_count += row.content.matches("![").count();
+            word_counts.push((row.slug.clone(), row.title.clone(), wc));
+        }
+
+        let avg_word_count = if note_count > 0 {
+            total_word_count / note_count as usize
+        } else {
+            0
+        };
+
+        word_counts.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+        let longest_notes: Vec<NoteWordRef> = word_counts
+            .iter()
+            .take(5)
+            .map(|(slug, title, wc)| NoteWordRef {
+                title: title.clone(),
+                slug: slug.clone(),
+                word_count: *wc,
+            })
+            .collect();
+
+        word_counts.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)));
+        let shortest_notes: Vec<NoteWordRef> = word_counts
+            .iter()
+            .filter(|(_, _, wc)| *wc > 0)
+            .take(5)
+            .map(|(slug, title, wc)| NoteWordRef {
+                title: title.clone(),
+                slug: slug.clone(),
+                word_count: *wc,
+            })
+            .collect();
+
+        let mut tags_stmt = conn
+            .prepare(
+                "SELECT tag, COUNT(*) as note_count FROM tags GROUP BY tag \
+                 ORDER BY note_count DESC, tag LIMIT 20",
+            )
+            .map_err(|e| format!("vault_stats prepare top_tags: {e}"))?;
+        let top_tags: Vec<TagStat> = tags_stmt
+            .query_map([], |row| Ok(TagStat { tag: row.get(0)?, note_count: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query top_tags: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read top_tags: {e}"))?;
+        drop(tags_stmt);
+
+        let mut linked_stmt = conn
+            .prepare(
+                r#"
+                SELECT n.title, n.slug, COUNT(l.source_slug) as backlink_count
+                FROM notes n
+                LEFT JOIN note_links l ON l.target_slug = n.slug
+                GROUP BY n.slug
+                HAVING backlink_count > 0
+                ORDER BY backlink_count DESC, n.title
+                LIMIT 20
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare most_linked: {e}"))?;
+        let most_linked: Vec<LinkedNoteRef> = linked_stmt
+            .query_map([], |row| {
+                Ok(LinkedNoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                    backlink_count: row.get(2)?,
+                })
+            })
+            .map_err(|e| format!("vault_stats query most_linked: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read most_linked: {e}"))?;
+        drop(linked_stmt);
+
+        let mut activity_stmt = conn
+            .prepare(
+                r#"
+                SELECT strftime('%Y-%m', mtime_ns / 1000000000, 'unixepoch') as month,
+                       COUNT(*) as modified_count
+                FROM notes
+                GROUP BY month
+                ORDER BY month DESC
+                LIMIT 6
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare activity_by_month: {e}"))?;
+        let activity_by_month: Vec<MonthActivity> = activity_stmt
+            .query_map([], |row| Ok(MonthActivity { month: row.get(0)?, modified_count: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query activity_by_month: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read activity_by_month: {e}"))?;
+        drop(activity_stmt);
+
+        let mut folder_stmt = conn
+            .prepare(
+                r#"
+                SELECT
+                  CASE WHEN instr(relative_path, '/') > 0
+                    THEN substr(relative_path, 1, instr(relative_path, '/') - 1)
+                    ELSE ''
+                  END as folder,
+                  COUNT(*) as note_count
+                FROM notes
+                GROUP BY folder
+                ORDER BY note_count DESC, folder
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare notes_per_folder: {e}"))?;
+        let notes_per_folder: Vec<FolderStat> = folder_stmt
+            .query_map([], |row| Ok(FolderStat { folder: row.get(0)?, note_count: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query notes_per_folder: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read notes_per_folder: {e}"))?;
+        drop(folder_stmt);
+
+        let mut orphan_stmt = conn
+            .prepare(
+                r#"
+                SELECT title, slug FROM notes
+                WHERE slug NOT IN (SELECT DISTINCT source_slug FROM note_links)
+                  AND slug NOT IN (SELECT DISTINCT target_slug FROM note_links)
+                ORDER BY title
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare orphan_notes: {e}"))?;
+        let orphan_notes: Vec<NoteRef> = orphan_stmt
+            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query orphan_notes: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read orphan_notes: {e}"))?;
+        drop(orphan_stmt);
+
+        let mut no_tag_stmt = conn
+            .prepare(
+                r#"
+                SELECT title, slug FROM notes
+                WHERE slug NOT IN (SELECT DISTINCT note_slug FROM tags)
+                ORDER BY title
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare no_tag_notes: {e}"))?;
+        let no_tag_notes: Vec<NoteRef> = no_tag_stmt
+            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query no_tag_notes: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read no_tag_notes: {e}"))?;
+        drop(no_tag_stmt);
+
+        let week_total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes \
+                 WHERE mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("vault_stats week_count: {e}"))?;
+        let mut week_stmt = conn
+            .prepare(
+                r#"
+                SELECT title, slug FROM notes
+                WHERE mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000
+                ORDER BY mtime_ns DESC
+                LIMIT 20
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare modified_this_week: {e}"))?;
+        let week_notes: Vec<NoteRef> = week_stmt
+            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query modified_this_week: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read modified_this_week: {e}"))?;
+        drop(week_stmt);
+
+        let month_total: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM notes \
+                 WHERE mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("vault_stats month_count: {e}"))?;
+        let mut month_stmt = conn
+            .prepare(
+                r#"
+                SELECT title, slug FROM notes
+                WHERE mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000
+                ORDER BY mtime_ns DESC
+                LIMIT 20
+                "#,
+            )
+            .map_err(|e| format!("vault_stats prepare modified_this_month: {e}"))?;
+        let month_notes: Vec<NoteRef> = month_stmt
+            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .map_err(|e| format!("vault_stats query modified_this_month: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("vault_stats read modified_this_month: {e}"))?;
+        drop(month_stmt);
+
+        Ok(VaultStatsResponse {
+            note_count,
+            word_count: total_word_count,
+            tag_count,
+            link_count,
+            image_count: total_image_count,
+            avg_word_count,
+            vault_size_bytes,
+            total_outgoing_links: link_count,
+            total_backlinks: link_count,
+            top_tags,
+            most_linked,
+            activity_by_month,
+            notes_per_folder,
+            longest_notes,
+            shortest_notes,
+            orphan_notes,
+            no_tag_notes,
+            modified_this_week: NoteList { count: week_total, notes: week_notes },
+            modified_this_month: NoteList { count: month_total, notes: month_notes },
+        })
+    }
+
+    pub fn graph_data(&self) -> Result<crate::api_types::GraphResponse, String> {
+        use crate::api_types::{GraphEdge, GraphNode, GraphResponse};
+
+        let conn = self.connection()?;
+
+        let mut nodes_stmt = conn
+            .prepare(
+                r#"
+                SELECT n.slug, n.title,
+                  (SELECT tag FROM tags WHERE note_slug = n.slug ORDER BY tag LIMIT 1) as primary_tag,
+                  COUNT(l.source_slug) as backlink_count
+                FROM notes n
+                LEFT JOIN note_links l ON l.target_slug = n.slug
+                GROUP BY n.slug
+                ORDER BY n.title
+                "#,
+            )
+            .map_err(|e| format!("graph_data prepare nodes: {e}"))?;
+        let nodes: Vec<GraphNode> = nodes_stmt
+            .query_map([], |row| {
+                Ok(GraphNode {
+                    slug: row.get(0)?,
+                    title: row.get(1)?,
+                    primary_tag: row.get(2)?,
+                    backlink_count: row.get(3)?,
+                })
+            })
+            .map_err(|e| format!("graph_data query nodes: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("graph_data read nodes: {e}"))?;
+        drop(nodes_stmt);
+
+        let mut edges_stmt = conn
+            .prepare("SELECT source_slug, target_slug FROM note_links")
+            .map_err(|e| format!("graph_data prepare edges: {e}"))?;
+        let edges: Vec<GraphEdge> = edges_stmt
+            .query_map([], |row| Ok(GraphEdge { source: row.get(0)?, target: row.get(1)? }))
+            .map_err(|e| format!("graph_data query edges: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("graph_data read edges: {e}"))?;
+        drop(edges_stmt);
+
+        Ok(GraphResponse { nodes, edges })
+    }
+}
+
+fn word_count_for_content(content: &str) -> usize {
+    strip_frontmatter(content).split_whitespace().count()
+}
+
+fn strip_frontmatter(content: &str) -> &str {
+    let s = content.trim_start_matches('\n');
+    let body = match s.strip_prefix("---\n") {
+        Some(rest) => rest,
+        None => return content,
+    };
+    if let Some(pos) = body.find("\n---\n") {
+        return &body[pos + 5..];
+    }
+    if let Some(stripped) = body.strip_suffix("\n---") {
+        let _ = stripped;
+        return "";
+    }
+    content
+}
+
 fn escape_like(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for ch in input.chars() {
