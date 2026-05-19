@@ -7,5 +7,6 @@ pub mod embed;
 pub mod rerank;
 pub mod handlers;
 pub mod mcp;
+pub mod search;
 pub mod vault;
 pub mod vault_watcher;
