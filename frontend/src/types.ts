@@ -84,6 +84,36 @@ export type SearchResponse = {
   results: SearchResult[];
 };
 
+export type TagStat = { tag: string; note_count: number };
+export type NoteRef = { title: string; slug: string };
+export type NoteWordRef = NoteRef & { word_count: number };
+export type LinkedNoteRef = NoteRef & { backlink_count: number };
+export type MonthActivity = { month: string; modified_count: number };
+export type FolderStat = { folder: string; note_count: number };
+export type NoteList = { count: number; notes: NoteRef[] };
+
+export type VaultStats = {
+  note_count: number;
+  word_count: number;
+  tag_count: number;
+  link_count: number;
+  image_count: number;
+  avg_word_count: number;
+  vault_size_bytes: number;
+  total_outgoing_links: number;
+  total_backlinks: number;
+  top_tags: TagStat[];
+  most_linked: LinkedNoteRef[];
+  activity_by_month: MonthActivity[];
+  notes_per_folder: FolderStat[];
+  longest_notes: NoteWordRef[];
+  shortest_notes: NoteWordRef[];
+  orphan_notes: NoteRef[];
+  no_tag_notes: NoteRef[];
+  modified_this_week: NoteList;
+  modified_this_month: NoteList;
+};
+
 export type MermaidApi = {
   initialize: (config: {
     startOnLoad: boolean;
