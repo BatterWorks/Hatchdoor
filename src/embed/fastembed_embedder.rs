@@ -10,16 +10,31 @@ pub struct FastembedEmbedder {
     tokenizer: Arc<Tokenizer>,
     dim: usize,
     id: &'static str,
+    doc_prefix: &'static str,
+    query_prefix: &'static str,
 }
 
 impl FastembedEmbedder {
-    fn load(model: EmbeddingModel, dim: usize, id: &'static str) -> Result<Self, String> {
+    fn load(
+        model: EmbeddingModel,
+        dim: usize,
+        id: &'static str,
+        doc_prefix: &'static str,
+        query_prefix: &'static str,
+    ) -> Result<Self, String> {
         let model = TextEmbedding::try_new(
             InitOptions::new(model).with_show_download_progress(false),
         )
         .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
         let tokenizer = Arc::new(model.tokenizer.clone());
-        Ok(Self { model, tokenizer, dim, id })
+        Ok(Self {
+            model,
+            tokenizer,
+            dim,
+            id,
+            doc_prefix,
+            query_prefix,
+        })
     }
 
     pub fn id(&self) -> &'static str {
@@ -27,15 +42,23 @@ impl FastembedEmbedder {
     }
 
     pub fn bge_small() -> Result<Self, String> {
-        Self::load(EmbeddingModel::BGESmallENV15, 384, "BGESmallENV15")
+        Self::load(EmbeddingModel::BGESmallENV15, 384, "BGESmallENV15", "", "")
     }
 
     pub fn nomic_v1_5() -> Result<Self, String> {
-        Self::load(EmbeddingModel::NomicEmbedTextV15, 768, "NomicEmbedTextV15")
+        // Nomic v1.5 requires task-instruction prefixes; the model is trained
+        // to produce different geometries for documents vs. queries.
+        Self::load(
+            EmbeddingModel::NomicEmbedTextV15,
+            768,
+            "NomicEmbedTextV15",
+            "search_document: ",
+            "search_query: ",
+        )
     }
 
     pub fn mxbai_large() -> Result<Self, String> {
-        Self::load(EmbeddingModel::MxbaiEmbedLargeV1, 1024, "MxbaiEmbedLargeV1")
+        Self::load(EmbeddingModel::MxbaiEmbedLargeV1, 1024, "MxbaiEmbedLargeV1", "", "")
     }
 }
 
@@ -55,6 +78,14 @@ impl Embedder for FastembedEmbedder {
 
     fn tokenizer(&self) -> Arc<Tokenizer> {
         self.tokenizer.clone()
+    }
+
+    fn doc_prefix(&self) -> &'static str {
+        self.doc_prefix
+    }
+
+    fn query_prefix(&self) -> &'static str {
+        self.query_prefix
     }
 }
 
