@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 
 use crate::api_types::RefreshResponse;
 use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
+use crate::search::SearchRequest;
 use crate::vault::VaultIndex;
 use crate::vault::{
     AttachmentOutcome, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
@@ -93,7 +94,7 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "search_notes",
-            "description": "Search notes and return compact results. Use this first for most questions. Start with include_content=false, then set include_content=true only when title/path search is not enough. Use get_note for selected slugs.",
+            "description": "Semantic-first chunk search across the vault. Returns ranked chunks with parent note metadata and the parent note's outbound wikilinks. Use mode=\"keyword\" for exact term/BM25 search when phrasing matters. Use get_note for full note content of a returned slug.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -102,16 +103,24 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
                         "minLength": 1,
                         "description": "Search query."
                     },
-                    "include_content": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Also search note content when title/path search is not enough."
+                    "mode": {
+                        "type": "string",
+                        "enum": ["semantic", "keyword"],
+                        "default": "semantic",
+                        "description": "Retrieval mode. semantic = vector similarity (default). keyword = FTS5 BM25 over chunk content."
                     },
                     "limit": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 50,
                         "default": 10
+                    },
+                    "per_note_cap": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "default": 2,
+                        "description": "Maximum number of chunks returned from any single note."
                     }
                 },
                 "required": ["query"],
@@ -219,15 +228,26 @@ async fn search_notes_tool(state: AppState, arguments: Value) -> Result<Value, J
     }
 
     let limit = args.limit.unwrap_or(10).clamp(1, 50);
-    let include_content = args.include_content.unwrap_or(false);
+    let per_note_cap = args.per_note_cap.unwrap_or(2).clamp(1, 10);
+    let mode = args.mode.unwrap_or_default();
+
     let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let results = cache
-        .search(&query, include_content, limit)
+    let embedder = state.embedder.as_ref();
+
+    let req = SearchRequest {
+        query,
+        mode,
+        limit,
+        per_note_cap,
+    };
+    let response = crate::search::run(cache.as_ref(), embedder, req)
         .map_err(JsonRpcFailure::internal)?;
 
-    Ok(tool_success(json!({ "results": results })))
+    Ok(tool_success(serde_json::to_value(&response).map_err(
+        |e| JsonRpcFailure::internal(format!("serialize search response: {e}")),
+    )?))
 }
 
 async fn get_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -843,9 +863,11 @@ fn write_tools_list() -> Vec<Value> {
 struct SearchNotesArgs {
     query: String,
     #[serde(default)]
-    include_content: Option<bool>,
+    mode: Option<crate::search::SearchMode>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    per_note_cap: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
