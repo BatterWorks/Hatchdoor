@@ -1,26 +1,26 @@
-{"id":"D1","query":"How do I restore a Proxmox backup if BatterNAS is dead?","expected_notes":["BatterBackup — PBS iSCSI to kDrive (Kopia) — Full setup runbook"],"expected_heading_path":"Recovery chain"}
-{"id":"D2","query":"What's the MergerFS pool layout on BatterProx?","expected_notes":["Homelab Storage — MergerFS & SnapRAID Runbook"],"expected_heading_path":"Final topology"}
-{"id":"D3","query":"How can I setup DNS + SSL wired up across the homelab?","expected_notes":["Homelab Internal DNS + SSL Pattern — From Alessandro"]}
-{"id":"D4","query":"How do I add a new client to Authelia?","expected_notes":["Authelia — Battercloud SSO Deployment Runbook"]}
-{"id":"D5","query":"Fix for Cloudflare 522 when NPM isn't forwarding","expected_notes":["Cloudflare 522 — Fix for NPM not forwarding to services (DOCKER-USER allow)"]}
-{"id":"D6","query":"How to set up Atuin shell history on a new machine","expected_notes":["Atuin Client Setup — New Machine Runbook"]}
-{"id":"D7","query":"How do I get Telegram alerts when Kopia backup fails?","expected_notes":["BatterBackup — Telegram alert on Kopia failure (systemd OnFailure)"]}
-{"id":"D8","query":"Which coffees did I rate as rebuy-worthy?","expected_notes":["Favourite coffees"]}
-{"id":"D9","query":"Tasting notes for the Pergamino Alto de Letras","expected_notes":["Coffee — Pergamino Alto de Letras"],"expected_heading_path":"Tasting notes"}
-{"id":"D10","query":"What's our plan for flying with the baby?","expected_notes":["Baby Travel — 9 Tips for Flying with a Baby (YouTube Short)"]}
-{"id":"D11","query":"Open research questions I still need to resolve about parenting","expected_notes":["Parenting Research Dashboard"],"expected_heading_path":"Open questions"}
-{"id":"D12","query":"Babymoov Nutribaby — what did I note about it?","expected_notes":["Babymoov"]}
-{"id":"D13","query":"What's my handover model if I can't manage things anymore?","expected_notes":["Contingency — Access & handover model"]}
-{"id":"D14","query":"Where is the inventory of all my assets and systems?","expected_notes":["Contingency — Assets & systems inventory"]}
-{"id":"D15","query":"Best Anki decks for Spanish vocabulary","expected_notes":["Anki for Spanish — Practical Starter Guide"],"expected_heading_path":"Spanish deck shortlist"}
-{"id":"D16","query":"How does Hatchdoor generate page URLs?","expected_notes":["Hatchdoor Page URL Generation"]}
-{"id":"D17","query":"Markdown features Hatchdoor supports","expected_notes":["Hatchdoor — Markdown Feature Showcase"]}
-{"id":"D18","query":"Tenant support resources in Amsterdam","expected_notes":["Amsterdam Housing — !WOON tenant support (English)"]}
-{"id":"D19","query":"Geneva airport free WiFi code","expected_notes":["Geneva Airport (GVA) — Free WiFi code"]}
-{"id":"D20","query":"Aurélien's political views — quick reference","expected_notes":["Aurélien — Political Beliefs Snapshot"]}
-{"id":"U1","query":"Where does my Plex media live?","expected_notes":["Homelab Atlas","Host — BatterVision (VM 112)","Homelab Storage — MergerFS & SnapRAID Runbook"]}
-{"id":"U2","query":"I'm looking for a new smell for the house","expected_notes":["Home Shopping Ideas","Idea — Zara Home 120 ml Café Ambre reed diffuser"],"expected_heading_path":"Home fragrance","anti_expected":["Gift idea — Nadine — Empressa perfume","Gift ideas — Nadine"]}
-{"id":"U3","query":"How often should I feed my Calathea?","expected_notes":["Calathea — Peacock plant"]}
-{"id":"U4","query":"How do I want to update my backup strategy?","expected_notes":["Backups & Archival Hub","M-DISC Optical Archive Layer","Home Photo & Video Library — Storage & Backup Design","Article Entry — Home Photo & Video Library — Storage & Backup Design"],"anti_expected":["Backup activities schedule","BatterBackup — Telegram alert on Kopia failure (systemd OnFailure)"]}
-{"id":"U5","query":"I am travelling by plane with the baby","expected_notes":["Baby Travel — 9 Tips for Flying with a Baby (YouTube Short)","Parenting & Baby"],"anti_expected":["Idea — Baby tummy-time alternative (lumbar reflex and airplane hold)","KLM baggage tag — ZARCA-AURELIEN — 11 Apr 2026","KLM baggage tag — WONG-NADINE — 11 Apr 2026"]}
-{"id":"U6","query":"How can I reflect on things with my family?","expected_notes":["Idea — Family half-year retrospective"],"anti_expected":["Relationships cheat sheet","Contingency — Decision log","Contingency — People & roles"]}
+{"id":"D1","query":"How do I restore a Proxmox backup if BatterNAS is dead?","expected_notes":["batterbackup-pbs-iscsi-to-kdrive-kopia-full-setup-runbook"],"expected_heading_path":"Recovery chain"}
+{"id":"D2","query":"What's the MergerFS pool layout on BatterProx?","expected_notes":["homelab-storage-mergerfs-snapraid-runbook"],"expected_heading_path":"Final topology"}
+{"id":"D3","query":"How can I setup DNS + SSL wired up across the homelab?","expected_notes":["homelab-internal-dns-ssl-pattern-from-alessandro"]}
+{"id":"D4","query":"How do I add a new client to Authelia?","expected_notes":["authelia-battercloud-sso-deployment-runbook"]}
+{"id":"D5","query":"Fix for Cloudflare 522 when NPM isn't forwarding","expected_notes":["cloudflare-522-fix-for-npm-not-forwarding-to-services-docker-user-allow"]}
+{"id":"D6","query":"How to set up Atuin shell history on a new machine","expected_notes":["atuin-client-setup-new-machine-runbook"]}
+{"id":"D7","query":"How do I get Telegram alerts when Kopia backup fails?","expected_notes":["batterbackup-telegram-alert-on-kopia-failure-systemd-onfailure"]}
+{"id":"D8","query":"Which coffees did I rate as rebuy-worthy?","expected_notes":["favourite-coffees"]}
+{"id":"D9","query":"Tasting notes for the Pergamino Alto de Letras","expected_notes":["coffee-pergamino-alto-de-letras"],"expected_heading_path":"Tasting notes"}
+{"id":"D10","query":"What's our plan for flying with the baby?","expected_notes":["baby-travel-9-tips-for-flying-with-a-baby-youtube-short"]}
+{"id":"D11","query":"Open research questions I still need to resolve about parenting","expected_notes":["parenting-research-dashboard"],"expected_heading_path":"Open questions"}
+{"id":"D12","query":"Babymoov Nutribaby — what did I note about it?","expected_notes":["babymoov"]}
+{"id":"D13","query":"What's my handover model if I can't manage things anymore?","expected_notes":["contingency-access-handover-model"]}
+{"id":"D14","query":"Where is the inventory of all my assets and systems?","expected_notes":["contingency-assets-systems-inventory"]}
+{"id":"D15","query":"Best Anki decks for Spanish vocabulary","expected_notes":["anki-for-spanish-practical-starter-guide"],"expected_heading_path":"Spanish deck shortlist"}
+{"id":"D16","query":"How does Hatchdoor generate page URLs?","expected_notes":["hatchdoor-page-url-generation"]}
+{"id":"D17","query":"Markdown features Hatchdoor supports","expected_notes":["hatchdoor-markdown-feature-showcase"]}
+{"id":"D18","query":"Tenant support resources in Amsterdam","expected_notes":["amsterdam-housing-woon-tenant-support-english"]}
+{"id":"D19","query":"Geneva airport free WiFi code","expected_notes":["geneva-airport-gva-free-wifi-code"]}
+{"id":"D20","query":"Aurélien's political views — quick reference","expected_notes":["aurlien-political-beliefs-snapshot"]}
+{"id":"U1","query":"Where does my Plex media live?","expected_notes":["homelab-atlas","host-battervision-vm-112","homelab-storage-mergerfs-snapraid-runbook"]}
+{"id":"U2","query":"I'm looking for a new smell for the house","expected_notes":["home-shopping-ideas","idea-zara-home-120-ml-caf-ambre-reed-diffuser"],"expected_heading_path":"Home fragrance","anti_expected":["gift-idea-nadine-empressa-perfume","gift-ideas-nadine"]}
+{"id":"U3","query":"How often should I feed my Calathea?","expected_notes":["calathea-peacock-plant"]}
+{"id":"U4","query":"How do I want to update my backup strategy?","expected_notes":["backups-archival-hub","m-disc-optical-archive-layer","home-photo-video-library-storage-backup-design","article-entry-home-photo-video-library-storage-backup-design"],"anti_expected":["backup-activities-schedule","batterbackup-telegram-alert-on-kopia-failure-systemd-onfailure"]}
+{"id":"U5","query":"I am travelling by plane with the baby","expected_notes":["baby-travel-9-tips-for-flying-with-a-baby-youtube-short","parenting-baby"],"anti_expected":["idea-baby-tummy-time-alternative-lumbar-reflex-and-airplane-hold","klm-baggage-tag-zarca-aurelien-11-apr-2026","klm-baggage-tag-wong-nadine-11-apr-2026"]}
+{"id":"U6","query":"How can I reflect on things with my family?","expected_notes":["idea-family-half-year-retrospective"],"anti_expected":["relationships-cheat-sheet","contingency-decision-log","contingency-people-roles"]}
