@@ -62,6 +62,7 @@ mod tests {
     fn fake_report() -> Report {
         Report {
             model_id: "BGESmallENV15".to_string(),
+            reranker_id: None,
             recall_at_5_any: 0.84,
             recall_at_5_all: 0.71,
             recall_at_10_any: 0.92,
@@ -73,7 +74,11 @@ mod tests {
                 query: "Where does my Plex media live?".to_string(),
                 first_expected_rank: Some(1),
                 anti_expected_hit_at_5: None,
+                rank_pre_rerank: None,
+                rank_post_rerank: None,
             }],
+            rerank_latency_ms: None,
+            e2e_latency_ms: None,
         }
     }
 
