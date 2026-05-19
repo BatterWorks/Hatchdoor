@@ -29,6 +29,7 @@ fn print_usage() {
   eval build --model <id> --cache <path>
   eval run --model <id> --cache <path> --queries <path>
   eval rerank --model <id> --cache <path> --reranker <id> --queries <path> [--initial-k <n>]
+  eval hybrid --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
 
 models:    BGESmallENV15 | NomicEmbedTextV15 | MxbaiEmbedLargeV1
 rerankers: JINARerankerV1TurboEn | JINARerankerV2BaseMultilingual"
@@ -46,6 +47,13 @@ enum Cmd {
         queries: PathBuf,
         initial_k: usize,
     },
+    Hybrid {
+        model: String,
+        cache: PathBuf,
+        queries: PathBuf,
+        initial_k: usize,
+        rrf_k: usize,
+    },
 }
 
 fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
@@ -56,6 +64,7 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
     let mut queries: Option<PathBuf> = None;
     let mut reranker: Option<String> = None;
     let mut initial_k: Option<usize> = None;
+    let mut rrf_k: Option<usize> = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--model" => model = Some(it.next().ok_or("missing value for --model")?),
@@ -67,6 +76,13 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
                 initial_k = Some(
                     raw.parse::<usize>()
                         .map_err(|e| format!("invalid --initial-k {raw}: {e}"))?,
+                );
+            }
+            "--rrf-k" => {
+                let raw = it.next().ok_or("missing value for --rrf-k")?;
+                rrf_k = Some(
+                    raw.parse::<usize>()
+                        .map_err(|e| format!("invalid --rrf-k {raw}: {e}"))?,
                 );
             }
             other => return Err(format!("unknown flag: {other}")),
@@ -85,6 +101,12 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
             let reranker = reranker.ok_or("missing --reranker")?;
             let initial_k = initial_k.unwrap_or(20);
             Ok(Cmd::Rerank { model, cache, reranker, queries, initial_k })
+        }
+        "hybrid" => {
+            let queries = queries.ok_or("missing --queries")?;
+            let initial_k = initial_k.unwrap_or(20);
+            let rrf_k = rrf_k.unwrap_or(60);
+            Ok(Cmd::Hybrid { model, cache, queries, initial_k, rrf_k })
         }
         other => Err(format!("unknown subcommand: {other}")),
     }
@@ -283,6 +305,71 @@ fn main() -> ExitCode {
             if let Err(e) =
                 hatchdoor::eval::report::append_rerank_section(&results_md, &report, initial_k)
             {
+                eprintln!("warning: failed to append section to {}: {e}", results_md.display());
+            }
+            ExitCode::SUCCESS
+        }
+        Cmd::Hybrid { model, cache, queries, initial_k, rrf_k } => {
+            if !cache.exists() {
+                eprintln!(
+                    "error: cache {} does not exist. Run `eval build` first.",
+                    cache.display()
+                );
+                return ExitCode::from(1);
+            }
+            let embedder = match load_embedder(&model) {
+                Ok(e) => e,
+                Err(e) => { eprintln!("error loading embedder: {e}"); return ExitCode::from(1); }
+            };
+            let sqlite = match hatchdoor::cache::SqliteCache::open(&cache, embedder.embedding_dim()) {
+                Ok(c) => c,
+                Err(e) => { eprintln!("error opening cache: {e}"); return ExitCode::from(1); }
+            };
+            let qs = match hatchdoor::eval::query::load_jsonl(&queries) {
+                Ok(q) => q,
+                Err(e) => { eprintln!("error loading queries: {e}"); return ExitCode::from(1); }
+            };
+
+            let hybrid = match hatchdoor::eval::hybrid_runner::run_hybrid_eval(
+                &sqlite,
+                embedder.as_ref(),
+                &qs,
+                initial_k,
+                rrf_k,
+                10,
+            ) {
+                Ok(r) => r,
+                Err(e) => { eprintln!("error running hybrid eval: {e}"); return ExitCode::from(1); }
+            };
+
+            let results: Vec<hatchdoor::eval::metrics::QueryResult> =
+                hybrid.iter().map(|h| h.query_result.clone()).collect();
+            let run_id = format!("Hybrid ({} + FTS RRF)", model);
+            let mut report = hatchdoor::eval::metrics::aggregate(&run_id, &qs, &results);
+            let latencies: Vec<f64> = hybrid.iter().map(|h| h.latency_ms).collect();
+            if !latencies.is_empty() {
+                report.e2e_latency_ms =
+                    Some(hatchdoor::eval::metrics::LatencyStats::from_samples(&latencies));
+            }
+
+            println!("hybrid complete: model={model} initial_k={initial_k} rrf_k={rrf_k}");
+            println!("  Recall@5  (any): {:.3}", report.recall_at_5_any);
+            println!("  Recall@5  (all): {:.3}", report.recall_at_5_all);
+            println!("  Recall@10 (any): {:.3}", report.recall_at_10_any);
+            println!("  Recall@10 (all): {:.3}", report.recall_at_10_all);
+            println!("  MRR           : {:.3}", report.mrr);
+            println!("  FP-rate@5     : {:.3}", report.fp_rate_at_5);
+            if let Some(s) = report.e2e_latency_ms {
+                println!("  e2e    lat ms : median={:.3} p90={:.3} max={:.3}", s.median, s.p90, s.max);
+            }
+
+            let results_md = std::path::PathBuf::from("eval/results.md");
+            if let Err(e) = hatchdoor::eval::report::append_hybrid_section(
+                &results_md,
+                &report,
+                initial_k,
+                rrf_k,
+            ) {
                 eprintln!("warning: failed to append section to {}: {e}", results_md.display());
             }
             ExitCode::SUCCESS

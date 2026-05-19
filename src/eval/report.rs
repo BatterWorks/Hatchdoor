@@ -135,6 +135,71 @@ pub fn append_rerank_section(
     Ok(())
 }
 
+pub fn append_hybrid_section(
+    path: &Path,
+    report: &Report,
+    initial_k: usize,
+    rrf_k: usize,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    writeln!(f).ok();
+    writeln!(f, "## Hybrid — {}", report.model_id).map_err(|e| format!("write: {e}"))?;
+    writeln!(f).ok();
+    writeln!(f, "- Run timestamp: {now}").ok();
+    writeln!(f, "- Initial K per retriever: {initial_k}").ok();
+    writeln!(f, "- RRF k: {rrf_k}").ok();
+    if let Some(stats) = report.e2e_latency_ms {
+        writeln!(
+            f,
+            "- Median end-to-end latency: {:.1} ms (p90: {:.1}, max: {:.1})",
+            stats.median, stats.p90, stats.max
+        )
+        .ok();
+    }
+    writeln!(f).ok();
+    writeln!(f, "| Metric | Value |").ok();
+    writeln!(f, "|---|---|").ok();
+    writeln!(f, "| Recall@5 (any) | {:.3} |", report.recall_at_5_any).ok();
+    writeln!(f, "| Recall@5 (all) | {:.3} |", report.recall_at_5_all).ok();
+    writeln!(f, "| Recall@10 (any) | {:.3} |", report.recall_at_10_any).ok();
+    writeln!(f, "| Recall@10 (all) | {:.3} |", report.recall_at_10_all).ok();
+    writeln!(f, "| MRR | {:.3} |", report.mrr).ok();
+    writeln!(f, "| FP-rate@5 | {:.3} |", report.fp_rate_at_5).ok();
+    writeln!(f).ok();
+    writeln!(f, "### Per-query breakdown").ok();
+    writeln!(f).ok();
+    writeln!(f, "| ID | Query | Rank of first expected | Anti in top-5? |").ok();
+    writeln!(f, "|---|---|---|---|").ok();
+    for pq in &report.per_query {
+        let rank = pq
+            .first_expected_rank
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let anti = match pq.anti_expected_hit_at_5 {
+            Some(true) => "yes",
+            Some(false) => "no",
+            None => "—",
+        };
+        let query_truncated = if pq.query.len() > 80 {
+            format!("{}…", &pq.query[..77])
+        } else {
+            pq.query.clone()
+        };
+        writeln!(f, "| {} | {} | {} | {} |", pq.id, query_truncated, rank, anti).ok();
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

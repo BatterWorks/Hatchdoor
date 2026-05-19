@@ -431,6 +431,41 @@ impl SqliteCache {
         }
         Ok(hits)
     }
+
+    /// Note-level FTS5 lookup ordered by BM25. Returns slugs in rank order.
+    /// Used by the hybrid-retrieval eval. Returns an empty list if the query
+    /// produces no usable FTS tokens.
+    #[allow(dead_code)]
+    pub fn fts_search_notes(&self, query: &str, k: usize) -> Result<Vec<String>, String> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(fts_q) = crate::cache::parse::build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT slug
+                FROM note_fts
+                WHERE note_fts MATCH ?1
+                ORDER BY bm25(note_fts)
+                LIMIT ?2
+                "#,
+            )
+            .map_err(|e| format!("prepare fts_search_notes: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![fts_q, k as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| format!("query fts_search_notes: {e}"))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| format!("read fts_search_notes row: {e}"))?);
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Debug)]
