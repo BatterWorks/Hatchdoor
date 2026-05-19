@@ -6,3 +6,4 @@ frontend/dist
 /tmp
 /data
 /.fastembed_cache
+.claude/
