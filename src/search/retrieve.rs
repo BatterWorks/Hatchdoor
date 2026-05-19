@@ -70,18 +70,15 @@ fn keyword(
     let b_max = hits
         .iter()
         .map(|h| h.bm25.abs())
-        .fold(f32::MIN, f32::max);
+        .fold(f32::NEG_INFINITY, f32::max);
     Ok(hits
         .into_iter()
         .map(|h| {
-            let raw = if b_max <= f32::EPSILON {
+            let score = if b_max <= f32::EPSILON {
                 1.0
             } else {
-                (1.0 - (h.bm25.abs() / b_max)).clamp(0.0, 1.0)
+                (h.bm25.abs() / b_max).clamp(0.0, 1.0)
             };
-            // Single-row sets, or sets where all BM25 values are identical, collapse to 0.
-            // Bump those to 1.0 so the caller still gets a positive score.
-            let score = if raw <= f32::EPSILON { 1.0 } else { raw };
             ChunkHit {
                 chunk_id: h.chunk_id,
                 note_slug: h.note_slug,
@@ -212,6 +209,28 @@ mod tests {
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn keyword_mode_scores_are_non_increasing_with_three_matches() {
+        let (cache, embedder) = build_cache(&[
+            ("a.md", "# A\n\noranges oranges oranges"),  // best BM25
+            ("b.md", "# B\n\noranges oranges"),
+            ("c.md", "# C\n\noranges"),                  // worst BM25
+        ]);
+        let req = SearchRequest {
+            query: "oranges".to_string(),
+            mode: SearchMode::Keyword,
+            limit: 10,
+            per_note_cap: 1,
+        };
+        let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
+        assert_eq!(hits.len(), 3);
+        for w in hits.windows(2) {
+            assert!(w[0].score >= w[1].score, "scores must be non-increasing: {} < {}", w[0].score, w[1].score);
+        }
+        // Best match (most oranges) should have highest score
+        assert!((hits[0].score - 1.0).abs() < 0.01, "best hit should have score near 1.0, got {}", hits[0].score);
     }
 
     #[test]
