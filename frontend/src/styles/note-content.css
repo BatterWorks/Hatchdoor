@@ -5,6 +5,7 @@
   max-width: 100%;
   box-sizing: border-box;
   min-width: 0;
+  overflow-y: auto;
 }
 
 /* Two-col layout: body + TOC
