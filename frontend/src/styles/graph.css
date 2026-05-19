@@ -11,6 +11,7 @@
   flex-direction: column;
   height: 100%;
   overflow: hidden;
+  position: relative;
 }
 
 /* ── HEADER ─────────────────────────────────────────────────── */
@@ -204,13 +205,176 @@
   color: var(--muted);
 }
 
+/* ── FILTER TOGGLE (hidden on desktop) ───────────────────────── */
+.graph-filter-toggle {
+  display: none;
+}
+
+/* ── MOBILE TAG OVERLAY (hidden on desktop) ──────────────────── */
+.graph-tags-mobile {
+  display: none;
+}
+
+.graph-filter-backdrop {
+  display: none;
+}
+
 /* ── RESPONSIVE ──────────────────────────────────────────────── */
 @media (max-width: 700px) {
+  /* Slim single-row HUD bar */
   .graph-header {
-    padding: 1rem 1rem 0.65rem;
+    padding: 0 0.75rem;
+    height: 44px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .graph-eyebrow {
+    display: none;
+  }
+
+  .graph-header-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0;
+  }
+
+  .graph-title {
+    font-size: 1.15rem;
+    letter-spacing: -0.01em;
+    flex-shrink: 0;
+  }
+
+  .graph-meta-strip {
+    flex: 1;
+    gap: 0.4rem;
+  }
+
+  .graph-meta-num {
+    font-size: 0.88rem;
+  }
+
+  .graph-meta-lbl {
+    font-size: 0.52rem;
   }
 
   .graph-hint {
     display: none;
+  }
+
+  /* Hide inline desktop tag block */
+  .graph-tags-desktop {
+    display: none;
+  }
+
+  /* Filter toggle button */
+  .graph-filter-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid var(--rule);
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+    transition:
+      border-color 120ms ease,
+      color 120ms ease,
+      background 120ms ease;
+  }
+
+  .graph-filter-toggle.has-active {
+    border-color: var(--hot);
+    color: var(--hot);
+  }
+
+  .graph-filter-toggle.is-open {
+    background: var(--paper-2);
+    color: var(--ink);
+    border-color: var(--rule-strong);
+  }
+
+  .graph-filter-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.1em;
+    height: 1.1em;
+    background: var(--hot);
+    color: var(--bg);
+    border-radius: 2px;
+    font-size: 0.7em;
+    font-weight: 700;
+    padding: 0 0.2em;
+    margin-left: 0.25em;
+    vertical-align: middle;
+  }
+
+  .graph-filter-caret {
+    font-size: 0.75rem;
+    transition: transform 180ms ease;
+    line-height: 1;
+  }
+
+  .graph-filter-toggle.is-open .graph-filter-caret {
+    transform: rotate(180deg);
+  }
+
+  /* Backdrop — tapping outside closes the panel */
+  .graph-filter-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    background: transparent;
+    border: none;
+    cursor: default;
+  }
+
+  /* Mobile tag overlay — slides down over canvas, never pushes it */
+  .graph-tags-mobile {
+    display: block;
+    position: absolute;
+    top: 44px; /* header height */
+    left: 0;
+    right: 0;
+    z-index: 10;
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 220ms cubic-bezier(0.4, 0, 0.2, 1);
+    /* suppress inner filter which is always "open" inside the mobile container */
+  }
+
+  /* When the backdrop is present (filterOpen=true), expand the panel */
+  .graph-tags-mobile:has(~ .graph-canvas-wrap) {
+    /* fallback — open state driven by aria-hidden=false */
+  }
+
+  .graph-tags-mobile[aria-hidden="false"] {
+    max-height: 45vh;
+    overflow-y: auto;
+  }
+
+  /* Force inner tag-filter always visible inside the mobile overlay */
+  .graph-tags-mobile .graph-tag-filter {
+    display: flex !important;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0.7rem 0.75rem;
+    margin-bottom: 0;
+  }
+
+  .graph-tag-chip {
+    font-size: 0.7rem;
+    padding: 0.18rem 0.55rem;
   }
 }
