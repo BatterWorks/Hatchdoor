@@ -57,7 +57,7 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
 
   if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
     const firstText = flattenText(first.props.children).trim();
-    const match = firstText.match(/^\[!([A-Za-z0-9_-]+)\]([+-])?\s*(.*)$/);
+    const match = firstText.match(/^\[!([A-Za-z0-9_-]+)\]([+-])?\s*(.*)$/m);
 
     if (match) {
       const kind = match[1].toLowerCase();
@@ -76,7 +76,9 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
             open={fold === "+"}
           >
             <summary className="callout-title">{title}</summary>
-            <div className="callout-body">{bodyNodes}</div>
+            {bodyNodes.length > 0 && (
+              <div className="callout-body">{bodyNodes}</div>
+            )}
           </details>
         );
       }
@@ -84,7 +86,9 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
       return (
         <div className={`callout callout-${kind}`}>
           <div className="callout-title">{title}</div>
-          <div className="callout-body">{bodyNodes}</div>
+          {bodyNodes.length > 0 && (
+            <div className="callout-body">{bodyNodes}</div>
+          )}
         </div>
       );
     }
