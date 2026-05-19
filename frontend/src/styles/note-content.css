@@ -88,20 +88,33 @@
 }
 
 .note-body h4 {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 1.08rem;
+  letter-spacing: -0.01em;
+  margin: 1.6rem 0 0.4rem;
+}
+
+.note-body h5 {
+  font-family: var(--font-serif);
+  font-style: normal;
+  font-weight: 400;
+  font-size: 0.95rem;
+  color: var(--muted);
+  margin: 1.2rem 0 0.3rem;
+}
+
+.note-body h6 {
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 96,
-    "wght" 600;
-  font-size: 0.88rem;
-  margin: 1.4rem 0 0.4rem;
-}
-
-.note-body h5,
-.note-body h6 {
-  font-family: var(--font-sans);
-  font-size: 0.88rem;
-  font-weight: 600;
-  margin: 1.2rem 0 0.35rem;
+    "wght" 500;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--tertiary);
+  margin: 1rem 0 0.25rem;
 }
 
 .note-body :is(h1, h2, h3, h4, h5, h6) {
@@ -188,6 +201,39 @@
   background: var(--hot);
 }
 
+.note-body ul ul li::before {
+  width: 0.42rem;
+  background: var(--muted);
+}
+
+.note-body ul ul ul li::before {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  top: 0.6em;
+  background: var(--tertiary);
+}
+
+/* Task list items — suppress dash bullet, show checkbox instead */
+.note-body ul li.task-list-item {
+  padding-left: 0;
+  list-style: none;
+}
+
+.note-body ul li.task-list-item::before {
+  display: none;
+}
+
+.note-body ul li.task-list-item input[type="checkbox"] {
+  margin-right: 0.45rem;
+  accent-color: var(--hot);
+  width: 0.9em;
+  height: 0.9em;
+  vertical-align: middle;
+  position: relative;
+  top: -0.08em;
+}
+
 .note-body ol {
   counter-reset: olc;
 }
@@ -205,6 +251,15 @@
   font-size: 0.86rem;
   color: var(--hot);
   font-weight: 600;
+}
+
+.note-body ol ol li::before {
+  content: counter(olc, lower-alpha) ".";
+}
+
+.note-body ol ol ol li::before {
+  content: counter(olc, lower-roman) ".";
+  color: var(--muted);
 }
 
 /* Blockquote */
@@ -366,15 +421,6 @@
   color: var(--bg);
 }
 
-/* Inline code outside code blocks */
-.note-body code {
-  font-family: var(--font-mono);
-  font-size: 0.86em;
-  background: var(--paper-2);
-  padding: 0.05rem 0.35rem;
-  color: var(--ink);
-}
-
 /* Reset inline code style when inside a code block */
 .code-block code {
   background: transparent;
@@ -404,15 +450,10 @@
 .callout {
   border: 1px solid var(--rule-strong);
   background: var(--paper);
-  padding: 0.9rem 1.1rem 0.9rem 3.1rem;
+  padding: 0;
   margin: 1.6rem 0;
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-size: 1.02rem;
-  line-height: 1.55;
   color: var(--ink-soft);
-  position: relative;
-  border-radius: 0;
+  overflow: hidden;
 }
 
 .callout-title {
@@ -424,22 +465,16 @@
   font-size: 0.72rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  position: absolute;
-  left: 0.9rem;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 1.5rem;
-  height: 1.5rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--bg);
+  display: block;
+  padding: 0.45rem 1.1rem;
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule-strong);
 }
 
 .callout-collapsible > .callout-title {
   cursor: pointer;
   list-style: none;
-  position: absolute;
+  display: list-item;
 }
 
 .callout-collapsible > .callout-title::-webkit-details-marker {
@@ -451,16 +486,7 @@
   font-style: italic;
   font-size: 1.02rem;
   line-height: 1.55;
-}
-
-.callout-note {
-  background: var(--info-bg);
-  border-color: var(--info-border);
-  color: var(--info-fg);
-}
-
-.callout-note .callout-title {
-  background: var(--info-fg);
+  padding: 0.9rem 1.1rem;
 }
 
 .callout-warning {
@@ -471,6 +497,8 @@
 
 .callout-warning .callout-title {
   background: var(--warn-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
 }
 
 .callout-danger,
@@ -483,6 +511,167 @@
 .callout-danger .callout-title,
 .callout-error .callout-title {
   background: var(--err-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-note,
+.callout-info {
+  background: var(--info-bg);
+  border-color: var(--info-border);
+  color: var(--info-fg);
+}
+
+.callout-note .callout-title,
+.callout-info .callout-title {
+  background: var(--info-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-tip,
+.callout-hint,
+.callout-important {
+  background: var(--tip-bg);
+  border-color: var(--tip-border);
+  color: var(--tip-fg);
+}
+
+.callout-tip .callout-title,
+.callout-hint .callout-title,
+.callout-important .callout-title {
+  background: var(--tip-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-success,
+.callout-check,
+.callout-done {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success-fg);
+}
+
+.callout-success .callout-title,
+.callout-check .callout-title,
+.callout-done .callout-title {
+  background: var(--success-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-question,
+.callout-help,
+.callout-faq {
+  background: var(--question-bg);
+  border-color: var(--question-border);
+  color: var(--question-fg);
+}
+
+.callout-question .callout-title,
+.callout-help .callout-title,
+.callout-faq .callout-title {
+  background: var(--question-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-abstract,
+.callout-summary,
+.callout-tldr {
+  background: var(--abstract-bg);
+  border-color: var(--abstract-border);
+  color: var(--abstract-fg);
+}
+
+.callout-abstract .callout-title,
+.callout-summary .callout-title,
+.callout-tldr .callout-title {
+  background: var(--abstract-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-caution,
+.callout-attention {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+  color: var(--warn-fg);
+}
+
+.callout-caution .callout-title,
+.callout-attention .callout-title {
+  background: var(--warn-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-failure,
+.callout-fail,
+.callout-missing {
+  background: var(--failure-bg);
+  border-color: var(--failure-border);
+  color: var(--failure-fg);
+}
+
+.callout-failure .callout-title,
+.callout-fail .callout-title,
+.callout-missing .callout-title {
+  background: var(--failure-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-bug {
+  background: var(--err-bg);
+  border-color: var(--err-border);
+  color: var(--err-fg);
+}
+
+.callout-bug .callout-title {
+  background: var(--err-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+.callout-example {
+  background: var(--example-bg);
+  border-color: var(--example-border);
+  color: var(--example-fg);
+}
+
+.callout-example .callout-title {
+  background: var(--example-fg);
+  color: var(--bg);
+  border-bottom-color: transparent;
+}
+
+/* Pull-quote (rendered from [!quote] and [!cite] callouts) */
+.note-body .pullquote {
+  margin: 1.8rem 0;
+  padding: 0;
+  border: none;
+}
+
+.note-body .pullquote blockquote {
+  margin: 0;
+}
+
+.note-body .pullquote figcaption {
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 88, "wght" 600;
+  font-style: normal;
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-top: 0.65rem;
+  text-align: right;
+}
+
+.note-body .pullquote figcaption::before {
+  content: "— ";
 }
 
 /* Mermaid diagrams */
