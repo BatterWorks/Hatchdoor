@@ -5,7 +5,7 @@ use super::SqliteCache;
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -253,7 +253,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("query");
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
     }
 
     #[test]
