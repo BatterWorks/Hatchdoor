@@ -377,6 +377,16 @@ impl SqliteCache {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+pub struct ChunkFtsHit {
+    pub chunk_id: i64,
+    pub note_slug: String,
+    pub heading_path: Option<String>,
+    pub content: String,
+    pub bm25: f32,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SemanticHit {
     pub chunk_id: i64,
     pub note_slug: String,
@@ -465,6 +475,52 @@ impl SqliteCache {
             out.push(r.map_err(|e| format!("read fts_search_notes row: {e}"))?);
         }
         Ok(out)
+    }
+
+    /// Chunk-level FTS5 lookup ordered by BM25. Returns `ChunkFtsHit` rows in
+    /// rank order (bm25 ascending, i.e. best match first).
+    /// Returns an empty list if the query produces no usable FTS tokens.
+    #[allow(dead_code)]
+    pub fn fts_search_chunks(
+        &self,
+        query: &str,
+        k: usize,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(fts_q) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)
+                FROM chunk_fts
+                JOIN chunks c ON c.id = chunk_fts.rowid
+                WHERE chunk_fts MATCH ?1
+                ORDER BY bm25(chunk_fts)
+                LIMIT ?2
+                "#,
+            )
+            .map_err(|e| format!("prepare fts_search_chunks: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![fts_q, k as i64], |row| {
+                Ok(ChunkFtsHit {
+                    chunk_id: row.get(0)?,
+                    note_slug: row.get(1)?,
+                    heading_path: row.get(2)?,
+                    content: row.get(3)?,
+                    bm25: row.get::<_, f64>(4)? as f32,
+                })
+            })
+            .map_err(|e| format!("query fts_search_chunks: {e}"))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row.map_err(|e| format!("read fts_search_chunks row: {e}"))?);
+        }
+        Ok(hits)
     }
 }
 
@@ -1001,5 +1057,67 @@ mod semantic_search_tests {
             .semantic_search(embedder.as_ref(), "anything", 5)
             .expect("search");
         assert!(hits.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fts_search_chunks_tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use crate::cache::SqliteCache;
+    use crate::embed::{Embedder, StubEmbedder};
+    use crate::vault::VaultIndex;
+
+    fn vault_with(files: &[(&str, &str)]) -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).expect("write");
+        }
+        dir
+    }
+
+    fn build_cache(files: &[(&str, &str)]) -> SqliteCache {
+        let dir = vault_with(files);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("index");
+        cache
+    }
+
+    #[test]
+    fn fts_search_chunks_returns_hits_ordered_by_bm25() {
+        let cache = build_cache(&[
+            ("a.md", "# Apples\n\napples and oranges grow on trees"),
+            ("b.md", "# Bicycles\n\nspokes and wheels"),
+        ]);
+        let hits = cache.fts_search_chunks("apples", 10).expect("search");
+        assert!(!hits.is_empty(), "expected at least one hit");
+        assert!(hits[0].note_slug.contains('a') || hits[0].content.contains("apples"));
+        for w in hits.windows(2) {
+            assert!(w[0].bm25 <= w[1].bm25, "bm25 must be non-decreasing");
+        }
+    }
+
+    #[test]
+    fn fts_search_chunks_returns_empty_on_stopword_only_query() {
+        let cache = build_cache(&[("a.md", "# A\n\nbody text")]);
+        let hits = cache.fts_search_chunks("   .  ", 10).expect("search");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn fts_search_chunks_respects_limit() {
+        let cache = build_cache(&[
+            ("a.md", "# A\n\napples"),
+            ("b.md", "# B\n\napples"),
+            ("c.md", "# C\n\napples"),
+        ]);
+        let hits = cache.fts_search_chunks("apples", 2).expect("search");
+        assert_eq!(hits.len(), 2);
     }
 }
