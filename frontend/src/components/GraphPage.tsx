@@ -198,6 +198,14 @@ export function GraphPage() {
     const nodes = simNodesRef.current;
     const links = simLinksRef.current;
 
+    // diagnostic: log state once per second
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const win = window as any;
+    if (!win._dbgLast || Date.now() - win._dbgLast > 1000) {
+      win._dbgLast = Date.now();
+      console.log("[graph] nodes:", nodes.length, "transform:", { x, y, k }, "canvas:", canvas.width, "x", canvas.height, "first:", nodes[0] ? `(${nodes[0].x?.toFixed(1)}, ${nodes[0].y?.toFixed(1)})` : "none");
+    }
+
     // determine which nodes are "visible" based on tag filter
     const isVisible = (node: SimNode) => {
       if (activeTags.size === 0) return true;
