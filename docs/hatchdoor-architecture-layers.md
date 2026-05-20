@@ -23,7 +23,7 @@ It should not include autonomous workflow orchestration for now.
 | **9. Context assembly layer** | Prepares useful context for agents. | Implemented — src/search/assemble.rs. Batched note metadata + resolved outbound wikilinks attached to each chunk hit. |
 | **10. Tool interface layer** | Exposes Hatchdoor capabilities to agents. | Implemented — MCP server at `/mcp` (`src/mcp/`). |
 | **11. Permission layer** | Controls read/write/modification rights. | Planned — Phase 5. Deferred until multi-agent or multi-tenant use is real. |
-| **12. Reindexing layer** | Keeps cache and indexes synchronised. | Partially implemented — watcher does full reindex; Phase 3 makes it incremental and embedding-aware. |
+| **12. Reindexing layer** | Keeps cache and indexes synchronised. | Implemented — watcher triggers full reindex on any vault change; note-level and chunk-level hash deduplication ensures only changed content is re-embedded. Full incremental dispatch (Phase 3) was evaluated and dropped — see phasing table. |
 | **13. Evaluation layer** | Measures retrieval quality. | Planned — Phase 1.5. Small harness with a labelled query set built from the real vault. |
 
 ---
@@ -80,8 +80,8 @@ The missing layers ship as a sequence of sub-projects, each with its own spec an
 | **1.5. Evaluation harness** | 13 | Labelled query set + scoring script so Phase 2 tuning is measurable. |
 | **1.6. Retrieval-strategy bake-off** | 13 (extended) | Eval-only: compared pure semantic vs cross-encoder rerank vs hybrid RRF. Outcome: pure semantic wins; reranker and hybrid dropped from runtime. See `docs/superpowers/specs/2026-05-19-phase-1.6-outcome.md`. |
 | **2. Semantic retrieval + context assembly** | 6 (runtime exposure), 9 | Done. New MCP tool and HTTP endpoint return ranked chunk-level results (semantic or keyword mode) with note metadata and resolved outbound wikilinks assembled inline. See src/search/. |
-| **3. Incremental reindexing** | 12 (full) | Watcher embeds only changed chunks instead of full reindex. |
-| **4. Permission layer** | 11 | Read/write gating per agent or path. Deferred until needed. |
+| **3. Incremental reindexing** | 12 (full) | **Dropped.** Tested 2026-05-20: no-change scan costs ~122ms; re-embedding a changed note costs ~2s (Nomic v1.5 on CPU). The scan is ~5% of total reindex time when any note changes, so incremental watcher dispatch saves negligible time at this vault size (284 notes / 491 chunks). The code already does note-level and chunk-level hash deduplication — only genuinely changed chunks are ever re-embedded. Revisit if the vault grows to thousands of notes. |
+| **4. Permission layer** | 11 | **Dropped.** Deferred indefinitely — no multi-agent or multi-tenant use case exists yet. Revisit when that changes. |
 
 ---
 

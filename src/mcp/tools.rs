@@ -94,7 +94,7 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "search_notes",
-            "description": "Semantic-first chunk search across the vault. Returns ranked chunks with parent note metadata and the parent note's outbound wikilinks. Use mode=\"keyword\" for exact term/BM25 search when phrasing matters. Use get_note for full note content of a returned slug.",
+            "description": "Semantic-first chunk search across the vault. Returns ranked chunks with parent note metadata and the parent note's outbound wikilinks. The default semantic mode uses vector similarity — phrase queries as natural language descriptions of what you're looking for, not keyword lists (e.g. \"how should I structure my backup strategy\" beats \"backup strategy\"). Use mode=\"keyword\" when the exact term or phrasing matters (tags, proper names, code symbols). Use get_note for full note content of a returned slug.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -191,7 +191,7 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
         }),
         json!({
             "name": "refresh_index",
-            "description": "Refresh Hatchdoor's SQLite view of the vault. Use only when the user says files changed or results appear stale; do not call before every search.",
+            "description": "Refresh Hatchdoor's SQLite view of the vault. Only needed for changes made outside this MCP session (e.g. the user edited a note directly). All write tools already trigger a synchronous reindex before returning, so do not call this after create_note, update_note, append_to_note, or any other write tool.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
