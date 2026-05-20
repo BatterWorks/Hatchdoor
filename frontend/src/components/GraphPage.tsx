@@ -348,9 +348,15 @@ export function GraphPage() {
       .sort((a, b) => b.backlink_count - a.backlink_count);
     for (const n of ranked) pushLabel(n);
 
-    // Deconfliction: track placed bounding boxes in screen space.
-    // Lower-priority labels are skipped if they would overlap a placed one.
-    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
+    // Deconfliction: track occupied regions in screen space.
+    // Pre-seed with every visible node so labels can't overlap nodes either.
+    const NODE_MARGIN = 5; // extra screen-px padding around each node circle
+    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = nodes
+      .filter(isVisible)
+      .map((n) => {
+        const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
+        return { sx: n.x * k + x - rScr, sy: n.y * k + y - rScr, sw: rScr * 2, sh: rScr * 2 };
+      });
 
     const fontSize = LABEL_SCREEN_SIZE / k;
     ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -380,8 +386,11 @@ export function GraphPage() {
       const sw = bw * k;
       const sh = bh * k;
 
+      // Skip own node box (index matches sorted node position) — label sits just
+      // below its node so it would always collide with its own pre-seeded box.
+      const ownIdx = nodes.indexOf(node);
       const overlaps = !isHov && !isSel && placed.some(
-        (p) => sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
+        (p, i) => i !== ownIdx && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
       );
 
       if (!overlaps) {
