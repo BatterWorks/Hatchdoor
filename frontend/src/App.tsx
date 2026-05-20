@@ -30,6 +30,7 @@ import {
   isEditableTarget,
 } from "./app/storage";
 import { useIsMobile } from "./app/useIsMobile";
+import { useTheme } from "./app/useTheme";
 import { copyText } from "./clipboard";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
@@ -78,6 +79,7 @@ function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
+  const { theme, cycleTheme } = useTheme();
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
   );
@@ -469,6 +471,7 @@ function App() {
         treeIsStale={treeIsStale}
         actionsMenuOpen={actionsMenuOpen}
         topbarRef={topbarRef}
+        theme={theme}
         onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
         onOpenSearch={() => setSearchOpen(true)}
         onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}
@@ -478,6 +481,7 @@ function App() {
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
         onToggleProperties={toggleProperties}
+        onCycleTheme={cycleTheme}
       />
 
       <div className="app-layout">
