@@ -16,6 +16,13 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400;500;600;700;800&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400;1,6..72,500&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <title>Hatchdoor</title>
+    <script>
+      (function () {
+        var v = localStorage.getItem("hatchdoor.theme");
+        document.documentElement.dataset.theme =
+          v === "light" || v === "dark" ? v : "auto";
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -2,6 +2,14 @@ import type { Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
 import type { ActiveNoteMeta } from "../types";
+import type { Theme } from "./useTheme";
+
+const THEME_ICON: Record<Theme, string> = { auto: "◑", light: "○", dark: "●" };
+const THEME_LABEL: Record<Theme, string> = {
+  auto: "Theme: System",
+  light: "Theme: Light",
+  dark: "Theme: Dark",
+};
 
 type TopbarProps = {
   activeNote: ActiveNoteMeta | null;
@@ -10,6 +18,7 @@ type TopbarProps = {
   treeIsStale: boolean;
   actionsMenuOpen: boolean;
   topbarRef?: Ref<HTMLElement>;
+  theme: Theme;
   onToggleDrawer: () => void;
   onOpenSearch: () => void;
   onToggleActionsMenu: () => void;
@@ -19,6 +28,7 @@ type TopbarProps = {
   onCopyNoteLink: () => void;
   onDownloadMarkdown: () => void;
   onToggleProperties: () => void;
+  onCycleTheme: () => void;
 };
 
 export function AppTopbar({
@@ -28,6 +38,7 @@ export function AppTopbar({
   treeIsStale,
   actionsMenuOpen,
   topbarRef,
+  theme,
   onToggleDrawer,
   onOpenSearch,
   onToggleActionsMenu,
@@ -37,6 +48,7 @@ export function AppTopbar({
   onCopyNoteLink,
   onDownloadMarkdown,
   onToggleProperties,
+  onCycleTheme,
 }: TopbarProps) {
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
@@ -101,6 +113,15 @@ export function AppTopbar({
               ⌕
             </button>
           )}
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onCycleTheme}
+            aria-label={THEME_LABEL[theme]}
+            title={THEME_LABEL[theme]}
+          >
+            {THEME_ICON[theme]}
+          </button>
           <div style={{ position: "relative" }}>
             <button
               type="button"
