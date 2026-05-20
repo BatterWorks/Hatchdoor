@@ -80,6 +80,7 @@
 .search-group {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 /* ── Result cards (shared base) ─────────────────────────── */
@@ -103,6 +104,8 @@
 .search-result--primary {
   border: 1px solid var(--rule);
   padding: 0.65rem 0.75rem;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .search-result--primary:hover {
@@ -122,6 +125,8 @@
   margin-left: 0.5rem;
   margin-top: 1px;
   background: var(--paper);
+  box-sizing: border-box;
+  overflow: hidden;
 }
 
 .search-result--chunk:hover {
