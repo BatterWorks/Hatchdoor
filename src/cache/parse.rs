@@ -159,6 +159,11 @@ fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
         if tag.is_empty() || tag.starts_with('#') || tag.chars().all(|ch| ch == '-') {
             continue;
         }
+        // Inline tags must be namespaced (e.g. #area/health), not free-form words or bare numbers.
+        let slash = tag.find('/');
+        if !slash.is_some_and(|pos| pos > 0 && pos < tag.len() - 1) {
+            continue;
+        }
         push_tag(tag, tags);
     }
 }
@@ -194,8 +199,8 @@ mod tests {
         let headings = extract_headings("# One\ntext\n### Three");
         assert_eq!(headings.len(), 2);
         assert_eq!(headings[0].anchor, "one");
-        let tags = extract_tags("hello #HomeLab #dns/network, ## no");
-        assert!(tags.contains("homelab"));
+        let tags = extract_tags("hello #topic/homelab #dns/network, ## no");
+        assert!(tags.contains("topic/homelab"));
         assert!(tags.contains("dns/network"));
         assert_eq!(
             build_fts_query("réseau dns"),
@@ -221,11 +226,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_hashtags_still_work_in_body() {
-        let content = "---\ntags: [existing]\n---\n\nSome text with #inline-tag here.";
+    fn inline_hashtags_require_namespace() {
+        let content = "---\ntags: [existing]\n---\n\nSome text with #area/health here but not #freeform or #1 or #0599.";
         let tags = extract_tags(content);
-        assert!(tags.contains("existing"));
-        assert!(tags.contains("inline-tag"));
+        assert!(tags.contains("existing"), "frontmatter tag preserved");
+        assert!(tags.contains("area/health"), "namespaced inline tag accepted");
+        assert!(!tags.contains("freeform"), "free-form inline tag rejected");
+        assert!(!tags.contains("1"), "numeric inline tag rejected");
+        assert!(!tags.contains("0599"), "numeric inline tag rejected");
     }
 
     #[test]
