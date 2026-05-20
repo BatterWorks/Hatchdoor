@@ -81,7 +81,7 @@ async fn run_server() {
     });
 
     let sqlite = Arc::new(
-        SqliteCache::open(&config.cache_db_path, 384).unwrap_or_else(|e| {
+        SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
             error!(
                 cache_db_path = %config.cache_db_path.display(),
                 "SQLite cache startup failed: {e}"
