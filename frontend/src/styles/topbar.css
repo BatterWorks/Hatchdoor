@@ -5,8 +5,7 @@
 }
 
 .app-topbar {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 40;
   display: grid;
   grid-template-columns: var(--sidebar-width, 280px) minmax(0, 1fr) auto;
@@ -95,14 +94,16 @@
   border-radius: 0;
 }
 
-.topbar-search-trigger:hover {
-  background: var(--ink);
-  color: var(--bg);
-}
+@media (hover: hover) {
+  .topbar-search-trigger:hover {
+    background: var(--ink);
+    color: var(--bg);
+  }
 
-.topbar-search-trigger:hover .shortcut-hint {
-  color: var(--bg);
-  border-color: var(--bg);
+  .topbar-search-trigger:hover .shortcut-hint {
+    color: var(--bg);
+    border-color: var(--bg);
+  }
 }
 
 .shortcut-hint {
@@ -135,9 +136,11 @@
   padding: 0;
 }
 
-.icon-button:hover {
-  background: var(--ink);
-  color: var(--bg);
+@media (hover: hover) {
+  .icon-button:hover {
+    background: var(--ink);
+    color: var(--bg);
+  }
 }
 
 .icon-button:focus-visible {
