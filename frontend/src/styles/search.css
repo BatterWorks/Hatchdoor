@@ -71,72 +71,128 @@
   margin: 0.5rem 0 0;
   padding: 0;
   display: grid;
-  gap: 0.45rem;
+  gap: 0.5rem;
 }
+
+/* ── Group wrapper ──────────────────────────────────────── */
+
+.search-group {
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Result cards (shared base) ─────────────────────────── */
 
 .search-result {
+  display: block;
   width: 100%;
   text-align: left;
-  border: 1px solid var(--rule);
   background: var(--bg);
-  padding: 0.6rem 0.7rem;
   cursor: pointer;
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+  transition: border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease);
   border-radius: 0;
-  /* Override ui-button uppercase */
-  text-transform: none;
-  letter-spacing: 0;
+  border: none;
+  padding: 0;
   font-size: inherit;
-  justify-content: flex-start;
+  color: inherit;
 }
 
-.search-result:hover {
+/* Primary chunk — full card with border */
+.search-result--primary {
+  border: 1px solid var(--rule);
+  padding: 0.65rem 0.75rem;
+}
+
+.search-result--primary:hover {
   border-color: var(--hot);
   background: var(--paper);
 }
 
-.search-result:focus-visible {
+.search-result--primary:focus-visible {
   outline: 2px solid var(--hot);
   outline-offset: -2px;
 }
 
-.search-main {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.7rem;
-  align-items: baseline;
+/* Extra chunks — connected via left border, no top border */
+.search-result--chunk {
+  border-left: 2px solid var(--rule-strong);
+  padding: 0.5rem 0.75rem;
+  margin-left: 0.5rem;
+  margin-top: 1px;
+  background: var(--paper);
+}
+
+.search-result--chunk:hover {
+  border-left-color: var(--hot);
+  background: var(--paper-2);
+}
+
+.search-result--chunk:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+/* ── Toggle ─────────────────────────────────────────────── */
+
+.search-group-toggle {
+  display: block;
+  width: auto;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0.3rem 0.75rem;
+  margin-left: 0.5rem;
+  font-family: var(--font-sans);
+  font-size: 0.74rem;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease);
+}
+
+.search-group-toggle:hover {
+  color: var(--hot);
+}
+
+.search-group-toggle:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 2px;
+}
+
+/* ── Card anatomy ───────────────────────────────────────── */
+
+.result-title {
   font-family: var(--font-display);
   font-variation-settings: "wdth" 100, "wght" 600;
   font-size: 0.95rem;
   color: var(--ink);
 }
 
-.search-main span {
+.result-path {
+  margin-top: 0.1rem;
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.result-breadcrumb {
+  margin-top: 0.3rem;
   font-family: var(--font-sans);
   font-size: 0.74rem;
-  color: var(--muted);
-  font-weight: 400;
-}
-
-.search-kind {
-  display: inline-block;
-  margin-top: 0.18rem;
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
   color: var(--hot);
-  text-transform: uppercase;
-  letter-spacing: 0.12em;
+  opacity: 0.9;
 }
 
-.search-snippet {
-  margin: 0.35rem 0 0;
+.result-snippet {
+  margin: 0.3rem 0 0;
   font-family: var(--font-sans);
-  font-size: 0.86rem;
+  font-size: 0.84rem;
   color: var(--ink-soft);
-  line-height: 1.45;
+  line-height: 1.5;
 }
 
-/* Search highlight marks */
+/* ── Highlight marks ────────────────────────────────────── */
+
 .search-match {
   background: var(--highlight);
   padding: 0 0.1rem;
