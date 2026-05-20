@@ -91,7 +91,7 @@ async fn run_server() {
     );
 
     let embedder: Arc<dyn Embedder> =
-        Arc::new(FastembedEmbedder::bge_small().unwrap_or_else(|e| {
+        Arc::new(FastembedEmbedder::nomic_v1_5().unwrap_or_else(|e| {
             error!("Failed to load embedder: {e}");
             std::process::exit(1);
         }));
@@ -150,8 +150,8 @@ async fn run_server() {
 }
 
 fn run_prefetch() {
-    info!("Pre-fetching BGE-small-EN weights and tokenizer");
-    match FastembedEmbedder::bge_small() {
+    info!("Pre-fetching Nomic Embed Text v1.5 weights and tokenizer");
+    match FastembedEmbedder::nomic_v1_5() {
         Ok(_) => info!("Pre-fetch complete"),
         Err(e) => {
             error!("Pre-fetch failed: {e}");
