@@ -171,6 +171,36 @@ body {
   font-family: var(--font-sans);
 }
 
+/* Custom scrollbars — Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+
+/* Custom scrollbars — WebKit/Blink (Chrome, Safari, Edge) */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border-radius: 0;
+  transition: background var(--dur) var(--ease);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 a {
   color: var(--hot);
 }
