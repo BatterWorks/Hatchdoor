@@ -72,6 +72,7 @@
   padding: 0;
   display: grid;
   gap: 0.5rem;
+  min-width: 0;
 }
 
 /* ── Group wrapper ──────────────────────────────────────── */
@@ -173,6 +174,9 @@
   font-family: var(--font-sans);
   font-size: 0.72rem;
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .result-breadcrumb {
@@ -189,6 +193,8 @@
   font-size: 0.84rem;
   color: var(--ink-soft);
   line-height: 1.5;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 /* ── Highlight marks ────────────────────────────────────── */
