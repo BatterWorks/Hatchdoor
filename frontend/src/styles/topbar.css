@@ -21,11 +21,6 @@
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
-  font-family: var(--font-display);
-  font-variation-settings: "wdth" 78, "wght" 800;
-  font-size: 1.05rem;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--ink);
   text-decoration: none;
   flex-shrink: 0;

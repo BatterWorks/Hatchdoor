@@ -89,7 +89,7 @@ export function AppTopbar({
             {/* Accent square */}
             <rect x="24" y="24" width="12" height="12" fill="var(--hot)" />
             {/* Wordmark text */}
-            <text className="brand-wordmark-text" x="76" y="47">
+            <text className="brand-wordmark-text" x="76" y="47" aria-hidden="true">
               HATCHDOOR
             </text>
           </svg>
