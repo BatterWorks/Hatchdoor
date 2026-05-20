@@ -14,7 +14,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import { parseFrontmatter, stripBlockIds, stripVaultNoteLinks } from "../markdown";
-import { extractMarkdownHeadings } from "../noteHeadings";
+import { extractMarkdownHeadings, slugifyHeading } from "../noteHeadings";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -28,7 +28,7 @@ import type {
   NoteLinksResponse,
 } from "../types";
 import { NoteSkeleton, StateBlock, StatusBadge } from "./ui";
-import { scrollElementIntoView } from "./note-page/dom";
+import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import {
   NoteLinksPanel,
@@ -172,6 +172,10 @@ export function NotePage({
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
   );
+  const matchHeading = useMemo(
+    () => new URLSearchParams(location.search).get("m"),
+    [location.search],
+  );
   const tocHeadings = useMemo(
     () => extractMarkdownHeadings(parsed.body),
     [parsed.body],
@@ -201,12 +205,15 @@ export function NotePage({
     if (hits.length > 0) {
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
+    } else if (matchHeading) {
+      const lastSegment = matchHeading.split(" > ").at(-1) ?? matchHeading;
+      jumpToHeading(slugifyHeading(lastSegment));
     }
 
     return () => {
       searchHitsRef.current = [];
     };
-  }, [markdown, note?.slug, searchQuery]);
+  }, [markdown, note?.slug, searchQuery, matchHeading]);
 
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
