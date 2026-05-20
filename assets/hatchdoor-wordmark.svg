@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 60" width="340" height="60" role="img" aria-label="Hatchdoor">
+  <title>Hatchdoor</title>
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,800&display=swap');
+      .b { fill: #0c0c0a; }
+      .a { fill: #ff4d1c; }
+      .t {
+        fill: #0c0c0a;
+        font-family: 'Bricolage Grotesque', system-ui, sans-serif;
+        font-size: 46px;
+        font-weight: 800;
+        font-variation-settings: "wdth" 78, "wght" 800;
+        letter-spacing: 0.04em;
+      }
+      @media (prefers-color-scheme: dark) {
+        .b { fill: #ece8d8; }
+        .a { fill: #ff5a2b; }
+        .t { fill: #ece8d8; }
+      }
+    </style>
+  </defs>
+  <!-- Left bracket -->
+  <rect class="b" x="4" y="4" width="9" height="52"/>
+  <rect class="b" x="4" y="4" width="16" height="9"/>
+  <rect class="b" x="4" y="47" width="16" height="9"/>
+  <!-- Right bracket -->
+  <rect class="b" x="47" y="4" width="9" height="52"/>
+  <rect class="b" x="40" y="4" width="16" height="9"/>
+  <rect class="b" x="40" y="47" width="16" height="9"/>
+  <!-- Accent square -->
+  <rect class="a" x="24" y="24" width="12" height="12"/>
+  <!-- Wordmark -->
+  <text class="t" x="76" y="47" dominant-baseline="auto">HATCHDOOR</text>
+</svg>
