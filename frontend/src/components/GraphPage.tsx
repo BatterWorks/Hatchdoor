@@ -332,31 +332,33 @@ export function GraphPage() {
     const LABEL_PAD_X = 5;        // screen-px padding (converted to world below)
     const LABEL_PAD_Y = 3;
 
-    // Collect candidates: hovered/selected always included, rest filtered by threshold.
+    // Hub threshold: top 10% by backlink count always get a label (guaranteed).
+    const sortedCounts = nodes.map((n) => n.backlink_count).sort((a, b) => a - b);
+    const hubMinBacklinks = sortedCounts[Math.floor(sortedCounts.length * 0.9)] ?? 0;
+
+    // Collect candidates: hovered/selected first, then hubs, then rest by importance.
     const seen = new Set<string>();
+    const guaranteed = new Set<string>();
     const labelCandidates: SimNode[] = [];
-    const pushLabel = (n: SimNode) => {
-      if (!seen.has(n.slug)) { seen.add(n.slug); labelCandidates.push(n); }
+    const pushLabel = (n: SimNode, force = false) => {
+      if (!seen.has(n.slug)) {
+        seen.add(n.slug);
+        labelCandidates.push(n);
+        if (force) guaranteed.add(n.slug);
+      }
     };
 
-    if (hovered) pushLabel(hovered);
-    if (selected && selected !== hovered) pushLabel(selected);
+    if (hovered) pushLabel(hovered, true);
+    if (selected && selected !== hovered) pushLabel(selected, true);
     // Sort remaining candidates by importance so hubs win deconfliction.
     const ranked = nodes
-      .filter((n) => isVisible(n) && nodeRadius(n.backlink_count) * k >= labelThreshold
-        && n.slug !== hovered?.slug && n.slug !== selected?.slug)
+      .filter((n) => isVisible(n) && n.slug !== hovered?.slug && n.slug !== selected?.slug
+        && (n.backlink_count >= hubMinBacklinks || nodeRadius(n.backlink_count) * k >= labelThreshold))
       .sort((a, b) => b.backlink_count - a.backlink_count);
-    for (const n of ranked) pushLabel(n);
+    for (const n of ranked) pushLabel(n, n.backlink_count >= hubMinBacklinks);
 
-    // Deconfliction: track occupied regions in screen space.
-    // Pre-seed with every visible node so labels can't overlap nodes either.
-    const NODE_MARGIN = 5; // extra screen-px padding around each node circle
-    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = nodes
-      .filter(isVisible)
-      .map((n) => {
-        const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
-        return { sx: n.x * k + x - rScr, sy: n.y * k + y - rScr, sw: rScr * 2, sh: rScr * 2 };
-      });
+    // Deconfliction: track placed label bounding boxes in screen space.
+    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
 
     const fontSize = LABEL_SCREEN_SIZE / k;
     ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -386,11 +388,9 @@ export function GraphPage() {
       const sw = bw * k;
       const sh = bh * k;
 
-      // Skip own node box (index matches sorted node position) — label sits just
-      // below its node so it would always collide with its own pre-seeded box.
-      const ownIdx = nodes.indexOf(node);
-      const overlaps = !isHov && !isSel && placed.some(
-        (p, i) => i !== ownIdx && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
+      const isGuaranteed = guaranteed.has(node.slug);
+      const overlaps = !isGuaranteed && placed.some(
+        (p) => sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
       );
 
       if (!overlaps) {
