@@ -325,10 +325,12 @@ export function GraphPage() {
       ctx.globalAlpha = 1;
     }
 
-    // Show a label when the node's rendered radius (world-radius × zoom) is
-    // large enough to be worth reading, plus always for hovered/selected.
-    const LABEL_SCREEN_THRESHOLD = 8; // px on screen
-    const LABEL_SCREEN_SIZE = 12;     // px on screen — constant regardless of zoom
+    // Zoom-adaptive label threshold: high when zoomed out (only hubs visible),
+    // decreasing as zoom increases so more labels are revealed like a map.
+    // Formula: BASE / √k — at k=0.9 only ~30+ backlink nodes; at k=2 most nodes.
+    const LABEL_ADAPTIVE_BASE = 12;
+    const labelThreshold = LABEL_ADAPTIVE_BASE / Math.sqrt(k);
+    const LABEL_SCREEN_SIZE = 12; // px on screen — constant regardless of zoom
 
     const seen = new Set<string>();
     const labelCandidates: SimNode[] = [];
@@ -339,7 +341,7 @@ export function GraphPage() {
     if (hovered) pushLabel(hovered);
     if (selected && selected !== hovered) pushLabel(selected);
     for (const node of nodes) {
-      if (isVisible(node) && nodeRadius(node.backlink_count) * k >= LABEL_SCREEN_THRESHOLD) {
+      if (isVisible(node) && nodeRadius(node.backlink_count) * k >= labelThreshold) {
         pushLabel(node);
       }
     }
