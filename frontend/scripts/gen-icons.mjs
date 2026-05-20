@@ -11,15 +11,16 @@ const iconsDir = resolve(__dirname, "../public/icons");
 mkdirSync(iconsDir, { recursive: true });
 
 // Icon SVG with light-theme background baked in (for all raster outputs)
+// ~15% padding on each side so mark breathes within the icon canvas
 const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60">
   <rect width="60" height="60" fill="#f4f1e8"/>
-  <rect x="4" y="4" width="9" height="52" fill="#0c0c0a"/>
-  <rect x="4" y="4" width="16" height="9" fill="#0c0c0a"/>
-  <rect x="4" y="47" width="16" height="9" fill="#0c0c0a"/>
-  <rect x="47" y="4" width="9" height="52" fill="#0c0c0a"/>
-  <rect x="40" y="4" width="16" height="9" fill="#0c0c0a"/>
-  <rect x="40" y="47" width="16" height="9" fill="#0c0c0a"/>
-  <rect x="24" y="24" width="12" height="12" fill="#ff4d1c"/>
+  <rect x="9" y="9" width="7" height="42" fill="#0c0c0a"/>
+  <rect x="9" y="9" width="13" height="7" fill="#0c0c0a"/>
+  <rect x="9" y="44" width="13" height="7" fill="#0c0c0a"/>
+  <rect x="44" y="9" width="7" height="42" fill="#0c0c0a"/>
+  <rect x="38" y="9" width="13" height="7" fill="#0c0c0a"/>
+  <rect x="38" y="44" width="13" height="7" fill="#0c0c0a"/>
+  <rect x="25" y="25" width="10" height="10" fill="#ff4d1c"/>
 </svg>`;
 
 function renderPng(size) {
