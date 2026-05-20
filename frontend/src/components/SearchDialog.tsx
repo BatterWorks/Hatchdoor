@@ -80,6 +80,7 @@ export function SearchDialog({
           ref={inputRef}
           className="search-input"
           placeholder="Search notes (title, path, content)"
+          autoFocus
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {

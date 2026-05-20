@@ -114,6 +114,7 @@ body.resizing {
   .icon-button {
     width: 44px;
     height: 44px;
+    font-size: 1.4rem;
   }
 
   .note-property-row {
