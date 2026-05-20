@@ -325,13 +325,14 @@ export function GraphPage() {
       ctx.globalAlpha = 1;
     }
 
-    // Zoom-adaptive label threshold: high when zoomed out (only hubs visible),
-    // decreasing as zoom increases so more labels are revealed like a map.
-    // Formula: BASE / √k — at k=0.9 only ~30+ backlink nodes; at k=2 most nodes.
-    const LABEL_ADAPTIVE_BASE = 12;
-    const labelThreshold = LABEL_ADAPTIVE_BASE / Math.sqrt(k);
+    // Zoom-adaptive pre-filter: raise threshold when zoomed out so only hubs
+    // are candidates; lower it as zoom increases to admit more nodes.
+    const labelThreshold = 10 / Math.sqrt(k);
     const LABEL_SCREEN_SIZE = 12; // px on screen — constant regardless of zoom
+    const LABEL_PAD_X = 5;        // screen-px padding (converted to world below)
+    const LABEL_PAD_Y = 3;
 
+    // Collect candidates: hovered/selected always included, rest filtered by threshold.
     const seen = new Set<string>();
     const labelCandidates: SimNode[] = [];
     const pushLabel = (n: SimNode) => {
@@ -340,17 +341,24 @@ export function GraphPage() {
 
     if (hovered) pushLabel(hovered);
     if (selected && selected !== hovered) pushLabel(selected);
-    for (const node of nodes) {
-      if (isVisible(node) && nodeRadius(node.backlink_count) * k >= labelThreshold) {
-        pushLabel(node);
-      }
-    }
+    // Sort remaining candidates by importance so hubs win deconfliction.
+    const ranked = nodes
+      .filter((n) => isVisible(n) && nodeRadius(n.backlink_count) * k >= labelThreshold
+        && n.slug !== hovered?.slug && n.slug !== selected?.slug)
+      .sort((a, b) => b.backlink_count - a.backlink_count);
+    for (const n of ranked) pushLabel(n);
+
+    // Deconfliction: track placed bounding boxes in screen space.
+    // Lower-priority labels are skipped if they would overlap a placed one.
+    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
+
+    const fontSize = LABEL_SCREEN_SIZE / k;
+    ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
 
     for (const node of labelCandidates) {
       const r = nodeRadius(node.backlink_count);
       const isHov = node.slug === hovered?.slug;
       const isSel = node.slug === selected?.slug;
-      const fontSize = LABEL_SCREEN_SIZE / k; // constant screen size
 
       ctx.save();
       ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -359,22 +367,36 @@ export function GraphPage() {
 
       const label = node.title.length > 28 ? node.title.slice(0, 26) + "…" : node.title;
       const metrics = ctx.measureText(label);
-      const padX = 5 / k;
-      const padY = 3 / k;
+      const padX = LABEL_PAD_X / k;
+      const padY = LABEL_PAD_Y / k;
       const bw = metrics.width + padX * 2;
       const bh = fontSize + padY * 2;
       const bx = node.x - bw / 2;
       const by = node.y + r + 4 / k;
 
-      ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
-      ctx.fillStyle = paperColor;
-      ctx.fillRect(bx, by, bw, bh);
-      ctx.strokeStyle = ruleColor;
-      ctx.lineWidth = 1 / k;
-      ctx.strokeRect(bx, by, bw, bh);
-      ctx.fillStyle = isSel ? hotColor : inkColor;
-      ctx.fillText(label, node.x, by + padY);
-      ctx.globalAlpha = 1;
+      // Convert bbox to screen space for overlap testing.
+      const sx = bx * k + x;
+      const sy = by * k + y;
+      const sw = bw * k;
+      const sh = bh * k;
+
+      const overlaps = !isHov && !isSel && placed.some(
+        (p) => sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
+      );
+
+      if (!overlaps) {
+        placed.push({ sx, sy, sw, sh });
+        ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
+        ctx.fillStyle = paperColor;
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.strokeStyle = ruleColor;
+        ctx.lineWidth = 1 / k;
+        ctx.strokeRect(bx, by, bw, bh);
+        ctx.fillStyle = isSel ? hotColor : inkColor;
+        ctx.fillText(label, node.x, by + padY);
+        ctx.globalAlpha = 1;
+      }
+
       ctx.restore();
     }
 
