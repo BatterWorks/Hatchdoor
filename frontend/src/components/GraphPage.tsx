@@ -34,6 +34,10 @@ interface SimLink extends SimulationLinkDatum<SimNode> {
 
 const BASE_RADIUS = 4;
 const SCALE_FACTOR = 2.8;
+const LABEL_ADAPTIVE_BASE = 10; // screen-px threshold for label visibility
+const LABEL_SCREEN_H = 18;      // 12px font + 6px padding, constant
+const LABEL_PX_PER_CHAR = 6;    // estimated screen-px per character
+const LABEL_PAD_TOTAL = 10;     // horizontal padding both sides
 
 function nodeRadius(backlinks: number): number {
   return BASE_RADIUS + Math.log(backlinks + 1) * SCALE_FACTOR;
@@ -51,6 +55,20 @@ function nodeColor(tag: string | null, alpha = 1): string {
   if (!tag) return `rgba(138, 134, 120, ${alpha})`;
   const hue = tagHue(tag);
   return `hsla(${hue}, 60%, 58%, ${alpha})`;
+}
+
+// Collision radius in world space. When the node will show a label at zoom k,
+// the radius expands to include the estimated label bounding box so the
+// simulation pushes nodes far enough apart for labels to fit without overlap.
+function collideRadius(node: SimNode, k: number): number {
+  const r = nodeRadius(node.backlink_count);
+  const labelVisible = r * Math.pow(k, 1.5) >= LABEL_ADAPTIVE_BASE;
+  if (!labelVisible) return r + 6;
+  const labelScreenW = Math.min(node.title.length, 28) * LABEL_PX_PER_CHAR + LABEL_PAD_TOTAL;
+  const gap = 4;
+  // Farthest point from node centre in any direction:
+  // horizontally: half label width; vertically: r + gap + label height
+  return Math.max(labelScreenW / 2, r * k + gap + LABEL_SCREEN_H) / k + 4 / k;
 }
 
 function cssVar(name: string): string {
@@ -86,6 +104,8 @@ export function GraphPage() {
   const panRef = useRef<{ startX: number; startY: number; ox: number; oy: number } | null>(null);
   const zoomAnimRef = useRef<{ targetK: number; cx: number; cy: number } | null>(null);
   const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
+  const collideForceRef = useRef<ReturnType<typeof forceCollide<SimNode>> | null>(null);
+  const lastCollideKRef = useRef<number>(0);
 
   // keep activeTagsRef in sync
   useEffect(() => {
@@ -325,104 +345,58 @@ export function GraphPage() {
       ctx.globalAlpha = 1;
     }
 
-    // Zoom-adaptive pre-filter: raise threshold when zoomed out so only hubs
-    // are candidates; lower it as zoom increases to admit more nodes.
-    const labelThreshold = 10 / Math.sqrt(k);
-    const LABEL_SCREEN_SIZE = 12; // px on screen — constant regardless of zoom
-    const LABEL_PAD_X = 5;        // screen-px padding (converted to world below)
-    const LABEL_PAD_Y = 3;
+    // Zoom-adaptive threshold — same formula used by collideRadius so the
+    // simulation and renderer agree on which nodes carry labels.
+    const labelThreshold = LABEL_ADAPTIVE_BASE / Math.sqrt(k);
+    const fontSize = 12 / k;
+    const padX = 5 / k;
+    const padY = 3 / k;
 
-    // Hub threshold: top 10% by backlink count always get a label (guaranteed).
-    const sortedCounts = nodes.map((n) => n.backlink_count).sort((a, b) => a - b);
-    const hubMinBacklinks = sortedCounts[Math.floor(sortedCounts.length * 0.9)] ?? 0;
-
-    // Collect candidates: hovered/selected first, then hubs, then rest by importance.
+    // Collect candidates: hovered/selected always first, then rest by importance.
     const seen = new Set<string>();
-    const guaranteed = new Set<string>();
     const labelCandidates: SimNode[] = [];
-    const pushLabel = (n: SimNode, force = false) => {
-      if (!seen.has(n.slug)) {
-        seen.add(n.slug);
-        labelCandidates.push(n);
-        if (force) guaranteed.add(n.slug);
-      }
-    };
+    const pushLabel = (n: SimNode) => { if (!seen.has(n.slug)) { seen.add(n.slug); labelCandidates.push(n); } };
+    if (hovered) pushLabel(hovered);
+    if (selected && selected !== hovered) pushLabel(selected);
+    [...nodes]
+      .filter((n) => isVisible(n) && nodeRadius(n.backlink_count) * k >= labelThreshold
+        && n.slug !== hovered?.slug && n.slug !== selected?.slug)
+      .sort((a, b) => b.backlink_count - a.backlink_count)
+      .forEach(pushLabel);
 
-    if (hovered) pushLabel(hovered, true);
-    if (selected && selected !== hovered) pushLabel(selected, true);
-    // Sort remaining candidates by importance so hubs win deconfliction.
-    const ranked = nodes
-      .filter((n) => isVisible(n) && n.slug !== hovered?.slug && n.slug !== selected?.slug
-        && (n.backlink_count >= hubMinBacklinks || nodeRadius(n.backlink_count) * k >= labelThreshold))
-      .sort((a, b) => b.backlink_count - a.backlink_count);
-    for (const n of ranked) pushLabel(n, n.backlink_count >= hubMinBacklinks);
+    // Label-label deconfliction — safety net while the simulation is settling.
+    // Once settled, collideRadius guarantees labels and nodes don't overlap.
+    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
 
-    // Deconfliction: track occupied regions in screen space.
-    // Pre-seed with every visible node circle so labels can't overlap nodes.
-    // Each entry carries the owning slug so a node's own label can self-exclude.
-    const NODE_MARGIN = 4; // extra px around each circle
-    const placed: Array<{ sx: number; sy: number; sw: number; sh: number; slug?: string }> = nodes
-      .filter(isVisible)
-      .map((n) => {
-        const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
-        return { sx: n.x * k + x - rScr, sy: n.y * k + y - rScr, sw: rScr * 2, sh: rScr * 2, slug: n.slug };
-      });
-
-    const fontSize = LABEL_SCREEN_SIZE / k;
     ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
-
-    const collidesWithPlaced = (sx: number, sy: number, sw: number, sh: number, ownSlug: string) =>
-      placed.some((p) => p.slug !== ownSlug && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy);
 
     for (const node of labelCandidates) {
       const r = nodeRadius(node.backlink_count);
       const isHov = node.slug === hovered?.slug;
       const isSel = node.slug === selected?.slug;
-      const isGuaranteed = guaranteed.has(node.slug);
+      const forced = isHov || isSel;
 
       ctx.save();
-      ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
 
       const label = node.title.length > 28 ? node.title.slice(0, 26) + "…" : node.title;
       const metrics = ctx.measureText(label);
-      const padX = LABEL_PAD_X / k;
-      const padY = LABEL_PAD_Y / k;
       const bw = metrics.width + padX * 2;
       const bh = fontSize + padY * 2;
-      const gap = 4 / k;
+      const bx = node.x - bw / 2;
+      const by = node.y + r + 4 / k;
+      const sx = bx * k + x;
+      const sy = by * k + y;
+      const sw = bw * k;
+      const sh = bh * k;
 
-      // Candidate positions: below, above, right, left.
-      const candidates = [
-        { bx: node.x - bw / 2,       by: node.y + r + gap },
-        { bx: node.x - bw / 2,       by: node.y - r - gap - bh },
-        { bx: node.x + r + gap,       by: node.y - bh / 2 },
-        { bx: node.x - r - gap - bw,  by: node.y - bh / 2 },
-      ];
+      const overlaps = !forced && placed.some(
+        (p) => sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
+      );
 
-      // Pick the first position that doesn't collide with any placed region.
-      // Guaranteed nodes fall back to the default (below) if nothing is clear.
-      let chosen = isGuaranteed ? candidates[0] : null;
-      for (const pos of candidates) {
-        const sx = pos.bx * k + x;
-        const sy = pos.by * k + y;
-        const sw = bw * k;
-        const sh = bh * k;
-        if (!collidesWithPlaced(sx, sy, sw, sh, node.slug)) {
-          chosen = pos;
-          break;
-        }
-      }
-
-      if (chosen) {
-        const { bx, by } = chosen;
-        const sx = bx * k + x;
-        const sy = by * k + y;
-        const sw = bw * k;
-        const sh = bh * k;
-        placed.push({ sx, sy, sw, sh, slug: node.slug });
-
+      if (!overlaps) {
+        placed.push({ sx, sy, sw, sh });
         ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
         ctx.fillStyle = paperColor;
         ctx.fillRect(bx, by, bw, bh);
@@ -430,7 +404,7 @@ export function GraphPage() {
         ctx.lineWidth = 1 / k;
         ctx.strokeRect(bx, by, bw, bh);
         ctx.fillStyle = isSel ? hotColor : inkColor;
-        ctx.fillText(label, bx + bw / 2, by + padY);
+        ctx.fillText(label, node.x, by + padY);
         ctx.globalAlpha = 1;
       }
 
@@ -445,6 +419,15 @@ export function GraphPage() {
 
   const startLoop = useCallback(() => {
     const tick = () => {
+      // Update collide radii and reheat sim when zoom changes by >10%.
+      const k = transformRef.current.k;
+      const lastK = lastCollideKRef.current;
+      if (lastK === 0 || Math.abs(Math.log(k) - Math.log(lastK)) > 0.1) {
+        lastCollideKRef.current = k;
+        collideForceRef.current?.radius((d) => collideRadius(d, k));
+        const sim = simRef.current;
+        if (sim && sim.alpha() < 0.05) sim.alpha(0.3).restart();
+      }
       render();
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -492,7 +475,13 @@ export function GraphPage() {
       .force("link", forceLink<SimNode, SimLink>(links).id((d) => d.slug).distance(60).strength(0.4))
       .force("charge", forceManyBody<SimNode>().strength(-180).distanceMax(400))
       .force("center", forceCenter<SimNode>(0, 0))
-      .force("collide", forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4))
+      .force("collide", (() => {
+        const initialK = transformRef.current.k || 0.9;
+        const cf = forceCollide<SimNode>().radius((d) => collideRadius(d, initialK));
+        collideForceRef.current = cf;
+        lastCollideKRef.current = initialK;
+        return cf;
+      })())
       .alphaDecay(0.02);
 
     simRef.current = sim;
