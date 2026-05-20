@@ -357,8 +357,16 @@ export function GraphPage() {
       .sort((a, b) => b.backlink_count - a.backlink_count);
     for (const n of ranked) pushLabel(n, n.backlink_count >= hubMinBacklinks);
 
-    // Deconfliction: track placed label bounding boxes in screen space.
-    const placed: Array<{ sx: number; sy: number; sw: number; sh: number }> = [];
+    // Deconfliction: track occupied regions in screen space.
+    // Pre-seed with every visible node circle so labels can't overlap nodes.
+    // Each entry carries the owning slug so a node's own label can self-exclude.
+    const NODE_MARGIN = 4; // extra px around each circle
+    const placed: Array<{ sx: number; sy: number; sw: number; sh: number; slug?: string }> = nodes
+      .filter(isVisible)
+      .map((n) => {
+        const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
+        return { sx: n.x * k + x - rScr, sy: n.y * k + y - rScr, sw: rScr * 2, sh: rScr * 2, slug: n.slug };
+      });
 
     const fontSize = LABEL_SCREEN_SIZE / k;
     ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -390,7 +398,7 @@ export function GraphPage() {
 
       const isGuaranteed = guaranteed.has(node.slug);
       const overlaps = !isGuaranteed && placed.some(
-        (p) => sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
+        (p) => p.slug !== node.slug && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
       );
 
       if (!overlaps) {
