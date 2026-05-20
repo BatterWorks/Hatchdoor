@@ -31,12 +31,21 @@
   flex-shrink: 0;
 }
 
-.topbar-brand-dot {
-  width: 9px;
-  height: 9px;
-  background: var(--hot);
-  display: inline-block;
+.brand-wordmark {
+  height: 1.45rem;
+  width: auto;
+  display: block;
   flex-shrink: 0;
+  overflow: visible;
+}
+
+.brand-wordmark-text {
+  fill: currentColor;
+  font-family: var(--font-display);
+  font-size: 46px;
+  font-weight: 800;
+  font-variation-settings: "wdth" 78, "wght" 800;
+  letter-spacing: 0.04em;
 }
 
 /* Breadcrumb — col 2 */

@@ -71,8 +71,28 @@ export function AppTopbar({
               ☰
             </button>
           ) : null}
-          <span className="topbar-brand-dot" aria-hidden="true" />
-          HATCHDOOR
+          <svg
+            className="brand-wordmark"
+            viewBox="0 0 340 60"
+            aria-label="Hatchdoor"
+            role="img"
+            focusable="false"
+          >
+            {/* Left bracket */}
+            <rect x="4" y="4" width="9" height="52" fill="currentColor" />
+            <rect x="4" y="4" width="16" height="9" fill="currentColor" />
+            <rect x="4" y="47" width="16" height="9" fill="currentColor" />
+            {/* Right bracket */}
+            <rect x="47" y="4" width="9" height="52" fill="currentColor" />
+            <rect x="40" y="4" width="16" height="9" fill="currentColor" />
+            <rect x="40" y="47" width="16" height="9" fill="currentColor" />
+            {/* Accent square */}
+            <rect x="24" y="24" width="12" height="12" fill="var(--hot)" />
+            {/* Wordmark text */}
+            <text className="brand-wordmark-text" x="76" y="47">
+              HATCHDOOR
+            </text>
+          </svg>
         </div>
 
         {/* Col 2 — Breadcrumb */}
