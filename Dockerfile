@@ -16,8 +16,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --bin hatchdoor
-ENV FASTEMBED_CACHE_PATH=/opt/fastembed
-RUN mkdir -p $FASTEMBED_CACHE_PATH \
+ENV FASTEMBED_CACHE_DIR=/opt/fastembed
+RUN mkdir -p $FASTEMBED_CACHE_DIR \
  && ./target/release/hatchdoor --prefetch-embedder
 
 FROM node:24-slim AS frontend-builder
@@ -33,7 +33,7 @@ WORKDIR /app
 ENV HOST=0.0.0.0 \
     PORT=42824 \
     VAULT_PATH=/data/vault \
-    FASTEMBED_CACHE_PATH=/opt/fastembed \
+    FASTEMBED_CACHE_DIR=/opt/fastembed \
     RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn
 
 COPY --from=rust-builder /app/target/release/hatchdoor /app/hatchdoor
