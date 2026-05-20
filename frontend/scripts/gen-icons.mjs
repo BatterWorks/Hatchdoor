@@ -1,6 +1,6 @@
 import { Resvg } from "@resvg/resvg-js";
 import pngToIco from "png-to-ico";
-import { writeFileSync, mkdirSync, readFileSync } from "fs";
+import { writeFileSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 
