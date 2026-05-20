@@ -371,10 +371,14 @@ export function GraphPage() {
     const fontSize = LABEL_SCREEN_SIZE / k;
     ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
 
+    const collidesWithPlaced = (sx: number, sy: number, sw: number, sh: number, ownSlug: string) =>
+      placed.some((p) => p.slug !== ownSlug && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy);
+
     for (const node of labelCandidates) {
       const r = nodeRadius(node.backlink_count);
       const isHov = node.slug === hovered?.slug;
       const isSel = node.slug === selected?.slug;
+      const isGuaranteed = guaranteed.has(node.slug);
 
       ctx.save();
       ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -387,22 +391,38 @@ export function GraphPage() {
       const padY = LABEL_PAD_Y / k;
       const bw = metrics.width + padX * 2;
       const bh = fontSize + padY * 2;
-      const bx = node.x - bw / 2;
-      const by = node.y + r + 4 / k;
+      const gap = 4 / k;
 
-      // Convert bbox to screen space for overlap testing.
-      const sx = bx * k + x;
-      const sy = by * k + y;
-      const sw = bw * k;
-      const sh = bh * k;
+      // Candidate positions: below, above, right, left.
+      const candidates = [
+        { bx: node.x - bw / 2,       by: node.y + r + gap },
+        { bx: node.x - bw / 2,       by: node.y - r - gap - bh },
+        { bx: node.x + r + gap,       by: node.y - bh / 2 },
+        { bx: node.x - r - gap - bw,  by: node.y - bh / 2 },
+      ];
 
-      const isGuaranteed = guaranteed.has(node.slug);
-      const overlaps = !isGuaranteed && placed.some(
-        (p) => p.slug !== node.slug && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy,
-      );
+      // Pick the first position that doesn't collide with any placed region.
+      // Guaranteed nodes fall back to the default (below) if nothing is clear.
+      let chosen = isGuaranteed ? candidates[0] : null;
+      for (const pos of candidates) {
+        const sx = pos.bx * k + x;
+        const sy = pos.by * k + y;
+        const sw = bw * k;
+        const sh = bh * k;
+        if (!collidesWithPlaced(sx, sy, sw, sh, node.slug)) {
+          chosen = pos;
+          break;
+        }
+      }
 
-      if (!overlaps) {
-        placed.push({ sx, sy, sw, sh });
+      if (chosen) {
+        const { bx, by } = chosen;
+        const sx = bx * k + x;
+        const sy = by * k + y;
+        const sw = bw * k;
+        const sh = bh * k;
+        placed.push({ sx, sy, sw, sh, slug: node.slug });
+
         ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
         ctx.fillStyle = paperColor;
         ctx.fillRect(bx, by, bw, bh);
@@ -410,7 +430,7 @@ export function GraphPage() {
         ctx.lineWidth = 1 / k;
         ctx.strokeRect(bx, by, bw, bh);
         ctx.fillStyle = isSel ? hotColor : inkColor;
-        ctx.fillText(label, node.x, by + padY);
+        ctx.fillText(label, bx + bw / 2, by + padY);
         ctx.globalAlpha = 1;
       }
 
