@@ -5,6 +5,7 @@
 
 target
 tmp
+.fastembed_cache
 
 frontend/node_modules
 frontend/dist
