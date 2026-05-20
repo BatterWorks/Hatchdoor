@@ -2,7 +2,8 @@
   --sidebar-width: 280px;
   display: grid;
   grid-template-columns: var(--sidebar-width) 8px minmax(0, 1fr);
-  height: calc(100dvh - 3px - 52px - env(safe-area-inset-top));
+  flex: 1;
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
