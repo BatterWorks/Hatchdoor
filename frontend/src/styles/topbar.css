@@ -1,7 +1,11 @@
-/* 3px accent rule sits above the topbar */
+/* 3px accent rule sits below the safe-area inset, above the topbar */
 .hotbar {
-  height: 3px;
-  background: var(--hot);
+  height: calc(3px + env(safe-area-inset-top));
+  background: linear-gradient(
+    to bottom,
+    var(--bg) env(safe-area-inset-top),
+    var(--hot) env(safe-area-inset-top)
+  );
 }
 
 .app-topbar {
@@ -11,7 +15,7 @@
   grid-template-columns: var(--sidebar-width, 280px) minmax(0, 1fr) auto;
   gap: 1.5rem;
   align-items: center;
-  padding: calc(0.9rem + env(safe-area-inset-top)) 1.25rem 0.9rem;
+  padding: 0.9rem 1.25rem 0.9rem;
   background: var(--bg);
   border-bottom: 1px solid var(--rule);
 }
