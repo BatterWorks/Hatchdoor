@@ -4,6 +4,42 @@
 
 **Goal:** Strip markdown syntax from search result snippets so users see clean plain text instead of raw markdown characters like `**bold**`, `## Heading`, or `[[wikilink]]`.
 
+## Scope Clarification
+
+This plan is a snippet-display cleanup plan. It only improves plain-text output for `content_snippet()` and any legacy/internal search path that still uses that helper.
+
+It does not improve the active Phase 2 `/api/search` retrieval path, semantic embeddings, chunking behavior, FTS indexing, search ranking or recall, MCP `search_notes` content, heading extraction, Markdown link parsing, or note rewrite logic.
+
+## Semantic Search Follow-Up
+
+A broader and more valuable use of `pulldown-cmark` would be to normalize Markdown before retrieval indexing:
+
+- Parse Markdown into clean plain text for embedding input.
+- Consider using the same normalized text for chunk-level FTS.
+- Keep heading text as semantic context.
+- Preserve link labels and Obsidian wikilink aliases/targets as readable text.
+- Drop Markdown delimiters, formatting syntax, and noisy link markup.
+- Keep raw Markdown separately for display, editing, byte ranges, and navigation.
+
+Suggested retrieval storage model:
+
+- `raw_content`: original Markdown chunk for display/navigation/update safety.
+- `search_content`: normalized plain-text chunk for embeddings and FTS.
+- `heading_path`: structured heading metadata.
+
+Acceptance criteria for that follow-up should be eval-based, not cosmetic:
+
+- Semantic or hybrid eval metrics improve or remain neutral.
+- Returned chunks become more readable.
+- Navigation and note display remain based on raw Markdown.
+- Keyword search does not regress for exact terms, tags, or code-like content.
+
+Risk notes:
+
+- Do not blindly strip all Markdown before indexing.
+- Keep heading text, link labels, wikilink aliases, task/list/table text, and possibly code content.
+- Usually drop raw URLs, embed syntax, and formatting delimiters unless a specific retrieval use case needs them.
+
 **Architecture:** Add `pulldown-cmark` as a direct dependency (it is already a transitive dep via `text-splitter`), create a `src/markdown/strip.rs` module with a `strip_to_plain_text` function, and use it inside `content_snippet` in `src/vault/paths.rs`. The snippet function reads raw note content from disk, so pre-processing there keeps the change local and self-contained.
 
 **Tech Stack:** Rust, `pulldown-cmark` 0.13 (CommonMark + GFM extensions), regex-based wikilink pre-pass.
