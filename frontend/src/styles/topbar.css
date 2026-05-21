@@ -1,5 +1,6 @@
 /* 3px accent rule sits below the safe-area inset, above the topbar */
 .hotbar {
+  flex-shrink: 0;
   height: calc(3px + env(safe-area-inset-top));
   background: linear-gradient(
     to bottom,

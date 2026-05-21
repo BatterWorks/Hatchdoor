@@ -94,6 +94,9 @@ describe("App mobile and topbar actions", () => {
     expect(document.querySelector<HTMLElement>(".app-shell")).toHaveStyle({
       "--mobile-drawer-top": "104px",
     });
+    expect(document.querySelector<HTMLElement>(".hotbar")).toHaveStyle({
+      flexShrink: "0",
+    });
     expect(
       await screen.findByRole("button", { name: "Close explorer" }),
     ).toBeInTheDocument();
