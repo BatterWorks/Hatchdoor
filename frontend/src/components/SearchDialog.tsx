@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useRef, useState, type ReactNode, type RefObject } from "react";
 
 import type { SearchResult, SearchSelection } from "../types";
 import { UiButton, UiPanel } from "./ui";
@@ -9,6 +9,8 @@ type NoteGroup = {
   note_path: string;
   chunks: SearchResult[];
 };
+
+const EMPTY_EXPANDED_SLUGS = new Set<string>();
 
 function groupResults(results: SearchResult[]): NoteGroup[] {
   const map = new Map<string, NoteGroup>();
@@ -74,21 +76,30 @@ export function SearchDialog({
 }) {
   const trimmedQuery = query.trim();
   const resultsListRef = useRef<HTMLUListElement | null>(null);
-  const [expandedSlugs, setExpandedSlugs] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    setExpandedSlugs(new Set());
-  }, [results]);
+  const resultsKey = [
+    trimmedQuery,
+    ...results.map((result) => `${result.note_slug}:${result.chunk_id}`),
+  ].join("|");
+  const [expandedState, setExpandedState] = useState<{
+    resultsKey: string;
+    slugs: Set<string>;
+  }>({ resultsKey: "", slugs: new Set() });
+  const expandedSlugs =
+    expandedState.resultsKey === resultsKey
+      ? expandedState.slugs
+      : EMPTY_EXPANDED_SLUGS;
 
   function toggleExpanded(slug: string) {
-    setExpandedSlugs((prev) => {
-      const next = new Set(prev);
+    setExpandedState((prev) => {
+      const next = new Set(
+        prev.resultsKey === resultsKey ? prev.slugs : EMPTY_EXPANDED_SLUGS,
+      );
       if (next.has(slug)) {
         next.delete(slug);
       } else {
         next.add(slug);
       }
-      return next;
+      return { resultsKey, slugs: next };
     });
   }
 

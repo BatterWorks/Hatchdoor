@@ -187,7 +187,7 @@ export function NotePage({
   const markdownComponents = useMemo(() => {
     const headingCounts = new Map<string, number>();
     return createNoteMarkdownComponents(note?.relative_path ?? "", headingCounts);
-  }, [note?.relative_path, markdown]);
+  }, [note?.relative_path]);
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
