@@ -129,6 +129,7 @@ pub struct ResolveBatchResponse {
 pub struct ResolveTargetResult {
     pub target: String,
     pub slug: Option<String>,
+    pub archived: bool,
 }
 
 #[derive(Debug, Serialize)]

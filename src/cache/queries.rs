@@ -204,7 +204,10 @@ impl SqliteCache {
         }))
     }
 
-    pub fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<String>, String> {
+    pub fn resolve_wikilink(
+        &self,
+        raw_target: &str,
+    ) -> Result<Option<(String, String)>, String> {
         // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
         let note_target = raw_target
             .split('#')
@@ -220,14 +223,14 @@ impl SqliteCache {
         let by_path = conn
             .query_row(
                 r#"
-                SELECT slug
+                SELECT slug, relative_path
                 FROM notes
                 WHERE normalized_relative_path = ?1
                 ORDER BY relative_path
                 LIMIT 1
                 "#,
                 params![normalized_path],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|error| format!("failed to resolve wikilink by path: {error}"))?;
@@ -243,14 +246,14 @@ impl SqliteCache {
         let by_title = conn
             .query_row(
                 r#"
-                SELECT slug
+                SELECT slug, relative_path
                 FROM notes
                 WHERE normalized_title = ?1
                 ORDER BY relative_path
                 LIMIT 1
                 "#,
                 params![normalized_base],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .optional()
             .map_err(|error| format!("failed to resolve wikilink by title: {error}"))?;
@@ -260,9 +263,9 @@ impl SqliteCache {
 
         let slug = slugify(base);
         conn.query_row(
-            "SELECT slug FROM notes WHERE slug = ?1 LIMIT 1",
+            "SELECT slug, relative_path FROM notes WHERE slug = ?1 LIMIT 1",
             params![slug],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(|error| format!("failed to resolve wikilink by slug: {error}"))

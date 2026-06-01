@@ -49,6 +49,14 @@ export function createNoteMarkdownComponents(
           </span>
         );
       }
+      if (typeof href === "string" && href.startsWith("/__archived__/")) {
+        const slug = href.slice("/__archived__/".length);
+        return (
+          <a className="archived-link" href={`/n/${slug}`}>
+            {children}
+          </a>
+        );
+      }
       if (isExternalHref(href)) {
         return (
           <a href={href} target="_blank" rel="noopener noreferrer">

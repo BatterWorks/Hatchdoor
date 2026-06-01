@@ -26,7 +26,7 @@ export function useResolvedWikilinks(
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
 
-      const map = new Map<string, string | null>();
+      const map = new Map<string, { slug: string; archived: boolean } | null>();
 
       if (uniqueTargets.length > 0) {
         try {
@@ -41,7 +41,10 @@ export function useResolvedWikilinks(
           if (res.ok) {
             const json = (await res.json()) as ResolveBatchResponse;
             for (const result of json.results) {
-              map.set(result.target, result.slug);
+              map.set(
+                result.target,
+                result.slug ? { slug: result.slug, archived: result.archived } : null,
+              );
             }
           }
         } catch {
@@ -59,11 +62,12 @@ export function useResolvedWikilinks(
             return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
           }
 
-          const slug = map.get(parsed.target) ?? null;
-          if (slug) {
+          const resolved = map.get(parsed.target) ?? null;
+          if (resolved) {
             const anchor = extractAnchor(parsed.target);
             const hash = anchor ? `#${anchor}` : "";
-            return `[${escapeMarkdownLabel(parsed.label)}](/n/${slug}${hash})`;
+            const prefix = resolved.archived ? "/__archived__/" : "/n/";
+            return `[${escapeMarkdownLabel(parsed.label)}](${prefix}${resolved.slug}${hash})`;
           }
           return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
         },

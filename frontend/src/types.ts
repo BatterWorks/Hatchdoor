@@ -63,6 +63,7 @@ export type ResolveBatchResponse = {
   results: Array<{
     target: string;
     slug: string | null;
+    archived: boolean;
   }>;
 };
 
