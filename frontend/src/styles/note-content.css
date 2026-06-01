@@ -708,6 +708,18 @@
   overflow: auto;
 }
 
+.note-body a.archived-link {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.note-body a.archived-link::after {
+  content: " ↩";
+  font-style: normal;
+  font-size: 0.75em;
+  opacity: 0.7;
+}
+
 .note-body .mermaid p {
   font-family: inherit;
   font-size: inherit;

@@ -73,6 +73,63 @@ describe("App links/download", () => {
     });
   });
 
+  it("renders archived wikilinks with archived-link class", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "See [[Old Setup|old setup log]]",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                { target: "Old Setup", slug: "old-setup", archived: true },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const link = screen.getByText("old setup log");
+      expect(link).toHaveClass("archived-link");
+      expect(link).toHaveAttribute("href", "/n/old-setup");
+    });
+  });
+
   it("opens external markdown links in a new tab", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {

@@ -314,6 +314,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_batch_marks_archived_notes() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        let archive_dir = vault_root.join("90-archive");
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write home");
+        std::fs::write(
+            archive_dir.join("Old Setup.md"),
+            "# Old Setup\n",
+        )
+        .expect("write archived note");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let state = AppState {
+            vault_path: vault_root,
+            cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            embedder,
+        };
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resolve-batch")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"targets":["Home","90-archive/Old Setup"]}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let results = payload["results"].as_array().expect("results array");
+
+        let home = results.iter().find(|r| r["target"] == "Home").expect("home result");
+        assert_eq!(home["archived"], false, "Home should not be archived");
+
+        let archived = results
+            .iter()
+            .find(|r| r["target"] == "90-archive/Old Setup")
+            .expect("archived result");
+        assert_eq!(archived["archived"], true, "90-archive note should be archived");
+    }
+
+    #[tokio::test]
     async fn router_wires_core_api_routes() {
         let (app, _tmp) = app_for_tests();
 

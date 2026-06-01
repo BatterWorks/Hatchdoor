@@ -78,7 +78,10 @@ pub async fn resolve_handler(
     };
 
     match cache.resolve_wikilink(&query.target) {
-        Ok(slug) => (StatusCode::OK, Json(ResolveResponse { slug })).into_response(),
+        Ok(resolved) => {
+            let slug = resolved.map(|(slug, _)| slug);
+            (StatusCode::OK, Json(ResolveResponse { slug })).into_response()
+        }
         Err(error) => internal_error_response(error),
     }
 }
@@ -94,11 +97,18 @@ pub async fn resolve_batch_handler(
 
     let mut results = Vec::with_capacity(payload.targets.len());
     for target in payload.targets {
-        let slug = match cache.resolve_wikilink(&target) {
-            Ok(slug) => slug,
+        let resolved = match cache.resolve_wikilink(&target) {
+            Ok(resolved) => resolved,
             Err(error) => return internal_error_response(error),
         };
-        results.push(ResolveTargetResult { target, slug });
+        let (slug, archived) = match resolved {
+            Some((slug, relative_path)) => {
+                let archived = relative_path.starts_with("90-archive/");
+                (Some(slug), archived)
+            }
+            None => (None, false),
+        };
+        results.push(ResolveTargetResult { target, slug, archived });
     }
 
     (StatusCode::OK, Json(ResolveBatchResponse { results })).into_response()
