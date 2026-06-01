@@ -14,7 +14,6 @@ import { UiButton } from "../ui";
 import { flattenText } from "./text";
 
 let mermaidModulePromise: Promise<MermaidApi> | null = null;
-let mermaidInitialized = false;
 const mermaidFontFamily = "Inter Tight, system-ui, sans-serif";
 
 async function getMermaidApi(): Promise<MermaidApi> {
@@ -23,21 +22,14 @@ async function getMermaidApi(): Promise<MermaidApi> {
       (mod) => (mod as { default: MermaidApi }).default,
     );
   }
+  return mermaidModulePromise;
+}
 
-  const api = await mermaidModulePromise;
-  if (!mermaidInitialized) {
-    api.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      fontFamily: mermaidFontFamily,
-      themeVariables: {
-        fontFamily: mermaidFontFamily,
-      },
-    });
-    mermaidInitialized = true;
-  }
-
-  return api;
+function isDarkMode(): boolean {
+  const dataTheme = document.documentElement.getAttribute("data-theme");
+  if (dataTheme === "dark") return true;
+  if (dataTheme === "light") return false;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
 async function waitForDocumentFonts(): Promise<void> {
@@ -167,6 +159,22 @@ export function CodeBlock({
 export function MermaidDiagram({ chart }: { chart: string }) {
   const [svg, setSvg] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [dark, setDark] = useState<boolean>(() => isDarkMode());
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const observer = new MutationObserver(() => setDark(isDarkMode()));
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    const onMqChange = () => setDark(isDarkMode());
+    mq.addEventListener("change", onMqChange);
+    return () => {
+      observer.disconnect();
+      mq.removeEventListener("change", onMqChange);
+    };
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -175,6 +183,15 @@ export function MermaidDiagram({ chart }: { chart: string }) {
       try {
         const api = await getMermaidApi();
         await waitForDocumentFonts();
+        api.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: dark ? "dark" : "default",
+          fontFamily: mermaidFontFamily,
+          themeVariables: {
+            fontFamily: mermaidFontFamily,
+          },
+        });
         const id = `m-${Math.random().toString(36).slice(2)}`;
         const { svg: rendered } = await api.render(id, chart);
         if (mounted) {
@@ -193,7 +210,7 @@ export function MermaidDiagram({ chart }: { chart: string }) {
     return () => {
       mounted = false;
     };
-  }, [chart]);
+  }, [chart, dark]);
 
   if (error) {
     return <pre className="error">Mermaid error: {error}</pre>;
