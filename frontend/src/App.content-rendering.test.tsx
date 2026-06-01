@@ -287,7 +287,7 @@ Body`,
     );
 
     const input = await screen.findByPlaceholderText(
-      "Search notes (title, path, content)",
+      "Search notes…",
     );
     expect(input).toHaveValue("type/reference");
     const includeContent = screen.getByRole("checkbox");
@@ -462,6 +462,7 @@ Body`,
     expect(mermaidInitialize).toHaveBeenCalledWith({
       startOnLoad: false,
       securityLevel: "strict",
+      theme: "default",
       fontFamily: "Inter Tight, system-ui, sans-serif",
       themeVariables: {
         fontFamily: "Inter Tight, system-ui, sans-serif",

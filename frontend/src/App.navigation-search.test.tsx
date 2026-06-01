@@ -498,7 +498,7 @@ describe("App navigation/search", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Search" }));
     const input = await screen.findByPlaceholderText(
-      "Search notes (title, path, content)",
+      "Search notes…",
     );
     fireEvent.change(input, { target: { value: "plan" } });
 

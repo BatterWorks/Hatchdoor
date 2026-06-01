@@ -247,9 +247,7 @@ describe("App enhancements", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Search" }));
-    const input = await screen.findByPlaceholderText(
-      "Search notes (title, path, content)",
-    );
+    const input = await screen.findByPlaceholderText("Search notes…");
     fireEvent.change(input, { target: { value: "token" } });
 
     fireEvent.click(await screen.findByRole("button", { name: /Home/ }));
