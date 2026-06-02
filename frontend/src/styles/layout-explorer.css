@@ -1,32 +1,39 @@
 .app-layout {
-  --sidebar-width: 270px;
+  --sidebar-width: 280px;
   display: grid;
   grid-template-columns: var(--sidebar-width) 8px minmax(0, 1fr);
-  min-height: calc(100dvh - 52px - env(safe-area-inset-top));
+  flex: 1;
+  min-height: 0;
   min-width: 0;
+  overflow: hidden;
 }
 
+/* Sidebar / Explorer pane */
 .explorer-pane {
-  border-right: 1px solid var(--color-border);
-  background: var(--color-bg-muted);
-  padding: 0.55rem;
+  background: var(--bg);
+  border-right: 1px solid var(--rule);
+  padding: 1.25rem 1rem 1.5rem;
   overflow-y: auto;
 }
 
+/* Section header with number + label + rule + count */
 .explorer-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 0.55rem;
-  padding-inline: 0.2rem;
+  gap: 0.55rem;
+  margin-bottom: 0.7rem;
+  padding: 0 0.3rem;
 }
 
 .explorer-header p {
   margin: 0;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 84, "wght" 700;
   font-size: 0.78rem;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--color-text-tertiary);
+  color: var(--ink);
+  flex: 1;
 }
 
 .explorer-actions {
@@ -34,33 +41,149 @@
   gap: 0.35rem;
 }
 
+/* Recent notes panel */
 .recent-notes {
-  margin: 0 0 0.58rem;
+  margin: 0 0 1.5rem;
   border: 0;
   background: transparent;
-  border-radius: 0;
-  padding: 0.04rem 0.08rem 0.16rem;
+  padding: 0;
 }
 
 .recent-notes-title {
-  margin: 0 0 0.16rem;
-  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--hot);
+  font-weight: 500;
+  margin: 0 0 0.45rem 0.4rem;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--color-text-tertiary);
+  letter-spacing: 0.14em;
 }
 
-.recent-notes .note-link {
+/* Note links in sidebar */
+.note-link {
   display: flex;
-  min-height: 30px;
-  padding: 0.08rem 0.26rem;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.22rem 0.45rem;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 100, "wght" 400;
+  font-size: 0.9rem;
+  color: var(--ink-soft);
+  text-decoration: none;
+  line-height: 1.4;
+  position: relative;
+  width: 100%;
 }
 
-.recent-notes .active-note {
-  background: var(--color-btn-active);
-  box-shadow: inset 2px 0 0 #8f8b83;
+.note-link:hover {
+  color: var(--ink);
+  background: var(--paper-2);
 }
 
+.note-link:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+.note-link.active-note {
+  color: var(--ink);
+  font-variation-settings: "wdth" 100, "wght" 600;
+  background: var(--hot-soft);
+  box-shadow: inset 3px 0 0 var(--hot);
+}
+
+/* Remove old note-link icon pseudo-element */
+.note-link::before {
+  display: none;
+}
+
+.note-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Folder tree */
+.tree {
+  list-style: none;
+  margin: 0;
+  padding-left: 0.95rem;
+}
+
+.root-tree {
+  padding-left: 0;
+}
+
+.folder-item {
+  margin: 0;
+}
+
+.folder-item summary {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.28rem 0.4rem;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 98, "wght" 500;
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+  cursor: pointer;
+  text-decoration: none;
+  line-height: 1.4;
+  list-style: none;
+  min-height: unset;
+  border-radius: 0;
+}
+
+.folder-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.folder-item summary::marker {
+  content: "";
+}
+
+/* Caret triangle */
+.folder-item summary::before {
+  content: "";
+  display: block;
+  width: 8px;
+  height: 8px;
+  background: var(--muted);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  transition: transform 180ms var(--ease);
+  flex: 0 0 auto;
+}
+
+.folder-item details[open] > summary::before {
+  transform: rotate(90deg);
+  background: var(--hot);
+}
+
+.folder-item summary:hover {
+  color: var(--ink);
+  background: var(--paper-2);
+}
+
+.folder-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Nested folder children indented with left border */
+.tree .tree {
+  border-left: 1px solid var(--rule);
+  margin-left: 0.4rem;
+}
+
+.note-item {
+  margin: 0;
+}
+
+/* Sidebar resizer */
 .sidebar-resizer {
   cursor: col-resize;
   position: relative;
@@ -74,10 +197,17 @@
   bottom: 0;
   left: 3px;
   width: 2px;
-  background: #ececea;
+  background: var(--rule);
 }
 
 .sidebar-resizer:hover::before {
-  background: #d8d8d5;
+  background: var(--rule-strong);
 }
 
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+
+.sidebar-resizer:focus-visible::before {
+  background: var(--hot);
+}

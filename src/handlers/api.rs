@@ -1,0 +1,232 @@
+use axum::Json;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use std::convert::Infallible;
+use std::sync::atomic::Ordering;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
+use tracing::{debug, warn};
+
+use crate::api_types::{
+    ErrorResponse, NoteLinksResponse, NoteResponse, RecentlyModifiedQuery,
+    RecentlyModifiedResponse, RefreshResponse, ResolveBatchRequest, ResolveBatchResponse,
+    ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, VaultEventResponse,
+};
+
+use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
+
+pub async fn health_handler() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
+pub async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.explorer_tree() {
+        Ok(tree) => (StatusCode::OK, Json(tree)).into_response(),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+pub async fn note_handler(
+    Path(slug): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.read_note_by_slug(&slug) {
+        Ok(Some(note)) => (StatusCode::OK, Json(NoteResponse { note })).into_response(),
+        Ok(None) => {
+            warn!(slug = %slug, "Note not found");
+            note_not_found_response(&slug)
+        }
+        Err(error) => internal_error_response(format!("Failed reading note {slug}: {error}")),
+    }
+}
+
+pub async fn note_links_handler(
+    Path(slug): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.note_links(&slug) {
+        Ok(Some(links)) => (StatusCode::OK, Json(NoteLinksResponse { links })).into_response(),
+        Ok(None) => note_not_found_response(&slug),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+pub async fn resolve_handler(
+    Query(query): Query<ResolveQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.resolve_wikilink(&query.target) {
+        Ok(resolved) => {
+            let slug = resolved.map(|(slug, _)| slug);
+            (StatusCode::OK, Json(ResolveResponse { slug })).into_response()
+        }
+        Err(error) => internal_error_response(error),
+    }
+}
+
+pub async fn resolve_batch_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<ResolveBatchRequest>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    let mut results = Vec::with_capacity(payload.targets.len());
+    for target in payload.targets {
+        let resolved = match cache.resolve_wikilink(&target) {
+            Ok(resolved) => resolved,
+            Err(error) => return internal_error_response(error),
+        };
+        let (slug, archived) = match resolved {
+            Some((slug, relative_path)) => {
+                let archived = relative_path.starts_with("90-archive/");
+                (Some(slug), archived)
+            }
+            None => (None, false),
+        };
+        results.push(ResolveTargetResult { target, slug, archived });
+    }
+
+    (StatusCode::OK, Json(ResolveBatchResponse { results })).into_response()
+}
+
+pub async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match refresh_if_needed(&state).await {
+        Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+pub async fn vault_events_handler(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let current_revision = state.vault_revision.load(Ordering::SeqCst);
+    let current_event = tokio_stream::once(Ok(vault_revision_event(current_revision)));
+    let live_events =
+        BroadcastStream::new(state.vault_events.subscribe()).filter_map(|event| match event {
+            Ok(revision) => Some(Ok(vault_revision_event(revision))),
+            Err(_) => None,
+        });
+
+    let stream = current_event.chain(live_events);
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn vault_revision_event(revision: u64) -> Event {
+    let payload = serde_json::to_string(&VaultEventResponse { revision })
+        .unwrap_or_else(|_| format!(r#"{{"revision":{revision}}}"#));
+    Event::default()
+        .event("vault-revision")
+        .id(revision.to_string())
+        .data(payload)
+}
+
+pub async fn recently_modified_handler(
+    Query(query): Query<RecentlyModifiedQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    let limit = query.limit.unwrap_or(5).clamp(1, 25);
+    match cache.recently_modified_notes(limit) {
+        Ok(notes) => (StatusCode::OK, Json(RecentlyModifiedResponse { notes })).into_response(),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+pub async fn search_handler(
+    Query(query): Query<SearchQuery>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+    let embedder = state.embedder.as_ref();
+
+    let limit = query.limit.unwrap_or(10).clamp(1, 50);
+    let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
+    let mode = query.mode.unwrap_or_default();
+    let q_len = query.q.len();
+    debug!(query_len = q_len, ?mode, limit, per_note_cap, "Executing Phase 2 search");
+
+    let req = crate::search::SearchRequest {
+        query: query.q,
+        mode,
+        limit,
+        per_note_cap,
+    };
+    match crate::search::run(cache.as_ref(), embedder, req) {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => internal_error_response(format!("Search failed: {error}")),
+    }
+}
+
+pub async fn stats_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.vault_stats() {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+pub async fn graph_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = match sqlite_cache(&state).await {
+        Ok(cache) => cache,
+        Err(err) => return err.into_response(),
+    };
+
+    match cache.graph_data() {
+        Ok(data) => (StatusCode::OK, Json(data)).into_response(),
+        Err(error) => internal_error_response(error),
+    }
+}
+
+fn note_not_found_response(slug: &str) -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("Note not found: {slug}"),
+        }),
+    )
+        .into_response()
+}
+
+fn internal_error_response(error: String) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse { error }),
+    )
+        .into_response()
+}

@@ -43,7 +43,10 @@ export function NoteProperties({
               <dt>{key}</dt>
               <dd>
                 {key === "tags" ? (
-                  <TagChips tags={normalizeTags(value)} onSelect={onTagSelect} />
+                  <TagChips
+                    tags={normalizeTags(value)}
+                    onSelect={onTagSelect}
+                  />
                 ) : (
                   <PropertyValue value={value} />
                 )}

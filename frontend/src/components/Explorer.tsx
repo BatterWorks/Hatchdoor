@@ -1,7 +1,12 @@
 import { NavLink } from "react-router-dom";
 import { useMemo } from "react";
 
-import type { ExplorerFolder, ExplorerNote, RecentNote } from "../types";
+import type {
+  ExplorerFolder,
+  ExplorerNote,
+  ModifiedNote,
+  RecentNote,
+} from "../types";
 import { UiPanel } from "./ui";
 
 export function RecentNotesList({
@@ -20,7 +25,7 @@ export function RecentNotesList({
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
-      <p className="recent-notes-title">Recent Notes</p>
+      <p className="recent-notes-title">Recently Viewed</p>
       <ul className="tree root-tree">
         {recent.map((note) => (
           <li key={note.slug} className="note-item">
@@ -33,6 +38,44 @@ export function RecentNotesList({
               to={`/n/${note.slug}`}
               onClick={onNavigate}
               title={`${note.relativePath}.md`}
+            >
+              <span className="note-label">{note.title}</span>
+            </NavLink>
+          </li>
+        ))}
+      </ul>
+    </UiPanel>
+  );
+}
+
+export function LastModifiedNotesList({
+  notes,
+  currentPath,
+  onNavigate,
+}: {
+  notes: ModifiedNote[];
+  currentPath: string;
+  onNavigate: () => void;
+}) {
+  if (notes.length === 0) {
+    return null;
+  }
+
+  return (
+    <UiPanel className="recent-notes" data-testid="last-modified-notes">
+      <p className="recent-notes-title">Last Modified</p>
+      <ul className="tree root-tree">
+        {notes.map((note) => (
+          <li key={note.slug} className="note-item">
+            <NavLink
+              className={
+                currentPath === `/n/${note.slug}`
+                  ? "note-link active-note"
+                  : "note-link"
+              }
+              to={`/n/${note.slug}`}
+              onClick={onNavigate}
+              title={`${note.relative_path}.md`}
             >
               <span className="note-label">{note.title}</span>
             </NavLink>

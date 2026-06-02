@@ -31,6 +31,8 @@ fn build_indexes_markdown_files_only() {
     let dir = tempdir().expect("temp dir");
     fs::write(dir.path().join("Home.md"), "# Home").expect("write note");
     fs::write(dir.path().join("readme.txt"), "ignore").expect("write text");
+    fs::create_dir_all(dir.path().join(".hatchdoor-trash")).expect("create trash");
+    fs::write(dir.path().join(".hatchdoor-trash/Deleted.md"), "# Deleted").expect("write trash");
 
     let vault = VaultIndex::build(dir.path()).expect("build vault");
     assert_eq!(vault.total_notes(), 1);
@@ -48,6 +50,23 @@ fn resolve_wikilink_supports_title_slug_and_md_suffix() {
     assert!(vault.resolve_wikilink("Second Note").is_some());
     assert!(vault.resolve_wikilink("second-note").is_some());
     assert!(vault.resolve_wikilink("Second Note.md").is_some());
+}
+
+#[test]
+fn resolve_wikilink_strips_heading_and_block_anchors() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("My Quotes.md"), "content").expect("write note");
+
+    let vault = VaultIndex::build(dir.path()).expect("build vault");
+    let result = vault
+        .resolve_wikilink("My Quotes#Marcus Aurelius")
+        .expect("heading anchor should resolve to note");
+    assert_eq!(result.slug, "my-quotes");
+
+    let result = vault
+        .resolve_wikilink("My Quotes^block-id")
+        .expect("block anchor should resolve to note");
+    assert_eq!(result.slug, "my-quotes");
 }
 
 #[test]

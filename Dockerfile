@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.95-slim-trixie AS chef
+FROM rust:1.95-slim AS chef
 WORKDIR /app
+RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 
 FROM chef AS planner
@@ -15,8 +16,11 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --bin hatchdoor
+ENV FASTEMBED_CACHE_DIR=/opt/fastembed
+RUN mkdir -p $FASTEMBED_CACHE_DIR \
+ && ./target/release/hatchdoor --prefetch-embedder
 
-FROM node:24-trixie-slim AS frontend-builder
+FROM node:24-slim AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
@@ -29,10 +33,11 @@ WORKDIR /app
 ENV HOST=0.0.0.0 \
     PORT=42824 \
     VAULT_PATH=/data/vault \
-    VAULT_REFRESH_SECONDS=2 \
+    FASTEMBED_CACHE_DIR=/opt/fastembed \
     RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn
 
 COPY --from=rust-builder /app/target/release/hatchdoor /app/hatchdoor
+COPY --from=rust-builder /opt/fastembed /opt/fastembed
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 EXPOSE 42824

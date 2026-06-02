@@ -1,5 +1,10 @@
 /target
 .env
+node_modules
 frontend/node_modules
 frontend/dist
 /tmp
+/data
+/.fastembed_cache
+.claude/
+.superpowers/

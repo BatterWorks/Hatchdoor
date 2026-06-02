@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60" width="60" height="60" role="img" aria-label="Hatchdoor">
+  <title>Hatchdoor</title>
+  <defs>
+    <style>
+      .b { fill: #0c0c0a; }
+      .a { fill: #ff4d1c; }
+      @media (prefers-color-scheme: dark) {
+        .b { fill: #ece8d8; }
+        .a { fill: #ff5a2b; }
+      }
+    </style>
+  </defs>
+  <!-- Left bracket -->
+  <rect class="b" x="9" y="9" width="7" height="42"/>
+  <rect class="b" x="9" y="9" width="13" height="7"/>
+  <rect class="b" x="9" y="44" width="13" height="7"/>
+  <!-- Right bracket -->
+  <rect class="b" x="44" y="9" width="7" height="42"/>
+  <rect class="b" x="38" y="9" width="13" height="7"/>
+  <rect class="b" x="38" y="44" width="13" height="7"/>
+  <!-- Accent square -->
+  <rect class="a" x="25" y="25" width="10" height="10"/>
+</svg>

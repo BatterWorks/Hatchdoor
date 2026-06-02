@@ -13,6 +13,7 @@ use super::paths::{
 use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
 };
+use crate::cache::parse::content_hash;
 
 impl VaultIndex {
     pub fn build(root: impl AsRef<Path>) -> io::Result<Self> {
@@ -23,7 +24,10 @@ impl VaultIndex {
         let mut ordered_slugs = Vec::new();
         let mut markdown_paths = Vec::new();
 
-        for entry in WalkDir::new(&root) {
+        for entry in WalkDir::new(&root)
+            .into_iter()
+            .filter_entry(|entry| entry.file_name() != ".hatchdoor-trash")
+        {
             let entry = entry.map_err(io::Error::other)?;
             let path = entry.path();
 
@@ -95,12 +99,29 @@ impl VaultIndex {
         })
     }
 
+    pub fn ordered_entries(&self) -> Vec<NoteEntry> {
+        self.ordered_slugs
+            .iter()
+            .filter_map(|slug| self.by_slug.get(slug).cloned())
+            .collect()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn find_by_slug(&self, slug: &str) -> Option<&NoteEntry> {
         self.by_slug.get(slug)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn resolve_wikilink(&self, raw_target: &str) -> Option<&NoteEntry> {
-        let normalized_target = normalize_link_target(raw_target);
+        // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
+        let note_target = raw_target
+            .split('#')
+            .next()
+            .unwrap_or(raw_target)
+            .split('^')
+            .next()
+            .unwrap_or(raw_target);
+        let normalized_target = normalize_link_target(note_target);
 
         if let Some(slug) = self.by_path_title.get(&normalize_title(&normalized_target)) {
             return self.by_slug.get(slug);
@@ -118,6 +139,7 @@ impl VaultIndex {
         self.by_slug.get(&slugify(base))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn read_note_by_slug(&self, slug: &str) -> io::Result<Option<Note>> {
         let Some(entry) = self.find_by_slug(slug) else {
             return Ok(None);
@@ -128,10 +150,12 @@ impl VaultIndex {
             title: entry.title.clone(),
             slug: entry.slug.clone(),
             relative_path: entry.relative_path.clone(),
+            content_hash: content_hash(&content),
             content,
         }))
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn explorer_tree(&self) -> ExplorerFolder {
         let mut root = FolderBuilder::default();
 
@@ -156,6 +180,7 @@ impl VaultIndex {
         root.build("Vault")
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn search(&self, query: &str, include_content: bool, limit: usize) -> Vec<SearchHit> {
         let normalized_query = normalize_title(query);
         if normalized_query.is_empty() || limit == 0 {
@@ -274,12 +299,14 @@ impl VaultIndex {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Default)]
 struct FolderBuilder {
     folders: BTreeMap<String, FolderBuilder>,
     notes: Vec<ExplorerNote>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl FolderBuilder {
     fn insert_note(&mut self, folders: &[&str], note: ExplorerNote) {
         if folders.is_empty() {

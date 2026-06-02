@@ -1,7 +1,4 @@
-import {
-  EXPANDED_FOLDERS_KEY,
-  RECENT_NOTES_KEY,
-} from "./constants";
+import { EXPANDED_FOLDERS_KEY, RECENT_NOTES_KEY } from "./constants";
 import type { RecentNote } from "../types";
 
 export function getStoredNumber(

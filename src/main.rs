@@ -1,39 +1,59 @@
-mod api_types;
-mod app_state;
-mod handlers;
-mod vault;
-
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{build_cache, init_logging, AppConfig, AppState};
-use crate::handlers::{
-    health_handler, note_download_handler, note_handler, note_links_handler, refresh_handler,
-    resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, tree_handler,
-    vault_asset_handler,
+use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
+use hatchdoor::cache::SqliteCache;
+use hatchdoor::embed::{Embedder, FastembedEmbedder};
+use hatchdoor::handlers::{
+    graph_handler, health_handler, note_download_handler, note_handler, note_links_handler,
+    recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
+    search_handler, spa_index_handler, stats_handler, tree_handler, vault_asset_handler,
+    vault_events_handler,
 };
+use hatchdoor::mcp::{mcp_get_handler, mcp_post_handler};
+use hatchdoor::vault_watcher::spawn_vault_watcher;
+
+enum RunMode {
+    Serve,
+    PrefetchEmbedder,
+    Unknown(String),
+}
+
+fn parse_run_mode(args: &[String]) -> RunMode {
+    match args.get(1).map(String::as_str) {
+        None => RunMode::Serve,
+        Some("--prefetch-embedder") => RunMode::PrefetchEmbedder,
+        Some(other) => RunMode::Unknown(other.to_string()),
+    }
+}
 
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health_handler))
+        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .route("/api/tree", get(tree_handler))
+        .route("/api/vault-events", get(vault_events_handler))
+        .route("/api/recently-modified", get(recently_modified_handler))
         .route("/api/note/{slug}", get(note_handler))
         .route("/api/note/{slug}/download", get(note_download_handler))
         .route("/api/note/{slug}/links", get(note_links_handler))
         .route("/api/resolve", get(resolve_handler))
         .route("/api/resolve-batch", post(resolve_batch_handler))
         .route("/api/search", get(search_handler))
+        .route("/api/stats", get(stats_handler))
+        .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
+        .route("/stats", get(spa_index_handler))
+        .route("/graph", get(spa_index_handler))
         .route("/vault-assets/{*path}", get(vault_asset_handler))
         .route_service(
             "/manifest.webmanifest",
@@ -54,29 +74,52 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
-#[tokio::main]
-async fn main() {
-    dotenv().ok();
-    init_logging();
-
+async fn run_server() {
     let config = AppConfig::from_env().unwrap_or_else(|e| {
         error!("Configuration error: {e}");
         std::process::exit(1);
     });
 
-    let cache = build_cache(&config.vault_path).unwrap_or_else(|e| {
-        error!(
-            "Failed to index vault at {}: {e}",
-            config.vault_path.display()
-        );
-        std::process::exit(1);
-    });
+    let sqlite = Arc::new(
+        SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
+            error!(
+                cache_db_path = %config.cache_db_path.display(),
+                "SQLite cache startup failed: {e}"
+            );
+            std::process::exit(1);
+        }),
+    );
 
+    let embedder: Arc<dyn Embedder> =
+        Arc::new(FastembedEmbedder::nomic_v1_5().unwrap_or_else(|e| {
+            error!("Failed to load embedder: {e}");
+            std::process::exit(1);
+        }));
+
+    let cache = build_cache_with_sqlite(&config.vault_path, sqlite, embedder.as_ref())
+        .unwrap_or_else(|e| {
+            error!(
+                "Failed to index vault at {} into SQLite cache {}: {e}",
+                config.vault_path.display(),
+                config.cache_db_path.display()
+            );
+            std::process::exit(1);
+        });
+
+    let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let state = AppState {
         vault_path: config.vault_path.clone(),
-        refresh_interval: Duration::from_secs(config.refresh_seconds),
         cache: Arc::new(RwLock::new(cache)),
+        vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        vault_events,
+        embedder,
     };
+
+    spawn_vault_watcher(
+        state.clone(),
+        config.vault_path.clone(),
+        config.cache_db_path.clone(),
+    );
 
     let app = build_router(state);
 
@@ -88,8 +131,8 @@ async fn main() {
     info!(
         host = %config.host,
         port = config.port,
-        refresh_seconds = config.refresh_seconds,
         vault_path = %config.vault_path.display(),
+        cache_db_path = %config.cache_db_path.display(),
         "Hatchdoor starting"
     );
     info!("Hatchdoor listening on http://{addr}");
@@ -106,29 +149,89 @@ async fn main() {
     });
 }
 
+fn run_prefetch() {
+    info!("Pre-fetching Nomic Embed Text v1.5 weights and tokenizer");
+    match FastembedEmbedder::nomic_v1_5() {
+        Ok(_) => info!("Pre-fetch complete"),
+        Err(e) => {
+            error!("Pre-fetch failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    dotenv().ok();
+    init_logging();
+
+    let args: Vec<String> = std::env::args().collect();
+    match parse_run_mode(&args) {
+        RunMode::Serve => run_server().await,
+        RunMode::PrefetchEmbedder => run_prefetch(),
+        RunMode::Unknown(flag) => {
+            error!("Unknown flag: {flag}");
+            std::process::exit(2);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use tempfile::TempDir;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
+    use tempfile::TempDir;
     use tokio::sync::RwLock;
+    use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
+    use hatchdoor::app_state::build_cache;
+    use hatchdoor::embed::{Embedder, StubEmbedder};
+
+    #[test]
+    fn cli_recognises_prefetch_embedder_flag() {
+        let args = vec!["hatchdoor".to_string(), "--prefetch-embedder".to_string()];
+        assert!(matches!(parse_run_mode(&args), RunMode::PrefetchEmbedder));
+    }
+
+    #[test]
+    fn cli_defaults_to_serve_mode() {
+        let args = vec!["hatchdoor".to_string()];
+        assert!(matches!(parse_run_mode(&args), RunMode::Serve));
+    }
+
+    #[test]
+    fn cli_rejects_unknown_flags() {
+        let args = vec!["hatchdoor".to_string(), "--bogus".to_string()];
+        assert!(matches!(parse_run_mode(&args), RunMode::Unknown(_)));
+    }
+
     fn app_for_tests() -> (Router, TempDir) {
+        let (app, tmp, _state) = app_for_tests_with_state();
+        (app, tmp)
+    }
+
+    fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let cache = build_cache(&vault_root).expect("cache");
+        let embedder: Arc<dyn Embedder> =
+            Arc::new(StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
             vault_path: vault_root,
-            refresh_interval: Duration::from_secs(60),
             cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            embedder,
         };
 
-        (build_router(state), tmp)
+        (build_router(state.clone()), tmp, state)
     }
 
     #[tokio::test]
@@ -146,7 +249,9 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.expect("body");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
         assert_eq!(&body[..], b"ok");
     }
 
@@ -180,6 +285,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_serves_vault_events_stream() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        state.vault_revision.store(7, Ordering::SeqCst);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vault-events")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+        let mut stream = response.into_body().into_data_stream();
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("first SSE event")
+            .expect("stream item")
+            .expect("body chunk");
+        let event = std::str::from_utf8(&chunk).expect("utf8 event");
+        assert!(event.contains("event: vault-revision"));
+        assert!(event.contains("id: 7"));
+        assert!(event.contains(r#"data: {"revision":7}"#));
+    }
+
+    #[tokio::test]
+    async fn resolve_batch_marks_archived_notes() {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        let archive_dir = vault_root.join("90-archive");
+        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write home");
+        std::fs::write(
+            archive_dir.join("Old Setup.md"),
+            "# Old Setup\n",
+        )
+        .expect("write archived note");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let state = AppState {
+            vault_path: vault_root,
+            cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            embedder,
+        };
+        let app = build_router(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resolve-batch")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"targets":["Home","90-archive/Old Setup"]}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let results = payload["results"].as_array().expect("results array");
+
+        let home = results.iter().find(|r| r["target"] == "Home").expect("home result");
+        assert_eq!(home["archived"], false, "Home should not be archived");
+
+        let archived = results
+            .iter()
+            .find(|r| r["target"] == "90-archive/Old Setup")
+            .expect("archived result");
+        assert_eq!(archived["archived"], true, "90-archive note should be archived");
+    }
+
+    #[tokio::test]
     async fn router_wires_core_api_routes() {
         let (app, _tmp) = app_for_tests();
 
@@ -197,6 +384,7 @@ mod tests {
         assert_eq!(note.status(), StatusCode::OK);
 
         let resolve_batch = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/resolve-batch")
@@ -208,5 +396,22 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(resolve_batch.status(), StatusCode::OK);
+
+        let modified = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/recently-modified?limit=5")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(modified.status(), StatusCode::OK);
+        let body = to_bytes(modified.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["notes"][0]["slug"], "home");
     }
 }

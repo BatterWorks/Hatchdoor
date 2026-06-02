@@ -17,16 +17,19 @@ pub struct Note {
     pub slug: String,
     pub relative_path: String,
     pub content: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct VaultIndex {
-    pub(crate) by_slug: HashMap<String, NoteEntry>,
-    pub(crate) by_title: HashMap<String, String>,
-    pub(crate) by_path_title: HashMap<String, String>,
-    pub(crate) ordered_slugs: Vec<String>,
-    pub(crate) outgoing_by_slug: HashMap<String, Vec<String>>,
-    pub(crate) backlinks_by_slug: HashMap<String, Vec<String>>,
+    pub by_slug: HashMap<String, NoteEntry>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub by_title: HashMap<String, String>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub by_path_title: HashMap<String, String>,
+    pub ordered_slugs: Vec<String>,
+    pub outgoing_by_slug: HashMap<String, Vec<String>>,
+    pub backlinks_by_slug: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -40,6 +43,14 @@ pub struct ExplorerFolder {
 pub struct ExplorerNote {
     pub title: String,
     pub slug: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModifiedNote {
+    pub title: String,
+    pub slug: String,
+    pub relative_path: String,
+    pub mtime_ns: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
