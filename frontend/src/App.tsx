@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import "./App.css";
@@ -23,13 +30,19 @@ import {
   isEditableTarget,
 } from "./app/storage";
 import { useIsMobile } from "./app/useIsMobile";
+import { useTheme } from "./app/useTheme";
+import { copyText } from "./clipboard";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
+import { GraphPage } from "./components/GraphPage";
+import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
+  ModifiedNote,
+  RecentlyModifiedResponse,
   RecentNote,
   SearchResponse,
   SearchResult,
@@ -50,9 +63,10 @@ function App() {
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
-  const [expandedFolders, setExpandedFolders] = useState<Record<string, boolean>>(
-    () => getStoredExpandedFolders(),
-  );
+  const [modifiedNotes, setModifiedNotes] = useState<ModifiedNote[]>([]);
+  const [expandedFolders, setExpandedFolders] = useState<
+    Record<string, boolean>
+  >(() => getStoredExpandedFolders());
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
@@ -60,14 +74,21 @@ function App() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
+  const [vaultRevision, setVaultRevision] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
-  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const { theme, cycleTheme } = useTheme();
+  const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
+    null,
+  );
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const topbarRef = useRef<HTMLElement | null>(null);
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
+  const prevFocusRef = useRef<Element | null>(null);
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -77,9 +98,27 @@ function App() {
         throw new Error(`Failed loading tree: ${res.status}`);
       }
       const nextTree = (await res.json()) as ExplorerFolder;
-      setTree((prev) => (isExplorerTreeEqual(prev, nextTree) ? prev : nextTree));
+      setTree((prev) =>
+        isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
+      );
     } catch (err) {
-      setTreeError(err instanceof Error ? err.message : "Unknown tree loading error");
+      setTreeError(
+        err instanceof Error ? err.message : "Unknown tree loading error",
+      );
+    }
+  }, []);
+
+  const loadModifiedNotes = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: "5" });
+      const res = await fetch(`/api/recently-modified?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error(`Failed loading modified notes: ${res.status}`);
+      }
+      const json = (await res.json()) as RecentlyModifiedResponse;
+      setModifiedNotes(json.notes.slice(0, 5));
+    } catch {
+      setModifiedNotes([]);
     }
   }, []);
 
@@ -87,19 +126,47 @@ function App() {
     void (async () => {
       setLoadingTree(true);
       await loadTree();
+      await loadModifiedNotes();
       setLoadingTree(false);
     })();
-  }, [loadTree]);
+  }, [loadModifiedNotes, loadTree]);
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      void loadTree();
-    }, 10_000);
+    if (!("EventSource" in window)) {
+      return;
+    }
+
+    const events = new EventSource("/api/vault-events");
+    const onVaultRevision = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { revision?: unknown };
+        if (typeof payload.revision === "number") {
+          const revision = payload.revision;
+          setVaultRevision((current) =>
+            revision > current ? revision : current,
+          );
+        }
+      } catch {
+        // Ignore malformed event payloads; the next valid revision will resync.
+      }
+    };
+
+    events.addEventListener("vault-revision", onVaultRevision);
 
     return () => {
-      window.clearInterval(id);
+      events.removeEventListener("vault-revision", onVaultRevision);
+      events.close();
     };
-  }, [loadTree]);
+  }, []);
+
+  useEffect(() => {
+    if (vaultRevision === 0) {
+      return;
+    }
+
+    void loadTree();
+    void loadModifiedNotes();
+  }, [loadModifiedNotes, loadTree, vaultRevision]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -142,6 +209,37 @@ function App() {
     setActionsMenuOpen(false);
   }, [location.pathname, isMobile]);
 
+  useLayoutEffect(() => {
+    if (!isMobile) {
+      setMobileDrawerTop(0);
+      return;
+    }
+
+    const updateDrawerTop = () => {
+      const nextTop = topbarRef.current?.getBoundingClientRect().bottom ?? 0;
+      setMobileDrawerTop(Math.ceil(nextTop));
+    };
+
+    updateDrawerTop();
+
+    const resizeObserver =
+      "ResizeObserver" in window ? new ResizeObserver(updateDrawerTop) : null;
+    if (topbarRef.current) {
+      resizeObserver?.observe(topbarRef.current);
+    }
+
+    window.addEventListener("resize", updateDrawerTop);
+    window.addEventListener("scroll", updateDrawerTop, { passive: true });
+    window.visualViewport?.addEventListener("resize", updateDrawerTop);
+
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateDrawerTop);
+      window.removeEventListener("scroll", updateDrawerTop);
+      window.visualViewport?.removeEventListener("resize", updateDrawerTop);
+    };
+  }, [isMobile]);
+
   useEffect(() => {
     if (location.pathname === "/") {
       setActiveNote(null);
@@ -154,7 +252,9 @@ function App() {
     }
 
     setRecentNotes((prev) => {
-      const withoutCurrent = prev.filter((item) => item.slug !== activeNote.slug);
+      const withoutCurrent = prev.filter(
+        (item) => item.slug !== activeNote.slug,
+      );
       const next: RecentNote[] = [
         { ...activeNote, viewedAt: Date.now() },
         ...withoutCurrent,
@@ -183,11 +283,16 @@ function App() {
   }, [location.pathname, navigate]);
 
   useEffect(() => {
-    if (!searchOpen) {
-      return;
+    if (searchOpen) {
+      prevFocusRef.current = document.activeElement;
+      const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+      return () => window.clearTimeout(id);
+    } else {
+      if (prevFocusRef.current instanceof HTMLElement) {
+        prevFocusRef.current.focus();
+      }
+      prevFocusRef.current = null;
     }
-    const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
-    return () => window.clearTimeout(id);
   }, [searchOpen]);
 
   useEffect(() => {
@@ -230,8 +335,9 @@ function App() {
         try {
           const params = new URLSearchParams({
             q: query,
-            content: String(searchIncludeContent),
+            mode: searchIncludeContent ? "keyword" : "semantic",
             limit: "30",
+            per_note_cap: "2",
           });
           const res = await fetch(`/api/search?${params.toString()}`);
           if (!res.ok) {
@@ -313,7 +419,8 @@ function App() {
       // Fall back to tree refresh even if force refresh endpoint fails.
     }
     await loadTree();
-  }, [loadTree]);
+    await loadModifiedNotes();
+  }, [loadModifiedNotes, loadTree]);
   const copyNoteLink = useCallback(async () => {
     if (!activeNote) {
       return;
@@ -323,6 +430,12 @@ function App() {
     } catch {
       // Ignore clipboard errors in unsupported contexts.
     }
+  }, [activeNote]);
+  const copyPageContent = useCallback(async () => {
+    if (!activeNote) {
+      return;
+    }
+    await copyText(activeNote.exportContent ?? "");
   }, [activeNote]);
   const toggleProperties = useCallback(() => {
     window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
@@ -342,41 +455,57 @@ function App() {
   }, [activeNote]);
 
   return (
-    <div className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}>
+    <div
+      className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}
+      style={
+        {
+          "--mobile-drawer-top": `${mobileDrawerTop}px`,
+          "--sidebar-width": `${sidebarWidth}px`,
+        } as CSSProperties
+      }
+    >
       <AppTopbar
         activeNote={activeNote}
         isMobile={isMobile}
         isOnline={isOnline}
         treeIsStale={treeIsStale}
         actionsMenuOpen={actionsMenuOpen}
+        topbarRef={topbarRef}
+        theme={theme}
         onToggleDrawer={() => setDrawerOpen((prev) => !prev)}
         onOpenSearch={() => setSearchOpen(true)}
         onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}
         onCloseActionsMenu={() => setActionsMenuOpen(false)}
         onRefreshVault={() => void refreshVault()}
+        onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
         onToggleProperties={toggleProperties}
+        onCycleTheme={cycleTheme}
       />
 
-      <div
-        className="app-layout"
-        style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
-      >
+      <div className="app-layout">
         <ExplorerPane
           explorerPaneRef={explorerPaneRef}
           drawerOpen={drawerOpen}
           locationPathname={location.pathname}
           recentNotes={recentNotes}
+          modifiedNotes={modifiedNotes}
           loadingTree={loadingTree}
           treeError={treeError}
           tree={tree}
           expandedFolders={expandedFolders}
           onExpandedFoldersChange={setExpandedFolders}
           onCloseDrawer={() => setDrawerOpen(false)}
-          onRefreshTree={() => void loadTree()}
+          onRefreshTree={() => {
+            void loadTree();
+            void loadModifiedNotes();
+          }}
           onScrollTopChange={(current) => {
-            window.localStorage.setItem(EXPLORER_SCROLL_TOP_KEY, String(current));
+            window.localStorage.setItem(
+              EXPLORER_SCROLL_TOP_KEY,
+              String(current),
+            );
           }}
         />
 
@@ -385,6 +514,11 @@ function App() {
             className="sidebar-resizer"
             role="separator"
             aria-orientation="vertical"
+            aria-label="Sidebar width"
+            aria-valuenow={sidebarWidth}
+            aria-valuemin={220}
+            aria-valuemax={420}
+            tabIndex={0}
             onPointerDown={(event) => {
               resizingRef.current = {
                 startX: event.clientX,
@@ -392,12 +526,30 @@ function App() {
               };
               document.body.classList.add("resizing");
             }}
+            onKeyDown={(event) => {
+              const step = event.shiftKey ? 20 : 5;
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setSidebarWidth((w) => clampSidebarWidth(w + step));
+              } else if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setSidebarWidth((w) => clampSidebarWidth(w - step));
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                setSidebarWidth(220);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                setSidebarWidth(420);
+              }
+            }}
           />
         ) : null}
 
-        <main className="note-pane">
+        <main className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}>
           <Routes>
             <Route path="/" element={<EmptyState />} />
+            <Route path="/stats" element={<StatsPage />} />
+            <Route path="/graph" element={<GraphPage />} />
             <Route
               path="/n/:slug"
               element={
@@ -405,6 +557,7 @@ function App() {
                   onActiveNoteChange={setActiveNote}
                   onTagSelect={openSearchForTag}
                   propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
+                  vaultRevision={vaultRevision}
                 />
               }
             />

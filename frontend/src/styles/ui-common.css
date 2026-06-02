@@ -1,123 +1,139 @@
+/* Base button — all ui-button variants */
 .ui-button,
-.close-note,
-.icon-button {
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--color-text);
-  border-radius: 6px;
-  padding: 0.26rem 0.52rem;
-  font-size: 0.82rem;
+.close-note {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 92, "wght" 600;
+  font-size: 0.74rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0.45rem 0.85rem;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  color: var(--ink);
   cursor: pointer;
-  transition:
-    background var(--dur-fast) var(--ease),
-    color var(--dur-fast) var(--ease);
+  text-decoration: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  border-radius: 0;
 }
 
 .ui-button:hover,
-.close-note:hover,
-.icon-button:hover {
-  background: var(--color-btn-hover);
+.close-note:hover {
+  background: var(--paper-2);
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+
+.ui-button:active,
+.close-note:active {
+  background: var(--hot);
+  color: var(--bg);
+  border-color: var(--hot);
 }
 
 .ui-button:focus-visible,
 .close-note:focus-visible,
-.icon-button:focus-visible,
 .note-link:focus-visible,
 .tag-chip:focus-visible,
 .search-input:focus-visible,
 .search-toggle input:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--color-focus) 48%, transparent);
+  outline: 2px solid var(--hot);
   outline-offset: 1px;
 }
 
+.ui-button:disabled,
+.close-note:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Topbar search trigger (extends button) */
+.topbar-search-trigger.ui-button {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.86rem;
+  min-width: 13rem;
+  justify-content: flex-start;
+  padding: 0.36rem 0.85rem;
+  border-color: var(--rule-strong);
+  color: var(--muted);
+  font-variation-settings: "wdth" 96, "wght" 500;
+}
+
+.topbar-search-trigger.ui-button:hover {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}
+
+/* Panel wrapper */
 .ui-panel {
-  border-radius: var(--radius-md);
+  border-radius: 0;
 }
 
-.ui-toolbar {
-  width: 100%;
-}
-
-.ui-badge {
-  font-weight: 600;
-}
-
-.ui-empty-state {
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: 1rem;
-  box-shadow: var(--shadow-soft);
-}
-
-.icon-button {
-  width: 2.05rem;
-  height: 2.05rem;
-  padding: 0;
-}
-
-.topbar-search-icon {
-  font-size: 1.45rem;
-  line-height: 1;
-  font-weight: 700;
-}
-
+/* State block */
 .state-block {
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+  padding: 1.25rem 1.3rem;
   text-align: left;
-  max-width: 38rem;
+  max-width: 36rem;
   margin: 0 auto;
 }
 
 .state-block h2 {
-  margin-top: 0;
+  margin: 0 0 0.4rem;
+  font-family: var(--font-display);
+  font-variation-settings: "wdth" 88, "wght" 700;
+  font-size: 1.05rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
+.state-block p {
+  margin: 0 0 0.7rem;
+  font-family: var(--font-sans);
+  font-size: 0.92rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* Loading skeleton */
 .skeleton-list {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.45rem;
 }
 
 .skeleton-line {
-  height: 0.8rem;
-  border-radius: 6px;
-  background: linear-gradient(90deg, #f0f0ee, #f8f8f6, #f0f0ee);
+  height: 0.85rem;
+  background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2));
   background-size: 200% 100%;
-  animation: shimmer 1.15s linear infinite;
+  animation: shimmer 1.2s linear infinite;
 }
 
 @keyframes shimmer {
-  0% {
-    background-position: 0 0;
-  }
-
-  100% {
-    background-position: 200% 0;
-  }
+  0% { background-position: 0 0; }
+  100% { background-position: 200% 0; }
 }
 
-.mermaid {
-  overflow: auto;
-  border: 1px solid var(--color-border);
-  border-radius: 8px;
-  padding: 0.48rem;
-  background: #fff;
-}
-
+/* Error / broken link */
 .error {
-  color: #9a3737;
+  color: var(--err-fg);
 }
 
 .broken-link {
-  color: #9a3737;
-  border-bottom: 1px dashed #be6565;
+  color: var(--err-fg);
+  border-bottom: 1px dashed var(--err-fg);
   cursor: not-allowed;
 }
 
+/* Drawer backdrop */
 .drawer-backdrop {
   position: fixed;
-  inset: calc(52px + env(safe-area-inset-top)) 0 0 0;
   border: 0;
-  background: rgba(15, 15, 15, 0.35);
+  background: var(--overlay-bg);
   z-index: 20;
 }
-

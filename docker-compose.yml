@@ -4,10 +4,10 @@ services:
     container_name: hatchdoor
     env_file:
       - .env
-    environment:
-      VAULT_PATH: /data/vault
     ports:
       - "42824:42824"
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
+      - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
+      - ${HOST_ATTACHMENT_STAGING_PATH:-./data/attachments-inbox}:${HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH:-/data/attachments-inbox}
     restart: unless-stopped

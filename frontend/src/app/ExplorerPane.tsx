@@ -1,14 +1,27 @@
 import type { RefObject } from "react";
+import { NavLink } from "react-router-dom";
 
-import { FolderTree, RecentNotesList } from "../components/Explorer";
+import {
+  FolderTree,
+  LastModifiedNotesList,
+  RecentNotesList,
+} from "../components/Explorer";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
-import type { ExplorerFolder, RecentNote } from "../types";
+import type { ExplorerFolder, ModifiedNote, RecentNote } from "../types";
+
+function countNotes(folder: ExplorerFolder): number {
+  return (
+    folder.notes.length +
+    folder.folders.reduce((sum, f) => sum + countNotes(f), 0)
+  );
+}
 
 type ExplorerPaneProps = {
   explorerPaneRef: RefObject<HTMLElement | null>;
   drawerOpen: boolean;
   locationPathname: string;
   recentNotes: RecentNote[];
+  modifiedNotes: ModifiedNote[];
   loadingTree: boolean;
   treeError: string | null;
   tree: ExplorerFolder | null;
@@ -24,6 +37,7 @@ export function ExplorerPane({
   drawerOpen,
   locationPathname,
   recentNotes,
+  modifiedNotes,
   loadingTree,
   treeError,
   tree,
@@ -51,8 +65,33 @@ export function ExplorerPane({
         </div>
       </header>
 
+      <div className="explorer-page-links">
+        <NavLink
+          className={({ isActive }) =>
+            `explorer-page-link${isActive ? " active" : ""}`
+          }
+          to="/stats"
+        >
+          Stats
+        </NavLink>
+        <NavLink
+          className={({ isActive }) =>
+            `explorer-page-link${isActive ? " active" : ""}`
+          }
+          to="/graph"
+        >
+          Graph
+        </NavLink>
+      </div>
+
       <RecentNotesList
         notes={recentNotes}
+        currentPath={locationPathname}
+        onNavigate={onCloseDrawer}
+      />
+
+      <LastModifiedNotesList
+        notes={modifiedNotes}
         currentPath={locationPathname}
         onNavigate={onCloseDrawer}
       />
@@ -65,6 +104,12 @@ export function ExplorerPane({
           actionLabel="Retry"
           onAction={onRefreshTree}
         />
+      ) : null}
+      {tree ? (
+        <p className="explorer-notes-label">
+          Notes{" "}
+          <span className="explorer-notes-count">{countNotes(tree)}</span>
+        </p>
       ) : null}
       {tree ? (
         <FolderTree

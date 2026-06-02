@@ -13,8 +13,8 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { parseFrontmatter } from "../markdown";
-import { extractMarkdownHeadings } from "../noteHeadings";
+import { parseFrontmatter, stripBlockIds, stripVaultNoteLinks } from "../markdown";
+import { extractMarkdownHeadings, slugifyHeading } from "../noteHeadings";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -28,7 +28,7 @@ import type {
   NoteLinksResponse,
 } from "../types";
 import { NoteSkeleton, StateBlock, StatusBadge } from "./ui";
-import { scrollElementIntoView } from "./note-page/dom";
+import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import {
   NoteLinksPanel,
@@ -43,10 +43,12 @@ export function NotePage({
   onActiveNoteChange,
   onTagSelect,
   propertiesCollapsedStorageKey,
+  vaultRevision,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   onTagSelect: (tag: string) => void;
   propertiesCollapsedStorageKey: string;
+  vaultRevision: number;
 }) {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
@@ -64,6 +66,8 @@ export function NotePage({
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
+  const currentSlugRef = useRef(slug);
+  currentSlugRef.current = slug;
 
   const loadNote = useCallback(
     async (hardReload: boolean) => {
@@ -78,8 +82,10 @@ export function NotePage({
           throw new Error(`Failed loading note: ${res.status}`);
         }
         const json = (await res.json()) as { note: Note };
+        if (slug !== currentSlugRef.current) return;
         setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
       } catch (err) {
+        if (slug !== currentSlugRef.current) return;
         setError(
           err instanceof Error ? err.message : "Unknown note loading error",
         );
@@ -95,46 +101,41 @@ export function NotePage({
         throw new Error(`Failed loading note links: ${res.status}`);
       }
       const json = (await res.json()) as NoteLinksResponse;
+      if (slug !== currentSlugRef.current) return;
       setNoteLinks((prev) =>
         isNoteLinksEqual(prev, json.links) ? prev : json.links,
       );
     } catch {
+      if (slug !== currentSlugRef.current) return;
       setNoteLinks(null);
     }
   }, [slug]);
 
   useEffect(() => {
+    let cancelled = false;
+
     void (async () => {
       setLoading(true);
       await loadNote(true);
       await loadNoteLinks();
-      setLoading(false);
+      if (!cancelled) {
+        setLoading(false);
+      }
     })();
-  }, [loadNote, loadNoteLinks]);
-
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      void loadNote(false);
-      void loadNoteLinks();
-    }, 10_000);
 
     return () => {
-      window.clearInterval(id);
+      cancelled = true;
     };
   }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
-    if (!note) {
-      onActiveNoteChange(null);
+    if (vaultRevision === 0) {
       return;
     }
 
-    onActiveNoteChange({
-      title: note.title,
-      slug: note.slug,
-      relativePath: note.relative_path,
-    });
-  }, [note, onActiveNoteChange]);
+    void loadNote(false);
+    void loadNoteLinks();
+  }, [loadNote, loadNoteLinks, vaultRevision]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -151,9 +152,28 @@ export function NotePage({
   }, []);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
-  const markdown = useResolvedWikilinks(parsed.body, note?.relative_path ?? "");
+
+  useEffect(() => {
+    if (!note) {
+      onActiveNoteChange(null);
+      return;
+    }
+
+    onActiveNoteChange({
+      title: note.title,
+      slug: note.slug,
+      relativePath: note.relative_path,
+      exportContent: stripVaultNoteLinks(parsed.body),
+    });
+  }, [note, onActiveNoteChange, parsed.body]);
+
+  const markdown = useResolvedWikilinks(stripBlockIds(parsed.body), note?.relative_path ?? "");
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
+    [location.search],
+  );
+  const matchHeading = useMemo(
+    () => new URLSearchParams(location.search).get("m"),
     [location.search],
   );
   const tocHeadings = useMemo(
@@ -164,6 +184,10 @@ export function NotePage({
     () => [rehypeKatex, createSearchHighlightPlugin(searchQuery)],
     [searchQuery],
   );
+  const markdownComponents = useMemo(() => {
+    const headingCounts = new Map<string, number>();
+    return createNoteMarkdownComponents(note?.relative_path ?? "", headingCounts);
+  }, [note?.relative_path]);
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
@@ -181,12 +205,15 @@ export function NotePage({
     if (hits.length > 0) {
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
+    } else if (matchHeading) {
+      const lastSegment = matchHeading.split(" > ").at(-1) ?? matchHeading;
+      jumpToHeading(slugifyHeading(lastSegment));
     }
 
     return () => {
       searchHitsRef.current = [];
     };
-  }, [markdown, note?.slug, searchQuery]);
+  }, [markdown, note?.slug, searchQuery, matchHeading]);
 
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
@@ -213,8 +240,6 @@ export function NotePage({
       <StateBlock title="Not Found" description="This note no longer exists." />
     );
   }
-
-  const headingCounts = new Map<string, number>();
 
   return (
     <div className="note-page-layout">
@@ -247,10 +272,7 @@ export function NotePage({
           <ReactMarkdown
             remarkPlugins={[remarkGfm, remarkMath]}
             rehypePlugins={rehypePlugins}
-            components={createNoteMarkdownComponents(
-              note.relative_path,
-              headingCounts,
-            )}
+            components={markdownComponents}
           >
             {markdown}
           </ReactMarkdown>

@@ -49,6 +49,14 @@ export function createNoteMarkdownComponents(
           </span>
         );
       }
+      if (typeof href === "string" && href.startsWith("/__archived__/")) {
+        const slug = href.slice("/__archived__/".length);
+        return (
+          <a className="archived-link" href={`/n/${slug}`}>
+            {children}
+          </a>
+        );
+      }
       if (isExternalHref(href)) {
         return (
           <a href={href} target="_blank" rel="noopener noreferrer">
@@ -70,6 +78,14 @@ export function createNoteMarkdownComponents(
           loading="lazy"
           decoding="async"
         />
+      );
+    },
+    li(props: { children?: ReactNode; className?: string }) {
+      const isTask = props.className?.includes("task-list-item") ?? false;
+      return (
+        <li className={isTask ? "task-list-item" : undefined}>
+          {props.children}
+        </li>
       );
     },
     blockquote(props: { children?: ReactNode }) {

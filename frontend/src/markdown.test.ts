@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeTags, parseFrontmatter } from "./markdown";
+import {
+  normalizeTags,
+  parseFrontmatter,
+  stripVaultNoteLinks,
+} from "./markdown";
 
 describe("parseFrontmatter", () => {
   it("extracts inline-array frontmatter and strips it from body", () => {
@@ -71,5 +75,17 @@ describe("normalizeTags", () => {
       "type/reference",
       "status/active",
     ]);
+  });
+});
+
+describe("stripVaultNoteLinks", () => {
+  it("strips vault-only note links to readable labels", () => {
+    expect(
+      stripVaultNoteLinks(
+        "See [[Projects/Plan|Plan Home]], [[Topic#Part]], [Internal](/n/topic), [Missing](/__missing__/Topic), and [External](https://example.com).",
+      ),
+    ).toBe(
+      "See Plan Home, Topic, Internal, Missing, and [External](https://example.com).",
+    );
   });
 });

@@ -13,8 +13,8 @@ export default defineConfig({
         description: "Read-only Obsidian vault web frontend",
         start_url: "/",
         display: "standalone",
-        background_color: "#f4f2ec",
-        theme_color: "#ece8da",
+        background_color: "#f4f1e8",
+        theme_color: "#f4f1e8",
         icons: [
           {
             src: "/android-chrome-192x192.png",

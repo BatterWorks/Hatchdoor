@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::types::NoteEntry;
 
-pub(crate) fn unique_slug(base: &str, by_slug: &HashMap<String, NoteEntry>) -> String {
+pub fn unique_slug(base: &str, by_slug: &HashMap<String, NoteEntry>) -> String {
     if !by_slug.contains_key(base) {
         return base.to_string();
     }
@@ -61,13 +61,13 @@ pub fn slugify(input: &str) -> String {
     out
 }
 
-pub(crate) fn relative_note_path_without_ext(root: &Path, path: &Path) -> Option<String> {
+pub fn relative_note_path_without_ext(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let as_string = relative.to_str()?.replace('\\', "/");
     Some(strip_md_extension(&as_string).to_string())
 }
 
-pub(crate) fn content_snippet(content: &str, normalized_query: &str) -> Option<String> {
+pub fn content_snippet(content: &str, normalized_query: &str) -> Option<String> {
     content
         .lines()
         .find(|line| normalize_title(line).contains(normalized_query))
