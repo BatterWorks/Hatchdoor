@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.95-slim AS chef
+FROM rust:1.96-slim AS chef
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
