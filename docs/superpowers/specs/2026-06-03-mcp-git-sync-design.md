@@ -53,10 +53,14 @@ into git commits + pushes without blocking the agent.
 Wraps the `git2` crate. Two responsibilities:
 
 - `open_and_validate(vault_path, config)` — called at startup when git sync is
-  enabled. Opens the vault as a git repo and confirms the configured remote and
-  branch exist. If git sync is enabled but the repo/remote/token is
-  misconfigured, **fail fast at startup** — consistent with how the SQLite
-  cache refuses to start on bad config.
+  enabled. Opens the vault as a git repo and confirms: it is a repo whose root
+  is the vault path, `HEAD` is on the configured branch (not detached or on a
+  different branch), the configured remote exists, and a token is present. If
+  git sync is enabled but any of this is wrong, **fail fast at startup** —
+  consistent with how the SQLite cache refuses to start on bad config.
+- After validation, if the local branch has commits the remote lacks (a push
+  stranded by an earlier outage/restart), trigger one sync attempt at startup so
+  those commits aren't stuck until the next MCP write.
 - `sync(batch)` — the single entry point that performs
   stage → commit → fetch → integrate → push.
 
@@ -65,8 +69,11 @@ Wraps the `git2` crate. Two responsibilities:
 A single tokio task, owned by `AppState`:
 
 - Every MCP write tool, *after* its filesystem write succeeds, sends a
-  lightweight `WriteRecord { op, paths, summary: Option<String> }` down an
-  `mpsc` channel and returns to the agent immediately.
+  `WriteRecord { op, affected_paths, summary: Option<String> }` down an
+  `mpsc` channel and returns to the agent immediately. `affected_paths` is the
+  **complete** set of vault paths the operation created, modified, or removed —
+  including the old+new paths of a rename and any other notes whose wikilinks
+  were rewritten (see `rewrites.rs`). The write layer already computes this set.
 - The task collects records and waits for a quiet window
   (`HATCHDOOR_GIT_DEBOUNCE_SECONDS`, default 30s), then drains **all** pending
   records into one batch and calls `git::sync`.
@@ -78,14 +85,27 @@ A single tokio task, owned by `AppState`:
 
 This shape decouples agent latency from network sync, coalesces bursts into few
 commits, and serializes git access. Only MCP writes trigger it; the local
-manual-commit workflow keeps working, and any stray uncommitted local edits are
-simply swept into the next `add -A`.
+manual-commit workflow keeps working, and unrelated uncommitted local edits are
+deliberately left untouched (see "Staging strategy").
+
+### Vault-mutation lock
+
+The background task serializes git operations against each other, but **not**
+against incoming MCP writes. A merge or a conflict `reset --hard` rewrites files
+on disk; a concurrent MCP write to the same note would race it (atomic rename
+narrows but does not close the window).
+
+A shared async lock (`Arc<Mutex>` / `RwLock`) guards vault mutation. Both the
+MCP write path and `git::sync`'s tree-mutating steps (merge, reset, checkout)
+acquire it, so a sync never overlaps a write. The debounce wait happens
+*outside* the lock; only the actual git tree mutation holds it, keeping write
+latency unaffected in the common case.
 
 ## `git::sync(batch)` semantics
 
-1. **Stage** — `index.add_all(["*"])`, write tree. `.gitignore` excludes
-   Hatchdoor's tmp files (`*.md.hatchdoor-tmp`); the cache DB already lives
-   outside the vault, so neither is committed.
+1. **Stage** — stage exactly the `affected_paths` collected from the batch's
+   `WriteRecord`s (see "Staging strategy"), capturing additions, modifications,
+   **and** removals, then write the tree.
 2. **Nothing to do?** — if the tree matches HEAD *and* there are no unpushed
    commits, return a no-op. Never create empty commits.
 3. **Commit** — author/committer from `HATCHDOOR_GIT_AUTHOR_NAME` /
@@ -106,7 +126,31 @@ simply swept into the next `add -A`.
        naming the conflicted file(s).
 6. **Push** to the remote branch using HTTPS-token credentials (`git2`
    `RemoteCallbacks` + `Cred::userpass_plaintext`). Username defaults sensibly
-   for token auth and is env-overridable.
+   for token auth and is env-overridable. The token is supplied only via the
+   credentials callback — never written into `.git/config` and never logged.
+
+### Secret handling
+
+The HTTPS token must never appear in `tracing` output or in any error message,
+status field, or commit metadata. All error paths that wrap git2 errors redact
+credentials before surfacing or logging them.
+
+### Staging strategy
+
+Stage only the `affected_paths` reported by the batch — **not** a blanket
+`add_all("*")`. Rationale:
+
+- **Accurate commits.** Contents exactly match the commit message; deletions and
+  renames (which `add_all` would miss without `update_all`) are captured because
+  the write layer reports the removed/renamed paths explicitly.
+- **No surprise commits.** Unrelated work-in-progress from the local editing
+  agent is left uncommitted rather than being scooped into an MCP-labeled commit
+  and pushed prematurely.
+- **No tmp-file risk.** A path Hatchdoor didn't write (e.g. `*.md.hatchdoor-tmp`)
+  is never staged.
+
+Each rename/move stages its old and new paths plus any other notes whose
+wikilinks were rewritten; the write layer already knows this full set.
 
 ### Failure behavior (all non-fatal to the server)
 
@@ -160,9 +204,24 @@ Dockerfile needs no change.
 
 ## Edge cases
 
+- **Write/sync race** — guarded by the vault-mutation lock (see above); a sync's
+  tree mutation never overlaps an MCP write.
+- **Deletions / renames** — staged explicitly via the batch's `affected_paths`,
+  including wikilink-rewrite side effects on other notes.
+- **Stranded unpushed commits after restart** — startup runs a sync attempt when
+  the local branch is ahead of the remote.
+- **Post-fetch push race** — if the remote moves again between our fetch and
+  push, the push is rejected non-fast-forward; this self-heals by re-fetching
+  and merging on the next batch.
+- **Token leakage** — redacted on every log and error path; never persisted to
+  `.git/config`.
+- **Branch/HEAD mismatch** — rejected at startup validation.
 - Transient auth/network errors leave the commit local and retry next batch.
 - Only one sync runs at a time (single background task).
-- Stray local uncommitted edits get swept into the next commit.
+- Unrelated local uncommitted edits are left untouched (precise staging).
+- A merge that pulls in remote changes can invalidate an `expected_content_hash`
+  an agent is holding; the next MCP write to that note correctly returns the
+  existing hash-conflict error — expected behavior, not a bug.
 
 ## Testing
 
@@ -176,4 +235,8 @@ bare "remote" repo on disk — no network required.
 - No-op when tree unchanged and nothing unpushed.
 - Commit-message assembly (auto title + agent-supplied body lines).
 - Debouncer coalesces multiple `WriteRecord`s into a single sync.
-- Startup validation fails fast when enabled-but-misconfigured.
+- Precise staging commits a note delete and a note rename (with wikilink-rewrite
+  side effects on other notes), and leaves an unrelated uncommitted file alone.
+- Startup validation fails fast when enabled-but-misconfigured (not a repo,
+  detached/wrong branch, missing remote, missing token).
+- Startup sync pushes commits that were stranded ahead of the remote.
