@@ -51,24 +51,30 @@ pub async fn handle_tools_call(
             "max_bytes": config.max_attachment_bytes,
             "usage": "Enable HATCHDOOR_MCP_WRITE_ENABLED to use staged attachment imports."
         }))),
-        "create_note" if config.write_enabled => create_note_tool(state, arguments).await,
-        "update_note" if config.write_enabled => update_note_tool(state, arguments).await,
-        "append_to_note" if config.write_enabled => append_to_note_tool(state, arguments).await,
-        "edit_note" if config.write_enabled => edit_note_tool(state, arguments).await,
-        "replace_section" if config.write_enabled => replace_section_tool(state, arguments).await,
-        "rename_note" if config.write_enabled => rename_note_tool(state, arguments).await,
-        "move_note" if config.write_enabled => move_note_tool(state, arguments).await,
-        "move_rename_note" if config.write_enabled => move_rename_note_tool(state, arguments).await,
-        "delete_note" if config.write_enabled => delete_note_tool(state, arguments).await,
-        "import_attachment" if config.write_enabled => {
-            import_attachment_tool(state, arguments, config).await
-        }
-        "move_attachment" if config.write_enabled => move_attachment_tool(state, arguments).await,
-        "rename_attachment" if config.write_enabled => {
-            rename_attachment_tool(state, arguments).await
-        }
-        "delete_attachment" if config.write_enabled => {
-            delete_attachment_tool(state, arguments).await
+        "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
+        | "rename_note" | "move_note" | "move_rename_note" | "delete_note"
+        | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
+            if config.write_enabled =>
+        {
+            // Hold the vault write lock for the whole tool call so a concurrent
+            // git-sync merge/reset cannot race a filesystem write.
+            let _guard = state.vault_write_lock.clone().lock_owned().await;
+            match name {
+                "create_note" => create_note_tool(state, arguments).await,
+                "update_note" => update_note_tool(state, arguments).await,
+                "append_to_note" => append_to_note_tool(state, arguments).await,
+                "edit_note" => edit_note_tool(state, arguments).await,
+                "replace_section" => replace_section_tool(state, arguments).await,
+                "rename_note" => rename_note_tool(state, arguments).await,
+                "move_note" => move_note_tool(state, arguments).await,
+                "move_rename_note" => move_rename_note_tool(state, arguments).await,
+                "delete_note" => delete_note_tool(state, arguments).await,
+                "import_attachment" => import_attachment_tool(state, arguments, config).await,
+                "move_attachment" => move_attachment_tool(state, arguments).await,
+                "rename_attachment" => rename_attachment_tool(state, arguments).await,
+                "delete_attachment" => delete_attachment_tool(state, arguments).await,
+                _ => unreachable!(),
+            }
         }
         "list_note_attachments" if config.write_enabled => {
             list_note_attachments_tool(state, arguments).await
@@ -352,6 +358,7 @@ async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "create", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -364,6 +371,7 @@ async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "update", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -377,6 +385,7 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "append", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -395,6 +404,7 @@ async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "edit", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -424,6 +434,7 @@ async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "replace_section", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -449,6 +460,7 @@ async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "rename", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -478,6 +490,7 @@ async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "move", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -498,6 +511,7 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "move_rename", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -515,6 +529,7 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_note_write(&state, "delete", &outcome, args.commit_summary);
     Ok(write_success(outcome))
 }
 
@@ -542,6 +557,7 @@ async fn import_attachment_tool(
         overwrite,
     )
     .map_err(write_error_to_jsonrpc)?;
+    record_attachment_write(&state, "import_attachment", &outcome, args.commit_summary);
     Ok(attachment_success(outcome))
 }
 
@@ -562,6 +578,7 @@ async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_attachment_write(&state, "move_attachment", &outcome, args.commit_summary);
     Ok(attachment_success(outcome))
 }
 
@@ -584,6 +601,7 @@ async fn rename_attachment_tool(
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_attachment_write(&state, "rename_attachment", &outcome, args.commit_summary);
     Ok(attachment_success(outcome))
 }
 
@@ -600,6 +618,7 @@ async fn delete_attachment_tool(
     let outcome = delete_attachment(&state.vault_path, &index, &source_relative_path)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
+    record_attachment_write(&state, "delete_attachment", &outcome, args.commit_summary);
     Ok(attachment_success(outcome))
 }
 
@@ -673,6 +692,41 @@ fn attachment_success(outcome: AttachmentOutcome) -> Value {
     }))
 }
 
+/// Build a WriteRecord from a note outcome and enqueue it for git sync (no-op when disabled).
+fn record_note_write(
+    state: &AppState,
+    op: &str,
+    outcome: &WriteOutcome,
+    commit_summary: Option<String>,
+) {
+    let target = outcome
+        .relative_path
+        .clone()
+        .or_else(|| outcome.slug.clone())
+        .unwrap_or_else(|| "note".to_string());
+    state.record_vault_write(crate::git::WriteRecord {
+        op: op.to_string(),
+        target,
+        affected_paths: outcome.affected_paths.clone(),
+        summary: commit_summary,
+    });
+}
+
+/// Build a WriteRecord from an attachment outcome and enqueue it for git sync (no-op when disabled).
+fn record_attachment_write(
+    state: &AppState,
+    op: &str,
+    outcome: &AttachmentOutcome,
+    commit_summary: Option<String>,
+) {
+    state.record_vault_write(crate::git::WriteRecord {
+        op: op.to_string(),
+        target: outcome.attachment.relative_path.clone(),
+        affected_paths: outcome.affected_paths.clone(),
+        summary: commit_summary,
+    });
+}
+
 fn replace_filename(relative_path: &str, new_title: &str) -> String {
     let directory = relative_path.rsplit_once('/').map(|(dir, _)| dir);
     match directory {
@@ -742,7 +796,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "relative_path": {"type": "string", "minLength": 1},
                     "content": {"type": "string"},
-                    "overwrite": {"type": "boolean", "default": false}
+                    "overwrite": {"type": "boolean", "default": false},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["relative_path", "content"],
                 "additionalProperties": false
@@ -757,7 +812,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "slug": {"type": "string", "minLength": 1},
                     "content": {"type": "string"},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "content", "expected_content_hash"],
                 "additionalProperties": false
@@ -772,7 +828,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "slug": {"type": "string", "minLength": 1},
                     "content": {"type": "string", "minLength": 1},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "content", "expected_content_hash"],
                 "additionalProperties": false
@@ -789,7 +846,8 @@ fn write_tools_list() -> Vec<Value> {
                     "old_string": {"type": "string", "minLength": 1},
                     "new_string": {"type": "string"},
                     "expected_content_hash": {"type": "string", "minLength": 1},
-                    "replace_all": {"type": "boolean"}
+                    "replace_all": {"type": "boolean"},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "old_string", "new_string", "expected_content_hash"],
                 "additionalProperties": false
@@ -806,7 +864,8 @@ fn write_tools_list() -> Vec<Value> {
                     "heading": {"type": "string", "minLength": 1},
                     "mode": {"type": "string", "enum": ["replace", "before", "after"]},
                     "content": {"type": "string"},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "heading", "mode", "content", "expected_content_hash"],
                 "additionalProperties": false
@@ -821,7 +880,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "slug": {"type": "string", "minLength": 1},
                     "new_title": {"type": "string", "minLength": 1},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "new_title", "expected_content_hash"],
                 "additionalProperties": false
@@ -836,7 +896,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "slug": {"type": "string", "minLength": 1},
                     "target_folder": {"type": "string"},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "target_folder", "expected_content_hash"],
                 "additionalProperties": false
@@ -851,7 +912,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "slug": {"type": "string", "minLength": 1},
                     "target_relative_path": {"type": "string", "minLength": 1},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "target_relative_path", "expected_content_hash"],
                 "additionalProperties": false
@@ -865,7 +927,8 @@ fn write_tools_list() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "slug": {"type": "string", "minLength": 1},
-                    "expected_content_hash": {"type": "string", "minLength": 1}
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["slug", "expected_content_hash"],
                 "additionalProperties": false
@@ -880,7 +943,8 @@ fn write_tools_list() -> Vec<Value> {
                 "properties": {
                     "staged_filename": {"type": "string", "minLength": 1},
                     "target_relative_path": {"type": "string", "minLength": 1},
-                    "overwrite": {"type": "boolean", "default": false}
+                    "overwrite": {"type": "boolean", "default": false},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["staged_filename", "target_relative_path"],
                 "additionalProperties": false
@@ -894,7 +958,8 @@ fn write_tools_list() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "source_relative_path": {"type": "string", "minLength": 1},
-                    "target_relative_path": {"type": "string", "minLength": 1}
+                    "target_relative_path": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["source_relative_path", "target_relative_path"],
                 "additionalProperties": false
@@ -908,7 +973,8 @@ fn write_tools_list() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "source_relative_path": {"type": "string", "minLength": 1},
-                    "new_filename": {"type": "string", "minLength": 1}
+                    "new_filename": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["source_relative_path", "new_filename"],
                 "additionalProperties": false
@@ -921,7 +987,8 @@ fn write_tools_list() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "source_relative_path": {"type": "string", "minLength": 1}
+                    "source_relative_path": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
                 "required": ["source_relative_path"],
                 "additionalProperties": false
@@ -975,6 +1042,8 @@ struct CreateNoteArgs {
     content: String,
     #[serde(default)]
     overwrite: Option<bool>,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -983,6 +1052,8 @@ struct UpdateNoteArgs {
     slug: String,
     content: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -991,6 +1062,8 @@ struct AppendNoteArgs {
     slug: String,
     content: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1002,6 +1075,8 @@ struct EditNoteArgs {
     expected_content_hash: String,
     #[serde(default)]
     replace_all: Option<bool>,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1012,6 +1087,8 @@ struct ReplaceSectionArgs {
     mode: String,
     content: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1020,6 +1097,8 @@ struct RenameNoteArgs {
     slug: String,
     new_title: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1028,6 +1107,8 @@ struct MoveNoteArgs {
     slug: String,
     target_folder: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1036,6 +1117,8 @@ struct MoveRenameNoteArgs {
     slug: String,
     target_relative_path: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1043,6 +1126,8 @@ struct MoveRenameNoteArgs {
 struct DeleteNoteArgs {
     slug: String,
     expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1052,6 +1137,8 @@ struct ImportAttachmentArgs {
     target_relative_path: String,
     #[serde(default)]
     overwrite: Option<bool>,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1059,6 +1146,8 @@ struct ImportAttachmentArgs {
 struct MoveAttachmentArgs {
     source_relative_path: String,
     target_relative_path: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1066,10 +1155,44 @@ struct MoveAttachmentArgs {
 struct RenameAttachmentArgs {
     source_relative_path: String,
     new_filename: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeleteAttachmentArgs {
     source_relative_path: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    #[test]
+    fn record_note_write_prefers_relative_path_target() {
+        let outcome = WriteOutcome {
+            slug: Some("new".to_string()),
+            relative_path: Some("Projects/New".to_string()),
+            content_hash: Some("h".to_string()),
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: None,
+            affected_paths: vec![std::path::PathBuf::from("/v/Projects/New.md")],
+        };
+        let record = crate::git::WriteRecord {
+            op: "create".to_string(),
+            target: outcome
+                .relative_path
+                .clone()
+                .or_else(|| outcome.slug.clone())
+                .unwrap_or_default(),
+            affected_paths: outcome.affected_paths.clone(),
+            summary: Some("added".to_string()),
+        };
+        assert_eq!(record.target, "Projects/New");
+        assert_eq!(record.affected_paths.len(), 1);
+    }
 }
