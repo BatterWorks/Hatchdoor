@@ -4,7 +4,11 @@ use std::path::Path;
 use crate::eval::compare_runner::{CompareQueryResult, CompareSummary};
 use crate::eval::metrics::Report;
 
-pub fn append_section(path: &Path, report: &Report, build_duration_secs: Option<f64>) -> Result<(), String> {
+pub fn append_section(
+    path: &Path,
+    report: &Report,
+    build_duration_secs: Option<f64>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
     }
@@ -36,10 +40,17 @@ pub fn append_section(path: &Path, report: &Report, build_duration_secs: Option<
     writeln!(f).ok();
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
-    writeln!(f, "| ID | Query | Rank of first expected | Anti in top-5? |").ok();
+    writeln!(
+        f,
+        "| ID | Query | Rank of first expected | Anti in top-5? |"
+    )
+    .ok();
     writeln!(f, "|---|---|---|---|").ok();
     for pq in &report.per_query {
-        let rank = pq.first_expected_rank.map(|r| r.to_string()).unwrap_or_else(|| "—".to_string());
+        let rank = pq
+            .first_expected_rank
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "—".to_string());
         let anti = match pq.anti_expected_hit_at_5 {
             Some(true) => "yes",
             Some(false) => "no",
@@ -50,16 +61,17 @@ pub fn append_section(path: &Path, report: &Report, build_duration_secs: Option<
         } else {
             pq.query.clone()
         };
-        writeln!(f, "| {} | {} | {} | {} |", pq.id, query_truncated, rank, anti).ok();
+        writeln!(
+            f,
+            "| {} | {} | {} | {} |",
+            pq.id, query_truncated, rank, anti
+        )
+        .ok();
     }
     Ok(())
 }
 
-pub fn append_rerank_section(
-    path: &Path,
-    report: &Report,
-    initial_k: usize,
-) -> Result<(), String> {
+pub fn append_rerank_section(path: &Path, report: &Report, initial_k: usize) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
     }
@@ -104,15 +116,29 @@ pub fn append_rerank_section(
     writeln!(f).ok();
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
-    writeln!(f, "| ID | Query | Rank pre | Rank post | Δ | Anti in top-5? |").ok();
+    writeln!(
+        f,
+        "| ID | Query | Rank pre | Rank post | Δ | Anti in top-5? |"
+    )
+    .ok();
     writeln!(f, "|---|---|---|---|---|---|").ok();
     for pq in &report.per_query {
-        let pre = pq.rank_pre_rerank.map(|r| r.to_string()).unwrap_or_else(|| "—".to_string());
-        let post = pq.rank_post_rerank.map(|r| r.to_string()).unwrap_or_else(|| "—".to_string());
+        let pre = pq
+            .rank_pre_rerank
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let post = pq
+            .rank_post_rerank
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "—".to_string());
         let delta = match (pq.rank_pre_rerank, pq.rank_post_rerank) {
             (Some(a), Some(b)) => {
                 let d = a as i64 - b as i64;
-                if d > 0 { format!("+{d}") } else { d.to_string() }
+                if d > 0 {
+                    format!("+{d}")
+                } else {
+                    d.to_string()
+                }
             }
             _ => "—".to_string(),
         };
@@ -179,7 +205,11 @@ pub fn append_hybrid_section(
     writeln!(f).ok();
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
-    writeln!(f, "| ID | Query | Rank of first expected | Anti in top-5? |").ok();
+    writeln!(
+        f,
+        "| ID | Query | Rank of first expected | Anti in top-5? |"
+    )
+    .ok();
     writeln!(f, "|---|---|---|---|").ok();
     for pq in &report.per_query {
         let rank = pq
@@ -196,7 +226,12 @@ pub fn append_hybrid_section(
         } else {
             pq.query.clone()
         };
-        writeln!(f, "| {} | {} | {} | {} |", pq.id, query_truncated, rank, anti).ok();
+        writeln!(
+            f,
+            "| {} | {} | {} | {} |",
+            pq.id, query_truncated, rank, anti
+        )
+        .ok();
     }
     Ok(())
 }
@@ -236,8 +271,14 @@ pub fn append_compare_section(
     writeln!(f, "|---|---|---|---|---|---|---|").ok();
 
     for r in results {
-        let rp = r.rank_pure.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
-        let rh = r.rank_hybrid.map(|v| v.to_string()).unwrap_or_else(|| "—".to_string());
+        let rp = r
+            .rank_pure
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let rh = r
+            .rank_hybrid
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".to_string());
         let delta = match (r.rank_pure, r.rank_hybrid) {
             (Some(p), Some(h)) => {
                 let d = p as i64 - h as i64;
@@ -266,18 +307,18 @@ pub fn append_compare_section(
         } else {
             r.query_text.clone()
         };
-        writeln!(f, "| {} | {} | {} | {} | {} | {} | {} |", r.query_id, q_trunc, rp, rh, delta, ap, ah).ok();
+        writeln!(
+            f,
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            r.query_id, q_trunc, rp, rh, delta, ap, ah
+        )
+        .ok();
     }
 
     writeln!(f).ok();
     writeln!(f, "### Summary").ok();
     writeln!(f).ok();
-    writeln!(
-        f,
-        "- Hybrid wins (lower rank): **{}**",
-        summary.hybrid_wins
-    )
-    .ok();
+    writeln!(f, "- Hybrid wins (lower rank): **{}**", summary.hybrid_wins).ok();
     writeln!(f, "- Ties: **{}**", summary.ties).ok();
     writeln!(f, "- Pure wins (lower rank): **{}**", summary.pure_wins).ok();
     writeln!(
@@ -295,7 +336,11 @@ pub fn append_compare_section(
     writeln!(f).ok();
     let verdict = format!(
         "**Verdict:** Hybrid wins on {} queries, loses on {}, ties on {}. Anti improvements: {}, anti regressions: {}.",
-        summary.hybrid_wins, summary.pure_wins, summary.ties, summary.anti_improvements, summary.anti_regressions
+        summary.hybrid_wins,
+        summary.pure_wins,
+        summary.ties,
+        summary.anti_improvements,
+        summary.anti_regressions
     );
     writeln!(f, "{verdict}").ok();
     Ok(())
@@ -340,7 +385,10 @@ mod tests {
         assert!(text.contains("0.840"), "recall_at_5_any value missing");
         assert!(text.contains("612.5"), "build duration missing");
         assert!(text.contains("U1"), "per-query row missing");
-        assert!(text.contains("Where does my Plex media live?"), "query text missing");
+        assert!(
+            text.contains("Where does my Plex media live?"),
+            "query text missing"
+        );
     }
 
     #[test]

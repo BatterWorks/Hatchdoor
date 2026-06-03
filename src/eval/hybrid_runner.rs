@@ -104,8 +104,14 @@ mod tests {
         write_vault(
             &vault,
             &[
-                ("alpha.md", "# Alpha\n\nalpha content about flying with babies on planes"),
-                ("beta.md", "# Beta\n\nbeta content unrelated topic gardening"),
+                (
+                    "alpha.md",
+                    "# Alpha\n\nalpha content about flying with babies on planes",
+                ),
+                (
+                    "beta.md",
+                    "# Beta\n\nbeta content unrelated topic gardening",
+                ),
                 ("gamma.md", "# Gamma\n\ngamma flying baby plane trip notes"),
             ],
         );
@@ -145,7 +151,10 @@ mod tests {
             &[
                 ("alpha.md", "# Alpha\n\nlongish content with various words"),
                 ("beta.md", "# Beta\n\nanother body of text"),
-                ("gamma.md", "# Gamma\n\nmergerfs pool layout on batterprox storage"),
+                (
+                    "gamma.md",
+                    "# Gamma\n\nmergerfs pool layout on batterprox storage",
+                ),
             ],
         );
 
@@ -164,6 +173,9 @@ mod tests {
             anti_expected: vec![],
         }];
         let out = run_hybrid_eval(&cache, embedder.as_ref(), &queries, 5, 60, 10).expect("run");
-        assert_eq!(out[0].query_result.top_k.first().map(String::as_str), Some("gamma"));
+        assert_eq!(
+            out[0].query_result.top_k.first().map(String::as_str),
+            Some("gamma")
+        );
     }
 }

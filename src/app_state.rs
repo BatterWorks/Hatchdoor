@@ -78,10 +78,7 @@ pub fn init_logging() {
         .init();
 }
 
-pub fn build_cache(
-    vault_path: &PathBuf,
-    embedder: &dyn Embedder,
-) -> Result<VaultCache, String> {
+pub fn build_cache(vault_path: &PathBuf, embedder: &dyn Embedder) -> Result<VaultCache, String> {
     let sqlite = Arc::new(SqliteCache::in_memory(384)?);
     build_cache_with_sqlite(vault_path, sqlite, embedder)
 }
@@ -105,9 +102,7 @@ pub async fn sqlite_cache(
     Ok(guard.sqlite.clone())
 }
 
-pub async fn refresh_if_needed(
-    state: &AppState,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+pub async fn refresh_if_needed(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let mut guard = state.cache.write().await;
     match build_cache_with_sqlite(
         &state.vault_path,

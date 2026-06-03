@@ -22,10 +22,9 @@ impl FastembedEmbedder {
         doc_prefix: &'static str,
         query_prefix: &'static str,
     ) -> Result<Self, String> {
-        let model = TextEmbedding::try_new(
-            InitOptions::new(model).with_show_download_progress(false),
-        )
-        .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
+        let model =
+            TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(false))
+                .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
         let tokenizer = Arc::new(model.tokenizer.clone());
         Ok(Self {
             model,
@@ -58,7 +57,13 @@ impl FastembedEmbedder {
     }
 
     pub fn mxbai_large() -> Result<Self, String> {
-        Self::load(EmbeddingModel::MxbaiEmbedLargeV1, 1024, "MxbaiEmbedLargeV1", "", "")
+        Self::load(
+            EmbeddingModel::MxbaiEmbedLargeV1,
+            1024,
+            "MxbaiEmbedLargeV1",
+            "",
+            "",
+        )
     }
 }
 

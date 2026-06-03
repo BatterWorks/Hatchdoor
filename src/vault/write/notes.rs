@@ -205,7 +205,10 @@ fn scan_headings(content: &str) -> Vec<(usize, usize, &str)> {
         } else {
             let level = trimmed.chars().take_while(|ch| *ch == '#').count();
             if (1..=6).contains(&level)
-                && trimmed[level..].chars().next().is_some_and(char::is_whitespace)
+                && trimmed[level..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
             {
                 headings.push((offset, level, trimmed.trim_end()));
             }

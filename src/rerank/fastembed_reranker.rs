@@ -12,10 +12,9 @@ pub struct FastembedReranker {
 
 impl FastembedReranker {
     fn load(model: RerankerModel, id: &'static str) -> Result<Self, String> {
-        let model = TextRerank::try_new(
-            RerankInitOptions::new(model).with_show_download_progress(false),
-        )
-        .map_err(|e| format!("failed to load reranker {id}: {e}"))?;
+        let model =
+            TextRerank::try_new(RerankInitOptions::new(model).with_show_download_progress(false))
+                .map_err(|e| format!("failed to load reranker {id}: {e}"))?;
         Ok(Self { model, id })
     }
 
@@ -24,7 +23,10 @@ impl FastembedReranker {
     }
 
     pub fn jina_v1_turbo() -> Result<Self, String> {
-        Self::load(RerankerModel::JINARerankerV1TurboEn, "JINARerankerV1TurboEn")
+        Self::load(
+            RerankerModel::JINARerankerV1TurboEn,
+            "JINARerankerV1TurboEn",
+        )
     }
 
     /// NB: the fastembed enum variant misspells "Multilingual" as

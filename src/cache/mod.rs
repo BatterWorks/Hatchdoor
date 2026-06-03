@@ -111,7 +111,9 @@ mod metadata_tests {
     #[test]
     fn set_and_get_metadata_roundtrip() {
         let cache = SqliteCache::in_memory(384).expect("open");
-        cache.set_metadata("embedder_id", "BGESmallENV15").expect("set");
+        cache
+            .set_metadata("embedder_id", "BGESmallENV15")
+            .expect("set");
         let v = cache.get_metadata("embedder_id").expect("get");
         assert_eq!(v.as_deref(), Some("BGESmallENV15"));
     }
@@ -128,6 +130,9 @@ mod metadata_tests {
         let cache = SqliteCache::in_memory(384).expect("open");
         cache.set_metadata("k", "first").expect("set 1");
         cache.set_metadata("k", "second").expect("set 2");
-        assert_eq!(cache.get_metadata("k").expect("get").as_deref(), Some("second"));
+        assert_eq!(
+            cache.get_metadata("k").expect("get").as_deref(),
+            Some("second")
+        );
     }
 }
