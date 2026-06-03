@@ -59,10 +59,7 @@ fn edit_note_replaces_unique_string() {
     .expect("edit");
 
     assert_eq!(fs::read_to_string(&path).expect("read"), "alpha BETA gamma");
-    assert_eq!(
-        outcome.content_hash,
-        Some(content_hash("alpha BETA gamma"))
-    );
+    assert_eq!(outcome.content_hash, Some(content_hash("alpha BETA gamma")));
 }
 
 #[test]

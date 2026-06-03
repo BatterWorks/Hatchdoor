@@ -57,10 +57,7 @@ impl SqliteCache {
         Ok(root.build("Vault"))
     }
 
-    pub fn recently_modified_notes(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<ModifiedNote>, String> {
+    pub fn recently_modified_notes(&self, limit: usize) -> Result<Vec<ModifiedNote>, String> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -204,10 +201,7 @@ impl SqliteCache {
         }))
     }
 
-    pub fn resolve_wikilink(
-        &self,
-        raw_target: &str,
-    ) -> Result<Option<(String, String)>, String> {
+    pub fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<(String, String)>, String> {
         // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
         let note_target = raw_target
             .split('#')
@@ -498,11 +492,7 @@ impl SqliteCache {
     /// rank order (bm25 ascending, i.e. best match first).
     /// Returns an empty list if the query produces no usable FTS tokens.
     #[allow(dead_code)]
-    pub fn fts_search_chunks(
-        &self,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<ChunkFtsHit>, String> {
+    pub fn fts_search_chunks(&self, query: &str, k: usize) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -556,9 +546,8 @@ impl SqliteCache {
         let mut map: HashMap<String, NoteWithLinks> = HashMap::new();
 
         // Note metadata
-        let sql_a = format!(
-            "SELECT slug, title, relative_path FROM notes WHERE slug IN ({placeholders})"
-        );
+        let sql_a =
+            format!("SELECT slug, title, relative_path FROM notes WHERE slug IN ({placeholders})");
         let mut stmt_a = conn
             .prepare(&sql_a)
             .map_err(|e| format!("prepare notes batch: {e}"))?;
@@ -682,7 +671,11 @@ impl SqliteCache {
             .map_err(|e| format!("vault_stats link_count: {e}"))?;
 
         let vault_size_bytes: i64 = conn
-            .query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM notes", [], |row| row.get(0))
+            .query_row(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM notes",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats vault_size_bytes: {e}"))?;
 
         // Fetch all content for word/image count and word-rank computations.
@@ -753,7 +746,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare top_tags: {e}"))?;
         let top_tags: Vec<TagStat> = tags_stmt
-            .query_map([], |row| Ok(TagStat { tag: row.get(0)?, note_count: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(TagStat {
+                    tag: row.get(0)?,
+                    note_count: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query top_tags: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read top_tags: {e}"))?;
@@ -798,7 +796,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare activity_by_month: {e}"))?;
         let activity_by_month: Vec<MonthActivity> = activity_stmt
-            .query_map([], |row| Ok(MonthActivity { month: row.get(0)?, modified_count: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(MonthActivity {
+                    month: row.get(0)?,
+                    modified_count: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query activity_by_month: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read activity_by_month: {e}"))?;
@@ -820,7 +823,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare notes_per_folder: {e}"))?;
         let notes_per_folder: Vec<FolderStat> = folder_stmt
-            .query_map([], |row| Ok(FolderStat { folder: row.get(0)?, note_count: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(FolderStat {
+                    folder: row.get(0)?,
+                    note_count: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query notes_per_folder: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read notes_per_folder: {e}"))?;
@@ -837,7 +845,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare orphan_notes: {e}"))?;
         let orphan_notes: Vec<NoteRef> = orphan_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query orphan_notes: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read orphan_notes: {e}"))?;
@@ -853,7 +866,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare no_tag_notes: {e}"))?;
         let no_tag_notes: Vec<NoteRef> = no_tag_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query no_tag_notes: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read no_tag_notes: {e}"))?;
@@ -878,7 +896,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare modified_this_week: {e}"))?;
         let week_notes: Vec<NoteRef> = week_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query modified_this_week: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read modified_this_week: {e}"))?;
@@ -903,7 +926,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare modified_this_month: {e}"))?;
         let month_notes: Vec<NoteRef> = month_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query modified_this_month: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read modified_this_month: {e}"))?;
@@ -927,8 +955,14 @@ impl SqliteCache {
             shortest_notes,
             orphan_notes,
             no_tag_notes,
-            modified_this_week: NoteList { count: week_total, notes: week_notes },
-            modified_this_month: NoteList { count: month_total, notes: month_notes },
+            modified_this_week: NoteList {
+                count: week_total,
+                notes: week_notes,
+            },
+            modified_this_month: NoteList {
+                count: month_total,
+                notes: month_notes,
+            },
         })
     }
 
@@ -968,7 +1002,12 @@ impl SqliteCache {
             .prepare("SELECT source_slug, target_slug FROM note_links")
             .map_err(|e| format!("graph_data prepare edges: {e}"))?;
         let edges: Vec<GraphEdge> = edges_stmt
-            .query_map([], |row| Ok(GraphEdge { source: row.get(0)?, target: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(GraphEdge {
+                    source: row.get(0)?,
+                    target: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("graph_data query edges: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("graph_data read edges: {e}"))?;
@@ -1291,9 +1330,7 @@ mod notes_with_outbound_links_batch_tests {
     #[test]
     fn batch_empty_input_returns_empty_map() {
         let cache = build_cache(&[("Alpha.md", "# Alpha\n\nbody")]);
-        let map = cache
-            .notes_with_outbound_links_batch(&[])
-            .expect("batch");
+        let map = cache.notes_with_outbound_links_batch(&[]).expect("batch");
         assert!(map.is_empty());
     }
 }

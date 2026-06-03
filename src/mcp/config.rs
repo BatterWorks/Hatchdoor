@@ -71,10 +71,7 @@ impl McpConfig {
     }
 }
 
-pub fn validate_mcp_request(
-    headers: &HeaderMap,
-    config: &McpConfig,
-) -> Result<(), Box<Response>> {
+pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(), Box<Response>> {
     if !config.enabled {
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }

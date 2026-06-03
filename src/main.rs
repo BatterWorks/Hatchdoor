@@ -219,8 +219,7 @@ mod tests {
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let embedder: Arc<dyn Embedder> =
-            Arc::new(StubEmbedder::new(384));
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let state = AppState {
@@ -320,11 +319,8 @@ mod tests {
         let archive_dir = vault_root.join("90-archive");
         std::fs::create_dir_all(&archive_dir).expect("create archive dir");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write home");
-        std::fs::write(
-            archive_dir.join("Old Setup.md"),
-            "# Old Setup\n",
-        )
-        .expect("write archived note");
+        std::fs::write(archive_dir.join("Old Setup.md"), "# Old Setup\n")
+            .expect("write archived note");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
@@ -356,14 +352,20 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         let results = payload["results"].as_array().expect("results array");
 
-        let home = results.iter().find(|r| r["target"] == "Home").expect("home result");
+        let home = results
+            .iter()
+            .find(|r| r["target"] == "Home")
+            .expect("home result");
         assert_eq!(home["archived"], false, "Home should not be archived");
 
         let archived = results
             .iter()
             .find(|r| r["target"] == "90-archive/Old Setup")
             .expect("archived result");
-        assert_eq!(archived["archived"], true, "90-archive note should be archived");
+        assert_eq!(
+            archived["archived"], true,
+            "90-archive note should be archived"
+        );
     }
 
     #[tokio::test]

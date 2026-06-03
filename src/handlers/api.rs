@@ -108,7 +108,11 @@ pub async fn resolve_batch_handler(
             }
             None => (None, false),
         };
-        results.push(ResolveTargetResult { target, slug, archived });
+        results.push(ResolveTargetResult {
+            target,
+            slug,
+            archived,
+        });
     }
 
     (StatusCode::OK, Json(ResolveBatchResponse { results })).into_response()
@@ -175,7 +179,13 @@ pub async fn search_handler(
     let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
     let mode = query.mode.unwrap_or_default();
     let q_len = query.q.len();
-    debug!(query_len = q_len, ?mode, limit, per_note_cap, "Executing Phase 2 search");
+    debug!(
+        query_len = q_len,
+        ?mode,
+        limit,
+        per_note_cap,
+        "Executing Phase 2 search"
+    );
 
     let req = crate::search::SearchRequest {
         query: query.q,

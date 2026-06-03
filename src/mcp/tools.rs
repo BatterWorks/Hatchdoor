@@ -8,8 +8,8 @@ use crate::vault::VaultIndex;
 use crate::vault::{
     AttachmentOutcome, SectionMode, WriteError, WriteOutcome, allowed_attachment_extensions,
     append_note, create_note, delete_attachment, delete_note, edit_note, import_attachment,
-    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment, replace_section,
-    update_note,
+    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
+    replace_section, update_note,
 };
 
 use super::config::McpConfig;
@@ -247,8 +247,8 @@ async fn search_notes_tool(state: AppState, arguments: Value) -> Result<Value, J
         limit,
         per_note_cap,
     };
-    let response = crate::search::run(cache.as_ref(), embedder, req)
-        .map_err(JsonRpcFailure::internal)?;
+    let response =
+        crate::search::run(cache.as_ref(), embedder, req).map_err(JsonRpcFailure::internal)?;
 
     Ok(tool_success(serde_json::to_value(&response).map_err(
         |e| JsonRpcFailure::internal(format!("serialize search response: {e}")),
