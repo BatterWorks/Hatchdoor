@@ -12,7 +12,7 @@ bytemuck = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 fastembed = "4"
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl"] }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 notify = "8"
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
