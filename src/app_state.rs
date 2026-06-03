@@ -61,6 +61,19 @@ pub struct AppState {
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
     pub embedder: Arc<dyn Embedder>,
+    /// Serializes vault file mutations against git sync tree operations.
+    pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Present only when git sync is enabled.
+    pub git_sync: Option<crate::git::GitSyncHandle>,
+}
+
+impl AppState {
+    /// Record a vault write for git sync. No-op when sync is disabled.
+    pub fn record_vault_write(&self, record: crate::git::WriteRecord) {
+        if let Some(handle) = &self.git_sync {
+            handle.record(record);
+        }
+    }
 }
 
 pub struct VaultCache {
@@ -180,6 +193,8 @@ mod tests {
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
             embedder,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: None,
         }
     }
 

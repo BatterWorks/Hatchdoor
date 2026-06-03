@@ -11,6 +11,7 @@ use tracing::{error, info};
 use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
 use hatchdoor::cache::SqliteCache;
 use hatchdoor::embed::{Embedder, FastembedEmbedder};
+use hatchdoor::git::{self, GitConfig};
 use hatchdoor::handlers::{
     graph_handler, health_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
@@ -106,6 +107,40 @@ async fn run_server() {
             std::process::exit(1);
         });
 
+    let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
+
+    let git_sync = match GitConfig::from_env(config.vault_path.clone()) {
+        Ok(None) => None,
+        Ok(Some(git_config)) => {
+            if let Err(e) = git::validate_repo(&git_config) {
+                error!("Git sync configuration invalid: {e}");
+                std::process::exit(1);
+            }
+            let handle = git::spawn_sync_task(
+                git_config.clone(),
+                vault_write_lock.clone(),
+                |cfg, paths, msg| git::sync(cfg, paths, msg).map(|report| report.outcome),
+            );
+            // Flush commits stranded by an earlier outage.
+            match git::has_unpushed(&git_config) {
+                Ok(true) => handle.record(hatchdoor::git::WriteRecord {
+                    op: "startup".to_string(),
+                    target: "flush unpushed".to_string(),
+                    affected_paths: vec![],
+                    summary: None,
+                }),
+                Ok(false) => {}
+                Err(e) => error!("Git sync startup check failed: {e}"),
+            }
+            info!("Git sync enabled");
+            Some(handle)
+        }
+        Err(e) => {
+            error!("Git sync configuration error: {e}");
+            std::process::exit(1);
+        }
+    };
+
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let state = AppState {
         vault_path: config.vault_path.clone(),
@@ -113,6 +148,8 @@ async fn run_server() {
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
         embedder,
+        vault_write_lock,
+        git_sync,
     };
 
     spawn_vault_watcher(
@@ -228,6 +265,8 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: None,
         };
 
         (build_router(state.clone()), tmp, state)
@@ -330,6 +369,8 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: None,
         };
         let app = build_router(state);
 
