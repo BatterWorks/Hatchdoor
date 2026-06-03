@@ -251,10 +251,10 @@ fn merge_remote(
                 }
             }
         }
-        // Abort: clear merge state and hard-reset back to our commit.
-        repo.cleanup_state()?;
+        // Abort: hard-reset back to our commit first, then clear merge state.
         let our_commit = repo.find_commit(local_oid)?;
         repo.reset(our_commit.as_object(), ResetType::Hard, None)?;
+        repo.cleanup_state()?;
         return Err(GitError::Conflict { files });
     }
 

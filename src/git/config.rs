@@ -1,7 +1,7 @@
 use std::env;
 
 /// Static configuration for the git-sync subsystem, read once at startup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GitConfig {
     /// Absolute path to the vault, which must be the git repository root.
     pub vault_path: std::path::PathBuf,
@@ -19,6 +19,21 @@ pub struct GitConfig {
     pub author_name: String,
     /// Commit author/committer email.
     pub author_email: String,
+}
+
+impl std::fmt::Debug for GitConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitConfig")
+            .field("vault_path", &self.vault_path)
+            .field("remote", &self.remote)
+            .field("branch", &self.branch)
+            .field("username", &self.username)
+            .field("token", &"***")
+            .field("debounce_seconds", &self.debounce_seconds)
+            .field("author_name", &self.author_name)
+            .field("author_email", &self.author_email)
+            .finish()
+    }
 }
 
 impl GitConfig {
