@@ -50,6 +50,7 @@ pub fn create_note(
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
+        affected_paths: vec![path.clone()],
     })
 }
 
@@ -67,6 +68,7 @@ pub fn update_note(
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
+        affected_paths: vec![entry.path.clone()],
     })
 }
 
@@ -94,6 +96,7 @@ pub fn append_note(
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
+        affected_paths: vec![entry.path.clone()],
     })
 }
 
@@ -140,6 +143,7 @@ pub fn edit_note(
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
+        affected_paths: vec![entry.path.clone()],
     })
 }
 
@@ -172,6 +176,7 @@ pub fn replace_section(
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
+        affected_paths: vec![entry.path.clone()],
     })
 }
 
@@ -304,13 +309,22 @@ pub fn move_or_rename_note(
         ))
     })?;
     let moved_assets = move_assets(&asset_moves)?;
-    let rewritten_notes = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let rewritten_notes = rewritten.len();
     let moved_content = fs::read_to_string(&target_path).map_err(|error| {
         WriteError::Io(format!(
             "failed to read moved note '{}': {error}",
             target_path.display()
         ))
     })?;
+
+    let mut affected_paths = rewritten;
+    affected_paths.push(entry.path.clone());
+    affected_paths.push(target_path.clone());
+    for asset in &asset_moves {
+        affected_paths.push(asset.source.clone());
+        affected_paths.push(asset.destination.clone());
+    }
 
     Ok(WriteOutcome {
         slug: None,
@@ -319,6 +333,7 @@ pub fn move_or_rename_note(
         rewritten_notes,
         moved_assets,
         trashed_path: None,
+        affected_paths,
     })
 }
 
@@ -350,7 +365,16 @@ pub fn delete_note(
             trash_path.display()
         ))
     })?;
-    let rewritten_notes = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let rewritten_notes = rewritten.len();
+
+    let mut affected_paths = rewritten;
+    affected_paths.push(entry.path.clone());
+    affected_paths.push(trash_path.clone());
+    for asset in &asset_moves {
+        affected_paths.push(asset.source.clone());
+        affected_paths.push(asset.destination.clone());
+    }
 
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
@@ -359,5 +383,6 @@ pub fn delete_note(
         rewritten_notes,
         moved_assets,
         trashed_path: Some(trash_relative),
+        affected_paths,
     })
 }
