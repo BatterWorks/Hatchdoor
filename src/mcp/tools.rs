@@ -352,7 +352,9 @@ async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailu
             "last_sync_at": null,
             "last_ok": false,
             "last_error": null,
-            "pending": 0
+            "last_error_kind": null,
+            "pending": 0,
+            "unpushed": 0
         }),
     };
     Ok(tool_success(status))

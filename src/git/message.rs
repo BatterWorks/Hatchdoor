@@ -37,7 +37,11 @@ pub fn build_commit_message(records: &[WriteRecord]) -> String {
         highlights.push(format!("+{} more", records.len() - 3));
     }
 
-    let title = format!("hatchdoor: {} ({file_count} files)", highlights.join(", "));
+    let file_word = if file_count == 1 { "file" } else { "files" };
+    let title = format!(
+        "hatchdoor: {} ({file_count} {file_word})",
+        highlights.join(", ")
+    );
 
     let body: Vec<String> = records
         .iter()
@@ -93,7 +97,7 @@ mod tests {
             Some("tighten intro"),
         )];
         let msg = build_commit_message(&records);
-        assert!(msg.starts_with("hatchdoor: update \"Project X\" (1 files)"));
+        assert!(msg.starts_with("hatchdoor: update \"Project X\" (1 file)"));
         assert!(msg.ends_with("- tighten intro"));
     }
 

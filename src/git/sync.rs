@@ -35,6 +35,18 @@ pub enum GitError {
     Other(String),
 }
 
+impl GitError {
+    /// Machine-readable category, surfaced in `GitSyncStatus.last_error_kind`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            GitError::Validation(_) => "validation",
+            GitError::Conflict { .. } => "conflict",
+            GitError::Remote(_) => "remote",
+            GitError::Other(_) => "other",
+        }
+    }
+}
+
 impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -128,6 +140,27 @@ pub fn has_unpushed(config: &GitConfig) -> Result<bool, GitError> {
         }
         // No tracking ref yet → treat as needing a push.
         Err(_) => Ok(true),
+    }
+}
+
+/// Number of local commits on the configured branch not yet on the remote
+/// tracking ref. Surfaced in status so a client can tell a conflict left a
+/// commit stranded locally. Best-effort: callers treat an error as "unknown".
+pub fn unpushed_count(config: &GitConfig) -> Result<usize, GitError> {
+    let repo = Repository::open(&config.vault_path)?;
+    let local = repo.refname_to_id(&format!("refs/heads/{}", config.branch))?;
+    let remote_ref = format!("refs/remotes/{}/{}", config.remote, config.branch);
+    match repo.refname_to_id(&remote_ref) {
+        Ok(remote_oid) => {
+            let (ahead, _behind) = repo.graph_ahead_behind(local, remote_oid)?;
+            Ok(ahead)
+        }
+        // No tracking ref yet → every commit on the branch is unpushed.
+        Err(_) => {
+            let mut walk = repo.revwalk()?;
+            walk.push(local)?;
+            Ok(walk.count())
+        }
     }
 }
 
@@ -489,5 +522,26 @@ mod tests {
             .to_string();
         assert_eq!(head_msg, "hatchdoor: edit Home");
         assert_eq!(remote_head_message(&remote, "main"), "remote edit");
+    }
+
+    #[test]
+    fn unpushed_count_is_zero_after_successful_push() {
+        let (_tmp, work, _remote) = init_repo_with_remote();
+        let config = base_config(&work);
+        let note = work.join("Note.md");
+        fs::write(&note, "# Note\n").unwrap();
+        sync(&config, &[note], "hatchdoor: add Note").unwrap();
+        assert_eq!(unpushed_count(&config).unwrap(), 0);
+    }
+
+    #[test]
+    fn unpushed_count_reflects_commit_stranded_by_conflict() {
+        let (_tmp, work, remote) = init_repo_with_remote();
+        let config = base_config(&work);
+        advance_remote(&remote, "# Home\nremote version\n");
+        fs::write(work.join("Home.md"), "# Home\nlocal version\n").unwrap();
+        // Conflict aborts but keeps our local commit, which is now unpushed.
+        let _ = sync(&config, &[work.join("Home.md")], "hatchdoor: edit Home").unwrap_err();
+        assert_eq!(unpushed_count(&config).unwrap(), 1);
     }
 }

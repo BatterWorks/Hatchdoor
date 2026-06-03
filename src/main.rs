@@ -116,22 +116,13 @@ async fn run_server() {
                 error!("Git sync configuration invalid: {e}");
                 std::process::exit(1);
             }
+            // The background task flushes any commits stranded by an earlier
+            // outage immediately on startup (see spawn_sync_task).
             let handle = git::spawn_sync_task(
                 git_config.clone(),
                 vault_write_lock.clone(),
                 |cfg, paths, msg| git::sync(cfg, paths, msg).map(|report| report.outcome),
             );
-            // Flush commits stranded by an earlier outage.
-            match git::has_unpushed(&git_config) {
-                Ok(true) => handle.record(hatchdoor::git::WriteRecord {
-                    op: "startup".to_string(),
-                    target: "flush unpushed".to_string(),
-                    affected_paths: vec![],
-                    summary: None,
-                }),
-                Ok(false) => {}
-                Err(e) => error!("Git sync startup check failed: {e}"),
-            }
             info!("Git sync enabled");
             Some(handle)
         }
