@@ -38,6 +38,7 @@ pub async fn handle_tools_call(
         "resolve_wikilink" => resolve_wikilink_tool(state, arguments).await,
         "get_tree" => get_tree_tool(state, arguments).await,
         "refresh_index" => refresh_index_tool(state, arguments).await,
+        "get_git_sync_status" => get_git_sync_status_tool(state).await,
         "get_attachment_import_config" if config.write_enabled => {
             get_attachment_import_config_tool(config)
         }
@@ -220,6 +221,16 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
             },
             "annotations": read_only_tool_annotations()
         }),
+        json!({
+            "name": "get_git_sync_status",
+            "description": "Report the status of automatic git sync: whether it is enabled, the last sync time, whether the last attempt succeeded, the last error (if any), and how many writes are pending. Use to check whether your changes have been committed and pushed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_only_tool_annotations()
+        }),
     ];
     if config.write_enabled {
         tools.extend(write_tools_list());
@@ -328,6 +339,40 @@ async fn refresh_index_tool(state: AppState, arguments: Value) -> Result<Value, 
     Ok(tool_success(json!(RefreshResponse { refreshed: true })))
 }
 
+async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailure> {
+    let status = match &state.git_sync {
+        Some(handle) => {
+            let guard = handle.status();
+            let snapshot = guard.read().await;
+            serde_json::to_value(&*snapshot)
+                .map_err(|e| JsonRpcFailure::internal(format!("serialize git status: {e}")))?
+        }
+        None => json!({
+            "enabled": false,
+            "last_sync_at": null,
+            "last_ok": false,
+            "last_error": null,
+            "pending": 0
+        }),
+    };
+    Ok(tool_success(status))
+}
+
+/// Returns the last sync error message when the most recent sync failed.
+async fn git_sync_warning(state: &AppState) -> Option<String> {
+    let handle = state.git_sync.as_ref()?;
+    let guard = handle.status();
+    let snapshot = guard.read().await;
+    if snapshot.last_ok {
+        None
+    } else {
+        snapshot
+            .last_error
+            .clone()
+            .map(|e| format!("git sync has not succeeded since: {e}"))
+    }
+}
+
 fn get_attachment_import_config_tool(config: &McpConfig) -> Result<Value, JsonRpcFailure> {
     let host_staging_path = if config.advertise_host_paths {
         config.host_attachment_staging_path.clone()
@@ -359,7 +404,8 @@ async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "create", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -372,7 +418,8 @@ async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "update", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -386,7 +433,8 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "append", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -405,7 +453,8 @@ async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "edit", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -435,7 +484,8 @@ async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "replace_section", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -461,7 +511,8 @@ async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "rename", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -491,7 +542,8 @@ async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "move", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -512,7 +564,8 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "move_rename", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -530,7 +583,8 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_note_write(&state, "delete", &outcome, args.commit_summary);
-    Ok(write_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
 }
 
 async fn import_attachment_tool(
@@ -558,7 +612,8 @@ async fn import_attachment_tool(
     )
     .map_err(write_error_to_jsonrpc)?;
     record_attachment_write(&state, "import_attachment", &outcome, args.commit_summary);
-    Ok(attachment_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(attachment_success(outcome, warning))
 }
 
 async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -579,7 +634,8 @@ async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_attachment_write(&state, "move_attachment", &outcome, args.commit_summary);
-    Ok(attachment_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(attachment_success(outcome, warning))
 }
 
 async fn rename_attachment_tool(
@@ -602,7 +658,8 @@ async fn rename_attachment_tool(
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_attachment_write(&state, "rename_attachment", &outcome, args.commit_summary);
-    Ok(attachment_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(attachment_success(outcome, warning))
 }
 
 async fn delete_attachment_tool(
@@ -619,7 +676,8 @@ async fn delete_attachment_tool(
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_attachment_write(&state, "delete_attachment", &outcome, args.commit_summary);
-    Ok(attachment_success(outcome))
+    let warning = git_sync_warning(&state).await;
+    Ok(attachment_success(outcome, warning))
 }
 
 async fn list_note_attachments_tool(
@@ -670,7 +728,7 @@ fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     }
 }
 
-fn write_success(outcome: WriteOutcome) -> Value {
+fn write_success(outcome: WriteOutcome, git_sync_warning: Option<String>) -> Value {
     tool_success(json!({
         "ok": true,
         "slug": outcome.slug,
@@ -679,16 +737,18 @@ fn write_success(outcome: WriteOutcome) -> Value {
         "rewritten_notes": outcome.rewritten_notes,
         "moved_assets": outcome.moved_assets,
         "trashed_path": outcome.trashed_path,
+        "git_sync_warning": git_sync_warning,
     }))
 }
 
-fn attachment_success(outcome: AttachmentOutcome) -> Value {
+fn attachment_success(outcome: AttachmentOutcome, git_sync_warning: Option<String>) -> Value {
     tool_success(json!({
         "ok": true,
         "attachment": outcome.attachment,
         "rewritten_notes": outcome.rewritten_notes,
         "trashed_path": outcome.trashed_path,
         "cleanup_warning": outcome.cleanup_warning,
+        "git_sync_warning": git_sync_warning,
     }))
 }
 
