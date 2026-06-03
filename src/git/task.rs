@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 use super::config::GitConfig;
 use super::message::{WriteRecord, build_commit_message};
 use super::status::GitSyncStatus;
-use super::sync::{GitError, SyncOutcome};
+use super::sync::{GitError, SyncOutcome, has_unpushed, unpushed_count};
 
 /// Handle stored in AppState so write tools can enqueue records and readers can
 /// observe status. `None` everywhere when git sync is disabled.
@@ -45,8 +45,22 @@ where
     let debounce = Duration::from_secs(config.debounce_seconds.max(1));
     let runner = Arc::new(runner);
 
+    // Decide up front whether to flush commits stranded by an earlier outage.
+    // This is a cheap local check; if it can't read git state (e.g. no repo, as
+    // in unit tests) we simply don't flush.
+    let startup_flush = matches!(has_unpushed(&config), Ok(true));
+
     tokio::spawn(async move {
-        run_loop(config, debounce, vault_lock, receiver, task_status, runner).await;
+        run_loop(
+            config,
+            debounce,
+            vault_lock,
+            receiver,
+            task_status,
+            runner,
+            startup_flush,
+        )
+        .await;
     });
 
     GitSyncHandle { sender, status }
@@ -59,6 +73,7 @@ async fn run_loop<R>(
     mut receiver: mpsc::UnboundedReceiver<WriteRecord>,
     status: Arc<RwLock<GitSyncStatus>>,
     runner: Arc<R>,
+    startup_flush: bool,
 ) where
     R: Fn(&GitConfig, &[std::path::PathBuf], &str) -> Result<SyncOutcome, GitError>
         + Send
@@ -66,6 +81,12 @@ async fn run_loop<R>(
         + 'static,
 {
     let mut batch: Vec<WriteRecord> = Vec::new();
+
+    // Immediately flush any commits stranded by an earlier outage, rather than
+    // waiting for the first write to trigger a debounced sync.
+    if startup_flush {
+        run_one_sync(&config, &vault_lock, &status, &runner, Vec::new()).await;
+    }
 
     loop {
         // Wait for the first record (or channel close).
@@ -128,17 +149,32 @@ async fn run_one_sync<R>(
     let _guard = vault_lock.lock().await;
     let config_clone = config.clone();
     let runner = runner.clone();
-    let result = tokio::task::spawn_blocking(move || runner(&config_clone, &paths, &message))
-        .await
-        .unwrap_or_else(|join_err| Err(GitError::Other(format!("sync task panicked: {join_err}"))));
+    // Run the sync and, in the same blocking hop, read how many local commits
+    // remain unpushed afterward (best-effort; `None` when it can't be read).
+    let (result, unpushed) = tokio::task::spawn_blocking(move || {
+        let outcome = runner(&config_clone, &paths, &message);
+        let unpushed = unpushed_count(&config_clone).ok();
+        (outcome, unpushed)
+    })
+    .await
+    .unwrap_or_else(|join_err| {
+        (
+            Err(GitError::Other(format!("sync task panicked: {join_err}"))),
+            None,
+        )
+    });
     drop(_guard);
 
     let mut guard = status.write().await;
     guard.last_sync_at = Some(now_rfc3339());
+    if let Some(unpushed) = unpushed {
+        guard.unpushed = unpushed;
+    }
     match result {
         Ok(outcome) => {
             guard.last_ok = true;
             guard.last_error = None;
+            guard.last_error_kind = None;
             match outcome {
                 SyncOutcome::NoChanges => info!("git sync: no changes"),
                 SyncOutcome::Pushed { committed } => {
@@ -154,6 +190,7 @@ async fn run_one_sync<R>(
                 _ => error!("git sync failed: {message}"),
             }
             guard.last_error = Some(message);
+            guard.last_error_kind = Some(err.kind().to_string());
         }
     }
 }

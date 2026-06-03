@@ -205,7 +205,7 @@ Vault-safe MCP tools:
 - `get_tree` -> fetch the explorer tree; potentially larger response
 - `refresh_index` -> force Hatchdoor to refresh its SQLite view of the vault without modifying vault content
 - `get_attachment_import_config` -> report attachment staging config, allowed extensions, max size, and usage guidance
-- `get_git_sync_status` -> report whether git sync is enabled, the last sync time, whether it succeeded, the last error, and how many writes are pending
+- `get_git_sync_status` -> report whether git sync is enabled, the last sync time, whether it succeeded, the last error (with a machine-readable `last_error_kind`: `conflict`/`remote`/`validation`/`other`), how many writes are pending, and how many local commits are unpushed
 - `create_note` -> create a Markdown note when write mode is enabled
 - `update_note` -> replace note content with `expected_content_hash`
 - `append_to_note` -> append Markdown with `expected_content_hash`
@@ -243,7 +243,7 @@ Requirements and behaviour:
 - Authentication is HTTPS with a username and token. The token is required when sync is enabled and is never logged or surfaced in status or error output.
 - After successful MCP write tools run, affected paths are committed and pushed. Writes are debounced (default 30s) and coalesced into a single commit. Agents may pass an optional `commit_summary` argument that is added to the commit body.
 - Each sync fetches and integrates the remote before pushing. A clean merge is committed and pushed; a conflicting merge is aborted, the local commit is kept (not pushed), and the conflict must be resolved by a human on the server.
-- Use the `get_git_sync_status` tool to check whether your changes have been committed and pushed. When the most recent sync failed, write-tool responses also include a `git_sync_warning` field.
+- Use the `get_git_sync_status` tool to check whether your changes have been committed and pushed. It reports an `unpushed` commit count (non-zero after a conflict abort or an outage) and a `last_error_kind` so a conflict is distinguishable from a transient remote error. When the most recent sync failed, write-tool responses also include a `git_sync_warning` field. Stranded commits from a previous run are flushed immediately on startup.
 
 ## Frontend Dev Mode
 
