@@ -356,7 +356,8 @@ mod tests {
                 "resolve_wikilink",
                 "get_tree",
                 "refresh_index",
-                "get_attachment_import_config"
+                "get_attachment_import_config",
+                "get_git_sync_status"
             ]
         );
         assert!(
@@ -380,7 +381,10 @@ mod tests {
         assert_eq!(refresh["annotations"]["destructiveHint"], false);
         assert_eq!(refresh["annotations"]["idempotentHint"], true);
         assert_eq!(refresh["annotations"]["openWorldHint"], false);
-        let attachment_config = tools.last().expect("attachment config tool");
+        let attachment_config = tools
+            .iter()
+            .find(|tool| tool["name"] == "get_attachment_import_config")
+            .expect("attachment config tool");
         assert_eq!(attachment_config["name"], "get_attachment_import_config");
         assert_eq!(attachment_config["annotations"]["readOnlyHint"], true);
 
