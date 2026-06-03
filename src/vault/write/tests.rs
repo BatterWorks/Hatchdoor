@@ -42,6 +42,228 @@ fn update_note_requires_matching_hash() {
 }
 
 #[test]
+fn edit_note_replaces_unique_string() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "alpha beta gamma").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    let outcome = edit_note(
+        entry,
+        "beta",
+        "BETA",
+        &content_hash("alpha beta gamma"),
+        false,
+    )
+    .expect("edit");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "alpha BETA gamma");
+    assert_eq!(
+        outcome.content_hash,
+        Some(content_hash("alpha BETA gamma"))
+    );
+}
+
+#[test]
+fn edit_note_rejects_missing_string() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "alpha").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    assert!(matches!(
+        edit_note(entry, "missing", "x", &content_hash("alpha"), false),
+        Err(WriteError::InvalidInput(_))
+    ));
+    assert_eq!(fs::read_to_string(&path).expect("read"), "alpha");
+}
+
+#[test]
+fn edit_note_rejects_ambiguous_match_without_replace_all() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "x and x").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    assert!(matches!(
+        edit_note(entry, "x", "y", &content_hash("x and x"), false),
+        Err(WriteError::Conflict(_))
+    ));
+    assert_eq!(fs::read_to_string(&path).expect("read"), "x and x");
+}
+
+#[test]
+fn edit_note_replace_all_replaces_every_occurrence() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "x x x").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    edit_note(entry, "x", "y", &content_hash("x x x"), true).expect("edit");
+
+    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y");
+}
+
+#[test]
+fn edit_note_requires_matching_hash() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    fs::write(&path, "alpha").expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    assert!(matches!(
+        edit_note(entry, "alpha", "beta", "fnv1a64:deadbeef", false),
+        Err(WriteError::Conflict(_))
+    ));
+    assert_eq!(fs::read_to_string(&path).expect("read"), "alpha");
+}
+
+#[test]
+fn replace_section_replaces_heading_and_body() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    let body = "# Title\n\n## One\nfirst\n\n## Two\nsecond\n";
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    replace_section(
+        entry,
+        "## One",
+        SectionMode::Replace,
+        "## One\nNEW\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "# Title\n\n## One\nNEW\n## Two\nsecond\n"
+    );
+}
+
+#[test]
+fn replace_section_before_inserts_above_heading() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    replace_section(
+        entry,
+        "## Two",
+        SectionMode::Before,
+        "## Inserted\nx\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Inserted\nx\n## Two\nsecond\n"
+    );
+}
+
+#[test]
+fn replace_section_after_inserts_below_section() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    let body = "## One\nfirst\n## Two\nsecond\n";
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    replace_section(
+        entry,
+        "## One",
+        SectionMode::After,
+        "## Inserted\nx\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## One\nfirst\n## Inserted\nx\n## Two\nsecond\n"
+    );
+}
+
+#[test]
+fn replace_section_ignores_heading_inside_code_fence() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    let body = "## Real\nbefore\n```\n## Fake\n```\nafter\n## Next\nx\n";
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    replace_section(
+        entry,
+        "## Real",
+        SectionMode::Replace,
+        "## Real\nNEW\n",
+        &content_hash(body),
+    )
+    .expect("replace");
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "## Real\nNEW\n## Next\nx\n"
+    );
+}
+
+#[test]
+fn replace_section_rejects_missing_heading() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    let body = "## One\nfirst\n";
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    assert!(matches!(
+        replace_section(
+            entry,
+            "## Missing",
+            SectionMode::Replace,
+            "x",
+            &content_hash(body),
+        ),
+        Err(WriteError::InvalidInput(_))
+    ));
+    assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
+fn replace_section_rejects_duplicate_heading() {
+    let tmp = TempDir::new().expect("tempdir");
+    let path = tmp.path().join("Home.md");
+    let body = "## Dup\na\n## Dup\nb\n";
+    fs::write(&path, body).expect("write");
+    let index = build(tmp.path());
+    let entry = index.find_by_slug("home").expect("home");
+
+    assert!(matches!(
+        replace_section(
+            entry,
+            "## Dup",
+            SectionMode::Replace,
+            "x",
+            &content_hash(body),
+        ),
+        Err(WriteError::Conflict(_))
+    ));
+    assert_eq!(fs::read_to_string(&path).expect("read"), body);
+}
+
+#[test]
 fn move_note_rewrites_backlinks_and_moves_referenced_assets() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();

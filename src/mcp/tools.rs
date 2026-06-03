@@ -6,9 +6,10 @@ use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
 use crate::search::SearchRequest;
 use crate::vault::VaultIndex;
 use crate::vault::{
-    AttachmentOutcome, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
-    create_note, delete_attachment, delete_note, import_attachment, list_note_attachments,
-    move_attachment, move_or_rename_note, rename_attachment, update_note,
+    AttachmentOutcome, SectionMode, WriteError, WriteOutcome, allowed_attachment_extensions,
+    append_note, create_note, delete_attachment, delete_note, edit_note, import_attachment,
+    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment, replace_section,
+    update_note,
 };
 
 use super::config::McpConfig;
@@ -53,6 +54,8 @@ pub async fn handle_tools_call(
         "create_note" if config.write_enabled => create_note_tool(state, arguments).await,
         "update_note" if config.write_enabled => update_note_tool(state, arguments).await,
         "append_to_note" if config.write_enabled => append_to_note_tool(state, arguments).await,
+        "edit_note" if config.write_enabled => edit_note_tool(state, arguments).await,
+        "replace_section" if config.write_enabled => replace_section_tool(state, arguments).await,
         "rename_note" if config.write_enabled => rename_note_tool(state, arguments).await,
         "move_note" if config.write_enabled => move_note_tool(state, arguments).await,
         "move_rename_note" if config.write_enabled => move_rename_note_tool(state, arguments).await,
@@ -73,6 +76,8 @@ pub async fn handle_tools_call(
         "create_note"
         | "update_note"
         | "append_to_note"
+        | "edit_note"
+        | "replace_section"
         | "rename_note"
         | "move_note"
         | "move_rename_note"
@@ -371,6 +376,53 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
     let entry = note_entry(&index, &args.slug)?;
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
+    refresh_after_write(&state).await?;
+    Ok(write_success(outcome))
+}
+
+async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: EditNoteArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid edit_note arguments: {error}"))
+    })?;
+    let index = current_index(&state)?;
+    let entry = note_entry(&index, &args.slug)?;
+    let outcome = edit_note(
+        &entry,
+        &args.old_string,
+        &args.new_string,
+        &args.expected_content_hash,
+        args.replace_all.unwrap_or(false),
+    )
+    .map_err(write_error_to_jsonrpc)?;
+    refresh_after_write(&state).await?;
+    Ok(write_success(outcome))
+}
+
+async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: ReplaceSectionArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid replace_section arguments: {error}"))
+    })?;
+    let heading = non_empty_argument("heading", args.heading)?;
+    let mode = match args.mode.as_str() {
+        "replace" => SectionMode::Replace,
+        "before" => SectionMode::Before,
+        "after" => SectionMode::After,
+        other => {
+            return Err(JsonRpcFailure::invalid_params(format!(
+                "mode must be one of replace, before, after (got '{other}')"
+            )));
+        }
+    };
+    let index = current_index(&state)?;
+    let entry = note_entry(&index, &args.slug)?;
+    let outcome = replace_section(
+        &entry,
+        &heading,
+        mode,
+        &args.content,
+        &args.expected_content_hash,
+    )
+    .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     Ok(write_success(outcome))
 }
@@ -728,6 +780,40 @@ fn write_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(false, false)
         }),
         json!({
+            "name": "edit_note",
+            "description": "Make a surgical string replacement in an existing note. old_string must match exactly and be unique unless replace_all is true; otherwise the edit is rejected without writing. Prefer this over update_note for small changes. Requires expected_content_hash from get_note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1},
+                    "old_string": {"type": "string", "minLength": 1},
+                    "new_string": {"type": "string"},
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "replace_all": {"type": "boolean"}
+                },
+                "required": ["slug", "old_string", "new_string", "expected_content_hash"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(false, false)
+        }),
+        json!({
+            "name": "replace_section",
+            "description": "Replace or insert around a whole Markdown section identified by its heading (e.g. '## Multi-engine support'). The section spans the heading line through the body up to the next same-or-higher heading. mode 'replace' overwrites the section (content should include the heading), 'before' inserts content above the heading, 'after' inserts content below the section. Headings inside fenced code blocks are ignored; the heading must match exactly and be unique. Requires expected_content_hash from get_note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1},
+                    "heading": {"type": "string", "minLength": 1},
+                    "mode": {"type": "string", "enum": ["replace", "before", "after"]},
+                    "content": {"type": "string"},
+                    "expected_content_hash": {"type": "string", "minLength": 1}
+                },
+                "required": ["slug", "heading", "mode", "content", "expected_content_hash"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(false, false)
+        }),
+        json!({
             "name": "rename_note",
             "description": "Rename a note within its current folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
@@ -903,6 +989,27 @@ struct UpdateNoteArgs {
 #[serde(deny_unknown_fields)]
 struct AppendNoteArgs {
     slug: String,
+    content: String,
+    expected_content_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditNoteArgs {
+    slug: String,
+    old_string: String,
+    new_string: String,
+    expected_content_hash: String,
+    #[serde(default)]
+    replace_all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceSectionArgs {
+    slug: String,
+    heading: String,
+    mode: String,
     content: String,
     expected_content_hash: String,
 }
