@@ -4,6 +4,7 @@ pub mod cache;
 pub mod chunk;
 pub mod embed;
 pub mod eval;
+pub mod git;
 pub mod handlers;
 pub mod mcp;
 pub mod rerank;
