@@ -12,8 +12,8 @@ use super::protocol::{
 };
 use super::tools::{handle_tools_call, tools_list};
 
-pub async fn mcp_get_handler(headers: HeaderMap) -> Response {
-    let config = McpConfig::from_env();
+pub async fn mcp_get_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let config = state.mcp_config.clone();
     handle_mcp_get(&headers, &config).await
 }
 
@@ -22,8 +22,8 @@ pub async fn mcp_post_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let config = McpConfig::from_env();
-    handle_mcp_post(state, &headers, body, &config).await
+    let config = state.mcp_config.clone();
+    handle_mcp_post(state.clone(), &headers, body, &config).await
 }
 
 async fn handle_mcp_get(headers: &HeaderMap, config: &McpConfig) -> Response {
@@ -177,6 +177,9 @@ mod tests {
             embedder,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
+            mcp_config: Arc::new(McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         (state, tmp)
     }

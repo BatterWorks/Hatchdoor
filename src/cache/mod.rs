@@ -7,17 +7,99 @@ mod schema;
 pub use queries::SemanticHit;
 
 use std::fs;
-use std::path::Path;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 
+/// Where the cache database lives. File-backed caches get a pool of extra
+/// read connections (WAL lets many readers run alongside the single writer);
+/// in-memory caches share the one connection because each `:memory:` handle
+/// would otherwise be an isolated empty database.
+enum CacheSource {
+    File(PathBuf),
+    Memory,
+}
+
+/// Upper bound on pooled read connections kept idle for a file-backed cache.
+const MAX_READ_CONNECTIONS: usize = 4;
+
 pub struct SqliteCache {
+    /// The single writer connection. All mutations and transactions go through
+    /// this; reads borrow it only for in-memory caches.
     pub conn: Mutex<Connection>,
+    source: CacheSource,
+    /// Idle read connections available for checkout (file-backed only).
+    read_pool: Mutex<Vec<Connection>>,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
+
+/// Pragmas applied to every connection (writer and readers).
+fn apply_common_pragmas(conn: &Connection) -> Result<(), String> {
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("failed to set busy_timeout: {e}"))?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|e| format!("failed to enable foreign_keys: {e}"))?;
+    Ok(())
+}
+
+/// Writer-connection pragmas: WAL plus the common settings. WAL lets readers
+/// on other connections run concurrently with the single writer.
+fn apply_writer_pragmas(conn: &Connection) -> Result<(), String> {
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| format!("failed to enable WAL: {e}"))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| format!("failed to set synchronous: {e}"))?;
+    apply_common_pragmas(conn)
+}
+
+/// Open a fresh read connection to a file-backed cache. Guarded as `query_only`
+/// so a stray write can't corrupt the writer's WAL state.
+fn open_read_connection(path: &Path) -> Result<Connection, String> {
+    register_sqlite_vec();
+    let conn = Connection::open(path).map_err(|e| {
+        format!(
+            "failed to open SQLite read connection '{}': {e}",
+            path.display()
+        )
+    })?;
+    apply_common_pragmas(&conn)?;
+    conn.pragma_update(None, "query_only", "ON")
+        .map_err(|e| format!("failed to set query_only: {e}"))?;
+    Ok(conn)
+}
+
+/// A connection checked out for read-only queries. Derefs to [`Connection`] so
+/// existing query code is unchanged. On drop it returns a pooled connection to
+/// the pool; the shared in-memory guard is simply released.
+pub struct ReadConn<'a> {
+    cache: &'a SqliteCache,
+    pooled: Option<Connection>,
+    shared: Option<MutexGuard<'a, Connection>>,
+}
+
+impl Deref for ReadConn<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        match (&self.pooled, &self.shared) {
+            (Some(conn), _) => conn,
+            (_, Some(guard)) => guard,
+            (None, None) => unreachable!("ReadConn holds exactly one connection"),
+        }
+    }
+}
+
+impl Drop for ReadConn<'_> {
+    fn drop(&mut self) {
+        if let Some(conn) = self.pooled.take() {
+            self.cache.return_read_connection(conn);
+        }
+    }
+}
 
 fn register_sqlite_vec() {
     SQLITE_VEC_INIT.call_once(|| unsafe {
@@ -50,8 +132,11 @@ impl SqliteCache {
         let conn = Connection::open(path).map_err(|error| {
             format!("failed to open SQLite cache '{}': {error}", path.display())
         })?;
+        apply_writer_pragmas(&conn)?;
         let cache = Self {
             conn: Mutex::new(conn),
+            source: CacheSource::File(path.to_path_buf()),
+            read_pool: Mutex::new(Vec::new()),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -61,8 +146,11 @@ impl SqliteCache {
         register_sqlite_vec();
         let conn = Connection::open_in_memory()
             .map_err(|error| format!("failed to open in-memory SQLite cache: {error}"))?;
+        apply_common_pragmas(&conn)?;
         let cache = Self {
             conn: Mutex::new(conn),
+            source: CacheSource::Memory,
+            read_pool: Mutex::new(Vec::new()),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -77,6 +165,48 @@ impl SqliteCache {
         self.conn
             .lock()
             .map_err(|_| "SQLite cache connection lock poisoned".to_string())
+    }
+
+    /// Check out a connection for read-only queries. File-backed caches draw
+    /// from a pool of dedicated read connections so concurrent readers don't
+    /// serialize behind the writer (WAL keeps them consistent). In-memory
+    /// caches share the single writer connection. The returned guard returns
+    /// its connection to the pool when dropped.
+    pub fn read(&self) -> Result<ReadConn<'_>, String> {
+        match &self.source {
+            CacheSource::Memory => Ok(ReadConn {
+                cache: self,
+                pooled: None,
+                shared: Some(self.connection()?),
+            }),
+            CacheSource::File(path) => {
+                let pooled = {
+                    let mut pool = self
+                        .read_pool
+                        .lock()
+                        .map_err(|_| "SQLite read pool lock poisoned".to_string())?;
+                    pool.pop()
+                };
+                let conn = match pooled {
+                    Some(conn) => conn,
+                    None => open_read_connection(path)?,
+                };
+                Ok(ReadConn {
+                    cache: self,
+                    pooled: Some(conn),
+                    shared: None,
+                })
+            }
+        }
+    }
+
+    fn return_read_connection(&self, conn: Connection) {
+        if let Ok(mut pool) = self.read_pool.lock()
+            && pool.len() < MAX_READ_CONNECTIONS
+        {
+            pool.push(conn);
+        }
+        // Otherwise the connection is dropped (closed) here.
     }
 
     pub fn set_metadata(&self, key: &str, value: &str) -> Result<(), String> {

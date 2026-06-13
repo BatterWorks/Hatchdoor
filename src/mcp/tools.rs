@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::api_types::RefreshResponse;
-use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
+use crate::app_state::{AppState, refresh_now, sqlite_cache};
 use crate::search::SearchRequest;
 use crate::vault::VaultIndex;
 use crate::vault::{
@@ -332,7 +332,7 @@ async fn get_tree_tool(state: AppState, arguments: Value) -> Result<Value, JsonR
 
 async fn refresh_index_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
     reject_non_empty_arguments("refresh_index", &arguments)?;
-    refresh_if_needed(&state)
+    refresh_now(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
@@ -414,7 +414,7 @@ async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let args: UpdateNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid update_note arguments: {error}"))
     })?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
@@ -429,7 +429,7 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
         JsonRpcFailure::invalid_params(format!("Invalid append_to_note arguments: {error}"))
     })?;
     let content = non_empty_argument("content", args.content)?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
@@ -443,7 +443,7 @@ async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     let args: EditNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid edit_note arguments: {error}"))
     })?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = edit_note(
         &entry,
@@ -474,7 +474,7 @@ async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value
             )));
         }
     };
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = replace_section(
         &entry,
@@ -500,7 +500,7 @@ async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
             "new_title cannot contain path separators",
         ));
     }
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let target = replace_filename(&entry.relative_path, &new_title);
     let outcome = move_or_rename_note(
@@ -521,7 +521,7 @@ async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     let args: MoveNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid move_note arguments: {error}"))
     })?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let target_folder = args.target_folder.trim().trim_matches('/');
     let file_name = entry
@@ -554,7 +554,7 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
     })?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = move_or_rename_note(
         &state.vault_path,
@@ -574,7 +574,7 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let args: DeleteNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid delete_note arguments: {error}"))
     })?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = delete_note(
         &state.vault_path,
@@ -626,7 +626,7 @@ async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let outcome = move_attachment(
         &state.vault_path,
         &index,
@@ -650,7 +650,7 @@ async fn rename_attachment_tool(
     let source_relative_path =
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let new_filename = non_empty_argument("new_filename", args.new_filename)?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let outcome = rename_attachment(
         &state.vault_path,
         &index,
@@ -673,7 +673,7 @@ async fn delete_attachment_tool(
     })?;
     let source_relative_path =
         non_empty_argument("source_relative_path", args.source_relative_path)?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let outcome = delete_attachment(&state.vault_path, &index, &source_relative_path)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
@@ -689,20 +689,28 @@ async fn list_note_attachments_tool(
     let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid list_note_attachments arguments: {error}"))
     })?;
-    let index = current_index(&state)?;
+    let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let attachments =
         list_note_attachments(&state.vault_path, &entry).map_err(write_error_to_jsonrpc)?;
     Ok(tool_success(json!({ "attachments": attachments })))
 }
 
-fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
-    VaultIndex::build(&state.vault_path).map_err(|error| {
-        JsonRpcFailure::internal(format!(
+/// Build the vault index off the async runtime. Write tools need the full
+/// index to rewrite backlinks/assets, but the O(vault) walk must not block a
+/// tokio worker.
+async fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
+    let vault_path = state.vault_path.clone();
+    match tokio::task::spawn_blocking(move || VaultIndex::build(&vault_path)).await {
+        Ok(Ok(index)) => Ok(index),
+        Ok(Err(error)) => Err(JsonRpcFailure::internal(format!(
             "failed to index vault at '{}': {error}",
             state.vault_path.display()
-        ))
-    })
+        ))),
+        Err(join_error) => Err(JsonRpcFailure::internal(format!(
+            "vault index build panicked: {join_error}"
+        ))),
+    }
 }
 
 fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry, JsonRpcFailure> {
@@ -717,7 +725,7 @@ fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry,
 }
 
 async fn refresh_after_write(state: &AppState) -> Result<(), JsonRpcFailure> {
-    refresh_if_needed(state)
+    refresh_now(state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))
 }

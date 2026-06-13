@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { escapeMarkdownLabel, parseWikilinkTarget } from "../../markdown";
 import { slugifyHeading } from "../../noteHeadings";
+import { apiFetch, withAccessToken } from "../../api";
 import type { ResolveBatchResponse } from "../../types";
 
 export function useResolvedWikilinks(
@@ -30,7 +31,7 @@ export function useResolvedWikilinks(
 
       if (uniqueTargets.length > 0) {
         try {
-          const res = await fetch("/api/resolve-batch", {
+          const res = await apiFetch("/api/resolve-batch", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -103,7 +104,7 @@ export function resolveAssetHref(
   }
 
   const encoded = normalized.split("/").map(encodeURIComponent).join("/");
-  return `/vault-assets/${encoded}${suffix}`;
+  return withAccessToken(`/vault-assets/${encoded}${suffix}`);
 }
 
 function splitPathSuffix(input: string): [string, string] {

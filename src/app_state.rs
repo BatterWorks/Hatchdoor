@@ -21,6 +21,11 @@ pub struct AppConfig {
     pub cache_db_path: PathBuf,
     pub host: String,
     pub port: u16,
+    /// When set, every `/api/*`, asset, and download request must present this
+    /// token (Bearer header or `access_token` query parameter).
+    pub web_bearer_token: Option<String>,
+    /// Folder prefix (with trailing slash) treated as archived in resolve results.
+    pub archive_prefix: String,
 }
 
 impl AppConfig {
@@ -28,8 +33,17 @@ impl AppConfig {
         let vault_path = env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
         let cache_db_path = env::var("HATCHDOOR_CACHE_DB")
             .unwrap_or_else(|_| "./data/cache/hatchdoor-cache.sqlite3".to_string());
-        let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let port_raw = env::var("PORT").unwrap_or_else(|_| "42824".to_string());
+        let web_bearer_token = env::var("HATCHDOOR_WEB_BEARER_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let archive_prefix = env::var("HATCHDOOR_ARCHIVE_PREFIX")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "90-archive/".to_string());
 
         let port = parse_port(&port_raw)?;
 
@@ -38,6 +52,8 @@ impl AppConfig {
             cache_db_path: PathBuf::from(cache_db_path),
             host,
             port,
+            web_bearer_token,
+            archive_prefix,
         })
     }
 
@@ -65,6 +81,12 @@ pub struct AppState {
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Present only when git sync is enabled.
     pub git_sync: Option<crate::git::GitSyncHandle>,
+    /// Validated MCP configuration, parsed once at startup.
+    pub mcp_config: Arc<crate::mcp::McpConfig>,
+    /// Folder prefix treated as archived in resolve results.
+    pub archive_prefix: Arc<str>,
+    /// Held while a reindex runs so concurrent refreshes coalesce into one.
+    pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -115,33 +137,72 @@ pub async fn sqlite_cache(
     Ok(guard.sqlite.clone())
 }
 
-pub async fn refresh_if_needed(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let mut guard = state.cache.write().await;
-    match build_cache_with_sqlite(
-        &state.vault_path,
-        guard.sqlite.clone(),
-        state.embedder.as_ref(),
-    ) {
-        Ok(cache) => {
-            info!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
-            *guard = cache;
-            broadcast_vault_revision(state);
-            Ok(())
-        }
-        Err(error) => {
-            error!(
-                vault_path = %state.vault_path.display(),
-                error = %error,
-                "Vault refresh failed"
-            );
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Vault refresh failed: {error}"),
-                }),
-            ))
-        }
+/// Build a generic `500` response, logging the real detail rather than leaking
+/// it (absolute paths, internal error strings) to the client.
+pub fn internal_error(detail: impl AsRef<str>) -> (StatusCode, Json<ErrorResponse>) {
+    error!(detail = %detail.as_ref(), "Internal server error");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal server error".to_string(),
+        }),
+    )
+}
+
+/// Run blocking (SQLite / embedding) work off the async runtime so it never
+/// hogs a tokio worker or stalls other requests.
+pub async fn run_blocking<T, F>(f: F) -> Result<T, (StatusCode, Json<ErrorResponse>)>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(internal_error(error)),
+        Err(join_error) => Err(internal_error(format!(
+            "background task panicked: {join_error}"
+        ))),
     }
+}
+
+/// Coalescing refresh for the public `/api/refresh` endpoint: if a reindex is
+/// already running, skip rather than queue another full pass behind it. This
+/// defuses a request loop that would otherwise pin a CPU core (F-02).
+pub async fn refresh_if_needed(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let _refresh_guard = match state.refresh_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            debug!("Refresh already in progress; coalescing request");
+            return Ok(());
+        }
+    };
+    run_reindex(state).await
+}
+
+/// Guaranteed refresh for paths that must see their own change reflected (MCP
+/// writes, the vault watcher): waits for any in-flight reindex, then reindexes.
+pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let _refresh_guard = state.refresh_lock.lock().await;
+    run_reindex(state).await
+}
+
+async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let sqlite = state.cache.read().await.sqlite.clone();
+    let vault_path = state.vault_path.clone();
+    let embedder = state.embedder.clone();
+
+    // The reindex writes inside a single SQLite transaction; WAL lets readers on
+    // pooled connections keep serving the prior snapshot until it commits, so we
+    // no longer hold the cache write lock for the whole rebuild (F-03).
+    run_blocking(move || {
+        let index = VaultIndex::build(&vault_path).map_err(|e| e.to_string())?;
+        sqlite.replace_from_index_with_embedder(&index, embedder.as_ref())
+    })
+    .await?;
+
+    info!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
+    broadcast_vault_revision(state);
+    Ok(())
 }
 
 fn broadcast_vault_revision(state: &AppState) {
@@ -177,6 +238,8 @@ mod tests {
             cache_db_path: PathBuf::from("./data/cache/hatchdoor-cache.sqlite3"),
             host: "0.0.0.0".to_string(),
             port: 42824,
+            web_bearer_token: None,
+            archive_prefix: "90-archive/".to_string(),
         };
 
         let addr = cfg.socket_addr().expect("valid addr");
@@ -195,6 +258,9 @@ mod tests {
             embedder,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
+            mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 

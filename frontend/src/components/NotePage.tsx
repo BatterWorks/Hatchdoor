@@ -9,6 +9,7 @@ import {
 
 import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
+import { apiFetch } from "../api";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -77,7 +78,7 @@ export function NotePage({
       }
 
       try {
-        const res = await fetch(`/api/note/${encodeURIComponent(slug)}`);
+        const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
         if (!res.ok) {
           throw new Error(`Failed loading note: ${res.status}`);
         }
@@ -96,7 +97,7 @@ export function NotePage({
 
   const loadNoteLinks = useCallback(async () => {
     try {
-      const res = await fetch(`/api/note/${encodeURIComponent(slug)}/links`);
+      const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}/links`);
       if (!res.ok) {
         throw new Error(`Failed loading note links: ${res.status}`);
       }
