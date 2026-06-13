@@ -21,11 +21,8 @@ pub struct RerankedHit {
 /// is sorted by descending `rerank_score`.
 #[allow(dead_code)]
 pub trait Reranker: Send + Sync {
-    fn rerank(
-        &self,
-        query: &str,
-        candidates: Vec<SemanticHit>,
-    ) -> Result<Vec<RerankedHit>, String>;
+    fn rerank(&self, query: &str, candidates: Vec<SemanticHit>)
+    -> Result<Vec<RerankedHit>, String>;
 
     fn id(&self) -> &'static str;
 }
@@ -151,11 +148,10 @@ mod tests {
     #[test]
     fn stub_preserves_input_size_and_carries_embedding_distance() {
         let r = StubReranker::new();
-        let candidates = vec![
-            hit(1, "a", "alpha", 0.10),
-            hit(2, "b", "alpha beta", 0.20),
-        ];
-        let out = r.rerank("alpha beta gamma", candidates.clone()).expect("rerank");
+        let candidates = vec![hit(1, "a", "alpha", 0.10), hit(2, "b", "alpha beta", 0.20)];
+        let out = r
+            .rerank("alpha beta gamma", candidates.clone())
+            .expect("rerank");
         assert_eq!(out.len(), candidates.len());
         let mut slugs: Vec<&str> = out.iter().map(|h| h.note_slug.as_str()).collect();
         slugs.sort();

@@ -31,9 +31,11 @@ import {
 } from "./app/storage";
 import { useIsMobile } from "./app/useIsMobile";
 import { useTheme } from "./app/useTheme";
+import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
 import { copyText } from "./clipboard";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
+import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
@@ -76,6 +78,7 @@ function App() {
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [vaultRevision, setVaultRevision] = useState(0);
+  const [authRequired, setAuthRequired] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -93,7 +96,7 @@ function App() {
   const loadTree = useCallback(async () => {
     setTreeError(null);
     try {
-      const res = await fetch("/api/tree");
+      const res = await apiFetch("/api/tree");
       if (!res.ok) {
         throw new Error(`Failed loading tree: ${res.status}`);
       }
@@ -111,7 +114,7 @@ function App() {
   const loadModifiedNotes = useCallback(async () => {
     try {
       const params = new URLSearchParams({ limit: "5" });
-      const res = await fetch(`/api/recently-modified?${params.toString()}`);
+      const res = await apiFetch(`/api/recently-modified?${params.toString()}`);
       if (!res.ok) {
         throw new Error(`Failed loading modified notes: ${res.status}`);
       }
@@ -120,6 +123,11 @@ function App() {
     } catch {
       setModifiedNotes([]);
     }
+  }, []);
+
+  useEffect(() => {
+    onUnauthorized(() => setAuthRequired(true));
+    return () => onUnauthorized(null);
   }, []);
 
   useEffect(() => {
@@ -136,7 +144,7 @@ function App() {
       return;
     }
 
-    const events = new EventSource("/api/vault-events");
+    const events = new EventSource(withAccessToken("/api/vault-events"));
     const onVaultRevision = (event: MessageEvent<string>) => {
       try {
         const payload = JSON.parse(event.data) as { revision?: unknown };
@@ -339,7 +347,7 @@ function App() {
             limit: "30",
             per_note_cap: "2",
           });
-          const res = await fetch(`/api/search?${params.toString()}`);
+          const res = await apiFetch(`/api/search?${params.toString()}`);
           if (!res.ok) {
             throw new Error(`Search failed: ${res.status}`);
           }
@@ -414,7 +422,7 @@ function App() {
   }, []);
   const refreshVault = useCallback(async () => {
     try {
-      await fetch("/api/refresh", { method: "POST" });
+      await apiFetch("/api/refresh", { method: "POST" });
     } catch {
       // Fall back to tree refresh even if force refresh endpoint fails.
     }
@@ -444,7 +452,9 @@ function App() {
     if (!activeNote) {
       return;
     }
-    const url = `/api/note/${encodeURIComponent(activeNote.slug)}/download`;
+    const url = withAccessToken(
+      `/api/note/${encodeURIComponent(activeNote.slug)}/download`,
+    );
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.setAttribute("download", "");
@@ -464,6 +474,15 @@ function App() {
         } as CSSProperties
       }
     >
+      {authRequired && (
+        <TokenPrompt
+          onSubmit={(token) => {
+            setToken(token);
+            setAuthRequired(false);
+            window.location.reload();
+          }}
+        />
+      )}
       <AppTopbar
         activeNote={activeNote}
         isMobile={isMobile}

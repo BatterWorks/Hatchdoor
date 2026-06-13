@@ -9,6 +9,9 @@ pub struct WriteOutcome {
     pub rewritten_notes: usize,
     pub moved_assets: usize,
     pub trashed_path: Option<String>,
+    /// Absolute paths created, modified, or removed by this operation
+    /// (primary file, rewritten backlink notes, moved assets, rename source).
+    pub affected_paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -24,6 +27,8 @@ pub struct AttachmentOutcome {
     pub rewritten_notes: usize,
     pub trashed_path: Option<String>,
     pub cleanup_warning: Option<String>,
+    /// Absolute paths created, modified, or removed by this operation.
+    pub affected_paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

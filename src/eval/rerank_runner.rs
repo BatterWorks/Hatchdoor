@@ -65,7 +65,10 @@ mod tests {
         write_vault(
             &vault,
             &[
-                ("alpha.md", "# Alpha\n\nalpha content about flying with babies"),
+                (
+                    "alpha.md",
+                    "# Alpha\n\nalpha content about flying with babies",
+                ),
                 ("beta.md", "# Beta\n\nbeta content unrelated topic"),
                 ("gamma.md", "# Gamma\n\ngamma flying baby plane"),
             ],
@@ -87,8 +90,7 @@ mod tests {
             expected_heading_path: None,
             anti_expected: vec![],
         }];
-        let out =
-            run_rerank_eval(&cache, embedder.as_ref(), &reranker, &queries, 5).expect("run");
+        let out = run_rerank_eval(&cache, embedder.as_ref(), &reranker, &queries, 5).expect("run");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].query_id, "Q1");
         assert!(!out[0].top_k_pre.is_empty());

@@ -205,6 +205,7 @@ Vault-safe MCP tools:
 - `get_tree` -> fetch the explorer tree; potentially larger response
 - `refresh_index` -> force Hatchdoor to refresh its SQLite view of the vault without modifying vault content
 - `get_attachment_import_config` -> report attachment staging config, allowed extensions, max size, and usage guidance
+- `get_git_sync_status` -> report whether git sync is enabled, the last sync time, whether it succeeded, the last error (with a machine-readable `last_error_kind`: `conflict`/`remote`/`validation`/`other`), how many writes are pending, and how many local commits are unpushed
 - `create_note` -> create a Markdown note when write mode is enabled
 - `update_note` -> replace note content with `expected_content_hash`
 - `append_to_note` -> append Markdown with `expected_content_hash`
@@ -220,6 +221,29 @@ Vault-safe MCP tools:
 Write tools modify Markdown files as the source of truth, then force a SQLite cache refresh. They do not expose shell or arbitrary filesystem path tools. Tool argument structs reject unknown fields so runtime behaviour matches the advertised schemas.
 
 MCP attachment imports allow image formats except SVG, plus PDF. Existing SVG files may still be served from a vault, but MCP cannot import or move SVG attachments.
+
+### Git sync
+
+Hatchdoor can automatically commit and push vault changes to a git remote so that edits made by remote MCP agents propagate to every synced device. It is opt-in and off by default:
+
+```env
+HATCHDOOR_GIT_SYNC_ENABLED=true
+HATCHDOOR_GIT_REMOTE=origin
+HATCHDOOR_GIT_BRANCH=main
+HATCHDOOR_GIT_HTTPS_USERNAME=hatchdoor
+HATCHDOOR_GIT_HTTPS_TOKEN=your-token
+HATCHDOOR_GIT_DEBOUNCE_SECONDS=30
+HATCHDOOR_GIT_AUTHOR_NAME=Hatchdoor
+HATCHDOOR_GIT_AUTHOR_EMAIL=hatchdoor@localhost
+```
+
+Requirements and behaviour:
+
+- The vault directory must be a git repository whose root is the vault and whose checked-out `HEAD` is the configured branch. The remote URL comes from the repo's existing remote config; Hatchdoor only references the remote by name. Misconfiguration is fatal at startup so problems surface immediately.
+- Authentication is HTTPS with a username and token. The token is required when sync is enabled and is never logged or surfaced in status or error output.
+- After successful MCP write tools run, affected paths are committed and pushed. Writes are debounced (default 30s) and coalesced into a single commit. Agents may pass an optional `commit_summary` argument that is added to the commit body.
+- Each sync fetches and integrates the remote before pushing. A clean merge is committed and pushed; a conflicting merge is aborted, the local commit is kept (not pushed), and the conflict must be resolved by a human on the server.
+- Use the `get_git_sync_status` tool to check whether your changes have been committed and pushed. It reports an `unpushed` commit count (non-zero after a conflict abort or an outage) and a `last_error_kind` so a conflict is distinguishable from a transient remote error. When the most recent sync failed, write-tool responses also include a `git_sync_warning` field. Stranded commits from a previous run are flushed immediately on startup.
 
 ## Frontend Dev Mode
 

@@ -14,7 +14,8 @@ pub use types::{
     VaultIndex,
 };
 pub use write::{
-    AttachmentOutcome, WriteError, WriteOutcome, allowed_attachment_extensions, append_note,
-    create_note, delete_attachment, delete_note, import_attachment, list_note_attachments,
-    move_attachment, move_or_rename_note, rename_attachment, update_note,
+    AttachmentOutcome, SectionMode, WriteError, WriteOutcome, allowed_attachment_extensions,
+    append_note, create_note, delete_attachment, delete_note, edit_note, import_attachment,
+    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
+    replace_section, update_note,
 };

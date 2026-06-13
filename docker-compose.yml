@@ -11,3 +11,11 @@ services:
       - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
       - ${HOST_ATTACHMENT_STAGING_PATH:-./data/attachments-inbox}:${HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH:-/data/attachments-inbox}
     restart: unless-stopped
+    healthcheck:
+      # Distroless runtime has no shell/curl, so the binary probes its own
+      # /health endpoint (which also pings SQLite) and exits non-zero on failure.
+      test: ["CMD", "/app/hatchdoor", "--healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s

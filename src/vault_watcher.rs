@@ -8,7 +8,7 @@ use notify::{
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::app_state::{AppState, refresh_if_needed};
+use crate::app_state::{AppState, refresh_now};
 
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -45,7 +45,7 @@ async fn run_vault_watcher(
         match result {
             Ok(event) if should_refresh_for_event(&event, &cache_db_path) => {
                 debounce_events(&mut event_rx, &cache_db_path).await;
-                if let Err((status, body)) = refresh_if_needed(&state).await {
+                if let Err((status, body)) = refresh_now(&state).await {
                     error!(
                         status = status.as_u16(),
                         error = %body.0.error,
@@ -92,7 +92,15 @@ pub fn should_refresh_for_event(event: &Event, cache_db_path: &Path) -> bool {
     event
         .paths
         .iter()
-        .any(|path| !is_cache_path(path, cache_db_path))
+        .any(|path| !is_cache_path(path, cache_db_path) && !is_git_path(path))
+}
+
+/// True when the path lives inside a `.git` directory. Git's own bookkeeping
+/// (and the commits/fetches/merges performed by git sync) must not trigger a
+/// vault reindex, or every sync would cause a reindex storm.
+fn is_git_path(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, Component::Normal(name) if name == ".git"))
 }
 
 fn refreshable_event_kind(event: &Event) -> bool {
@@ -208,6 +216,24 @@ mod tests {
         .add_path(absolute_sidecar);
 
         assert!(!should_refresh_for_event(&event, &relative_cache));
+    }
+
+    #[test]
+    fn should_refresh_for_event_ignores_git_directory() {
+        let dir = tempdir().expect("temp dir");
+        let cache = dir.path().join("cache.sqlite3");
+
+        for relative in [".git/index", ".git/refs/heads/main", ".git/objects/ab/cdef"] {
+            let event = Event::new(EventKind::Modify(ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )))
+            .add_path(dir.path().join(relative));
+
+            assert!(
+                !should_refresh_for_event(&event, &cache),
+                "{relative} should be ignored"
+            );
+        }
     }
 
     #[test]

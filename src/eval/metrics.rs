@@ -45,7 +45,10 @@ pub fn recall_at_k_all(expected: &[String], top_k: &[String]) -> f64 {
     if expected.is_empty() {
         return 0.0;
     }
-    let hits = expected.iter().filter(|e| top_k.iter().any(|t| t == *e)).count();
+    let hits = expected
+        .iter()
+        .filter(|e| top_k.iter().any(|t| t == *e))
+        .count();
     hits as f64 / expected.len() as f64
 }
 
@@ -78,7 +81,9 @@ pub fn aggregate(model_id: &str, queries: &[Query], results: &[QueryResult]) -> 
 
     for q in queries {
         let result = by_id.get(q.id.as_str());
-        let top_10: Vec<String> = result.map(|r| r.top_k.iter().take(10).cloned().collect()).unwrap_or_default();
+        let top_10: Vec<String> = result
+            .map(|r| r.top_k.iter().take(10).cloned().collect())
+            .unwrap_or_default();
         let top_5: Vec<String> = top_10.iter().take(5).cloned().collect();
 
         if recall_at_k_any(&q.expected_notes, &top_5) {
@@ -149,13 +154,18 @@ pub struct LatencyStats {
 impl LatencyStats {
     /// `samples` must be non-empty.
     pub fn from_samples(samples: &[f64]) -> Self {
-        assert!(!samples.is_empty(), "LatencyStats::from_samples needs ≥1 sample");
+        assert!(
+            !samples.is_empty(),
+            "LatencyStats::from_samples needs ≥1 sample"
+        );
         let mut sorted: Vec<f64> = samples.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = sorted.len();
         let median = sorted[n / 2];
         // ceil(0.9 * n) - 1, clamped to [0, n-1]
-        let p90_idx = ((0.9 * n as f64).ceil() as usize).saturating_sub(1).min(n - 1);
+        let p90_idx = ((0.9 * n as f64).ceil() as usize)
+            .saturating_sub(1)
+            .min(n - 1);
         let p90 = sorted[p90_idx];
         let max = sorted[n - 1];
         Self { median, p90, max }
@@ -192,8 +202,9 @@ pub fn aggregate_rerank(
 
     for q in queries {
         let result = by_id.get(q.id.as_str());
-        let top_10_post: Vec<String> =
-            result.map(|r| r.top_k_post.iter().take(10).cloned().collect()).unwrap_or_default();
+        let top_10_post: Vec<String> = result
+            .map(|r| r.top_k_post.iter().take(10).cloned().collect())
+            .unwrap_or_default();
         let top_5_post: Vec<String> = top_10_post.iter().take(5).cloned().collect();
 
         if recall_at_k_any(&q.expected_notes, &top_5_post) {
@@ -243,8 +254,10 @@ pub fn aggregate_rerank(
 
     let rerank_samples: Vec<f64> = results.iter().map(|r| r.rerank_latency_ms).collect();
     let e2e_samples: Vec<f64> = results.iter().map(|r| r.e2e_latency_ms).collect();
-    let rerank_latency_ms = (!rerank_samples.is_empty()).then(|| LatencyStats::from_samples(&rerank_samples));
-    let e2e_latency_ms = (!e2e_samples.is_empty()).then(|| LatencyStats::from_samples(&e2e_samples));
+    let rerank_latency_ms =
+        (!rerank_samples.is_empty()).then(|| LatencyStats::from_samples(&rerank_samples));
+    let e2e_latency_ms =
+        (!e2e_samples.is_empty()).then(|| LatencyStats::from_samples(&e2e_samples));
 
     Report {
         model_id: run_id.to_string(),
@@ -285,10 +298,7 @@ mod aggregate_tests {
 
     #[test]
     fn aggregate_computes_recall_mrr_fp() {
-        let queries = vec![
-            q("a", &["n1"], &[]),
-            q("b", &["n2"], &["bad"]),
-        ];
+        let queries = vec![q("a", &["n1"], &[]), q("b", &["n2"], &["bad"])];
         let results = vec![
             r("a", &["n1", "x", "y", "z", "w", "u", "v", "p", "q", "r"]), // rank 1
             r("b", &["bad", "n2", "y", "z", "w", "u", "v", "p", "q", "r"]), // rank 2, anti hit
@@ -297,7 +307,10 @@ mod aggregate_tests {
         assert_eq!(rep.recall_at_5_any, 1.0);
         assert_eq!(rep.recall_at_10_any, 1.0);
         assert!((rep.mrr - (1.0 + 0.5) / 2.0).abs() < 1e-9);
-        assert!((rep.fp_rate_at_5 - 1.0).abs() < 1e-9, "fp denom is 1 (only b has anti), numerator is 1");
+        assert!(
+            (rep.fp_rate_at_5 - 1.0).abs() < 1e-9,
+            "fp denom is 1 (only b has anti), numerator is 1"
+        );
     }
 
     #[test]
@@ -329,7 +342,10 @@ mod tests {
 
     #[test]
     fn recall_all_is_fraction_present() {
-        assert_eq!(recall_at_k_all(&s(&["a", "b", "c"]), &s(&["a", "b", "z"])), 2.0 / 3.0);
+        assert_eq!(
+            recall_at_k_all(&s(&["a", "b", "c"]), &s(&["a", "b", "z"])),
+            2.0 / 3.0
+        );
     }
 
     #[test]
@@ -339,7 +355,10 @@ mod tests {
 
     #[test]
     fn first_rank_is_one_indexed() {
-        assert_eq!(first_expected_rank(&s(&["b"]), &s(&["a", "b", "c"])), Some(2));
+        assert_eq!(
+            first_expected_rank(&s(&["b"]), &s(&["a", "b", "c"])),
+            Some(2)
+        );
     }
 
     #[test]
@@ -378,7 +397,7 @@ mod rerank_tests {
         let queries = vec![q("Q1", "any", &["x"], &[])];
         let pre = vec![RerankQueryResult {
             query_id: "Q1".to_string(),
-            top_k_pre: top(&["a", "b", "x"]),  // expected at rank 3 pre
+            top_k_pre: top(&["a", "b", "x"]), // expected at rank 3 pre
             top_k_post: top(&["x", "a", "b"]), // expected at rank 1 post
             rerank_latency_ms: 12.0,
             e2e_latency_ms: 25.0,

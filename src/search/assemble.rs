@@ -4,10 +4,7 @@ use crate::cache::SqliteCache;
 
 use super::{ChunkHit, OutboundLink, SearchResult};
 
-pub fn assemble(
-    cache: &SqliteCache,
-    hits: Vec<ChunkHit>,
-) -> Result<Vec<SearchResult>, String> {
+pub fn assemble(cache: &SqliteCache, hits: Vec<ChunkHit>) -> Result<Vec<SearchResult>, String> {
     if hits.is_empty() {
         return Ok(Vec::new());
     }

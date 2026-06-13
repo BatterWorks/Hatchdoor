@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import { apiFetch } from "../api";
+
 import { StateBlock } from "./ui";
 import type {
   FolderStat,
@@ -205,7 +207,7 @@ export function StatsPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch("/api/stats");
+        const res = await apiFetch("/api/stats");
         if (!res.ok) throw new Error(`Stats failed: ${res.status}`);
         const data = (await res.json()) as VaultStats;
         if (!cancelled) setStats(data);

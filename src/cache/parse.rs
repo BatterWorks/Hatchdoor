@@ -104,7 +104,11 @@ fn split_frontmatter(content: &str) -> (&str, &str) {
     if let Some(end) = rest.find("\n---") {
         let fm_end = lines[0].len() + 1 + end;
         let body_start = fm_end + 4; // skip "\n---"
-        let body = if body_start < content.len() { &content[body_start..] } else { "" };
+        let body = if body_start < content.len() {
+            &content[body_start..]
+        } else {
+            ""
+        };
         (&content[lines[0].len() + 1..fm_end], body)
     } else {
         ("", content)
@@ -153,9 +157,14 @@ fn push_tag(raw: &str, tags: &mut HashSet<String>) {
 fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
     for token in body.split_whitespace() {
         let token = token.trim_matches(|ch: char| {
-            matches!(ch, ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}')
+            matches!(
+                ch,
+                ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}'
+            )
         });
-        let Some(tag) = token.strip_prefix('#') else { continue };
+        let Some(tag) = token.strip_prefix('#') else {
+            continue;
+        };
         if tag.is_empty() || tag.starts_with('#') || tag.chars().all(|ch| ch == '-') {
             continue;
         }
@@ -219,7 +228,8 @@ mod tests {
 
     #[test]
     fn extracts_frontmatter_tags_block_sequence() {
-        let content = "---\ntags:\n  - programming\n  - philosophy\ncreated: 2026-01-01\n---\n\nBody text.";
+        let content =
+            "---\ntags:\n  - programming\n  - philosophy\ncreated: 2026-01-01\n---\n\nBody text.";
         let tags = extract_tags(content);
         assert!(tags.contains("programming"), "missing programming");
         assert!(tags.contains("philosophy"), "missing philosophy");
@@ -230,7 +240,10 @@ mod tests {
         let content = "---\ntags: [existing]\n---\n\nSome text with #area/health here but not #freeform or #1 or #0599.";
         let tags = extract_tags(content);
         assert!(tags.contains("existing"), "frontmatter tag preserved");
-        assert!(tags.contains("area/health"), "namespaced inline tag accepted");
+        assert!(
+            tags.contains("area/health"),
+            "namespaced inline tag accepted"
+        );
         assert!(!tags.contains("freeform"), "free-form inline tag rejected");
         assert!(!tags.contains("1"), "numeric inline tag rejected");
         assert!(!tags.contains("0599"), "numeric inline tag rejected");

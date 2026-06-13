@@ -1,12 +1,14 @@
 pub mod api_types;
-pub mod eval;
 pub mod app_state;
+pub mod auth;
 pub mod cache;
 pub mod chunk;
 pub mod embed;
-pub mod rerank;
+pub mod eval;
+pub mod git;
 pub mod handlers;
 pub mod mcp;
+pub mod rerank;
 pub mod search;
 pub mod vault;
 pub mod vault_watcher;
