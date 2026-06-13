@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
-use crate::eval::hybrid_runner::{run_hybrid_eval, HybridQueryResult};
+use crate::eval::hybrid_runner::{HybridQueryResult, run_hybrid_eval};
 use crate::eval::metrics::first_expected_rank;
 use crate::eval::query::Query;
 
@@ -89,15 +89,22 @@ pub fn run_compare_eval(
     // --- Hybrid side ---
     let hybrid: Vec<HybridQueryResult> =
         run_hybrid_eval(cache, embedder, queries, initial_k, rrf_k, 10)?;
-    let hybrid_by_id: std::collections::HashMap<&str, &HybridQueryResult> =
-        hybrid.iter().map(|h| (h.query_result.query_id.as_str(), h)).collect();
-    let pure_by_id: std::collections::HashMap<&str, &Vec<String>> =
-        pure_results.iter().map(|(id, v)| (id.as_str(), v)).collect();
+    let hybrid_by_id: std::collections::HashMap<&str, &HybridQueryResult> = hybrid
+        .iter()
+        .map(|h| (h.query_result.query_id.as_str(), h))
+        .collect();
+    let pure_by_id: std::collections::HashMap<&str, &Vec<String>> = pure_results
+        .iter()
+        .map(|(id, v)| (id.as_str(), v))
+        .collect();
 
     // --- Build per-query comparison ---
     let mut compare = Vec::with_capacity(queries.len());
     for q in queries {
-        let pure_top = pure_by_id.get(q.id.as_str()).map(|v| v.as_slice()).unwrap_or(&[]);
+        let pure_top = pure_by_id
+            .get(q.id.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         let hybrid_top = hybrid_by_id
             .get(q.id.as_str())
             .map(|h| h.query_result.top_k.as_slice())
@@ -213,8 +220,8 @@ mod tests {
     #[test]
     fn mixed_batch_counts() {
         let results = vec![
-            mk(Some(3), Some(1), None, None),  // hybrid wins
-            mk(Some(1), Some(2), None, None),  // pure wins
+            mk(Some(3), Some(1), None, None),              // hybrid wins
+            mk(Some(1), Some(2), None, None),              // pure wins
             mk(Some(2), Some(2), Some(false), Some(true)), // tie + anti regression
         ];
         let s = compare_summary(&results);

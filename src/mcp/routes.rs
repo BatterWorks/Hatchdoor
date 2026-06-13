@@ -12,8 +12,8 @@ use super::protocol::{
 };
 use super::tools::{handle_tools_call, tools_list};
 
-pub async fn mcp_get_handler(headers: HeaderMap) -> Response {
-    let config = McpConfig::from_env();
+pub async fn mcp_get_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let config = state.mcp_config.clone();
     handle_mcp_get(&headers, &config).await
 }
 
@@ -22,8 +22,8 @@ pub async fn mcp_post_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let config = McpConfig::from_env();
-    handle_mcp_post(state, &headers, body, &config).await
+    let config = state.mcp_config.clone();
+    handle_mcp_post(state.clone(), &headers, body, &config).await
 }
 
 async fn handle_mcp_get(headers: &HeaderMap, config: &McpConfig) -> Response {
@@ -175,6 +175,11 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: None,
+            mcp_config: Arc::new(McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
         (state, tmp)
     }
@@ -354,7 +359,8 @@ mod tests {
                 "resolve_wikilink",
                 "get_tree",
                 "refresh_index",
-                "get_attachment_import_config"
+                "get_attachment_import_config",
+                "get_git_sync_status"
             ]
         );
         assert!(
@@ -378,7 +384,10 @@ mod tests {
         assert_eq!(refresh["annotations"]["destructiveHint"], false);
         assert_eq!(refresh["annotations"]["idempotentHint"], true);
         assert_eq!(refresh["annotations"]["openWorldHint"], false);
-        let attachment_config = tools.last().expect("attachment config tool");
+        let attachment_config = tools
+            .iter()
+            .find(|tool| tool["name"] == "get_attachment_import_config")
+            .expect("attachment config tool");
         assert_eq!(attachment_config["name"], "get_attachment_import_config");
         assert_eq!(attachment_config["annotations"]["readOnlyHint"], true);
 
@@ -449,6 +458,8 @@ mod tests {
 
         assert!(names.contains(&"create_note"));
         assert!(names.contains(&"update_note"));
+        assert!(names.contains(&"edit_note"));
+        assert!(names.contains(&"replace_section"));
         assert!(names.contains(&"move_rename_note"));
         assert!(names.contains(&"delete_note"));
         assert!(names.contains(&"import_attachment"));
@@ -569,6 +580,111 @@ mod tests {
             .expect("new note");
         assert_eq!(note.relative_path, "Projects/New");
         assert_eq!(note.content, "# New\ncreated from MCP");
+    }
+
+    #[tokio::test]
+    async fn edit_note_tool_replaces_string_and_refreshes_cache() {
+        let (state, _tmp) = test_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let response = post_json_with_auth(
+            state.clone(),
+            json!({
+                "jsonrpc":"2.0",
+                "id":53,
+                "method":"tools/call",
+                "params": {
+                    "name": "edit_note",
+                    "arguments": {
+                        "slug": "home",
+                        "old_string": "alpha",
+                        "new_string": "ALPHA",
+                        "expected_content_hash": hash
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["structuredContent"]["ok"], true);
+        assert_eq!(
+            std::fs::read_to_string(state.vault_path.join("Home.md")).expect("read"),
+            "# Home\nALPHA token\n[[Plan]]"
+        );
+
+        let cache = state.cache.read().await;
+        let note = cache
+            .sqlite
+            .read_note_by_slug("home")
+            .expect("read refreshed cache")
+            .expect("home note");
+        assert_eq!(note.content, "# Home\nALPHA token\n[[Plan]]");
+    }
+
+    #[tokio::test]
+    async fn replace_section_tool_overwrites_section() {
+        let (state, _tmp) = test_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let response = post_json_with_auth(
+            state.clone(),
+            json!({
+                "jsonrpc":"2.0",
+                "id":54,
+                "method":"tools/call",
+                "params": {
+                    "name": "replace_section",
+                    "arguments": {
+                        "slug": "home",
+                        "heading": "# Home",
+                        "mode": "replace",
+                        "content": "# Home\nrewritten\n",
+                        "expected_content_hash": hash
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["structuredContent"]["ok"], true);
+        assert_eq!(
+            std::fs::read_to_string(state.vault_path.join("Home.md")).expect("read"),
+            "# Home\nrewritten\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_section_tool_rejects_invalid_mode() {
+        let (state, _tmp) = test_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let response = post_json_with_auth(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":55,
+                "method":"tools/call",
+                "params": {
+                    "name": "replace_section",
+                    "arguments": {
+                        "slug": "home",
+                        "heading": "# Home",
+                        "mode": "sideways",
+                        "content": "x",
+                        "expected_content_hash": hash
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
     }
 
     #[tokio::test]

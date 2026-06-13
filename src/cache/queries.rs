@@ -12,8 +12,17 @@ use super::SqliteCache;
 use super::parse::{build_fts_query, fts_query_terms};
 
 impl SqliteCache {
+    /// Lightweight liveness probe used by `/health`: confirms the cache database
+    /// is reachable rather than just that the process is running.
+    pub fn health_check(&self) -> Result<(), String> {
+        let conn = self.read()?;
+        conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            .map(|_| ())
+            .map_err(|error| format!("health check query failed: {error}"))
+    }
+
     pub fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         conn.query_row(
             r#"
             SELECT title, slug, relative_path, content, content_hash
@@ -57,15 +66,12 @@ impl SqliteCache {
         Ok(root.build("Vault"))
     }
 
-    pub fn recently_modified_notes(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<ModifiedNote>, String> {
+    pub fn recently_modified_notes(&self, limit: usize) -> Result<Vec<ModifiedNote>, String> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -119,7 +125,7 @@ impl SqliteCache {
             .collect::<Vec<_>>();
 
         let remaining = limit.saturating_sub(results.len());
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -204,10 +210,7 @@ impl SqliteCache {
         }))
     }
 
-    pub fn resolve_wikilink(
-        &self,
-        raw_target: &str,
-    ) -> Result<Option<(String, String)>, String> {
+    pub fn resolve_wikilink(&self, raw_target: &str) -> Result<Option<(String, String)>, String> {
         // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
         let note_target = raw_target
             .split('#')
@@ -218,7 +221,7 @@ impl SqliteCache {
             .unwrap_or(raw_target);
         let normalized_target = normalize_link_target(note_target);
         let normalized_path = normalize_title(&normalized_target);
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let by_path = conn
             .query_row(
@@ -279,7 +282,7 @@ impl SqliteCache {
         results: &mut Vec<SearchHit>,
     ) -> Result<(), String> {
         let like = format!("%{}%", escape_like(normalized_query));
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -330,7 +333,7 @@ impl SqliteCache {
     }
 
     fn note_rows_ordered(&self) -> Result<Vec<NoteRow>, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare("SELECT title, slug, relative_path FROM notes ORDER BY relative_path")
             .map_err(|error| format!("failed to prepare note list query: {error}"))?;
@@ -349,7 +352,7 @@ impl SqliteCache {
     }
 
     fn note_exists(&self, slug: &str) -> Result<bool, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM notes WHERE slug = ?1)",
             params![slug],
@@ -359,7 +362,7 @@ impl SqliteCache {
     }
 
     fn link_rows(&self, sql: &str, slug: &str) -> Result<Vec<NoteLink>, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(sql)
             .map_err(|error| format!("failed to prepare link query: {error}"))?;
@@ -428,7 +431,7 @@ impl SqliteCache {
             .ok_or("embedder returned no vectors")?;
         let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -470,7 +473,7 @@ impl SqliteCache {
         let Some(fts_q) = crate::cache::parse::build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -498,18 +501,14 @@ impl SqliteCache {
     /// rank order (bm25 ascending, i.e. best match first).
     /// Returns an empty list if the query produces no usable FTS tokens.
     #[allow(dead_code)]
-    pub fn fts_search_chunks(
-        &self,
-        query: &str,
-        k: usize,
-    ) -> Result<Vec<ChunkFtsHit>, String> {
+    pub fn fts_search_chunks(&self, query: &str, k: usize) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 {
             return Ok(Vec::new());
         }
         let Some(fts_q) = build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -547,7 +546,7 @@ impl SqliteCache {
         if slugs.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let placeholders = std::iter::repeat_n("?", slugs.len())
             .collect::<Vec<_>>()
@@ -556,9 +555,8 @@ impl SqliteCache {
         let mut map: HashMap<String, NoteWithLinks> = HashMap::new();
 
         // Note metadata
-        let sql_a = format!(
-            "SELECT slug, title, relative_path FROM notes WHERE slug IN ({placeholders})"
-        );
+        let sql_a =
+            format!("SELECT slug, title, relative_path FROM notes WHERE slug IN ({placeholders})");
         let mut stmt_a = conn
             .prepare(&sql_a)
             .map_err(|e| format!("prepare notes batch: {e}"))?;
@@ -667,7 +665,7 @@ impl SqliteCache {
             VaultStatsResponse,
         };
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let note_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
@@ -682,7 +680,11 @@ impl SqliteCache {
             .map_err(|e| format!("vault_stats link_count: {e}"))?;
 
         let vault_size_bytes: i64 = conn
-            .query_row("SELECT COALESCE(SUM(size_bytes), 0) FROM notes", [], |row| row.get(0))
+            .query_row(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM notes",
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats vault_size_bytes: {e}"))?;
 
         // Fetch all content for word/image count and word-rank computations.
@@ -753,7 +755,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare top_tags: {e}"))?;
         let top_tags: Vec<TagStat> = tags_stmt
-            .query_map([], |row| Ok(TagStat { tag: row.get(0)?, note_count: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(TagStat {
+                    tag: row.get(0)?,
+                    note_count: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query top_tags: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read top_tags: {e}"))?;
@@ -798,7 +805,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare activity_by_month: {e}"))?;
         let activity_by_month: Vec<MonthActivity> = activity_stmt
-            .query_map([], |row| Ok(MonthActivity { month: row.get(0)?, modified_count: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(MonthActivity {
+                    month: row.get(0)?,
+                    modified_count: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query activity_by_month: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read activity_by_month: {e}"))?;
@@ -820,7 +832,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare notes_per_folder: {e}"))?;
         let notes_per_folder: Vec<FolderStat> = folder_stmt
-            .query_map([], |row| Ok(FolderStat { folder: row.get(0)?, note_count: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(FolderStat {
+                    folder: row.get(0)?,
+                    note_count: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query notes_per_folder: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read notes_per_folder: {e}"))?;
@@ -837,7 +854,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare orphan_notes: {e}"))?;
         let orphan_notes: Vec<NoteRef> = orphan_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query orphan_notes: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read orphan_notes: {e}"))?;
@@ -853,7 +875,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare no_tag_notes: {e}"))?;
         let no_tag_notes: Vec<NoteRef> = no_tag_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query no_tag_notes: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read no_tag_notes: {e}"))?;
@@ -878,7 +905,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare modified_this_week: {e}"))?;
         let week_notes: Vec<NoteRef> = week_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query modified_this_week: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read modified_this_week: {e}"))?;
@@ -903,7 +935,12 @@ impl SqliteCache {
             )
             .map_err(|e| format!("vault_stats prepare modified_this_month: {e}"))?;
         let month_notes: Vec<NoteRef> = month_stmt
-            .query_map([], |row| Ok(NoteRef { title: row.get(0)?, slug: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(NoteRef {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("vault_stats query modified_this_month: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("vault_stats read modified_this_month: {e}"))?;
@@ -927,15 +964,21 @@ impl SqliteCache {
             shortest_notes,
             orphan_notes,
             no_tag_notes,
-            modified_this_week: NoteList { count: week_total, notes: week_notes },
-            modified_this_month: NoteList { count: month_total, notes: month_notes },
+            modified_this_week: NoteList {
+                count: week_total,
+                notes: week_notes,
+            },
+            modified_this_month: NoteList {
+                count: month_total,
+                notes: month_notes,
+            },
         })
     }
 
     pub fn graph_data(&self) -> Result<crate::api_types::GraphResponse, String> {
         use crate::api_types::{GraphEdge, GraphNode, GraphResponse};
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let mut nodes_stmt = conn
             .prepare(
@@ -968,7 +1011,12 @@ impl SqliteCache {
             .prepare("SELECT source_slug, target_slug FROM note_links")
             .map_err(|e| format!("graph_data prepare edges: {e}"))?;
         let edges: Vec<GraphEdge> = edges_stmt
-            .query_map([], |row| Ok(GraphEdge { source: row.get(0)?, target: row.get(1)? }))
+            .query_map([], |row| {
+                Ok(GraphEdge {
+                    source: row.get(0)?,
+                    target: row.get(1)?,
+                })
+            })
             .map_err(|e| format!("graph_data query edges: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("graph_data read edges: {e}"))?;
@@ -1291,9 +1339,7 @@ mod notes_with_outbound_links_batch_tests {
     #[test]
     fn batch_empty_input_returns_empty_map() {
         let cache = build_cache(&[("Alpha.md", "# Alpha\n\nbody")]);
-        let map = cache
-            .notes_with_outbound_links_batch(&[])
-            .expect("batch");
+        let map = cache.notes_with_outbound_links_batch(&[]).expect("batch");
         assert!(map.is_empty());
     }
 }

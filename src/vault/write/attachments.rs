@@ -85,6 +85,7 @@ pub fn import_attachment(
         rewritten_notes: 0,
         trashed_path: None,
         cleanup_warning,
+        affected_paths: vec![target_path.clone()],
     })
 }
 
@@ -108,7 +109,8 @@ pub fn move_attachment(
 
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", &source_path, &target_path, &[])?;
-    let rewritten_notes = apply_rewrites(rewrites)?;
+    let rewritten = apply_rewrites(rewrites)?;
+    let rewritten_notes = rewritten.len();
     fs::rename(&source_path, &target_path).map_err(|error| {
         rollback_rewrites(vault_root, index, &target_path, &source_path);
         WriteError::Io(format!(
@@ -117,11 +119,15 @@ pub fn move_attachment(
             target_path.display()
         ))
     })?;
+    let mut affected_paths = rewritten;
+    affected_paths.push(source_path.clone());
+    affected_paths.push(target_path.clone());
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, &target_path)?,
         rewritten_notes,
         trashed_path: None,
         cleanup_warning: None,
+        affected_paths,
     })
 }
 
@@ -151,7 +157,8 @@ pub fn delete_attachment(
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", &source_path, &trash_path, &[])?;
 
-    let rewritten_notes = apply_rewrites(rewrites)?;
+    let rewritten = apply_rewrites(rewrites)?;
+    let rewritten_notes = rewritten.len();
     fs::rename(&source_path, &trash_path).map_err(|error| {
         rollback_rewrites(vault_root, index, &trash_path, &source_path);
         WriteError::Io(format!(
@@ -160,11 +167,15 @@ pub fn delete_attachment(
             trash_path.display()
         ))
     })?;
+    let mut affected_paths = rewritten;
+    affected_paths.push(source_path.clone());
+    affected_paths.push(trash_path.clone());
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, &trash_path)?,
         rewritten_notes,
         trashed_path: Some(trash_relative),
         cleanup_warning: None,
+        affected_paths,
     })
 }
 
@@ -186,7 +197,8 @@ fn move_attachment_by_paths(
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
-    let rewritten_notes = apply_rewrites(rewrites)?;
+    let rewritten = apply_rewrites(rewrites)?;
+    let rewritten_notes = rewritten.len();
     fs::rename(source_path, target_path).map_err(|error| {
         rollback_rewrites(vault_root, index, target_path, source_path);
         WriteError::Io(format!(
@@ -195,11 +207,15 @@ fn move_attachment_by_paths(
             target_path.display()
         ))
     })?;
+    let mut affected_paths = rewritten;
+    affected_paths.push(source_path.to_path_buf());
+    affected_paths.push(target_path.to_path_buf());
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, target_path)?,
         rewritten_notes,
         trashed_path: None,
         cleanup_warning: None,
+        affected_paths,
     })
 }
 

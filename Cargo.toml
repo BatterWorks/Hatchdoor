@@ -1,6 +1,6 @@
 [package]
 name = "hatchdoor"
-version = "2.0.0"
+version = "2.1.1"
 edition = "2024"
 default-run = "hatchdoor"
 
@@ -12,6 +12,7 @@ bytemuck = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 fastembed = "4"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 notify = "8"
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
@@ -33,4 +34,5 @@ embedder-tests = []
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
 tower = "0.5"

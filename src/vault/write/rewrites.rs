@@ -165,13 +165,15 @@ pub(super) fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
     if len >= 3 { Some((marker, len)) } else { None }
 }
 
-pub(super) fn apply_rewrites(rewrites: Vec<TextRewrite>) -> Result<usize, WriteError> {
-    let mut changed = 0usize;
+pub(super) fn apply_rewrites(
+    rewrites: Vec<TextRewrite>,
+) -> Result<Vec<std::path::PathBuf>, WriteError> {
+    let mut written = Vec::with_capacity(rewrites.len());
     for rewrite in rewrites {
         atomic_write(&rewrite.path, &rewrite.content)?;
-        changed += 1;
+        written.push(rewrite.path);
     }
-    Ok(changed)
+    Ok(written)
 }
 
 pub(super) fn rollback_rewrites(

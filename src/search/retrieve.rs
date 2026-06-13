@@ -55,11 +55,7 @@ fn semantic(
         .collect())
 }
 
-fn keyword(
-    cache: &SqliteCache,
-    query: &str,
-    k: usize,
-) -> Result<Vec<ChunkHit>, String> {
+fn keyword(cache: &SqliteCache, query: &str, k: usize) -> Result<Vec<ChunkHit>, String> {
     let hits = cache.fts_search_chunks(query, k)?;
     if hits.is_empty() {
         return Ok(Vec::new());
@@ -90,11 +86,7 @@ fn keyword(
         .collect())
 }
 
-fn apply_per_note_cap(
-    raw: Vec<ChunkHit>,
-    per_note_cap: usize,
-    limit: usize,
-) -> Vec<ChunkHit> {
+fn apply_per_note_cap(raw: Vec<ChunkHit>, per_note_cap: usize, limit: usize) -> Vec<ChunkHit> {
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut out = Vec::with_capacity(limit.min(raw.len()));
     for h in raw {
@@ -155,7 +147,11 @@ mod tests {
             assert!(w[0].score >= w[1].score, "scores must be non-increasing");
         }
         for h in &hits {
-            assert!(h.score >= 0.0 && h.score <= 1.0, "score out of range: {}", h.score);
+            assert!(
+                h.score >= 0.0 && h.score <= 1.0,
+                "score out of range: {}",
+                h.score
+            );
         }
     }
 
@@ -192,7 +188,11 @@ mod tests {
             assert!(w[0].score >= w[1].score, "scores must be non-increasing");
         }
         for h in &hits {
-            assert!(h.score > 0.0 && h.score <= 1.0, "score out of range: {}", h.score);
+            assert!(
+                h.score > 0.0 && h.score <= 1.0,
+                "score out of range: {}",
+                h.score
+            );
         }
         // bananas chunk should NOT be in keyword results for "oranges"
         assert!(!hits.iter().any(|h| h.content.contains("bananas")));
@@ -214,9 +214,9 @@ mod tests {
     #[test]
     fn keyword_mode_scores_are_non_increasing_with_three_matches() {
         let (cache, embedder) = build_cache(&[
-            ("a.md", "# A\n\noranges oranges oranges"),  // best BM25
+            ("a.md", "# A\n\noranges oranges oranges"), // best BM25
             ("b.md", "# B\n\noranges oranges"),
-            ("c.md", "# C\n\noranges"),                  // worst BM25
+            ("c.md", "# C\n\noranges"), // worst BM25
         ]);
         let req = SearchRequest {
             query: "oranges".to_string(),
@@ -227,10 +227,19 @@ mod tests {
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert_eq!(hits.len(), 3);
         for w in hits.windows(2) {
-            assert!(w[0].score >= w[1].score, "scores must be non-increasing: {} < {}", w[0].score, w[1].score);
+            assert!(
+                w[0].score >= w[1].score,
+                "scores must be non-increasing: {} < {}",
+                w[0].score,
+                w[1].score
+            );
         }
         // Best match (most oranges) should have highest score
-        assert!((hits[0].score - 1.0).abs() < 0.01, "best hit should have score near 1.0, got {}", hits[0].score);
+        assert!(
+            (hits[0].score - 1.0).abs() < 0.01,
+            "best hit should have score near 1.0, got {}",
+            hits[0].score
+        );
     }
 
     #[test]

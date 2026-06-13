@@ -22,20 +22,24 @@ pub async fn note_download_handler(
         Err(err) => return err.into_response(),
     };
 
-    let note = match cache.read_note_by_slug(&slug) {
-        Ok(Some(note)) => note,
+    // Reading the note and bundling its assets is filesystem + zip work; keep it
+    // off the async runtime.
+    let lookup_slug = slug.clone();
+    let vault_path = state.vault_path.clone();
+    let export = match crate::app_state::run_blocking(move || {
+        let Some(note) = cache.read_note_by_slug(&lookup_slug)? else {
+            return Ok(None);
+        };
+        build_note_export(&vault_path, &note).map(Some)
+    })
+    .await
+    {
+        Ok(Some(export)) => export,
         Ok(None) => {
             warn!(slug = %slug, "Note not found for download");
             return note_not_found_response(&slug);
         }
-        Err(error) => {
-            return internal_error_response(format!("Failed reading note {slug}: {error}"));
-        }
-    };
-
-    let export = match build_note_export(&state.vault_path, &note) {
-        Ok(export) => export,
-        Err(error) => return internal_error_response(error),
+        Err(err) => return err.into_response(),
     };
     let filename = export.filename;
     let content_disposition = build_download_content_disposition(&filename);
@@ -70,14 +74,6 @@ fn note_not_found_response(slug: &str) -> Response {
         Json(ErrorResponse {
             error: format!("Note not found: {slug}"),
         }),
-    )
-        .into_response()
-}
-
-fn internal_error_response(error: String) -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error }),
     )
         .into_response()
 }

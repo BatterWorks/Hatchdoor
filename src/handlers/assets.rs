@@ -2,11 +2,11 @@ use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::AppState;
+use crate::app_state::{AppState, run_blocking};
 
 pub async fn vault_asset_handler(
     Path(path): Path<String>,
@@ -19,26 +19,35 @@ pub async fn vault_asset_handler(
         }
     };
 
-    let bytes = match std::fs::read(&asset_path) {
+    let content_type = content_type_for_path(&asset_path);
+    let read_path = asset_path.clone();
+    let bytes = match run_blocking(move || {
+        std::fs::read(&read_path)
+            .map_err(|error| format!("failed reading asset '{}': {error}", read_path.display()))
+    })
+    .await
+    {
         Ok(bytes) => bytes,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed reading asset '{}': {error}", asset_path.display()),
-                }),
-            )
-                .into_response();
-        }
+        Err(err) => return err.into_response(),
     };
 
-    let content_type = content_type_for_path(&asset_path);
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, content_type)],
-        bytes,
-    )
-        .into_response()
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    if content_type == "image/svg+xml" {
+        // SVGs can carry scripts that execute on direct navigation. Sandbox the
+        // document and force a download on navigation; <img> embedding (which
+        // never executes scripts) is unaffected by either header.
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox"),
+        );
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+    }
+
+    (StatusCode::OK, headers, bytes).into_response()
 }
 
 fn resolve_asset_path(vault_root: &FsPath, raw_path: &str) -> Result<PathBuf, AssetPathError> {

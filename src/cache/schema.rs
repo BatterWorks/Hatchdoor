@@ -309,6 +309,9 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("query sql");
-        assert!(sql.contains("FLOAT[768]"), "expected FLOAT[768] in schema, got: {sql}");
+        assert!(
+            sql.contains("FLOAT[768]"),
+            "expected FLOAT[768] in schema, got: {sql}"
+        );
     }
 }

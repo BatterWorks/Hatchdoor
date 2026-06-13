@@ -12,8 +12,8 @@ pub struct Query {
 }
 
 pub fn load_jsonl(path: &std::path::Path) -> Result<Vec<Query>, String> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut out = Vec::new();
     for (idx, line) in contents.lines().enumerate() {
         let line_no = idx + 1;

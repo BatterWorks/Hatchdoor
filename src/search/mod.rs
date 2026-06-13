@@ -79,7 +79,7 @@ mod tests {
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
 
-    use super::{run, SearchMode, SearchRequest};
+    use super::{SearchMode, SearchRequest, run};
 
     fn build_cache(files: &[(&str, &str)]) -> (SqliteCache, Arc<dyn Embedder>) {
         let dir = TempDir::new().expect("tempdir");
@@ -180,7 +180,11 @@ mod tests {
         )
         .expect("run");
         // With per_note_cap=1, at most 1 chunk from Alpha. We may get 1 from Alpha + 0..1 from Bravo.
-        let alpha_count = resp.results.iter().filter(|r| r.note_slug == "alpha").count();
+        let alpha_count = resp
+            .results
+            .iter()
+            .filter(|r| r.note_slug == "alpha")
+            .count();
         assert!(alpha_count <= 1);
     }
 }
