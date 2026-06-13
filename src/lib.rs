@@ -1,5 +1,6 @@
 pub mod api_types;
 pub mod app_state;
+pub mod auth;
 pub mod cache;
 pub mod chunk;
 pub mod embed;

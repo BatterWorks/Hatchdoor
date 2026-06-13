@@ -4,7 +4,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::{debug, warn};
@@ -15,10 +16,17 @@ use crate::api_types::{
     ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, VaultEventResponse,
 };
 
-use crate::app_state::{AppState, refresh_if_needed, sqlite_cache};
+use crate::app_state::{AppState, refresh_if_needed, run_blocking, sqlite_cache};
 
-pub async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+/// Upper bound on targets accepted by `/api/resolve-batch` (DoS guard).
+const MAX_RESOLVE_BATCH: usize = 200;
+
+pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let cache = state.cache.read().await.sqlite.clone();
+    match run_blocking(move || cache.health_check()).await {
+        Ok(()) => (StatusCode::OK, "ok").into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response(),
+    }
 }
 
 pub async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -27,9 +35,9 @@ pub async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
         Err(err) => return err.into_response(),
     };
 
-    match cache.explorer_tree() {
+    match run_blocking(move || cache.explorer_tree()).await {
         Ok(tree) => (StatusCode::OK, Json(tree)).into_response(),
-        Err(error) => internal_error_response(error),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -42,13 +50,14 @@ pub async fn note_handler(
         Err(err) => return err.into_response(),
     };
 
-    match cache.read_note_by_slug(&slug) {
+    let lookup_slug = slug.clone();
+    match run_blocking(move || cache.read_note_by_slug(&lookup_slug)).await {
         Ok(Some(note)) => (StatusCode::OK, Json(NoteResponse { note })).into_response(),
         Ok(None) => {
             warn!(slug = %slug, "Note not found");
             note_not_found_response(&slug)
         }
-        Err(error) => internal_error_response(format!("Failed reading note {slug}: {error}")),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -61,10 +70,11 @@ pub async fn note_links_handler(
         Err(err) => return err.into_response(),
     };
 
-    match cache.note_links(&slug) {
+    let lookup_slug = slug.clone();
+    match run_blocking(move || cache.note_links(&lookup_slug)).await {
         Ok(Some(links)) => (StatusCode::OK, Json(NoteLinksResponse { links })).into_response(),
         Ok(None) => note_not_found_response(&slug),
-        Err(error) => internal_error_response(error),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -77,12 +87,12 @@ pub async fn resolve_handler(
         Err(err) => return err.into_response(),
     };
 
-    match cache.resolve_wikilink(&query.target) {
+    match run_blocking(move || cache.resolve_wikilink(&query.target)).await {
         Ok(resolved) => {
             let slug = resolved.map(|(slug, _)| slug);
             (StatusCode::OK, Json(ResolveResponse { slug })).into_response()
         }
-        Err(error) => internal_error_response(error),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -90,32 +100,47 @@ pub async fn resolve_batch_handler(
     State(state): State<AppState>,
     Json(payload): Json<ResolveBatchRequest>,
 ) -> impl IntoResponse {
+    if payload.targets.len() > MAX_RESOLVE_BATCH {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ErrorResponse {
+                error: format!("Too many targets (max {MAX_RESOLVE_BATCH})"),
+            }),
+        )
+            .into_response();
+    }
+
     let cache = match sqlite_cache(&state).await {
         Ok(cache) => cache,
         Err(err) => return err.into_response(),
     };
+    let archive_prefix = state.archive_prefix.clone();
 
-    let mut results = Vec::with_capacity(payload.targets.len());
-    for target in payload.targets {
-        let resolved = match cache.resolve_wikilink(&target) {
-            Ok(resolved) => resolved,
-            Err(error) => return internal_error_response(error),
-        };
-        let (slug, archived) = match resolved {
-            Some((slug, relative_path)) => {
-                let archived = relative_path.starts_with("90-archive/");
-                (Some(slug), archived)
-            }
-            None => (None, false),
-        };
-        results.push(ResolveTargetResult {
-            target,
-            slug,
-            archived,
-        });
+    let result = run_blocking(move || {
+        let mut results = Vec::with_capacity(payload.targets.len());
+        for target in payload.targets {
+            let resolved = cache.resolve_wikilink(&target)?;
+            let (slug, archived) = match resolved {
+                Some((slug, relative_path)) => {
+                    let archived = relative_path.starts_with(&*archive_prefix);
+                    (Some(slug), archived)
+                }
+                None => (None, false),
+            };
+            results.push(ResolveTargetResult {
+                target,
+                slug,
+                archived,
+            });
+        }
+        Ok(results)
+    })
+    .await;
+
+    match result {
+        Ok(results) => (StatusCode::OK, Json(ResolveBatchResponse { results })).into_response(),
+        Err(err) => err.into_response(),
     }
-
-    (StatusCode::OK, Json(ResolveBatchResponse { results })).into_response()
 }
 
 pub async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -130,11 +155,16 @@ pub async fn vault_events_handler(
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
     let current_revision = state.vault_revision.load(Ordering::SeqCst);
     let current_event = tokio_stream::once(Ok(vault_revision_event(current_revision)));
-    let live_events =
-        BroadcastStream::new(state.vault_events.subscribe()).filter_map(|event| match event {
-            Ok(revision) => Some(Ok(vault_revision_event(revision))),
-            Err(_) => None,
-        });
+    let revision_on_lag: Arc<AtomicU64> = state.vault_revision.clone();
+    let live_events = BroadcastStream::new(state.vault_events.subscribe()).map(move |event| {
+        // On broadcast lag, emit the current revision so a slow client
+        // always resyncs instead of silently missing the update.
+        let revision = match event {
+            Ok(revision) => revision,
+            Err(_lagged) => revision_on_lag.load(Ordering::SeqCst),
+        };
+        Ok(vault_revision_event(revision))
+    });
 
     let stream = current_event.chain(live_events);
     Sse::new(stream).keep_alive(KeepAlive::default())
@@ -159,9 +189,9 @@ pub async fn recently_modified_handler(
     };
 
     let limit = query.limit.unwrap_or(5).clamp(1, 25);
-    match cache.recently_modified_notes(limit) {
+    match run_blocking(move || cache.recently_modified_notes(limit)).await {
         Ok(notes) => (StatusCode::OK, Json(RecentlyModifiedResponse { notes })).into_response(),
-        Err(error) => internal_error_response(error),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -173,7 +203,7 @@ pub async fn search_handler(
         Ok(cache) => cache,
         Err(err) => return err.into_response(),
     };
-    let embedder = state.embedder.as_ref();
+    let embedder = state.embedder.clone();
 
     let limit = query.limit.unwrap_or(10).clamp(1, 50);
     let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
@@ -193,9 +223,15 @@ pub async fn search_handler(
         limit,
         per_note_cap,
     };
-    match crate::search::run(cache.as_ref(), embedder, req) {
+    // Query embedding + SQLite work runs off the async runtime.
+    let result = run_blocking(move || {
+        crate::search::run(cache.as_ref(), embedder.as_ref(), req)
+            .map_err(|error| format!("Search failed: {error}"))
+    })
+    .await;
+    match result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(error) => internal_error_response(format!("Search failed: {error}")),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -205,9 +241,9 @@ pub async fn stats_handler(State(state): State<AppState>) -> impl IntoResponse {
         Err(err) => return err.into_response(),
     };
 
-    match cache.vault_stats() {
+    match run_blocking(move || cache.vault_stats()).await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
-        Err(error) => internal_error_response(error),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -217,9 +253,9 @@ pub async fn graph_handler(State(state): State<AppState>) -> impl IntoResponse {
         Err(err) => return err.into_response(),
     };
 
-    match cache.graph_data() {
+    match run_blocking(move || cache.graph_data()).await {
         Ok(data) => (StatusCode::OK, Json(data)).into_response(),
-        Err(error) => internal_error_response(error),
+        Err(err) => err.into_response(),
     }
 }
 
@@ -229,14 +265,6 @@ fn note_not_found_response(slug: &str) -> axum::response::Response {
         Json(ErrorResponse {
             error: format!("Note not found: {slug}"),
         }),
-    )
-        .into_response()
-}
-
-fn internal_error_response(error: String) -> axum::response::Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse { error }),
     )
         .into_response()
 }

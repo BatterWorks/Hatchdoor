@@ -12,8 +12,17 @@ use super::SqliteCache;
 use super::parse::{build_fts_query, fts_query_terms};
 
 impl SqliteCache {
+    /// Lightweight liveness probe used by `/health`: confirms the cache database
+    /// is reachable rather than just that the process is running.
+    pub fn health_check(&self) -> Result<(), String> {
+        let conn = self.read()?;
+        conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+            .map(|_| ())
+            .map_err(|error| format!("health check query failed: {error}"))
+    }
+
     pub fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         conn.query_row(
             r#"
             SELECT title, slug, relative_path, content, content_hash
@@ -62,7 +71,7 @@ impl SqliteCache {
             return Ok(Vec::new());
         }
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -116,7 +125,7 @@ impl SqliteCache {
             .collect::<Vec<_>>();
 
         let remaining = limit.saturating_sub(results.len());
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -212,7 +221,7 @@ impl SqliteCache {
             .unwrap_or(raw_target);
         let normalized_target = normalize_link_target(note_target);
         let normalized_path = normalize_title(&normalized_target);
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let by_path = conn
             .query_row(
@@ -273,7 +282,7 @@ impl SqliteCache {
         results: &mut Vec<SearchHit>,
     ) -> Result<(), String> {
         let like = format!("%{}%", escape_like(normalized_query));
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -324,7 +333,7 @@ impl SqliteCache {
     }
 
     fn note_rows_ordered(&self) -> Result<Vec<NoteRow>, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare("SELECT title, slug, relative_path FROM notes ORDER BY relative_path")
             .map_err(|error| format!("failed to prepare note list query: {error}"))?;
@@ -343,7 +352,7 @@ impl SqliteCache {
     }
 
     fn note_exists(&self, slug: &str) -> Result<bool, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM notes WHERE slug = ?1)",
             params![slug],
@@ -353,7 +362,7 @@ impl SqliteCache {
     }
 
     fn link_rows(&self, sql: &str, slug: &str) -> Result<Vec<NoteLink>, String> {
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(sql)
             .map_err(|error| format!("failed to prepare link query: {error}"))?;
@@ -422,7 +431,7 @@ impl SqliteCache {
             .ok_or("embedder returned no vectors")?;
         let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -464,7 +473,7 @@ impl SqliteCache {
         let Some(fts_q) = crate::cache::parse::build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -499,7 +508,7 @@ impl SqliteCache {
         let Some(fts_q) = build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.connection()?;
+        let conn = self.read()?;
         let mut stmt = conn
             .prepare(
                 r#"
@@ -537,7 +546,7 @@ impl SqliteCache {
         if slugs.is_empty() {
             return Ok(HashMap::new());
         }
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let placeholders = std::iter::repeat_n("?", slugs.len())
             .collect::<Vec<_>>()
@@ -656,7 +665,7 @@ impl SqliteCache {
             VaultStatsResponse,
         };
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let note_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
@@ -969,7 +978,7 @@ impl SqliteCache {
     pub fn graph_data(&self) -> Result<crate::api_types::GraphResponse, String> {
         use crate::api_types::{GraphEdge, GraphNode, GraphResponse};
 
-        let conn = self.connection()?;
+        let conn = self.read()?;
 
         let mut nodes_stmt = conn
             .prepare(

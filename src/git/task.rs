@@ -187,6 +187,7 @@ async fn run_one_sync<R>(
             let message = err.to_string();
             match &err {
                 GitError::Conflict { .. } => warn!("git sync conflict: {message}"),
+                GitError::DirtyWorkingTree { .. } => warn!("git sync skipped: {message}"),
                 _ => error!("git sync failed: {message}"),
             }
             guard.last_error = Some(message);

@@ -8,7 +8,7 @@ use notify::{
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::app_state::{AppState, refresh_if_needed};
+use crate::app_state::{AppState, refresh_now};
 
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
 
@@ -45,7 +45,7 @@ async fn run_vault_watcher(
         match result {
             Ok(event) if should_refresh_for_event(&event, &cache_db_path) => {
                 debounce_events(&mut event_rx, &cache_db_path).await;
-                if let Err((status, body)) = refresh_if_needed(&state).await {
+                if let Err((status, body)) = refresh_now(&state).await {
                     error!(
                         status = status.as_u16(),
                         error = %body.0.error,

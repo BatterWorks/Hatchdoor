@@ -69,6 +69,40 @@ impl McpConfig {
             allowed_origins,
         }
     }
+
+    /// A fully disabled configuration, used as a default in tests and when MCP
+    /// is off.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            write_enabled: false,
+            attachment_staging_path: None,
+            host_attachment_staging_path: None,
+            advertise_host_paths: false,
+            max_attachment_bytes: 10 * 1024 * 1024,
+            bearer_token: None,
+            allowed_origins: Vec::new(),
+        }
+    }
+
+    /// Parse and validate the configuration once, failing fast on misconfiguration
+    /// (e.g. write mode enabled without a bearer token) instead of surfacing the
+    /// error on every request.
+    pub fn from_env_validated() -> Result<Self, String> {
+        let config = Self::from_env();
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.enabled && self.write_enabled && self.bearer_token.is_none() {
+            return Err(
+                "HATCHDOOR_MCP_WRITE_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(), Box<Response>> {
@@ -97,10 +131,11 @@ pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(
     }
 
     if let Some(expected_token) = &config.bearer_token {
+        let expected = format!("Bearer {expected_token}");
         let authorized = headers
             .get(header::AUTHORIZATION)
             .and_then(header_to_str)
-            .map(|value| value == format!("Bearer {expected_token}"))
+            .map(|value| crate::auth::constant_time_eq(value.as_bytes(), expected.as_bytes()))
             .unwrap_or(false);
         if !authorized {
             return Err(Box::new(jsonrpc_error_response(
@@ -171,6 +206,24 @@ pub fn origin_matches_allowed(origin: &str, allowed: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_rejects_write_mode_without_token() {
+        let mut config = McpConfig::disabled();
+        config.enabled = true;
+        config.write_enabled = true;
+        assert!(config.validate().is_err());
+
+        config.bearer_token = Some("token".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_allows_read_only_without_token() {
+        let mut config = McpConfig::disabled();
+        config.enabled = true;
+        assert!(config.validate().is_ok());
+    }
 
     #[test]
     fn origin_matching_allows_only_exact_or_local_port_variants() {

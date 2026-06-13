@@ -9,6 +9,7 @@ use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
 use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
+use hatchdoor::auth::{WebToken, require_web_token};
 use hatchdoor::cache::SqliteCache;
 use hatchdoor::embed::{Embedder, FastembedEmbedder};
 use hatchdoor::git::{self, GitConfig};
@@ -18,12 +19,13 @@ use hatchdoor::handlers::{
     search_handler, spa_index_handler, stats_handler, tree_handler, vault_asset_handler,
     vault_events_handler,
 };
-use hatchdoor::mcp::{mcp_get_handler, mcp_post_handler};
+use hatchdoor::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
 
 enum RunMode {
     Serve,
     PrefetchEmbedder,
+    Healthcheck,
     Unknown(String),
 }
 
@@ -31,14 +33,15 @@ fn parse_run_mode(args: &[String]) -> RunMode {
     match args.get(1).map(String::as_str) {
         None => RunMode::Serve,
         Some("--prefetch-embedder") => RunMode::PrefetchEmbedder,
+        Some("--healthcheck") => RunMode::Healthcheck,
         Some(other) => RunMode::Unknown(other.to_string()),
     }
 }
 
-fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health_handler))
-        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
+    // Routes that expose vault data. When a web token is configured they sit
+    // behind the auth layer; the SPA shell, /health, and /mcp stay open.
+    let protected = Router::new()
         .route("/api/tree", get(tree_handler))
         .route("/api/vault-events", get(vault_events_handler))
         .route("/api/recently-modified", get(recently_modified_handler))
@@ -51,11 +54,24 @@ fn build_router(state: AppState) -> Router {
         .route("/api/stats", get(stats_handler))
         .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
+        .route("/vault-assets/{*path}", get(vault_asset_handler));
+
+    let protected = match web_bearer_token {
+        Some(token) => protected.layer(axum::middleware::from_fn_with_state(
+            WebToken(token),
+            require_web_token,
+        )),
+        None => protected,
+    };
+
+    Router::new()
+        .route("/health", get(health_handler))
+        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+        .merge(protected)
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
         .route("/stats", get(spa_index_handler))
         .route("/graph", get(spa_index_handler))
-        .route("/vault-assets/{*path}", get(vault_asset_handler))
         .route_service(
             "/manifest.webmanifest",
             ServeFile::new("frontend/dist/manifest.webmanifest"),
@@ -80,6 +96,18 @@ async fn run_server() {
         error!("Configuration error: {e}");
         std::process::exit(1);
     });
+
+    let mcp_config = Arc::new(McpConfig::from_env_validated().unwrap_or_else(|e| {
+        error!("MCP configuration error: {e}");
+        std::process::exit(1);
+    }));
+
+    if config.host == "0.0.0.0" && config.web_bearer_token.is_none() {
+        info!(
+            "HOST=0.0.0.0 with no HATCHDOOR_WEB_BEARER_TOKEN set: the API is reachable \
+             unauthenticated on all interfaces. Set a token or front it with an authenticating proxy."
+        );
+    }
 
     let sqlite = Arc::new(
         SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
@@ -141,6 +169,9 @@ async fn run_server() {
         embedder,
         vault_write_lock,
         git_sync,
+        mcp_config,
+        archive_prefix: Arc::from(config.archive_prefix.as_str()),
+        refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     spawn_vault_watcher(
@@ -149,7 +180,8 @@ async fn run_server() {
         config.cache_db_path.clone(),
     );
 
-    let app = build_router(state);
+    let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
+    let app = build_router(state, web_bearer_token);
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
         error!("Address error: {e}");
@@ -197,9 +229,50 @@ async fn main() {
     match parse_run_mode(&args) {
         RunMode::Serve => run_server().await,
         RunMode::PrefetchEmbedder => run_prefetch(),
+        RunMode::Healthcheck => run_healthcheck(),
         RunMode::Unknown(flag) => {
             error!("Unknown flag: {flag}");
             std::process::exit(2);
+        }
+    }
+}
+
+/// Container health probe: hit the local `/health` endpoint over a raw socket
+/// (the distroless runtime has no shell or curl) and exit non-zero on failure.
+fn run_healthcheck() {
+    use std::io::{Read, Write};
+
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(42824);
+    let addr = format!("127.0.0.1:{port}");
+
+    let probe = || -> std::io::Result<bool> {
+        let mut stream = std::net::TcpStream::connect(&addr)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(4)))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(4)))?;
+        stream
+            .write_all(b"GET /health HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+        let mut response = String::new();
+        stream.read_to_string(&mut response)?;
+        let status_ok = response
+            .lines()
+            .next()
+            .map(|line| line.contains(" 200"))
+            .unwrap_or(false);
+        Ok(status_ok)
+    };
+
+    match probe() {
+        Ok(true) => std::process::exit(0),
+        Ok(false) => {
+            eprintln!("healthcheck: endpoint did not report healthy");
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("healthcheck: {error}");
+            std::process::exit(1);
         }
     }
 }
@@ -258,9 +331,12 @@ mod tests {
             embedder,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
+            mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
-        (build_router(state.clone()), tmp, state)
+        (build_router(state.clone(), None), tmp, state)
     }
 
     #[tokio::test]
@@ -362,8 +438,11 @@ mod tests {
             embedder,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
+            mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let response = app
             .oneshot(
@@ -398,6 +477,77 @@ mod tests {
             archived["archived"], true,
             "90-archive note should be archived"
         );
+    }
+
+    #[tokio::test]
+    async fn web_token_guards_api_routes_but_not_health_or_spa() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        let app = build_router(state, Some(Arc::from("secret-token")));
+
+        let no_token = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+
+        let with_header = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree")
+                    .method("GET")
+                    .header("authorization", "Bearer secret-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(with_header.status(), StatusCode::OK);
+
+        let with_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree?access_token=secret-token")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(with_query.status(), StatusCode::OK);
+
+        let health = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let root = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_ne!(root.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

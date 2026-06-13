@@ -29,6 +29,10 @@ pub enum GitError {
     Validation(String),
     /// A merge produced conflicts; the local commit was kept and not pushed.
     Conflict { files: Vec<String> },
+    /// A remote-integrating merge was needed but the working tree has
+    /// uncommitted manual edits to tracked files outside the write batch.
+    /// Refused rather than force-overwriting them (silent data loss).
+    DirtyWorkingTree { files: Vec<String> },
     /// Network / auth / push failure. Retried on the next batch.
     Remote(String),
     /// Any other libgit2 failure.
@@ -41,6 +45,7 @@ impl GitError {
         match self {
             GitError::Validation(_) => "validation",
             GitError::Conflict { .. } => "conflict",
+            GitError::DirtyWorkingTree { .. } => "dirty_tree",
             GitError::Remote(_) => "remote",
             GitError::Other(_) => "other",
         }
@@ -54,6 +59,11 @@ impl std::fmt::Display for GitError {
             GitError::Conflict { files } => {
                 write!(f, "git merge conflict (not pushed): {}", files.join(", "))
             }
+            GitError::DirtyWorkingTree { files } => write!(
+                f,
+                "git refusing to overwrite uncommitted manual edits: {}",
+                files.join(", ")
+            ),
             GitError::Remote(m) => write!(f, "git remote error: {m}"),
             GitError::Other(m) => write!(f, "git error: {m}"),
         }
@@ -268,6 +278,15 @@ fn merge_remote(
     their: &AnnotatedCommit,
     local_oid: git2::Oid,
 ) -> Result<(), GitError> {
+    // The merge below ends in a force checkout that resets the working tree to
+    // HEAD. If a tracked file was edited by hand on the server and never
+    // committed (Hatchdoor only stages MCP-written paths), that force checkout
+    // would silently discard it. Refuse instead so the edit can be preserved.
+    let dirty = dirty_tracked_files(repo)?;
+    if !dirty.is_empty() {
+        return Err(GitError::DirtyWorkingTree { files: dirty });
+    }
+
     let mut merge_opts = MergeOptions::new();
     repo.merge(&[their], Some(&mut merge_opts), None)?;
 
@@ -277,10 +296,10 @@ fn merge_remote(
         let mut files = Vec::new();
         if let Ok(conflicts) = index.conflicts() {
             for conflict in conflicts.flatten() {
-                if let Some(entry) = conflict.our.or(conflict.their) {
-                    if let Ok(path) = std::str::from_utf8(&entry.path) {
-                        files.push(path.to_string());
-                    }
+                if let Some(entry) = conflict.our.or(conflict.their)
+                    && let Ok(path) = std::str::from_utf8(&entry.path)
+                {
+                    files.push(path.to_string());
                 }
             }
         }
@@ -312,6 +331,27 @@ fn merge_remote(
     // Make the working tree match the new HEAD.
     repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))?;
     Ok(())
+}
+
+/// Tracked files with uncommitted working-tree changes (modified, deleted,
+/// renamed, or type-changed). Untracked and ignored files are excluded.
+fn dirty_tracked_files(repo: &Repository) -> Result<Vec<String>, GitError> {
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(false).include_ignored(false);
+    let statuses = repo.statuses(Some(&mut opts))?;
+    let dirty_mask = git2::Status::WT_MODIFIED
+        | git2::Status::WT_DELETED
+        | git2::Status::WT_TYPECHANGE
+        | git2::Status::WT_RENAMED;
+    let mut files = Vec::new();
+    for entry in statuses.iter() {
+        if entry.status().intersects(dirty_mask)
+            && let Some(path) = entry.path()
+        {
+            files.push(path.to_string());
+        }
+    }
+    Ok(files)
 }
 
 fn push(repo: &Repository, config: &GitConfig) -> Result<(), GitError> {
@@ -443,7 +483,12 @@ mod tests {
         let new_file = work.join("Note.md");
         fs::write(&new_file, "# Note\n").unwrap();
 
-        let report = sync(&config, &[new_file.clone()], "hatchdoor: add Note").unwrap();
+        let report = sync(
+            &config,
+            std::slice::from_ref(&new_file),
+            "hatchdoor: add Note",
+        )
+        .unwrap();
         assert_eq!(report.outcome, SyncOutcome::Pushed { committed: true });
         assert_eq!(remote_head_message(&remote, "main"), "hatchdoor: add Note");
     }
@@ -455,7 +500,12 @@ mod tests {
         let home = work.join("Home.md");
         fs::remove_file(&home).unwrap();
 
-        let report = sync(&config, &[home.clone()], "hatchdoor: delete Home").unwrap();
+        let report = sync(
+            &config,
+            std::slice::from_ref(&home),
+            "hatchdoor: delete Home",
+        )
+        .unwrap();
         assert_eq!(report.outcome, SyncOutcome::Pushed { committed: true });
         // Remote no longer has the file in its tree.
         let repo = Repository::open_bare(&remote).unwrap();
@@ -543,5 +593,47 @@ mod tests {
         // Conflict aborts but keeps our local commit, which is now unpushed.
         let _ = sync(&config, &[work.join("Home.md")], "hatchdoor: edit Home").unwrap_err();
         assert_eq!(unpushed_count(&config).unwrap(), 1);
+    }
+
+    #[test]
+    fn sync_refuses_to_overwrite_uncommitted_manual_edit() {
+        let (_tmp, work, remote) = init_repo_with_remote();
+        let config = base_config(&work);
+
+        // Remote moves ahead with an unrelated new file, so integrating it would
+        // be a clean merge ending in a force checkout.
+        {
+            let tmp = TempDir::new().unwrap();
+            let clone = tmp.path().join("other");
+            let repo = Repository::clone(remote.to_str().unwrap(), &clone).unwrap();
+            fs::write(clone.join("Remote.md"), "# Remote\n").unwrap();
+            commit_all(&repo, "remote add Remote");
+            let mut other_remote = repo.find_remote("origin").unwrap();
+            other_remote
+                .push(&["refs/heads/main:refs/heads/main"], None)
+                .unwrap();
+            drop(other_remote);
+        }
+
+        // A human edits a tracked file directly on the server, uncommitted.
+        fs::write(work.join("Home.md"), "# Home\nhand edited\n").unwrap();
+
+        // An MCP write to a different file triggers a sync.
+        let local = work.join("Local.md");
+        fs::write(&local, "# Local\n").unwrap();
+        let err = sync(&config, &[local], "hatchdoor: add Local").unwrap_err();
+
+        match err {
+            GitError::DirtyWorkingTree { files } => {
+                assert!(files.iter().any(|f| f == "Home.md"), "got {files:?}");
+            }
+            other => panic!("expected dirty working tree, got {other:?}"),
+        }
+
+        // The manual edit survives rather than being reset to HEAD.
+        assert_eq!(
+            fs::read_to_string(work.join("Home.md")).unwrap(),
+            "# Home\nhand edited\n"
+        );
     }
 }
