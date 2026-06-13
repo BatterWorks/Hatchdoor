@@ -36,6 +36,12 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff2}"],
+        // Keep the SPA navigation fallback from swallowing server routes. On
+        // iOS standalone PWAs the `download` attribute is ignored and the
+        // anchor click becomes a navigation; without this denylist the service
+        // worker serves the cached index.html, so a `.md` download arrives as
+        // an HTML file. Let these requests reach the network instead.
+        navigateFallbackDenylist: [/^\/api\//, /^\/vault-assets\//, /^\/health/],
       },
     }),
   ],

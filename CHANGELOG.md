@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## v2.1.1 - 2026-06-13
 
-Security, performance, and operational hardening from the 2026-06-11 codebase audit.
+Security, performance, and operational hardening from the 2026-06-11 codebase audit, plus an iOS PWA download fix.
+
+### Fixed
+- Markdown downloads no longer arrive as HTML on iOS standalone PWAs. The service worker's SPA navigation fallback was intercepting `/api/*`, `/vault-assets/*`, and `/health` navigations (iOS ignores the `<a download>` attribute and treats the click as a navigation) and serving the cached `index.html`. Added a `navigateFallbackDenylist` so those requests reach the network.
 
 ### Security
 - Added optional web API authentication: when `HATCHDOOR_WEB_BEARER_TOKEN` is set, all `/api/*` routes, `/vault-assets/*`, and note downloads require the token (via `Authorization: Bearer` header or `access_token` query parameter). The PWA prompts for the token on a 401. (F-01)
