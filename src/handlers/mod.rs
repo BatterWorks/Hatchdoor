@@ -12,4 +12,7 @@ pub use api::{
 pub use assets::vault_asset_handler;
 pub use downloads::note_download_handler;
 pub use spa::spa_index_handler;
-pub use write_api::write_capabilities_handler;
+pub use write_api::{
+    create_note_handler, delete_note_handler, move_note_handler, move_rename_note_handler,
+    rename_note_handler, update_note_handler, write_capabilities_handler,
+};
