@@ -17,7 +17,7 @@ use hatchdoor::handlers::{
     graph_handler, health_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
     search_handler, spa_index_handler, stats_handler, tree_handler, vault_asset_handler,
-    vault_events_handler,
+    vault_events_handler, write_capabilities_handler,
 };
 use hatchdoor::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
@@ -54,6 +54,7 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .route("/api/stats", get(stats_handler))
         .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
+        .route("/api/write-capabilities", get(write_capabilities_handler))
         .route("/vault-assets/{*path}", get(vault_asset_handler));
 
     let protected = match web_bearer_token {
@@ -167,6 +168,7 @@ async fn run_server() {
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
         embedder,
+        web_auth_enabled: config.web_bearer_token.is_some(),
         vault_write_lock,
         git_sync,
         mcp_config,
@@ -311,11 +313,13 @@ mod tests {
     }
 
     fn app_for_tests() -> (Router, TempDir) {
-        let (app, tmp, _state) = app_for_tests_with_state();
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         (app, tmp)
     }
 
-    fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
+    fn app_for_tests_with_web_auth(
+        web_bearer_token: Option<Arc<str>>,
+    ) -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -329,6 +333,7 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: web_bearer_token.is_some(),
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
@@ -336,7 +341,11 @@ mod tests {
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
-        (build_router(state.clone(), None), tmp, state)
+        (build_router(state.clone(), web_bearer_token), tmp, state)
+    }
+
+    fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
+        app_for_tests_with_web_auth(None)
     }
 
     #[tokio::test]
@@ -436,6 +445,7 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
@@ -481,8 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_token_guards_api_routes_but_not_health_or_spa() {
-        let (_app, _tmp, state) = app_for_tests_with_state();
-        let app = build_router(state, Some(Arc::from("secret-token")));
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
 
         let no_token = app
             .clone()
@@ -597,5 +606,72 @@ mod tests {
             .expect("body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(payload["notes"][0]["slug"], "home");
+    }
+
+    #[tokio::test]
+    async fn router_wires_write_capabilities_route() {
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["enabled"], true);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or("").contains("unauthenticated"))
+        );
+    }
+
+    #[tokio::test]
+    async fn router_wires_write_capabilities_with_web_token() {
+        let (_app, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
+        let app = build_router(state, Some(Arc::from("secret-token")));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .header("authorization", "Bearer secret-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = to_bytes(authorized.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["enabled"], true);
+        assert!(payload["warnings"].as_array().expect("warnings").is_empty());
     }
 }
