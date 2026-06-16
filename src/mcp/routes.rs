@@ -175,6 +175,7 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(McpConfig::disabled()),
