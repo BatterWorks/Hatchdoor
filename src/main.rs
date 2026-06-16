@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
@@ -14,10 +14,11 @@ use hatchdoor::cache::SqliteCache;
 use hatchdoor::embed::{Embedder, FastembedEmbedder};
 use hatchdoor::git::{self, GitConfig};
 use hatchdoor::handlers::{
-    graph_handler, health_handler, note_download_handler, note_handler, note_links_handler,
-    recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
-    search_handler, spa_index_handler, stats_handler, tree_handler, vault_asset_handler,
-    vault_events_handler, write_capabilities_handler,
+    create_note_handler, delete_note_handler, graph_handler, health_handler, move_note_handler,
+    move_rename_note_handler, note_download_handler, note_handler, note_links_handler,
+    recently_modified_handler, refresh_handler, rename_note_handler, resolve_batch_handler,
+    resolve_handler, search_handler, spa_index_handler, stats_handler, tree_handler,
+    update_note_handler, vault_asset_handler, vault_events_handler, write_capabilities_handler,
 };
 use hatchdoor::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
@@ -45,7 +46,19 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .route("/api/tree", get(tree_handler))
         .route("/api/vault-events", get(vault_events_handler))
         .route("/api/recently-modified", get(recently_modified_handler))
-        .route("/api/note/{slug}", get(note_handler))
+        .route("/api/note", post(create_note_handler))
+        .route(
+            "/api/note/{slug}",
+            get(note_handler)
+                .put(update_note_handler)
+                .delete(delete_note_handler),
+        )
+        .route("/api/note/{slug}/rename", patch(rename_note_handler))
+        .route("/api/note/{slug}/move", patch(move_note_handler))
+        .route(
+            "/api/note/{slug}/move-rename",
+            patch(move_rename_note_handler),
+        )
         .route("/api/note/{slug}/download", get(note_download_handler))
         .route("/api/note/{slug}/links", get(note_links_handler))
         .route("/api/resolve", get(resolve_handler))
@@ -673,5 +686,295 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(payload["enabled"], true);
         assert!(payload["warnings"].as_array().expect("warnings").is_empty());
+    }
+
+    #[tokio::test]
+    async fn write_api_updates_note_and_rejects_stale_hash() {
+        let (app, _tmp) = app_for_tests();
+
+        let note_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let note_body = to_bytes(note_response.into_body(), usize::MAX)
+            .await
+            .expect("note body");
+        let note_payload: serde_json::Value = serde_json::from_slice(&note_body).expect("json");
+        let hash = note_payload["note"]["content_hash"].as_str().expect("hash");
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Home\nupdated\n","expected_content_hash":"{hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update.status(), StatusCode::OK);
+
+        let stale = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Home\nstale overwrite\n","expected_content_hash":"{hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_update_payload_missing_expected_hash() {
+        let (app, _tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r##"{"content":"# Home\nupdated\n"}"##))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_create_path_traversal() {
+        let (app, _tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"../escape.md","content":"# Nope\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn write_api_delete_rejects_stale_hash() {
+        let (app, _tmp) = app_for_tests();
+
+        let note_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let note_body = to_bytes(note_response.into_body(), usize::MAX)
+            .await
+            .expect("note body");
+        let note_payload: serde_json::Value = serde_json::from_slice(&note_body).expect("json");
+        let original_hash = note_payload["note"]["content_hash"].as_str().expect("hash");
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Home\nfresh content\n","expected_content_hash":"{original_hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update.status(), StatusCode::OK);
+
+        let stale_delete = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{original_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn write_api_successful_write_updates_vault_revision() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        let before = state.vault_revision.load(Ordering::SeqCst);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Projects/Revision Note.md","content":"# Revision Note\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = state.vault_revision.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "vault revision should advance after refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_api_creates_renames_moves_and_deletes_note() {
+        let (app, _tmp) = app_for_tests();
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Projects/New Note.md","content":"# New Note\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(create.status(), StatusCode::OK);
+        let create_body = to_bytes(create.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let created: serde_json::Value = serde_json::from_slice(&create_body).expect("json");
+        let created_object = created.as_object().expect("object");
+        for field in [
+            "ok",
+            "slug",
+            "relative_path",
+            "content_hash",
+            "rewritten_notes",
+            "moved_assets",
+            "trashed_path",
+            "git_sync_warning",
+        ] {
+            assert!(created_object.contains_key(field), "missing field {field}");
+        }
+        assert_eq!(created["ok"], true);
+        let slug = created["slug"].as_str().expect("slug");
+        let hash = created["content_hash"].as_str().expect("hash");
+
+        let duplicate_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Projects/New Note.md","content":"# Duplicate\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(duplicate_create.status(), StatusCode::CONFLICT);
+
+        let rename = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{slug}/rename"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"new_title":"Renamed Note","expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(rename.status(), StatusCode::OK);
+        let rename_body = to_bytes(rename.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let renamed: serde_json::Value = serde_json::from_slice(&rename_body).expect("json");
+        let renamed_slug = renamed["slug"].as_str().expect("renamed slug");
+        let renamed_hash = renamed["content_hash"].as_str().expect("renamed hash");
+
+        let move_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{renamed_slug}/move"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"target_folder":"Archive","expected_content_hash":"{renamed_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(move_response.status(), StatusCode::OK);
+        let move_body = to_bytes(move_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let moved: serde_json::Value = serde_json::from_slice(&move_body).expect("json");
+        let moved_slug = moved["slug"].as_str().expect("moved slug");
+        let moved_hash = moved["content_hash"].as_str().expect("moved hash");
+
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{moved_slug}"))
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{moved_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(delete.status(), StatusCode::OK);
     }
 }
