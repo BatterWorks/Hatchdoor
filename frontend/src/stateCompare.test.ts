@@ -14,12 +14,14 @@ describe("stateCompare", () => {
       slug: "atlas",
       relative_path: "Notes/Atlas",
       content: "# Atlas",
+      content_hash: "hash-left",
     };
     const right: Note = {
       title: "Atlas",
       slug: "atlas",
       relative_path: "Notes/Atlas",
       content: "# Atlas",
+      content_hash: "hash-right",
     };
 
     expect(isNoteEqual(left, right)).toBe(true);
@@ -31,6 +33,7 @@ describe("stateCompare", () => {
       slug: "atlas",
       relative_path: "Notes/Atlas",
       content: "# Atlas",
+      content_hash: "hash-left",
     };
     const right: Note = {
       ...left,
