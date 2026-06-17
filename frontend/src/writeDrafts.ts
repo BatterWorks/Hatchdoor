@@ -26,6 +26,9 @@ export function loadNoteDraft(slug: string): NoteDraft | null {
     ) {
       return null;
     }
+    if (parsed.slug !== slug) {
+      return null;
+    }
     return {
       slug: parsed.slug,
       content: parsed.content,
@@ -39,7 +42,10 @@ export function loadNoteDraft(slug: string): NoteDraft | null {
 
 export function saveNoteDraft(slug: string, draft: NoteDraft): void {
   try {
-    window.localStorage.setItem(noteDraftKey(slug), JSON.stringify(draft));
+    window.localStorage.setItem(
+      noteDraftKey(slug),
+      JSON.stringify({ ...draft, slug }),
+    );
   } catch {
     // Storage can fail in private browsing or when quota is exceeded.
   }

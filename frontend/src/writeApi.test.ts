@@ -1,0 +1,167 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { apiFetch } from "./api";
+import {
+  createNote,
+  deleteNote,
+  getWriteCapabilities,
+  moveNote,
+  renameNote,
+  updateNote,
+} from "./writeApi";
+
+vi.mock("./api", () => ({
+  apiFetch: vi.fn(),
+}));
+
+const mockedApiFetch = vi.mocked(apiFetch);
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
+    },
+  });
+}
+
+function expectJsonCall(
+  callIndex: number,
+  expectedUrl: string,
+  expectedMethod: string,
+  expectedBody: unknown,
+): void {
+  const [url, init] = mockedApiFetch.mock.calls[callIndex] ?? [];
+  expect(url).toBe(expectedUrl);
+  expect(init?.method).toBe(expectedMethod);
+  expect(init?.headers).toMatchObject({ "content-type": "application/json" });
+  expect(JSON.parse(String(init?.body))).toEqual(expectedBody);
+}
+
+describe("writeApi", () => {
+  it("loads write capabilities", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ enabled: true, warnings: ["read-only mode off"] }),
+    );
+
+    await expect(getWriteCapabilities()).resolves.toEqual({
+      enabled: true,
+      warnings: ["read-only mode off"],
+    });
+
+    expect(mockedApiFetch).toHaveBeenCalledWith("/api/write-capabilities");
+  });
+
+  it("sends the expected create/update/rename/move/delete write requests", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        slug: "home",
+        relative_path: "Home.md",
+        content_hash: "hash-create",
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: null,
+      }),
+    );
+    await createNote("Notes/Home.md", "# Home");
+    expectJsonCall(0, "/api/note", "POST", {
+      relative_path: "Notes/Home.md",
+      content: "# Home",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        slug: "folder/alpha beta",
+        relative_path: "Folder/Alpha Beta.md",
+        content_hash: "hash-update",
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: null,
+      }),
+    );
+    await updateNote("folder/alpha beta", "# Updated", "hash-1");
+    expectJsonCall(1, "/api/note/folder%2Falpha%20beta", "PUT", {
+      content: "# Updated",
+      expected_content_hash: "hash-1",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        slug: "folder/alpha beta",
+        relative_path: "Folder/Renamed.md",
+        content_hash: "hash-rename",
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: null,
+      }),
+    );
+    await renameNote("folder/alpha beta", "Renamed Note", "hash-2");
+    expectJsonCall(2, "/api/note/folder%2Falpha%20beta/rename", "PATCH", {
+      new_title: "Renamed Note",
+      expected_content_hash: "hash-2",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        slug: "folder/alpha beta",
+        relative_path: "Archive/Renamed.md",
+        content_hash: "hash-move",
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: null,
+      }),
+    );
+    await moveNote("folder/alpha beta", "Archive/2026", "hash-3");
+    expectJsonCall(3, "/api/note/folder%2Falpha%20beta/move", "PATCH", {
+      target_folder: "Archive/2026",
+      expected_content_hash: "hash-3",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        slug: "folder/alpha beta",
+        relative_path: null,
+        content_hash: null,
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: "90-archive/Renamed.md",
+      }),
+    );
+    await deleteNote("folder/alpha beta", "hash-4");
+    expectJsonCall(4, "/api/note/folder%2Falpha%20beta", "DELETE", {
+      expected_content_hash: "hash-4",
+    });
+  });
+
+  it("maps conflict and write errors to named exceptions", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ error: "changed" }, 409),
+    );
+    await expect(createNote("Home", "# Home")).rejects.toMatchObject({
+      name: "ConflictError",
+      message: "changed",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({ error: "boom" }, 500),
+    );
+    await expect(deleteNote("home", "hash-1")).rejects.toMatchObject({
+      name: "WriteApiError",
+      message: "boom",
+    });
+  });
+});
