@@ -14,6 +14,7 @@ export type Note = {
   slug: string;
   relative_path: string;
   content: string;
+  content_hash: string;
 };
 
 export type NoteLink = {
@@ -29,6 +30,21 @@ export type NoteLinks = {
 
 export type NoteLinksResponse = {
   links: NoteLinks;
+};
+
+export type WriteCapabilities = {
+  enabled: boolean;
+  warnings: string[];
+};
+
+export type WriteOutcome = {
+  ok: boolean;
+  slug: string | null;
+  relative_path: string | null;
+  content_hash: string | null;
+  rewritten_notes: number;
+  moved_assets: number;
+  trashed_path: string | null;
 };
 
 export type ActiveNoteMeta = {
