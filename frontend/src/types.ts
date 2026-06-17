@@ -42,6 +42,7 @@ export type WriteOutcome = {
   slug: string | null;
   relative_path: string | null;
   content_hash: string | null;
+  git_sync_warning: string | null;
   rewritten_notes: number;
   moved_assets: number;
   trashed_path: string | null;
