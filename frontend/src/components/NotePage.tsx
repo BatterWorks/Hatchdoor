@@ -28,6 +28,13 @@ import type {
   NoteLinks,
   NoteLinksResponse,
 } from "../types";
+import { updateNote } from "../writeApi";
+import {
+  clearNoteDraft,
+  loadNoteDraft,
+  saveNoteDraft,
+} from "../writeDrafts";
+import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge } from "./ui";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
@@ -45,11 +52,15 @@ export function NotePage({
   onTagSelect,
   propertiesCollapsedStorageKey,
   vaultRevision,
+  writeEnabled,
+  editRequestId,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   onTagSelect: (tag: string) => void;
   propertiesCollapsedStorageKey: string;
   vaultRevision: number;
+  writeEnabled: boolean;
+  editRequestId: number;
 }) {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
@@ -58,6 +69,10 @@ export function NotePage({
   const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [draftContent, setDraftContent] = useState("");
+  const [editorError, setEditorError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
       return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
@@ -68,6 +83,7 @@ export function NotePage({
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
   const currentSlugRef = useRef(slug);
+  const lastEditRequestIdRef = useRef(editRequestId);
   currentSlugRef.current = slug;
 
   const loadNote = useCallback(
@@ -130,6 +146,13 @@ export function NotePage({
   }, [loadNote, loadNoteLinks]);
 
   useEffect(() => {
+    setIsEditing(false);
+    setDraftContent("");
+    setEditorError(null);
+    setSaving(false);
+  }, [slug]);
+
+  useEffect(() => {
     if (vaultRevision === 0) {
       return;
     }
@@ -151,6 +174,40 @@ export function NotePage({
     return () =>
       window.removeEventListener("hatchdoor:toggle-note-properties", onToggle);
   }, []);
+
+  const startEditing = useCallback(() => {
+    if (!writeEnabled || !note || isEditing) {
+      return;
+    }
+
+    const storedDraft = loadNoteDraft(note.slug);
+    setDraftContent(storedDraft?.content ?? note.content);
+    setEditorError(null);
+    setSaving(false);
+    setIsEditing(true);
+  }, [isEditing, note, writeEnabled]);
+
+  useEffect(() => {
+    if (editRequestId === lastEditRequestIdRef.current) {
+      return;
+    }
+
+    lastEditRequestIdRef.current = editRequestId;
+    startEditing();
+  }, [editRequestId, startEditing]);
+
+  useEffect(() => {
+    if (!isEditing || !note) {
+      return;
+    }
+
+    saveNoteDraft(note.slug, {
+      slug: note.slug,
+      content: draftContent,
+      baseContentHash: note.content_hash,
+      savedAt: Date.now(),
+    });
+  }, [draftContent, isEditing, note]);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
 
@@ -193,6 +250,9 @@ export function NotePage({
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
     if (!root) {
+      searchHitsRef.current = [];
+      setSearchHitCount(0);
+      setActiveSearchHit(0);
       return;
     }
 
@@ -242,6 +302,49 @@ export function NotePage({
     );
   }
 
+  const handleCancelEditing = () => {
+    const isDirty = draftContent !== note.content;
+    if (
+      isDirty &&
+      !window.confirm("Discard your unsaved draft for this note?")
+    ) {
+      return;
+    }
+
+    clearNoteDraft(note.slug);
+    setDraftContent(note.content);
+    setEditorError(null);
+    setSaving(false);
+    setIsEditing(false);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setEditorError(null);
+
+    try {
+      await updateNote(note.slug, draftContent, note.content_hash);
+      clearNoteDraft(note.slug);
+      setIsEditing(false);
+      setLoading(true);
+      await loadNote(true);
+      await loadNoteLinks();
+    } catch (saveError) {
+      if (saveError instanceof Error && saveError.name === "ConflictError") {
+        setEditorError(
+          "This note changed on disk. Your draft was kept; reload the latest note before saving.",
+        );
+      } else if (saveError instanceof Error) {
+        setEditorError(saveError.message);
+      } else {
+        setEditorError("Failed saving note.");
+      }
+    } finally {
+      setSaving(false);
+      setLoading(false);
+    }
+  };
+
   return (
     <div className="note-page-layout">
       <article className="note-content">
@@ -269,15 +372,26 @@ export function NotePage({
         />
         <NoteLinksPanel links={noteLinks} />
         <NoteTocMobile headings={tocHeadings} />
-        <div ref={noteBodyRef} className="note-body">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm, remarkMath]}
-            rehypePlugins={rehypePlugins}
-            components={markdownComponents}
-          >
-            {markdown}
-          </ReactMarkdown>
-        </div>
+        {isEditing ? (
+          <NoteEditor
+            content={draftContent}
+            saving={saving}
+            error={editorError}
+            onChange={setDraftContent}
+            onSave={handleSave}
+            onCancel={handleCancelEditing}
+          />
+        ) : (
+          <div ref={noteBodyRef} className="note-body">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm, remarkMath]}
+              rehypePlugins={rehypePlugins}
+              components={markdownComponents}
+            >
+              {markdown}
+            </ReactMarkdown>
+          </div>
+        )}
       </article>
 
       <NoteTocDesktop headings={tocHeadings} />

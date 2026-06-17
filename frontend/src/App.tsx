@@ -40,6 +40,7 @@ import { GraphPage } from "./components/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
+import { getWriteCapabilities } from "./writeApi";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
@@ -79,6 +80,8 @@ function App() {
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [vaultRevision, setVaultRevision] = useState(0);
   const [authRequired, setAuthRequired] = useState(false);
+  const [writeEnabled, setWriteEnabled] = useState(false);
+  const [editRequestId, setEditRequestId] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -128,6 +131,27 @@ function App() {
   useEffect(() => {
     onUnauthorized(() => setAuthRequired(true));
     return () => onUnauthorized(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const capabilities = await getWriteCapabilities();
+        if (!cancelled) {
+          setWriteEnabled(Boolean(capabilities.enabled));
+        }
+      } catch {
+        if (!cancelled) {
+          setWriteEnabled(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -485,6 +509,7 @@ function App() {
       )}
       <AppTopbar
         activeNote={activeNote}
+        writeEnabled={writeEnabled}
         isMobile={isMobile}
         isOnline={isOnline}
         treeIsStale={treeIsStale}
@@ -499,6 +524,7 @@ function App() {
         onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
+        onEditNote={() => setEditRequestId((prev) => prev + 1)}
         onToggleProperties={toggleProperties}
         onCycleTheme={cycleTheme}
       />
@@ -577,6 +603,8 @@ function App() {
                   onTagSelect={openSearchForTag}
                   propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
                   vaultRevision={vaultRevision}
+                  writeEnabled={writeEnabled}
+                  editRequestId={editRequestId}
                 />
               }
             />
