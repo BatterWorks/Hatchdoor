@@ -13,6 +13,7 @@ const THEME_LABEL: Record<Theme, string> = {
 
 type TopbarProps = {
   activeNote: ActiveNoteMeta | null;
+  writeEnabled: boolean;
   isMobile: boolean;
   isOnline: boolean;
   treeIsStale: boolean;
@@ -27,12 +28,14 @@ type TopbarProps = {
   onCopyPageContent: () => void;
   onCopyNoteLink: () => void;
   onDownloadMarkdown: () => void;
+  onEditNote: () => void;
   onToggleProperties: () => void;
   onCycleTheme: () => void;
 };
 
 export function AppTopbar({
   activeNote,
+  writeEnabled,
   isMobile,
   isOnline,
   treeIsStale,
@@ -47,6 +50,7 @@ export function AppTopbar({
   onCopyPageContent,
   onCopyNoteLink,
   onDownloadMarkdown,
+  onEditNote,
   onToggleProperties,
   onCycleTheme,
 }: TopbarProps) {
@@ -175,6 +179,18 @@ export function AppTopbar({
                 >
                   Refresh vault
                 </UiButton>
+                {activeNote && writeEnabled ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onEditNote();
+                    }}
+                  >
+                    Edit note
+                  </UiButton>
+                ) : null}
                 {activeNote ? (
                   <UiButton
                     className="close-note"
