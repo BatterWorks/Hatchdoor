@@ -70,7 +70,6 @@ export function TokenPrompt({ onSubmit }: { onSubmit: (token: string) => void })
         <input
           style={input}
           type="password"
-          // eslint-disable-next-line jsx-a11y/no-autofocus
           autoFocus
           value={value}
           onChange={(event) => setValue(event.target.value)}
