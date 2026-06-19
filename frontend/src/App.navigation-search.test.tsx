@@ -254,21 +254,22 @@ describe("App navigation/search", () => {
   });
 
   it("renders folders collapsed by default on explorer root", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          name: "Vault",
-          folders: [
-            {
-              name: "Projects",
-              folders: [],
-              notes: [{ title: "Plan", slug: "plan" }],
-            },
-          ],
-          notes: [],
-        }),
-        { status: 200 },
-      ),
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            name: "Vault",
+            folders: [
+              {
+                name: "Projects",
+                folders: [],
+                notes: [{ title: "Plan", slug: "plan" }],
+              },
+            ],
+            notes: [],
+          }),
+          { status: 200 },
+        ),
     );
 
     render(
