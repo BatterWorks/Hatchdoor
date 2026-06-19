@@ -19,6 +19,8 @@ function countNotes(folder: ExplorerFolder): number {
 type ExplorerPaneProps = {
   explorerPaneRef: RefObject<HTMLElement | null>;
   drawerOpen: boolean;
+  writeEnabled: boolean;
+  onCreateNoteInFolder: (folderPath: string) => void;
   locationPathname: string;
   recentNotes: RecentNote[];
   modifiedNotes: ModifiedNote[];
@@ -35,6 +37,8 @@ type ExplorerPaneProps = {
 export function ExplorerPane({
   explorerPaneRef,
   drawerOpen,
+  writeEnabled,
+  onCreateNoteInFolder,
   locationPathname,
   recentNotes,
   modifiedNotes,
@@ -59,6 +63,14 @@ export function ExplorerPane({
       <header className="explorer-header">
         <p>Vault Explorer</p>
         <div className="explorer-actions">
+          {writeEnabled ? (
+            <UiButton
+              className="close-note"
+              onClick={() => onCreateNoteInFolder("")}
+            >
+              New
+            </UiButton>
+          ) : null}
           <UiButton className="close-note" onClick={onRefreshTree}>
             Refresh
           </UiButton>
@@ -117,6 +129,8 @@ export function ExplorerPane({
           currentPath={locationPathname}
           expandedFolders={expandedFolders}
           onExpandedFoldersChange={onExpandedFoldersChange}
+          writeEnabled={writeEnabled}
+          onCreateNoteInFolder={onCreateNoteInFolder}
         />
       ) : null}
     </aside>

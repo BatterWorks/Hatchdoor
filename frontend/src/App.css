@@ -8,6 +8,98 @@
 @import "./styles/stats.css";
 @import "./styles/graph.css";
 
+.write-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.5rem 1rem 0;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.write-notice-messages {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.write-notice-dismiss {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.note-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.note-edit-button {
+  flex: none;
+}
+
+.note-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.note-editor-modes {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.note-editor-hint {
+  margin-left: auto;
+  font-size: 0.78rem;
+  opacity: 0.6;
+}
+
+.note-editor-preview {
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.75rem 0.9rem;
+  min-height: 8rem;
+}
+
+.folder-new-note {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  opacity: 0;
+  padding: 0 0.3rem;
+}
+
+.folder-item summary:hover .folder-new-note,
+.folder-new-note:focus-visible {
+  opacity: 0.8;
+}
+
+.note-editor-notice {
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;

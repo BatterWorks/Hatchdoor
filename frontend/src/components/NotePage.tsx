@@ -28,15 +28,16 @@ import type {
   NoteLinks,
   NoteLinksResponse,
 } from "../types";
-import { updateNote } from "../writeApi";
+import { describeWriteOutcome, updateNote } from "../writeApi";
 import {
   clearNoteDraft,
   loadNoteDraft,
   saveNoteDraft,
 } from "../writeDrafts";
 import { NoteEditor } from "./NoteEditor";
-import { NoteSkeleton, StateBlock, StatusBadge } from "./ui";
+import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
+import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
 import {
   NoteLinksPanel,
@@ -54,6 +55,7 @@ export function NotePage({
   vaultRevision,
   writeEnabled,
   editRequestId,
+  onWriteNotice,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   onTagSelect: (tag: string) => void;
@@ -61,6 +63,7 @@ export function NotePage({
   vaultRevision: number;
   writeEnabled: boolean;
   editRequestId: number;
+  onWriteNotice?: (message: string | null) => void;
 }) {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
@@ -71,6 +74,11 @@ export function NotePage({
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [draftContent, setDraftContent] = useState("");
+  const [editBaseHash, setEditBaseHash] = useState("");
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
+  const [draftStale, setDraftStale] = useState(false);
+  const [conflict, setConflict] = useState(false);
+  const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
@@ -84,6 +92,7 @@ export function NotePage({
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
   const currentSlugRef = useRef(slug);
   const lastEditRequestIdRef = useRef(editRequestId);
+  const lastHandledRevisionRef = useRef(0);
   currentSlugRef.current = slug;
 
   const loadNote = useCallback(
@@ -148,18 +157,33 @@ export function NotePage({
   useEffect(() => {
     setIsEditing(false);
     setDraftContent("");
+    setEditBaseHash("");
+    setDraftNotice(null);
+    setDraftStale(false);
+    setConflict(false);
+    setNoteChangedOnDisk(false);
     setEditorError(null);
     setSaving(false);
   }, [slug]);
 
   useEffect(() => {
-    if (vaultRevision === 0) {
+    if (vaultRevision === 0 || vaultRevision === lastHandledRevisionRef.current) {
+      return;
+    }
+    lastHandledRevisionRef.current = vaultRevision;
+
+    // Never refetch the note out from under an open editor: doing so would move
+    // the content hash the editor saves against and silently defeat the
+    // optimistic-concurrency guard. Flag the change instead so the user can
+    // reload deliberately.
+    if (isEditing) {
+      setNoteChangedOnDisk(true);
       return;
     }
 
     void loadNote(false);
     void loadNoteLinks();
-  }, [loadNote, loadNoteLinks, vaultRevision]);
+  }, [loadNote, loadNoteLinks, vaultRevision, isEditing]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -181,7 +205,27 @@ export function NotePage({
     }
 
     const storedDraft = loadNoteDraft(note.slug);
-    setDraftContent(storedDraft?.content ?? note.content);
+    if (storedDraft && storedDraft.content !== note.content) {
+      const stale = storedDraft.baseContentHash !== note.content_hash;
+      setDraftContent(storedDraft.content);
+      // Save against the version the draft was actually based on. If the note
+      // moved on disk since, the server will reject the save (409) and the user
+      // is prompted to reload rather than silently overwriting newer content.
+      setEditBaseHash(storedDraft.baseContentHash);
+      setDraftStale(stale);
+      setDraftNotice(
+        stale
+          ? "Restored an earlier draft based on a previous version of this note. Reload the latest version before saving to avoid overwriting newer changes."
+          : "Restored your unsaved draft for this note.",
+      );
+    } else {
+      setDraftContent(note.content);
+      setEditBaseHash(note.content_hash);
+      setDraftStale(false);
+      setDraftNotice(null);
+    }
+    setConflict(false);
+    setNoteChangedOnDisk(false);
     setEditorError(null);
     setSaving(false);
     setIsEditing(true);
@@ -204,10 +248,10 @@ export function NotePage({
     saveNoteDraft(note.slug, {
       slug: note.slug,
       content: draftContent,
-      baseContentHash: note.content_hash,
+      baseContentHash: editBaseHash || note.content_hash,
       savedAt: Date.now(),
     });
-  }, [draftContent, isEditing, note]);
+  }, [draftContent, editBaseHash, isEditing, note]);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
 
@@ -315,8 +359,55 @@ export function NotePage({
     clearNoteDraft(note.slug);
     setDraftContent(note.content);
     setEditorError(null);
+    setDraftNotice(null);
+    setDraftStale(false);
+    setConflict(false);
     setSaving(false);
     setIsEditing(false);
+
+    // If the note changed on disk while we held the editor open, pick up the
+    // latest now that the editor is closed.
+    if (noteChangedOnDisk) {
+      setNoteChangedOnDisk(false);
+      setLoading(true);
+      void (async () => {
+        await loadNote(true);
+        await loadNoteLinks();
+        setLoading(false);
+      })();
+    }
+  };
+
+  const handleReloadLatest = async () => {
+    setSaving(true);
+    setEditorError(null);
+    try {
+      const res = await apiFetch(`/api/note/${encodeURIComponent(note.slug)}`);
+      if (!res.ok) {
+        throw new Error(`Failed loading note: ${res.status}`);
+      }
+      const json = (await res.json()) as { note: Note };
+      setNote(json.note);
+      setEditBaseHash(json.note.content_hash);
+      saveNoteDraft(json.note.slug, {
+        slug: json.note.slug,
+        content: draftContent,
+        baseContentHash: json.note.content_hash,
+        savedAt: Date.now(),
+      });
+      setConflict(false);
+      setNoteChangedOnDisk(false);
+      setDraftStale(false);
+      setDraftNotice(
+        "Loaded the latest version. Your text is preserved — review it, then Save to apply your changes over the latest.",
+      );
+    } catch {
+      setEditorError(
+        "Could not reload the latest version. Check your connection and try again.",
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleSave = async () => {
@@ -324,16 +415,32 @@ export function NotePage({
     setEditorError(null);
 
     try {
-      await updateNote(note.slug, draftContent, note.content_hash);
+      const outcome = await updateNote(note.slug, draftContent, editBaseHash);
       clearNoteDraft(note.slug);
+      setConflict(false);
+      setNoteChangedOnDisk(false);
+      setDraftStale(false);
+      setDraftNotice(null);
       setIsEditing(false);
-      setLoading(true);
-      await loadNote(true);
+      onWriteNotice?.(describeWriteOutcome(outcome));
+      // Patch the saved content in place so the reader updates instantly without
+      // a skeleton flash, then reconcile title/links in the background.
+      setNote((prev) =>
+        prev
+          ? {
+              ...prev,
+              content: draftContent,
+              content_hash: outcome.content_hash ?? prev.content_hash,
+            }
+          : prev,
+      );
+      await loadNote(false);
       await loadNoteLinks();
     } catch (saveError) {
       if (saveError instanceof Error && saveError.name === "ConflictError") {
+        setConflict(true);
         setEditorError(
-          "This note changed on disk. Your draft was kept; reload the latest note before saving.",
+          "This note changed on disk since you started editing. Your draft is safe — reload the latest version, then save again to apply your changes.",
         );
       } else if (saveError instanceof Error) {
         setEditorError(saveError.message);
@@ -349,7 +456,17 @@ export function NotePage({
   return (
     <div className="note-page-layout">
       <article className="note-content">
-        <h2 className="note-page-title">{note.title}</h2>
+        <div className="note-page-heading">
+          <h2 className="note-page-title">{note.title}</h2>
+          {writeEnabled && !isEditing ? (
+            <UiButton
+              className="close-note note-edit-button"
+              onClick={startEditing}
+            >
+              Edit
+            </UiButton>
+          ) : null}
+        </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
         {searchHitCount > 0 ? (
           <SearchHitNavigator
@@ -378,9 +495,22 @@ export function NotePage({
             content={draftContent}
             saving={saving}
             error={editorError}
+            notice={
+              noteChangedOnDisk
+                ? "This note changed on disk while you were editing. Reload the latest version before saving to avoid overwriting those changes."
+                : draftNotice
+            }
+            canReload={conflict || noteChangedOnDisk || draftStale}
             onChange={setDraftContent}
             onSave={handleSave}
+            onReload={handleReloadLatest}
             onCancel={handleCancelEditing}
+            renderPreview={(value) => (
+              <NotePreview
+                content={value}
+                relativePath={note.relative_path}
+              />
+            )}
           />
         ) : (
           <div ref={noteBodyRef} className="note-body">

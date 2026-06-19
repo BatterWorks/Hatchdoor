@@ -1,6 +1,38 @@
 import { apiFetch } from "./api";
 import type { WriteCapabilities, WriteOutcome } from "./types";
 
+/**
+ * Build a human-readable summary of the side effects reported by a write so
+ * they can be surfaced to the user. Returns null when a write completed
+ * cleanly with nothing worth announcing.
+ */
+export function describeWriteOutcome(outcome: WriteOutcome): string | null {
+  const parts: string[] = [];
+
+  if (outcome.git_sync_warning) {
+    parts.push(`Git sync warning: ${outcome.git_sync_warning}`);
+  }
+  if (outcome.rewritten_notes > 0) {
+    parts.push(
+      `Updated ${outcome.rewritten_notes} linking note${
+        outcome.rewritten_notes === 1 ? "" : "s"
+      }.`,
+    );
+  }
+  if (outcome.moved_assets > 0) {
+    parts.push(
+      `Moved ${outcome.moved_assets} asset${
+        outcome.moved_assets === 1 ? "" : "s"
+      }.`,
+    );
+  }
+  if (outcome.trashed_path) {
+    parts.push(`Moved to trash: ${outcome.trashed_path}.`);
+  }
+
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 async function parseError(res: Response): Promise<string> {
   try {
     const json = (await res.json()) as { error?: unknown };
