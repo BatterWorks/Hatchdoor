@@ -4,6 +4,7 @@ import {
   clearNoteDraft,
   loadNoteDraft,
   noteDraftKey,
+  pruneNoteDrafts,
   saveNoteDraft,
 } from "./writeDrafts";
 
@@ -68,5 +69,31 @@ describe("writeDrafts", () => {
   it("returns null for malformed draft JSON", () => {
     window.localStorage.setItem("hatchdoor:draft:note:broken", "{");
     expect(loadNoteDraft("broken")).toBeNull();
+  });
+
+  it("prunes drafts older than the max age and malformed entries", () => {
+    const now = 2_000_000_000_000;
+    saveNoteDraft("fresh", {
+      slug: "fresh",
+      content: "keep",
+      baseContentHash: "h",
+      savedAt: now - 1000,
+    });
+    saveNoteDraft("stale", {
+      slug: "stale",
+      content: "drop",
+      baseContentHash: "h",
+      savedAt: now - 10 * 24 * 60 * 60 * 1000,
+    });
+    window.localStorage.setItem("hatchdoor:draft:note:broken", "{");
+    window.localStorage.setItem("unrelated:key", "keep");
+
+    const removed = pruneNoteDrafts(7 * 24 * 60 * 60 * 1000, now);
+
+    expect(removed).toBe(2);
+    expect(loadNoteDraft("fresh")).not.toBeNull();
+    expect(loadNoteDraft("stale")).toBeNull();
+    expect(window.localStorage.getItem("hatchdoor:draft:note:broken")).toBeNull();
+    expect(window.localStorage.getItem("unrelated:key")).toBe("keep");
   });
 });

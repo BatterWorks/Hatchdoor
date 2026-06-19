@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -47,10 +48,14 @@ import { isExplorerTreeEqual } from "./stateCompare";
 import {
   createNote,
   deleteNote,
+  describeWriteOutcome,
   getWriteCapabilities,
   moveNote,
   renameNote,
 } from "./writeApi";
+import { validateNotePath } from "./writePaths";
+import { pruneNoteDrafts } from "./writeDrafts";
+import { collectFolderPaths } from "./app/folderPaths";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
@@ -91,10 +96,13 @@ function App() {
   const [vaultRevision, setVaultRevision] = useState(0);
   const [authRequired, setAuthRequired] = useState(false);
   const [writeEnabled, setWriteEnabled] = useState(false);
+  const [writeWarnings, setWriteWarnings] = useState<string[]>([]);
+  const [writeNotice, setWriteNotice] = useState<string | null>(null);
   const [editRequestId, setEditRequestId] = useState(0);
   const [noteActionDialog, setNoteActionDialog] =
     useState<NoteActionDialogKind | null>(null);
   const [noteActionError, setNoteActionError] = useState<string | null>(null);
+  const [noteActionInitialFolder, setNoteActionInitialFolder] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -146,6 +154,19 @@ function App() {
     return () => onUnauthorized(null);
   }, []);
 
+  const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
+
+  const openCreateDialog = useCallback((folder: string) => {
+    setNoteActionError(null);
+    setNoteActionInitialFolder(folder);
+    setNoteActionDialog("create");
+  }, []);
+
+  useEffect(() => {
+    // Drafts only bridge an interrupted edit; drop ones older than a week.
+    pruneNoteDrafts(7 * 24 * 60 * 60 * 1000);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -154,10 +175,14 @@ function App() {
         const capabilities = await getWriteCapabilities();
         if (!cancelled) {
           setWriteEnabled(Boolean(capabilities.enabled));
+          setWriteWarnings(
+            Array.isArray(capabilities.warnings) ? capabilities.warnings : [],
+          );
         }
       } catch {
         if (!cancelled) {
           setWriteEnabled(false);
+          setWriteWarnings([]);
         }
       }
     })();
@@ -348,6 +373,19 @@ function App() {
         return;
       }
 
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "n" &&
+        writeEnabled &&
+        !isEditableTarget(event.target)
+      ) {
+        // Works in installed/standalone PWA contexts; harmless where the
+        // browser reserves the shortcut.
+        event.preventDefault();
+        openCreateDialog("");
+        return;
+      }
+
       if (event.key === "/" && !isEditableTarget(event.target)) {
         event.preventDefault();
         setSearchOpen(true);
@@ -356,7 +394,7 @@ function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [openCreateDialog, writeEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -504,6 +542,7 @@ function App() {
   const closeNoteActionDialog = useCallback(() => {
     setNoteActionDialog(null);
     setNoteActionError(null);
+    setNoteActionInitialFolder("");
   }, []);
 
   const requireActiveNoteHash = useCallback(() => {
@@ -516,9 +555,15 @@ function App() {
   const handleCreateNote = useCallback(
     async (relativePath: string, content: string) => {
       setNoteActionError(null);
+      const pathError = validateNotePath(relativePath, { label: "Note path" });
+      if (pathError) {
+        setNoteActionError(pathError);
+        return;
+      }
       try {
         const outcome = await createNote(relativePath, content);
         setNoteActionDialog(null);
+        setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();
         if (outcome.slug) {
           navigate(`/n/${encodeURIComponent(outcome.slug)}`);
@@ -535,10 +580,16 @@ function App() {
   const handleRenameNote = useCallback(
     async (newTitle: string) => {
       setNoteActionError(null);
+      const trimmed = newTitle.trim();
+      if (!trimmed) {
+        setNoteActionError("New title is required.");
+        return;
+      }
       try {
         const { slug, contentHash } = requireActiveNoteHash();
-        const outcome = await renameNote(slug, newTitle, contentHash);
+        const outcome = await renameNote(slug, trimmed, contentHash);
         setNoteActionDialog(null);
+        setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();
         if (outcome.slug) {
           navigate(`/n/${encodeURIComponent(outcome.slug)}`);
@@ -555,10 +606,19 @@ function App() {
   const handleMoveNote = useCallback(
     async (targetFolder: string) => {
       setNoteActionError(null);
+      const pathError = validateNotePath(targetFolder, {
+        allowEmpty: true,
+        label: "Target folder",
+      });
+      if (pathError) {
+        setNoteActionError(pathError);
+        return;
+      }
       try {
         const { slug, contentHash } = requireActiveNoteHash();
         const outcome = await moveNote(slug, targetFolder, contentHash);
         setNoteActionDialog(null);
+        setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();
         if (outcome.slug) {
           navigate(`/n/${encodeURIComponent(outcome.slug)}`);
@@ -576,8 +636,9 @@ function App() {
     setNoteActionError(null);
     try {
       const { slug, contentHash } = requireActiveNoteHash();
-      await deleteNote(slug, contentHash);
+      const outcome = await deleteNote(slug, contentHash);
       setNoteActionDialog(null);
+      setWriteNotice(describeWriteOutcome(outcome));
       await refreshVault();
       navigate("/");
     } catch (error) {
@@ -624,10 +685,7 @@ function App() {
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
         onEditNote={() => setEditRequestId((prev) => prev + 1)}
-        onNewNote={() => {
-          setNoteActionError(null);
-          setNoteActionDialog("create");
-        }}
+        onNewNote={() => openCreateDialog("")}
         onRenameNote={() => {
           setNoteActionError(null);
           setNoteActionDialog("rename");
@@ -644,10 +702,34 @@ function App() {
         onCycleTheme={cycleTheme}
       />
 
+      {writeWarnings.length > 0 || writeNotice ? (
+        <div className="write-notice" role="status">
+          <div className="write-notice-messages">
+            {writeWarnings.map((warning) => (
+              <span key={warning}>{warning}</span>
+            ))}
+            {writeNotice ? <span>{writeNotice}</span> : null}
+          </div>
+          <button
+            type="button"
+            className="write-notice-dismiss"
+            aria-label="Dismiss notice"
+            onClick={() => {
+              setWriteNotice(null);
+              setWriteWarnings([]);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
+
       <div className="app-layout">
         <ExplorerPane
           explorerPaneRef={explorerPaneRef}
           drawerOpen={drawerOpen}
+          writeEnabled={writeEnabled}
+          onCreateNoteInFolder={openCreateDialog}
           locationPathname={location.pathname}
           recentNotes={recentNotes}
           modifiedNotes={modifiedNotes}
@@ -720,6 +802,7 @@ function App() {
                   vaultRevision={vaultRevision}
                   writeEnabled={writeEnabled}
                   editRequestId={editRequestId}
+                  onWriteNotice={setWriteNotice}
                 />
               }
             />
@@ -766,6 +849,8 @@ function App() {
         <NoteActionsDialog
           kind={noteActionDialog}
           error={noteActionError}
+          folderPaths={folderPaths}
+          initialFolder={noteActionInitialFolder}
           onClose={closeNoteActionDialog}
           onCreate={(relativePath, content) =>
             void handleCreateNote(relativePath, content)

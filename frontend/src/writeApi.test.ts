@@ -4,11 +4,27 @@ import { apiFetch } from "./api";
 import {
   createNote,
   deleteNote,
+  describeWriteOutcome,
   getWriteCapabilities,
   moveNote,
   renameNote,
   updateNote,
 } from "./writeApi";
+import type { WriteOutcome } from "./types";
+
+function outcome(overrides: Partial<WriteOutcome> = {}): WriteOutcome {
+  return {
+    ok: true,
+    slug: "home",
+    relative_path: "Home.md",
+    content_hash: "hash",
+    git_sync_warning: null,
+    rewritten_notes: 0,
+    moved_assets: 0,
+    trashed_path: null,
+    ...overrides,
+  };
+}
 
 vi.mock("./api", () => ({
   apiFetch: vi.fn(),
@@ -145,6 +161,24 @@ describe("writeApi", () => {
     expectJsonCall(4, "/api/note/folder%2Falpha%20beta", "DELETE", {
       expected_content_hash: "hash-4",
     });
+  });
+
+  it("summarizes write outcome side effects", () => {
+    expect(describeWriteOutcome(outcome())).toBeNull();
+    expect(
+      describeWriteOutcome(outcome({ git_sync_warning: "push failed" })),
+    ).toBe("Git sync warning: push failed");
+    expect(describeWriteOutcome(outcome({ rewritten_notes: 1 }))).toBe(
+      "Updated 1 linking note.",
+    );
+    expect(
+      describeWriteOutcome(
+        outcome({ rewritten_notes: 3, moved_assets: 2 }),
+      ),
+    ).toBe("Updated 3 linking notes. Moved 2 assets.");
+    expect(
+      describeWriteOutcome(outcome({ trashed_path: "90-archive/Home.md" })),
+    ).toBe("Moved to trash: 90-archive/Home.md.");
   });
 
   it("maps conflict and write errors to named exceptions", async () => {

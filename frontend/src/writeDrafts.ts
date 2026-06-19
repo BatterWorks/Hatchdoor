@@ -58,3 +58,40 @@ export function clearNoteDraft(slug: string): void {
     // Ignore storage failures.
   }
 }
+
+const NOTE_DRAFT_PREFIX = "hatchdoor:draft:note:";
+
+/**
+ * Remove note drafts older than `maxAgeMs`. Drafts are only meant to bridge an
+ * interrupted edit; without pruning they accumulate in localStorage forever.
+ * Returns the number of drafts removed.
+ */
+export function pruneNoteDrafts(maxAgeMs: number, now: number = Date.now()): number {
+  let removed = 0;
+  try {
+    const staleKeys: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (!key || !key.startsWith(NOTE_DRAFT_PREFIX)) {
+        continue;
+      }
+      const raw = window.localStorage.getItem(key);
+      let savedAt: unknown;
+      try {
+        savedAt = raw ? (JSON.parse(raw) as Partial<NoteDraft>).savedAt : null;
+      } catch {
+        savedAt = null;
+      }
+      if (typeof savedAt !== "number" || now - savedAt > maxAgeMs) {
+        staleKeys.push(key);
+      }
+    }
+    for (const key of staleKeys) {
+      window.localStorage.removeItem(key);
+      removed += 1;
+    }
+  } catch {
+    // Ignore storage failures.
+  }
+  return removed;
+}
