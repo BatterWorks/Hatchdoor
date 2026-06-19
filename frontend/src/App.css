@@ -7,3 +7,60 @@
 @import "./styles/responsive.css";
 @import "./styles/stats.css";
 @import "./styles/graph.css";
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: var(--overlay-bg);
+}
+
+.modal-panel {
+  width: min(520px, 100%);
+  max-height: min(720px, calc(100vh - 2rem));
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 1rem;
+}
+
+.modal-panel h2 {
+  margin: 0 0 0.5rem;
+}
+
+.modal-panel form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.modal-panel label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.modal-panel input,
+.modal-panel textarea {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.65rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.modal-panel textarea {
+  min-height: 8rem;
+  resize: vertical;
+  font: 0.95rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
