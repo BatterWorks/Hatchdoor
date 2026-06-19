@@ -33,6 +33,10 @@ import { useIsMobile } from "./app/useIsMobile";
 import { useTheme } from "./app/useTheme";
 import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
 import { copyText } from "./clipboard";
+import {
+  NoteActionsDialog,
+  type NoteActionDialogKind,
+} from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
 import { TokenPrompt } from "./components/TokenPrompt";
@@ -40,7 +44,13 @@ import { GraphPage } from "./components/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
-import { getWriteCapabilities } from "./writeApi";
+import {
+  createNote,
+  deleteNote,
+  getWriteCapabilities,
+  moveNote,
+  renameNote,
+} from "./writeApi";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
@@ -82,6 +92,9 @@ function App() {
   const [authRequired, setAuthRequired] = useState(false);
   const [writeEnabled, setWriteEnabled] = useState(false);
   const [editRequestId, setEditRequestId] = useState(0);
+  const [noteActionDialog, setNoteActionDialog] =
+    useState<NoteActionDialogKind | null>(null);
+  const [noteActionError, setNoteActionError] = useState<string | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -488,6 +501,92 @@ function App() {
     anchor.remove();
   }, [activeNote]);
 
+  const closeNoteActionDialog = useCallback(() => {
+    setNoteActionDialog(null);
+    setNoteActionError(null);
+  }, []);
+
+  const requireActiveNoteHash = useCallback(() => {
+    if (!activeNote?.slug || !activeNote.contentHash) {
+      throw new Error("Current note is not ready for write actions");
+    }
+    return { slug: activeNote.slug, contentHash: activeNote.contentHash };
+  }, [activeNote]);
+
+  const handleCreateNote = useCallback(
+    async (relativePath: string, content: string) => {
+      setNoteActionError(null);
+      try {
+        const outcome = await createNote(relativePath, content);
+        setNoteActionDialog(null);
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        }
+      } catch (error) {
+        setNoteActionError(
+          error instanceof Error ? error.message : "Create failed",
+        );
+      }
+    },
+    [navigate, refreshVault],
+  );
+
+  const handleRenameNote = useCallback(
+    async (newTitle: string) => {
+      setNoteActionError(null);
+      try {
+        const { slug, contentHash } = requireActiveNoteHash();
+        const outcome = await renameNote(slug, newTitle, contentHash);
+        setNoteActionDialog(null);
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        }
+      } catch (error) {
+        setNoteActionError(
+          error instanceof Error ? error.message : "Rename failed",
+        );
+      }
+    },
+    [navigate, refreshVault, requireActiveNoteHash],
+  );
+
+  const handleMoveNote = useCallback(
+    async (targetFolder: string) => {
+      setNoteActionError(null);
+      try {
+        const { slug, contentHash } = requireActiveNoteHash();
+        const outcome = await moveNote(slug, targetFolder, contentHash);
+        setNoteActionDialog(null);
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        }
+      } catch (error) {
+        setNoteActionError(
+          error instanceof Error ? error.message : "Move failed",
+        );
+      }
+    },
+    [navigate, refreshVault, requireActiveNoteHash],
+  );
+
+  const handleDeleteNote = useCallback(async () => {
+    setNoteActionError(null);
+    try {
+      const { slug, contentHash } = requireActiveNoteHash();
+      await deleteNote(slug, contentHash);
+      setNoteActionDialog(null);
+      await refreshVault();
+      navigate("/");
+    } catch (error) {
+      setNoteActionError(
+        error instanceof Error ? error.message : "Delete failed",
+      );
+    }
+  }, [navigate, refreshVault, requireActiveNoteHash]);
+
   return (
     <div
       className={`app-shell ${drawerOpen ? "drawer-open" : ""}`}
@@ -525,6 +624,22 @@ function App() {
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
         onEditNote={() => setEditRequestId((prev) => prev + 1)}
+        onNewNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("create");
+        }}
+        onRenameNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("rename");
+        }}
+        onMoveNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("move");
+        }}
+        onDeleteNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("delete");
+        }}
         onToggleProperties={toggleProperties}
         onCycleTheme={cycleTheme}
       />
@@ -644,6 +759,20 @@ function App() {
             const suffix = params.toString();
             navigate(`/n/${selection.slug}${suffix ? `?${suffix}` : ""}`);
           }}
+        />
+      ) : null}
+
+      {noteActionDialog ? (
+        <NoteActionsDialog
+          kind={noteActionDialog}
+          error={noteActionError}
+          onClose={closeNoteActionDialog}
+          onCreate={(relativePath, content) =>
+            void handleCreateNote(relativePath, content)
+          }
+          onRename={(newTitle) => void handleRenameNote(newTitle)}
+          onMove={(targetFolder) => void handleMoveNote(targetFolder)}
+          onDelete={() => void handleDeleteNote()}
         />
       ) : null}
     </div>

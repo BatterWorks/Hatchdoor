@@ -222,6 +222,7 @@ export function NotePage({
       slug: note.slug,
       relativePath: note.relative_path,
       exportContent: stripVaultNoteLinks(parsed.body),
+      contentHash: note.content_hash,
     });
   }, [note, onActiveNoteChange, parsed.body]);
 

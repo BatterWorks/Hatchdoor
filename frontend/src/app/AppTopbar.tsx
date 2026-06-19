@@ -29,6 +29,10 @@ type TopbarProps = {
   onCopyNoteLink: () => void;
   onDownloadMarkdown: () => void;
   onEditNote: () => void;
+  onNewNote: () => void;
+  onRenameNote: () => void;
+  onMoveNote: () => void;
+  onDeleteNote: () => void;
   onToggleProperties: () => void;
   onCycleTheme: () => void;
 };
@@ -51,6 +55,10 @@ export function AppTopbar({
   onCopyNoteLink,
   onDownloadMarkdown,
   onEditNote,
+  onNewNote,
+  onRenameNote,
+  onMoveNote,
+  onDeleteNote,
   onToggleProperties,
   onCycleTheme,
 }: TopbarProps) {
@@ -179,6 +187,18 @@ export function AppTopbar({
                 >
                   Refresh vault
                 </UiButton>
+                {writeEnabled ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onNewNote();
+                    }}
+                  >
+                    New note
+                  </UiButton>
+                ) : null}
                 {activeNote && writeEnabled ? (
                   <UiButton
                     className="close-note"
@@ -189,6 +209,42 @@ export function AppTopbar({
                     }}
                   >
                     Edit note
+                  </UiButton>
+                ) : null}
+                {activeNote && writeEnabled ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onRenameNote();
+                    }}
+                  >
+                    Rename note
+                  </UiButton>
+                ) : null}
+                {activeNote && writeEnabled ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onMoveNote();
+                    }}
+                  >
+                    Move note
+                  </UiButton>
+                ) : null}
+                {activeNote && writeEnabled ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onDeleteNote();
+                    }}
+                  >
+                    Delete note
                   </UiButton>
                 ) : null}
                 {activeNote ? (

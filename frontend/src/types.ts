@@ -53,6 +53,7 @@ export type ActiveNoteMeta = {
   slug: string;
   relativePath: string;
   exportContent?: string;
+  contentHash?: string;
 };
 
 export type RecentNote = ActiveNoteMeta & {
