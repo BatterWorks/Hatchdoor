@@ -139,4 +139,31 @@ describe("NoteEditor conflict review", () => {
       screen.getByRole("button", { name: "Keep draft on latest" }),
     ).toBeInTheDocument();
   });
+
+  it("keeps conflict review focused by hiding generic notices", () => {
+    render(
+      <NoteEditor
+        content={"# Home\nDraft"}
+        saving={false}
+        error={null}
+        notice="This note changed on disk while you were editing."
+        onChange={() => {}}
+        onSave={() => {}}
+        onCancel={() => {}}
+        conflictReview={{
+          diskContent: "# Home\nDisk",
+          draftContent: "# Home\nDraft",
+          onUseDisk: vi.fn(),
+          onKeepDraft: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("region", { name: "Conflict review" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("This note changed on disk while you were editing."),
+    ).not.toBeInTheDocument();
+  });
 });

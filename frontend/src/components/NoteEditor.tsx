@@ -303,12 +303,14 @@ export function NoteEditor({
           {error}
         </p>
       ) : null}
-      {notice ? (
+      {notice && !conflictReview ? (
         <p className="note-editor-notice" role="status">
           {notice}
         </p>
       ) : null}
-      {attachmentNotice ? <AttachmentNotice notice={attachmentNotice} /> : null}
+      {attachmentNotice && !conflictReview ? (
+        <AttachmentNotice notice={attachmentNotice} />
+      ) : null}
       {conflictReview ? (
         <ConflictReviewPanel conflictReview={conflictReview} saving={saving} />
       ) : null}
