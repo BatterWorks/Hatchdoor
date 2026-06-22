@@ -70,9 +70,29 @@
   position: relative;
 }
 
+.note-editor-input.drag-active .note-editor-textarea {
+  border-color: var(--accent, var(--ink));
+  box-shadow: inset 0 0 0 1px var(--accent, var(--ink));
+}
+
+.note-editor-drop-target {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent, var(--ink));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--paper) 86%, transparent);
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
 .note-editor-properties {
   display: grid;
-  gap: 0.5rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
   margin-bottom: 0.75rem;
   padding: 0.75rem;
   border: 1px solid var(--rule);
@@ -82,11 +102,16 @@
 
 .note-editor-property {
   display: grid;
-  grid-template-columns: minmax(6rem, 10rem) 1fr;
-  gap: 0.75rem;
-  align-items: center;
+  gap: 0.3rem;
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+.note-editor-property-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .note-editor-property input {
@@ -102,7 +127,7 @@
 .note-editor-conflict {
   display: grid;
   gap: 0.75rem;
-  padding: 0.75rem;
+  padding: 0.85rem;
   border: 1px solid var(--rule);
   border-radius: 6px;
   background: var(--surface, rgba(127, 127, 127, 0.06));
@@ -121,10 +146,24 @@
   font-size: 1rem;
 }
 
+.note-editor-conflict-header p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .note-editor-conflict-actions {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+}
+
+.note-editor-conflict-primary {
+  font-weight: 700;
+}
+
+.note-editor-conflict-secondary {
+  opacity: 0.75;
 }
 
 .note-editor-conflict-diff {
@@ -137,7 +176,7 @@
 
 .note-editor-conflict-line {
   display: grid;
-  grid-template-columns: 4rem 1fr;
+  grid-template-columns: 4.5rem 1fr;
   gap: 0.5rem;
   padding: 0.25rem 0.5rem;
   border-bottom: 1px solid var(--rule);
@@ -148,11 +187,11 @@
 }
 
 .note-editor-conflict-line.disk {
-  background: rgba(220, 80, 80, 0.12);
+  background: rgba(190, 85, 75, 0.12);
 }
 
 .note-editor-conflict-line.draft {
-  background: rgba(80, 140, 220, 0.12);
+  background: rgba(70, 120, 170, 0.12);
 }
 
 .note-editor-conflict-marker {
@@ -230,6 +269,37 @@
   background: var(--paper);
   color: var(--ink);
   font-size: 0.88rem;
+}
+
+.note-editor-notice.attachment-loading {
+  border-style: dashed;
+}
+
+.note-editor-notice.attachment-success {
+  border-color: color-mix(in srgb, var(--ink) 28%, var(--rule));
+}
+
+.note-editor-notice.attachment-error {
+  border-color: rgba(190, 85, 75, 0.5);
+  background: rgba(190, 85, 75, 0.08);
+}
+
+@media (max-width: 720px) {
+  .note-editor-properties {
+    grid-template-columns: 1fr;
+  }
+
+  .note-editor-conflict-actions {
+    width: 100%;
+  }
+
+  .note-editor-conflict-actions .ui-button {
+    flex: 1 1 100%;
+  }
+
+  .note-editor-conflict-line {
+    grid-template-columns: 3.75rem 1fr;
+  }
 }
 
 .modal-backdrop {
