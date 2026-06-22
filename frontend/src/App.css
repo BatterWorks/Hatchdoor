@@ -66,6 +66,138 @@
   opacity: 0.6;
 }
 
+.note-editor-input {
+  position: relative;
+}
+
+.note-editor-properties {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface, rgba(127, 127, 127, 0.06));
+}
+
+.note-editor-property {
+  display: grid;
+  grid-template-columns: minmax(6rem, 10rem) 1fr;
+  gap: 0.75rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.note-editor-property input {
+  min-width: 0;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0.35rem 0.45rem;
+  font: inherit;
+}
+
+.note-editor-conflict {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface, rgba(127, 127, 127, 0.06));
+}
+
+.note-editor-conflict-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.note-editor-conflict-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.note-editor-conflict-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.note-editor-conflict-diff {
+  display: grid;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+.note-editor-conflict-line {
+  display: grid;
+  grid-template-columns: 4rem 1fr;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.note-editor-conflict-line:last-child {
+  border-bottom: 0;
+}
+
+.note-editor-conflict-line.disk {
+  background: rgba(220, 80, 80, 0.12);
+}
+
+.note-editor-conflict-line.draft {
+  background: rgba(80, 140, 220, 0.12);
+}
+
+.note-editor-conflict-marker {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.note-editor-conflict-line code {
+  white-space: pre-wrap;
+}
+
+.note-editor-autocomplete {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 0.15rem 0 0;
+  padding: 0.25rem;
+  list-style: none;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+.note-editor-autocomplete-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.note-editor-autocomplete-item.active,
+.note-editor-autocomplete-item:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.15));
+}
+
 .note-editor-preview {
   border: 1px solid var(--rule);
   border-radius: 6px;
@@ -148,7 +280,12 @@
 .modal-panel textarea {
   min-height: 8rem;
   resize: vertical;
-  font: 0.95rem/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font:
+    0.95rem/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
 }
 
 .modal-actions {

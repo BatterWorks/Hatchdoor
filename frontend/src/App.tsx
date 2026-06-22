@@ -56,6 +56,7 @@ import {
 import { validateNotePath } from "./writePaths";
 import { pruneNoteDrafts } from "./writeDrafts";
 import { collectFolderPaths } from "./app/folderPaths";
+import { flattenNoteCandidates } from "./app/noteCandidates";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
@@ -155,6 +156,7 @@ function App() {
   }, []);
 
   const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
+  const noteCandidates = useMemo(() => flattenNoteCandidates(tree), [tree]);
 
   const openCreateDialog = useCallback((folder: string) => {
     setNoteActionError(null);
@@ -803,6 +805,7 @@ function App() {
                   writeEnabled={writeEnabled}
                   editRequestId={editRequestId}
                   onWriteNotice={setWriteNotice}
+                  noteCandidates={noteCandidates}
                 />
               }
             />

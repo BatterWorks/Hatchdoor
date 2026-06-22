@@ -14,7 +14,11 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { parseFrontmatter, stripBlockIds, stripVaultNoteLinks } from "../markdown";
+import {
+  parseFrontmatter,
+  stripBlockIds,
+  stripVaultNoteLinks,
+} from "../markdown";
 import { extractMarkdownHeadings, slugifyHeading } from "../noteHeadings";
 import {
   createSearchHighlightPlugin,
@@ -24,16 +28,17 @@ import {
 import { isNoteEqual, isNoteLinksEqual } from "../stateCompare";
 import type {
   ActiveNoteMeta,
+  ExplorerNote,
   Note,
   NoteLinks,
   NoteLinksResponse,
 } from "../types";
-import { describeWriteOutcome, updateNote } from "../writeApi";
 import {
-  clearNoteDraft,
-  loadNoteDraft,
-  saveNoteDraft,
-} from "../writeDrafts";
+  describeWriteOutcome,
+  updateNote,
+  uploadAttachment,
+} from "../writeApi";
+import { clearNoteDraft, loadNoteDraft, saveNoteDraft } from "../writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
@@ -56,6 +61,7 @@ export function NotePage({
   writeEnabled,
   editRequestId,
   onWriteNotice,
+  noteCandidates = [],
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   onTagSelect: (tag: string) => void;
@@ -64,6 +70,7 @@ export function NotePage({
   writeEnabled: boolean;
   editRequestId: number;
   onWriteNotice?: (message: string | null) => void;
+  noteCandidates?: ExplorerNote[];
 }) {
   const params = useParams<{ slug: string }>();
   const location = useLocation();
@@ -78,6 +85,7 @@ export function NotePage({
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const [draftStale, setDraftStale] = useState(false);
   const [conflict, setConflict] = useState(false);
+  const [conflictNote, setConflictNote] = useState<Note | null>(null);
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -167,7 +175,10 @@ export function NotePage({
   }, [slug]);
 
   useEffect(() => {
-    if (vaultRevision === 0 || vaultRevision === lastHandledRevisionRef.current) {
+    if (
+      vaultRevision === 0 ||
+      vaultRevision === lastHandledRevisionRef.current
+    ) {
       return;
     }
     lastHandledRevisionRef.current = vaultRevision;
@@ -270,7 +281,10 @@ export function NotePage({
     });
   }, [note, onActiveNoteChange, parsed.body]);
 
-  const markdown = useResolvedWikilinks(stripBlockIds(parsed.body), note?.relative_path ?? "");
+  const markdown = useResolvedWikilinks(
+    stripBlockIds(parsed.body),
+    note?.relative_path ?? "",
+  );
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
@@ -289,7 +303,10 @@ export function NotePage({
   );
   const markdownComponents = useMemo(() => {
     const headingCounts = new Map<string, number>();
-    return createNoteMarkdownComponents(note?.relative_path ?? "", headingCounts);
+    return createNoteMarkdownComponents(
+      note?.relative_path ?? "",
+      headingCounts,
+    );
   }, [note?.relative_path]);
 
   useLayoutEffect(() => {
@@ -362,6 +379,7 @@ export function NotePage({
     setDraftNotice(null);
     setDraftStale(false);
     setConflict(false);
+    setConflictNote(null);
     setSaving(false);
     setIsEditing(false);
 
@@ -396,6 +414,7 @@ export function NotePage({
         savedAt: Date.now(),
       });
       setConflict(false);
+      setConflictNote(null);
       setNoteChangedOnDisk(false);
       setDraftStale(false);
       setDraftNotice(
@@ -418,6 +437,7 @@ export function NotePage({
       const outcome = await updateNote(note.slug, draftContent, editBaseHash);
       clearNoteDraft(note.slug);
       setConflict(false);
+      setConflictNote(null);
       setNoteChangedOnDisk(false);
       setDraftStale(false);
       setDraftNotice(null);
@@ -439,8 +459,19 @@ export function NotePage({
     } catch (saveError) {
       if (saveError instanceof Error && saveError.name === "ConflictError") {
         setConflict(true);
+        try {
+          const res = await apiFetch(
+            `/api/note/${encodeURIComponent(note.slug)}`,
+          );
+          if (res.ok) {
+            const json = (await res.json()) as { note: Note };
+            setConflictNote(json.note);
+          }
+        } catch {
+          // The generic conflict error still leaves the draft safe in the editor.
+        }
         setEditorError(
-          "This note changed on disk since you started editing. Your draft is safe — reload the latest version, then save again to apply your changes.",
+          "This note changed on disk since you started editing. Review the disk version against your draft before saving again.",
         );
       } else if (saveError instanceof Error) {
         setEditorError(saveError.message);
@@ -451,6 +482,58 @@ export function NotePage({
       setSaving(false);
       setLoading(false);
     }
+  };
+
+  const handleUseConflictDiskVersion = () => {
+    if (!conflictNote) {
+      return;
+    }
+    setNote(conflictNote);
+    setDraftContent(conflictNote.content);
+    setEditBaseHash(conflictNote.content_hash);
+    saveNoteDraft(conflictNote.slug, {
+      slug: conflictNote.slug,
+      content: conflictNote.content,
+      baseContentHash: conflictNote.content_hash,
+      savedAt: Date.now(),
+    });
+    setConflict(false);
+    setConflictNote(null);
+    setNoteChangedOnDisk(false);
+    setDraftStale(false);
+    setEditorError(null);
+    setDraftNotice("Using the disk version. Edit it, then Save when ready.");
+  };
+
+  const handleKeepConflictDraft = () => {
+    if (!conflictNote) {
+      return;
+    }
+    setNote(conflictNote);
+    setEditBaseHash(conflictNote.content_hash);
+    saveNoteDraft(conflictNote.slug, {
+      slug: conflictNote.slug,
+      content: draftContent,
+      baseContentHash: conflictNote.content_hash,
+      savedAt: Date.now(),
+    });
+    setConflict(false);
+    setConflictNote(null);
+    setNoteChangedOnDisk(false);
+    setDraftStale(false);
+    setEditorError(null);
+    setDraftNotice(
+      "Keeping your draft against the latest disk version. Review it, then Save again.",
+    );
+  };
+
+  const handleUploadAttachment = async (file: File): Promise<string> => {
+    const filename = safeAttachmentFilename(file.name);
+    const outcome = await uploadAttachment(file, `Attachments/${filename}`);
+    if (outcome.git_sync_warning) {
+      onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
+    }
+    return outcome.attachment.relative_path;
   };
 
   return (
@@ -501,15 +584,24 @@ export function NotePage({
                 : draftNotice
             }
             canReload={conflict || noteChangedOnDisk || draftStale}
+            noteCandidates={noteCandidates}
+            conflictReview={
+              conflictNote
+                ? {
+                    diskContent: conflictNote.content,
+                    draftContent,
+                    onUseDisk: handleUseConflictDiskVersion,
+                    onKeepDraft: handleKeepConflictDraft,
+                  }
+                : null
+            }
             onChange={setDraftContent}
             onSave={handleSave}
             onReload={handleReloadLatest}
             onCancel={handleCancelEditing}
+            onUploadAttachment={handleUploadAttachment}
             renderPreview={(value) => (
-              <NotePreview
-                content={value}
-                relativePath={note.relative_path}
-              />
+              <NotePreview content={value} relativePath={note.relative_path} />
             )}
           />
         ) : (
@@ -528,4 +620,9 @@ export function NotePage({
       <NoteTocDesktop headings={tocHeadings} />
     </div>
   );
+}
+
+function safeAttachmentFilename(filename: string): string {
+  const basename = filename.split(/[\\/]/).pop()?.trim() || "attachment";
+  return basename.replace(/[^A-Za-z0-9._ -]/g, "-");
 }

@@ -18,7 +18,8 @@ use hatchdoor::handlers::{
     move_rename_note_handler, note_download_handler, note_handler, note_links_handler,
     recently_modified_handler, refresh_handler, rename_note_handler, resolve_batch_handler,
     resolve_handler, search_handler, spa_index_handler, stats_handler, tree_handler,
-    update_note_handler, vault_asset_handler, vault_events_handler, write_capabilities_handler,
+    update_note_handler, upload_attachment_handler, vault_asset_handler, vault_events_handler,
+    write_capabilities_handler,
 };
 use hatchdoor::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
@@ -47,6 +48,7 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .route("/api/vault-events", get(vault_events_handler))
         .route("/api/recently-modified", get(recently_modified_handler))
         .route("/api/note", post(create_note_handler))
+        .route("/api/attachment", post(upload_attachment_handler))
         .route(
             "/api/note/{slug}",
             get(note_handler)
@@ -686,6 +688,55 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(payload["enabled"], true);
         assert!(payload["warnings"].as_array().expect("warnings").is_empty());
+    }
+
+    #[tokio::test]
+    async fn router_uploads_attachment_into_vault() {
+        let (app, tmp) = app_for_tests();
+        let boundary = "hatchdoor-test-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"target_relative_path\"\r\n\r\n\
+             Attachments/pasted.png\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"pasted.png\"\r\n\
+             Content-Type: image/png\r\n\r\n"
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(b"png-bytes".iter().copied())
+        .chain(format!("\r\n--{boundary}--\r\n").into_bytes())
+        .collect::<Vec<_>>();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/attachment")
+                    .method("POST")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            json["attachment"]["relative_path"],
+            "Attachments/pasted.png"
+        );
+        assert_eq!(json["attachment"]["size_bytes"], 9);
+        assert_eq!(
+            std::fs::read(tmp.path().join("vault/Attachments/pasted.png")).expect("file"),
+            b"png-bytes"
+        );
     }
 
     #[tokio::test]
