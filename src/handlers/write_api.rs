@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path, State};
+use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,8 @@ use crate::api_types::ErrorResponse;
 use crate::app_state::{AppState, internal_error, refresh_now};
 use crate::git::WriteRecord;
 use crate::vault::{
-    VaultIndex, WriteError, WriteOutcome, create_note, delete_note, move_or_rename_note,
-    update_note,
+    AttachmentInfo, AttachmentOutcome, VaultIndex, WriteError, WriteOutcome, create_note,
+    delete_note, import_attachment_bytes, move_or_rename_note, update_note,
 };
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +72,16 @@ struct WriteOutcomeResponse {
     pub git_sync_warning: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct AttachmentOutcomeResponse {
+    pub ok: bool,
+    pub attachment: AttachmentInfo,
+    pub rewritten_notes: usize,
+    pub trashed_path: Option<String>,
+    pub cleanup_warning: Option<String>,
+    pub git_sync_warning: Option<String>,
+}
+
 pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl IntoResponse {
     let warnings = if state.web_auth_enabled {
         Vec::new()
@@ -88,6 +98,95 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
         }),
     )
         .into_response()
+}
+
+pub async fn upload_attachment_handler(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut target_relative_path: Option<String> = None;
+    let mut file_bytes: Option<Vec<u8>> = None;
+
+    while let Some(field) = match multipart.next_field().await {
+        Ok(field) => field,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("invalid multipart upload: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    } {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "target_relative_path" {
+            let value = match field.text().await {
+                Ok(value) => value,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("invalid target_relative_path field: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            target_relative_path = Some(value);
+        } else if name == "file" {
+            let bytes = match field.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: format!("invalid file field: {error}"),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
+            file_bytes = Some(bytes.to_vec());
+        }
+    }
+
+    let target_relative_path = match non_empty_input(
+        "target_relative_path",
+        target_relative_path.unwrap_or_default(),
+    ) {
+        Ok(path) => path,
+        Err(err) => return err.into_response(),
+    };
+    let file_bytes = match file_bytes {
+        Some(bytes) if !bytes.is_empty() => bytes,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "file field is required".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let _guard = state.vault_write_lock.clone().lock_owned().await;
+    let outcome = match import_attachment_bytes(
+        &state.vault_path,
+        &target_relative_path,
+        &file_bytes,
+        state.mcp_config.max_attachment_bytes,
+        false,
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => return write_error_response(err),
+    };
+
+    match finalize_attachment_write_response(&state, outcome).await {
+        Ok(response) => response.into_response(),
+        Err(err) => err.into_response(),
+    }
 }
 
 pub async fn create_note_handler(
@@ -354,6 +453,30 @@ async fn finalize_note_write_response(
     let response =
         write_response_from_outcome(&refreshed_index, outcome, git_sync_warning(state).await)?;
     Ok((StatusCode::OK, Json(response)))
+}
+
+async fn finalize_attachment_write_response(
+    state: &AppState,
+    outcome: AttachmentOutcome,
+) -> Result<(StatusCode, Json<AttachmentOutcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
+    state.record_vault_write(WriteRecord {
+        op: "upload_attachment".to_string(),
+        target: outcome.attachment.relative_path.clone(),
+        affected_paths: outcome.affected_paths.clone(),
+        summary: None,
+    });
+    refresh_after_write(state).await?;
+    Ok((
+        StatusCode::OK,
+        Json(AttachmentOutcomeResponse {
+            ok: true,
+            attachment: outcome.attachment,
+            rewritten_notes: outcome.rewritten_notes,
+            trashed_path: outcome.trashed_path,
+            cleanup_warning: outcome.cleanup_warning,
+            git_sync_warning: git_sync_warning(state).await,
+        }),
+    ))
 }
 
 async fn refresh_after_write(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {

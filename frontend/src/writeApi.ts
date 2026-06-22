@@ -1,5 +1,9 @@
 import { apiFetch } from "./api";
-import type { WriteCapabilities, WriteOutcome } from "./types";
+import type {
+  AttachmentOutcome,
+  WriteCapabilities,
+  WriteOutcome,
+} from "./types";
 
 /**
  * Build a human-readable summary of the side effects reported by a write so
@@ -81,6 +85,23 @@ export function createNote(
     method: "POST",
     body: JSON.stringify({ relative_path: relativePath, content }),
   });
+}
+
+export async function uploadAttachment(
+  file: File,
+  targetRelativePath: string,
+): Promise<AttachmentOutcome> {
+  const form = new FormData();
+  form.set("target_relative_path", targetRelativePath);
+  form.set("file", file);
+  const res = await apiFetch("/api/attachment", {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw makeWriteError(await parseError(res), res.status);
+  }
+  return (await res.json()) as AttachmentOutcome;
 }
 
 export function updateNote(

@@ -48,6 +48,19 @@ export type WriteOutcome = {
   trashed_path: string | null;
 };
 
+export type AttachmentOutcome = {
+  ok: boolean;
+  attachment: {
+    relative_path: string;
+    size_bytes: number;
+    content_hash: string;
+  };
+  git_sync_warning: string | null;
+  rewritten_notes: number;
+  trashed_path: string | null;
+  cleanup_warning: string | null;
+};
+
 export type ActiveNoteMeta = {
   title: string;
   slug: string;
@@ -144,7 +157,12 @@ export type VaultStats = {
   modified_this_month: NoteList;
 };
 
-export type GraphNode = { slug: string; title: string; primary_tag: string | null; backlink_count: number };
+export type GraphNode = {
+  slug: string;
+  title: string;
+  primary_tag: string | null;
+  backlink_count: number;
+};
 export type GraphEdge = { source: string; target: string };
 export type GraphData = { nodes: GraphNode[]; edges: GraphEdge[] };
 

@@ -9,6 +9,7 @@ import {
   moveNote,
   renameNote,
   updateNote,
+  uploadAttachment,
 } from "./writeApi";
 import type { WriteOutcome } from "./types";
 
@@ -163,6 +164,35 @@ describe("writeApi", () => {
     });
   });
 
+  it("uploads an attachment as multipart form data", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        attachment: {
+          relative_path: "Attachments/pasted.png",
+          size_bytes: 9,
+          content_hash: "fnv1a64:test",
+        },
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        trashed_path: null,
+        cleanup_warning: null,
+      }),
+    );
+
+    const file = new File(["png-bytes"], "pasted.png", { type: "image/png" });
+    await uploadAttachment(file, "Attachments/pasted.png");
+
+    const [url, init] = mockedApiFetch.mock.calls[0] ?? [];
+    expect(url).toBe("/api/attachment");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBeInstanceOf(FormData);
+    expect((init?.body as FormData).get("target_relative_path")).toBe(
+      "Attachments/pasted.png",
+    );
+    expect((init?.body as FormData).get("file")).toBe(file);
+  });
+
   it("summarizes write outcome side effects", () => {
     expect(describeWriteOutcome(outcome())).toBeNull();
     expect(
@@ -172,9 +202,7 @@ describe("writeApi", () => {
       "Updated 1 linking note.",
     );
     expect(
-      describeWriteOutcome(
-        outcome({ rewritten_notes: 3, moved_assets: 2 }),
-      ),
+      describeWriteOutcome(outcome({ rewritten_notes: 3, moved_assets: 2 })),
     ).toBe("Updated 3 linking notes. Moved 2 assets.");
     expect(
       describeWriteOutcome(outcome({ trashed_path: "90-archive/Home.md" })),
@@ -190,9 +218,7 @@ describe("writeApi", () => {
       message: "changed",
     });
 
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({ error: "boom" }, 500),
-    );
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ error: "boom" }, 500));
     await expect(deleteNote("home", "hash-1")).rejects.toMatchObject({
       name: "WriteApiError",
       message: "boom",

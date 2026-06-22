@@ -6,7 +6,7 @@ default-run = "hatchdoor"
 
 [dependencies]
 ahash = "0.8"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 blake3 = "1"
 bytemuck = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
