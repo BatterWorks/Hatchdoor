@@ -558,10 +558,10 @@ describe("App write mode", () => {
     expect(screen.getByText("Disk edit")).toBeInTheDocument();
     expect(screen.getByText("My draft")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Use disk version" }),
+      screen.getByRole("button", { name: "Discard draft and use disk" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Keep my draft" }),
+      screen.getByRole("button", { name: "Keep draft on latest" }),
     ).toBeInTheDocument();
   });
 

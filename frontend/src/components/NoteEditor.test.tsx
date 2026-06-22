@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
+import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NoteEditor } from "./NoteEditor";
@@ -12,10 +13,12 @@ function FrontmatterHarness({
   initialContent,
   onSaveContent,
   uploadAttachment,
+  conflictReview,
 }: {
   initialContent: string;
   onSaveContent: (content: string) => void;
   uploadAttachment?: (file: File) => Promise<string>;
+  conflictReview?: ComponentProps<typeof NoteEditor>["conflictReview"];
 }) {
   const [content, setContent] = useState(initialContent);
 
@@ -28,6 +31,7 @@ function FrontmatterHarness({
       onSave={() => onSaveContent(content)}
       onCancel={() => {}}
       onUploadAttachment={uploadAttachment}
+      conflictReview={conflictReview}
     />
   );
 }
@@ -86,5 +90,53 @@ describe("NoteEditor attachment uploads", () => {
     await screen.findByText("Inserted attachment: Attachments/pasted.png");
     expect(uploadAttachment).toHaveBeenCalledWith(file);
     expect(textarea).toHaveValue("# Body\n![[Attachments/pasted.png]]");
+  });
+
+  it("shows a visible drop target while dragging an image over the editor", () => {
+    const uploadAttachment = vi.fn();
+
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    });
+    fireEvent.dragEnter(textarea, {
+      dataTransfer: {
+        files: [new File(["png-bytes"], "pasted.png", { type: "image/png" })],
+      },
+    });
+
+    expect(screen.getByText("Drop image to attach")).toBeInTheDocument();
+    expect(textarea.closest(".note-editor-input")).toHaveClass("drag-active");
+  });
+});
+
+describe("NoteEditor conflict review", () => {
+  it("gives conflict actions distinct, explicit labels", () => {
+    render(
+      <FrontmatterHarness
+        initialContent={"# Home\nDraft"}
+        onSaveContent={() => {}}
+        conflictReview={{
+          diskContent: "# Home\nDisk",
+          draftContent: "# Home\nDraft",
+          onUseDisk: vi.fn(),
+          onKeepDraft: vi.fn(),
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Discard draft and use disk" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Keep draft on latest" }),
+    ).toBeInTheDocument();
   });
 });

@@ -4,9 +4,9 @@ import {
   useMemo,
   useRef,
   useState,
-  type FormEvent,
   type ClipboardEvent,
   type DragEvent,
+  type FormEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -48,6 +48,11 @@ type NoteEditorProps = {
   renderPreview?: (content: string) => ReactNode;
 };
 
+type AttachmentNotice = {
+  tone: "loading" | "success" | "error";
+  message: string;
+};
+
 export function NoteEditor({
   content,
   saving,
@@ -67,7 +72,9 @@ export function NoteEditor({
   const listboxId = useId();
   const [preview, setPreview] = useState(false);
   const [trigger, setTrigger] = useState<WikilinkTrigger | null>(null);
-  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
+  const [attachmentNotice, setAttachmentNotice] =
+    useState<AttachmentNotice | null>(null);
+  const [dragActive, setDragActive] = useState(false);
   const [acIndex, setAcIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingCaretRef = useRef<number | null>(null);
@@ -158,7 +165,10 @@ export function NoteEditor({
       textarea.value.slice(0, start) + embed + textarea.value.slice(end);
     pendingCaretRef.current = start + embed.length;
     updateContentBody(nextBody);
-    setAttachmentNotice(`Inserted attachment: ${relativePath}`);
+    setAttachmentNotice({
+      tone: "success",
+      message: `Inserted attachment: ${relativePath}`,
+    });
   };
 
   const uploadEditorFile = async (
@@ -168,13 +178,16 @@ export function NoteEditor({
     if (!onUploadAttachment) {
       return;
     }
-    setAttachmentNotice("Uploading attachment...");
+    setAttachmentNotice({
+      tone: "loading",
+      message: "Uploading attachment...",
+    });
     try {
       const relativePath = await onUploadAttachment(file);
       insertAttachmentAtCaret(relativePath, textarea);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Upload failed.";
-      setAttachmentNotice(message);
+      setAttachmentNotice({ tone: "error", message });
     }
   };
 
@@ -202,7 +215,19 @@ export function NoteEditor({
       return;
     }
     event.preventDefault();
+    setDragActive(false);
     void uploadEditorFile(file, event.currentTarget);
+  };
+
+  const handleDragEnter = (event: DragEvent<HTMLTextAreaElement>) => {
+    if (onUploadAttachment && firstImageFile(event.dataTransfer.files)) {
+      event.preventDefault();
+      setDragActive(true);
+    }
+  };
+
+  const handleDragLeave = () => {
+    setDragActive(false);
   };
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -283,81 +308,24 @@ export function NoteEditor({
           {notice}
         </p>
       ) : null}
-      {attachmentNotice ? (
-        <p className="note-editor-notice" role="status">
-          {attachmentNotice}
-        </p>
-      ) : null}
+      {attachmentNotice ? <AttachmentNotice notice={attachmentNotice} /> : null}
       {conflictReview ? (
-        <section className="note-editor-conflict" aria-label="Conflict review">
-          <div className="note-editor-conflict-header">
-            <h3>Conflict review</h3>
-            <div className="note-editor-conflict-actions">
-              <UiButton
-                className="close-note"
-                type="button"
-                onClick={conflictReview.onUseDisk}
-                disabled={saving}
-              >
-                Use disk version
-              </UiButton>
-              <UiButton
-                className="close-note"
-                type="button"
-                onClick={conflictReview.onKeepDraft}
-                disabled={saving}
-              >
-                Keep my draft
-              </UiButton>
-            </div>
-          </div>
-          <div className="note-editor-conflict-diff">
-            {diffConflictLines(
-              conflictReview.diskContent,
-              conflictReview.draftContent,
-            ).map((line, index) => (
-              <div
-                // Diff rows can repeat, so the index is the stable row identity.
-                key={index}
-                className={`note-editor-conflict-line ${line.kind}`}
-              >
-                <span className="note-editor-conflict-marker">
-                  {line.kind === "same"
-                    ? " "
-                    : line.kind === "disk"
-                      ? "disk"
-                      : "draft"}
-                </span>
-                <code>{line.text}</code>
-              </div>
-            ))}
-          </div>
-        </section>
+        <ConflictReviewPanel conflictReview={conflictReview} saving={saving} />
       ) : null}
       {preview && renderPreview ? (
         renderPreview(content)
       ) : (
-        <div className="note-editor-input">
+        <div
+          className={
+            dragActive ? "note-editor-input drag-active" : "note-editor-input"
+          }
+        >
           {showFrontmatterFields ? (
-            <div
-              className="note-editor-properties"
-              aria-label="Frontmatter properties"
-            >
-              {frontmatterFields.entries.map((entry) => (
-                <label className="note-editor-property" key={entry.id}>
-                  <span>{entry.key}</span>
-                  <input
-                    type="text"
-                    value={entry.value}
-                    aria-label={`Property ${entry.key}`}
-                    disabled={saving}
-                    onChange={(event) =>
-                      updateFrontmatterField(entry.id, event.target.value)
-                    }
-                  />
-                </label>
-              ))}
-            </div>
+            <FrontmatterFields
+              entries={frontmatterFields.entries}
+              saving={saving}
+              onFieldChange={updateFrontmatterField}
+            />
           ) : null}
           <textarea
             id={textareaId}
@@ -384,38 +352,23 @@ export function NoteEditor({
                 event.preventDefault();
               }
             }}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             onKeyDown={handleTextareaKeyDown}
           />
+          {dragActive ? (
+            <div className="note-editor-drop-target" aria-hidden="true">
+              Drop image to attach
+            </div>
+          ) : null}
           {showAutocomplete ? (
-            <ul
+            <AutocompleteList
               id={listboxId}
-              className="note-editor-autocomplete"
-              role="listbox"
-              aria-label="Link suggestions"
-            >
-              {acItems.map((note, index) => (
-                <li key={note.slug} role="presentation">
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={index === acIndex}
-                    className={
-                      index === acIndex
-                        ? "note-editor-autocomplete-item active"
-                        : "note-editor-autocomplete-item"
-                    }
-                    // Keep the textarea selection while clicking.
-                    onMouseDown={(event) => {
-                      event.preventDefault();
-                      selectCandidate(note);
-                    }}
-                  >
-                    {note.title}
-                  </button>
-                </li>
-              ))}
-            </ul>
+              items={acItems}
+              activeIndex={acIndex}
+              onSelect={selectCandidate}
+            />
           ) : null}
         </div>
       )}
@@ -446,5 +399,141 @@ export function NoteEditor({
         </span>
       </div>
     </form>
+  );
+}
+
+function AttachmentNotice({ notice }: { notice: AttachmentNotice }) {
+  return (
+    <p className={`note-editor-notice attachment-${notice.tone}`} role="status">
+      {notice.message}
+    </p>
+  );
+}
+
+function FrontmatterFields({
+  entries,
+  saving,
+  onFieldChange,
+}: {
+  entries: FrontmatterEntry[];
+  saving: boolean;
+  onFieldChange: (id: string, value: string) => void;
+}) {
+  return (
+    <div className="note-editor-properties" aria-label="Frontmatter properties">
+      {entries.map((entry) => (
+        <label className="note-editor-property" key={entry.id}>
+          <span className="note-editor-property-label">{entry.key}</span>
+          <input
+            type="text"
+            value={entry.value}
+            aria-label={`Property ${entry.key}`}
+            disabled={saving}
+            onChange={(event) => onFieldChange(entry.id, event.target.value)}
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function ConflictReviewPanel({
+  conflictReview,
+  saving,
+}: {
+  conflictReview: NonNullable<NoteEditorProps["conflictReview"]>;
+  saving: boolean;
+}) {
+  return (
+    <section className="note-editor-conflict" aria-label="Conflict review">
+      <div className="note-editor-conflict-header">
+        <div>
+          <h3>Conflict review</h3>
+          <p>Compare the latest disk version with your draft before saving.</p>
+        </div>
+        <div className="note-editor-conflict-actions">
+          <UiButton
+            className="close-note note-editor-conflict-secondary"
+            type="button"
+            onClick={conflictReview.onUseDisk}
+            disabled={saving}
+          >
+            Discard draft and use disk
+          </UiButton>
+          <UiButton
+            className="close-note note-editor-conflict-primary"
+            type="button"
+            onClick={conflictReview.onKeepDraft}
+            disabled={saving}
+          >
+            Keep draft on latest
+          </UiButton>
+        </div>
+      </div>
+      <div className="note-editor-conflict-diff">
+        {diffConflictLines(
+          conflictReview.diskContent,
+          conflictReview.draftContent,
+        ).map((line, index) => (
+          <div
+            // Diff rows can repeat, so the index is the stable row identity.
+            key={index}
+            className={`note-editor-conflict-line ${line.kind}`}
+          >
+            <span className="note-editor-conflict-marker">
+              {line.kind === "same"
+                ? "same"
+                : line.kind === "disk"
+                  ? "disk"
+                  : "draft"}
+            </span>
+            <code>{line.text}</code>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AutocompleteList({
+  id,
+  items,
+  activeIndex,
+  onSelect,
+}: {
+  id: string;
+  items: ExplorerNote[];
+  activeIndex: number;
+  onSelect: (note: ExplorerNote) => void;
+}) {
+  return (
+    <ul
+      id={id}
+      className="note-editor-autocomplete"
+      role="listbox"
+      aria-label="Link suggestions"
+    >
+      {items.map((note, index) => (
+        <li key={note.slug} role="presentation">
+          <button
+            type="button"
+            role="option"
+            aria-selected={index === activeIndex}
+            className={
+              index === activeIndex
+                ? "note-editor-autocomplete-item active"
+                : "note-editor-autocomplete-item"
+            }
+            // Keep the textarea selection while clicking.
+            onMouseDown={(event) => {
+              event.preventDefault();
+              onSelect(note);
+            }}
+          >
+            {note.title}
+          </button>
+        </li>
+      ))}
+    </ul>
   );
 }
