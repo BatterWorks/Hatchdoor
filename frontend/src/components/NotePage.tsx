@@ -10,6 +10,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
 import { apiFetch } from "../api";
+import { normalizeImageForUpload } from "../imageUpload";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -528,8 +529,12 @@ export function NotePage({
   };
 
   const handleUploadAttachment = async (file: File): Promise<string> => {
-    const filename = safeAttachmentFilename(file.name);
-    const outcome = await uploadAttachment(file, `Attachments/${filename}`);
+    const normalizedFile = await normalizeImageForUpload(file);
+    const filename = safeAttachmentFilename(normalizedFile.name);
+    const outcome = await uploadAttachment(
+      normalizedFile,
+      `Attachments/${filename}`,
+    );
     if (outcome.git_sync_warning) {
       onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
     }
