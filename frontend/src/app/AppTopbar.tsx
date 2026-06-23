@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import { useEffect, useRef, type Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
 import type { ActiveNoteMeta } from "../types";
@@ -60,9 +60,27 @@ export function AppTopbar({
   onDeleteNote,
   onCycleTheme,
 }: TopbarProps) {
+  const actionsMenuRef = useRef<HTMLDivElement>(null);
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
+
+  useEffect(() => {
+    if (!actionsMenuOpen) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && actionsMenuRef.current?.contains(target)) {
+        return;
+      }
+      onCloseActionsMenu();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [actionsMenuOpen, onCloseActionsMenu]);
 
   return (
     <>
@@ -157,7 +175,7 @@ export function AppTopbar({
           >
             {THEME_ICON[theme]}
           </button>
-          <div style={{ position: "relative" }}>
+          <div className="topbar-menu-host" ref={actionsMenuRef}>
             <button
               type="button"
               className="icon-button"
@@ -168,118 +186,121 @@ export function AppTopbar({
             >
               ···
             </button>
-            {actionsMenuOpen ? (
-              <div className="topbar-menu" role="menu">
-                {writeEnabled ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onNewNote();
-                    }}
-                  >
-                    New note
-                  </UiButton>
-                ) : null}
-                {activeNote && writeEnabled ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onEditNote();
-                    }}
-                  >
-                    Edit note
-                  </UiButton>
-                ) : null}
-                {activeNote && writeEnabled ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onRenameNote();
-                    }}
-                  >
-                    Rename note
-                  </UiButton>
-                ) : null}
-                {activeNote && writeEnabled ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onMoveNote();
-                    }}
-                  >
-                    Move note
-                  </UiButton>
-                ) : null}
-                {activeNote && writeEnabled ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onArchiveNote();
-                    }}
-                  >
-                    Archive note
-                  </UiButton>
-                ) : null}
-                {activeNote && writeEnabled ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onDeleteNote();
-                    }}
-                  >
-                    Delete note
-                  </UiButton>
-                ) : null}
-                {activeNote ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onCopyPageContent();
-                    }}
-                  >
-                    Copy page content
-                  </UiButton>
-                ) : null}
-                {activeNote ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onDownloadMarkdown();
-                    }}
-                  >
-                    Download .md
-                  </UiButton>
-                ) : null}
-                {activeNote ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onCopyNoteLink();
-                    }}
-                  >
-                    Copy note link
-                  </UiButton>
-                ) : null}
-              </div>
-            ) : null}
+            <div
+              className="topbar-menu"
+              role="menu"
+              aria-hidden={!actionsMenuOpen}
+              data-open={actionsMenuOpen}
+            >
+              {writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onNewNote();
+                  }}
+                >
+                  New note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onEditNote();
+                  }}
+                >
+                  Edit note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onRenameNote();
+                  }}
+                >
+                  Rename note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onMoveNote();
+                  }}
+                >
+                  Move note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onArchiveNote();
+                  }}
+                >
+                  Archive note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onDeleteNote();
+                  }}
+                >
+                  Delete note
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onCopyPageContent();
+                  }}
+                >
+                  Copy page content
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onDownloadMarkdown();
+                  }}
+                >
+                  Download .md
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onCopyNoteLink();
+                  }}
+                >
+                  Copy note link
+                </UiButton>
+              ) : null}
+            </div>
           </div>
         </div>
       </header>
