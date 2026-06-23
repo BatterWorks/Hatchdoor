@@ -150,6 +150,16 @@ export function moveNote(
   });
 }
 
+export function archiveNote(
+  slug: string,
+  expectedContentHash: string,
+): Promise<WriteOutcome> {
+  return requestJson(`/api/note/${encodeURIComponent(slug)}/archive`, {
+    method: "PATCH",
+    body: JSON.stringify({ expected_content_hash: expectedContentHash }),
+  });
+}
+
 export function deleteNote(
   slug: string,
   expectedContentHash: string,

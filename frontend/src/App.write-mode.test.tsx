@@ -106,6 +106,22 @@ function mockReadAndWriteApi() {
           );
         }
 
+        if (url.includes("/api/note/home/archive") && method === "PATCH") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              slug: "archive-home",
+              relative_path: "90-archive/Home",
+              content_hash: "hash-archived",
+              git_sync_warning: null,
+              rewritten_notes: 1,
+              moved_assets: 0,
+              trashed_path: null,
+            }),
+            { status: 200 },
+          );
+        }
+
         if (url.includes("/api/note/home") && method === "DELETE") {
           return new Response(
             JSON.stringify({
@@ -319,6 +335,33 @@ describe("App write mode", () => {
       await screen.findByRole("menuitem", { name: "Rename note" }),
     );
     expect(screen.getByLabelText("New title")).toBeInTheDocument();
+  });
+
+  it("archives a note from the actions menu", async () => {
+    const fetchMock = mockReadAndWriteApi();
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Archive note" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/note/home/archive",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ expected_content_hash: "hash-1" }),
+        }),
+      );
+    });
   });
 
   it("saves against the hash captured at edit start, ignoring disk changes mid-edit", async () => {

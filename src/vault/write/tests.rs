@@ -365,6 +365,29 @@ fn move_note_rewrites_backlinks_and_moves_referenced_assets() {
 }
 
 #[test]
+fn archive_note_moves_to_archive_prefix_and_rewrites_backlinks() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("40-reference")).expect("mkdir");
+    fs::write(root.join("40-reference/Idea.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "See [[Idea]]").expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+
+    let outcome =
+        archive_note(root, &index, entry, "90-archive/", &content_hash("body")).expect("archive");
+
+    assert_eq!(outcome.relative_path, Some("90-archive/Idea".to_string()));
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert!(!root.join("40-reference/Idea.md").exists());
+    assert!(root.join("90-archive/Idea.md").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[90-archive/Idea]]"
+    );
+}
+
+#[test]
 fn delete_note_moves_note_and_assets_to_trash_and_removes_backlinks() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();

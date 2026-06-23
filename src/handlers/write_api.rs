@@ -9,8 +9,8 @@ use crate::api_types::ErrorResponse;
 use crate::app_state::{AppState, internal_error, refresh_now};
 use crate::git::WriteRecord;
 use crate::vault::{
-    AttachmentInfo, AttachmentOutcome, VaultIndex, WriteError, WriteOutcome, create_note,
-    delete_note, import_attachment_bytes, move_or_rename_note, update_note,
+    AttachmentInfo, AttachmentOutcome, VaultIndex, WriteError, WriteOutcome, archive_note,
+    create_note, delete_note, import_attachment_bytes, move_or_rename_note, update_note,
 };
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +45,12 @@ pub struct MoveNoteRequest {
 #[serde(deny_unknown_fields)]
 pub struct MoveRenameNoteRequest {
     pub target_relative_path: String,
+    pub expected_content_hash: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveNoteRequest {
     pub expected_content_hash: String,
 }
 
@@ -376,6 +382,42 @@ pub async fn move_rename_note_handler(
     };
 
     match finalize_note_write_response(&state, "move_rename", outcome).await {
+        Ok(response) => response.into_response(),
+        Err(err) => err.into_response(),
+    }
+}
+
+pub async fn archive_note_handler(
+    Path(slug): Path<String>,
+    State(state): State<AppState>,
+    payload: Result<Json<ArchiveNoteRequest>, JsonRejection>,
+) -> impl IntoResponse {
+    let payload = match write_payload(payload) {
+        Ok(payload) => payload,
+        Err(err) => return err.into_response(),
+    };
+
+    let _guard = state.vault_write_lock.clone().lock_owned().await;
+    let index = match current_index(&state).await {
+        Ok(index) => index,
+        Err(err) => return err.into_response(),
+    };
+    let entry = match note_entry(&index, &slug) {
+        Ok(entry) => entry,
+        Err(err) => return err.into_response(),
+    };
+    let outcome = match archive_note(
+        &state.vault_path,
+        &index,
+        &entry,
+        &state.archive_prefix,
+        &payload.expected_content_hash,
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => return write_error_response(err),
+    };
+
+    match finalize_note_write_response(&state, "archive", outcome).await {
         Ok(response) => response.into_response(),
         Err(err) => err.into_response(),
     }

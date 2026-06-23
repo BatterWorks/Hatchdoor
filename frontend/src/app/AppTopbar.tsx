@@ -32,6 +32,7 @@ type TopbarProps = {
   onNewNote: () => void;
   onRenameNote: () => void;
   onMoveNote: () => void;
+  onArchiveNote: () => void;
   onDeleteNote: () => void;
   onToggleProperties: () => void;
   onCycleTheme: () => void;
@@ -58,6 +59,7 @@ export function AppTopbar({
   onNewNote,
   onRenameNote,
   onMoveNote,
+  onArchiveNote,
   onDeleteNote,
   onToggleProperties,
   onCycleTheme,
@@ -101,7 +103,12 @@ export function AppTopbar({
             {/* Accent square */}
             <rect x="24" y="24" width="12" height="12" fill="var(--hot)" />
             {/* Wordmark text */}
-            <text className="brand-wordmark-text" x="76" y="47" aria-hidden="true">
+            <text
+              className="brand-wordmark-text"
+              x="76"
+              y="47"
+              aria-hidden="true"
+            >
               HATCHDOOR
             </text>
           </svg>
@@ -233,6 +240,18 @@ export function AppTopbar({
                     }}
                   >
                     Move note
+                  </UiButton>
+                ) : null}
+                {activeNote && writeEnabled ? (
+                  <UiButton
+                    className="close-note"
+                    role="menuitem"
+                    onClick={() => {
+                      onCloseActionsMenu();
+                      onArchiveNote();
+                    }}
+                  >
+                    Archive note
                   </UiButton>
                 ) : null}
                 {activeNote && writeEnabled ? (

@@ -14,12 +14,12 @@ use hatchdoor::cache::SqliteCache;
 use hatchdoor::embed::{Embedder, FastembedEmbedder};
 use hatchdoor::git::{self, GitConfig};
 use hatchdoor::handlers::{
-    create_note_handler, delete_note_handler, graph_handler, health_handler, move_note_handler,
-    move_rename_note_handler, note_download_handler, note_handler, note_links_handler,
-    recently_modified_handler, refresh_handler, rename_note_handler, resolve_batch_handler,
-    resolve_handler, search_handler, spa_index_handler, stats_handler, tree_handler,
-    update_note_handler, upload_attachment_handler, vault_asset_handler, vault_events_handler,
-    write_capabilities_handler,
+    archive_note_handler, create_note_handler, delete_note_handler, graph_handler, health_handler,
+    move_note_handler, move_rename_note_handler, note_download_handler, note_handler,
+    note_links_handler, recently_modified_handler, refresh_handler, rename_note_handler,
+    resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, stats_handler,
+    tree_handler, update_note_handler, upload_attachment_handler, vault_asset_handler,
+    vault_events_handler, write_capabilities_handler,
 };
 use hatchdoor::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
@@ -57,6 +57,7 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         )
         .route("/api/note/{slug}/rename", patch(rename_note_handler))
         .route("/api/note/{slug}/move", patch(move_note_handler))
+        .route("/api/note/{slug}/archive", patch(archive_note_handler))
         .route(
             "/api/note/{slug}/move-rename",
             patch(move_rename_note_handler),
@@ -1014,14 +1015,37 @@ mod tests {
         let moved_slug = moved["slug"].as_str().expect("moved slug");
         let moved_hash = moved["content_hash"].as_str().expect("moved hash");
 
-        let delete = app
+        let archive = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/note/{moved_slug}"))
-                    .method("DELETE")
+                    .uri(format!("/api/note/{moved_slug}/archive"))
+                    .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
                         r#"{{"expected_content_hash":"{moved_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(archive.status(), StatusCode::OK);
+        let archive_body = to_bytes(archive.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let archived: serde_json::Value = serde_json::from_slice(&archive_body).expect("json");
+        let archived_slug = archived["slug"].as_str().expect("archived slug");
+        let archived_hash = archived["content_hash"].as_str().expect("archived hash");
+        assert_eq!(archived["relative_path"], "90-archive/Renamed Note");
+
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{archived_slug}"))
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{archived_hash}"}}"#
                     )))
                     .expect("request"),
             )

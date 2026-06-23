@@ -2,12 +2,18 @@ import { useEffect, useRef } from "react";
 
 import { UiButton } from "./ui";
 
-export type NoteActionDialogKind = "create" | "rename" | "move" | "delete";
+export type NoteActionDialogKind =
+  | "create"
+  | "rename"
+  | "move"
+  | "archive"
+  | "delete";
 
 const DIALOG_TITLE: Record<NoteActionDialogKind, string> = {
   create: "Create note",
   rename: "Rename note",
   move: "Move note",
+  archive: "Archive note",
   delete: "Delete note",
 };
 
@@ -23,6 +29,7 @@ export function NoteActionsDialog({
   onCreate,
   onRename,
   onMove,
+  onArchive,
   onDelete,
 }: {
   kind: NoteActionDialogKind;
@@ -33,6 +40,7 @@ export function NoteActionsDialog({
   onCreate: (relativePath: string, content: string) => void;
   onRename: (newTitle: string) => void;
   onMove: (targetFolder: string) => void;
+  onArchive: () => void;
   onDelete: () => void;
 }) {
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -112,6 +120,9 @@ export function NoteActionsDialog({
             onClose={onClose}
             onMove={onMove}
           />
+        ) : null}
+        {kind === "archive" ? (
+          <ArchiveForm error={error} onClose={onClose} onArchive={onArchive} />
         ) : null}
         {kind === "delete" ? (
           <DeleteForm error={error} onClose={onClose} onDelete={onDelete} />
@@ -268,6 +279,30 @@ function MoveForm({
   );
 }
 
+function ArchiveForm({
+  error,
+  onClose,
+  onArchive,
+}: {
+  error: string | null;
+  onClose: () => void;
+  onArchive: () => void;
+}) {
+  return (
+    <div>
+      <h2>Archive note</h2>
+      <p>This moves the note to Hatchdoor's configured archive folder.</p>
+      {error ? <p className="note-editor-error">{error}</p> : null}
+      <div className="modal-actions">
+        <UiButton onClick={onArchive}>Archive</UiButton>
+        <UiButton className="close-note" onClick={onClose}>
+          Cancel
+        </UiButton>
+      </div>
+    </div>
+  );
+}
+
 function DeleteForm({
   error,
   onClose,
@@ -280,7 +315,9 @@ function DeleteForm({
   return (
     <div>
       <h2>Delete note</h2>
-      <p>This moves the note to Hatchdoor trash using the current content hash.</p>
+      <p>
+        This moves the note to Hatchdoor trash using the current content hash.
+      </p>
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
         <UiButton onClick={onDelete}>Delete</UiButton>
