@@ -462,6 +462,7 @@ mod tests {
         assert!(names.contains(&"edit_note"));
         assert!(names.contains(&"replace_section"));
         assert!(names.contains(&"move_rename_note"));
+        assert!(names.contains(&"archive_note"));
         assert!(names.contains(&"delete_note"));
         assert!(names.contains(&"import_attachment"));
         assert!(names.contains(&"move_attachment"));

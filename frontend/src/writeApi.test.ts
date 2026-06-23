@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "./api";
 import {
+  archiveNote,
   createNote,
   deleteNote,
   describeWriteOutcome,
@@ -74,7 +75,7 @@ describe("writeApi", () => {
     expect(mockedApiFetch).toHaveBeenCalledWith("/api/write-capabilities");
   });
 
-  it("sends the expected create/update/rename/move/delete write requests", async () => {
+  it("sends the expected create/update/rename/move/archive/delete write requests", async () => {
     mockedApiFetch.mockResolvedValueOnce(
       jsonResponse({
         ok: true,
@@ -151,6 +152,23 @@ describe("writeApi", () => {
       jsonResponse({
         ok: true,
         slug: "folder/alpha beta",
+        relative_path: "90-archive/Renamed.md",
+        content_hash: "hash-archive",
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: null,
+      }),
+    );
+    await archiveNote("folder/alpha beta", "hash-4");
+    expectJsonCall(4, "/api/note/folder%2Falpha%20beta/archive", "PATCH", {
+      expected_content_hash: "hash-4",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        slug: "folder/alpha beta",
         relative_path: null,
         content_hash: null,
         git_sync_warning: null,
@@ -159,9 +177,9 @@ describe("writeApi", () => {
         trashed_path: "90-archive/Renamed.md",
       }),
     );
-    await deleteNote("folder/alpha beta", "hash-4");
-    expectJsonCall(4, "/api/note/folder%2Falpha%20beta", "DELETE", {
-      expected_content_hash: "hash-4",
+    await deleteNote("folder/alpha beta", "hash-5");
+    expectJsonCall(5, "/api/note/folder%2Falpha%20beta", "DELETE", {
+      expected_content_hash: "hash-5",
     });
   });
 

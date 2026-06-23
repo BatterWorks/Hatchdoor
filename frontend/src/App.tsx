@@ -46,6 +46,7 @@ import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
 import {
+  archiveNote,
   createNote,
   deleteNote,
   describeWriteOutcome,
@@ -634,6 +635,24 @@ function App() {
     [navigate, refreshVault, requireActiveNoteHash],
   );
 
+  const handleArchiveNote = useCallback(async () => {
+    setNoteActionError(null);
+    try {
+      const { slug, contentHash } = requireActiveNoteHash();
+      const outcome = await archiveNote(slug, contentHash);
+      setNoteActionDialog(null);
+      setWriteNotice(describeWriteOutcome(outcome));
+      await refreshVault();
+      if (outcome.slug) {
+        navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+      }
+    } catch (error) {
+      setNoteActionError(
+        error instanceof Error ? error.message : "Archive failed",
+      );
+    }
+  }, [navigate, refreshVault, requireActiveNoteHash]);
+
   const handleDeleteNote = useCallback(async () => {
     setNoteActionError(null);
     try {
@@ -695,6 +714,10 @@ function App() {
         onMoveNote={() => {
           setNoteActionError(null);
           setNoteActionDialog("move");
+        }}
+        onArchiveNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("archive");
         }}
         onDeleteNote={() => {
           setNoteActionError(null);
@@ -789,7 +812,9 @@ function App() {
           />
         ) : null}
 
-        <main className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}>
+        <main
+          className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}
+        >
           <Routes>
             <Route path="/" element={<EmptyState />} />
             <Route path="/stats" element={<StatsPage />} />
@@ -860,6 +885,7 @@ function App() {
           }
           onRename={(newTitle) => void handleRenameNote(newTitle)}
           onMove={(targetFolder) => void handleMoveNote(targetFolder)}
+          onArchive={() => void handleArchiveNote()}
           onDelete={() => void handleDeleteNote()}
         />
       ) : null}

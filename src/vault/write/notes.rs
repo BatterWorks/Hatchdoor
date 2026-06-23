@@ -410,6 +410,40 @@ pub fn move_or_rename_note(
     })
 }
 
+pub fn archive_note(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    archive_prefix: &str,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    let archive_folder = archive_prefix.trim().trim_matches('/');
+    if archive_folder.is_empty() {
+        return Err(WriteError::InvalidInput(
+            "archive prefix cannot be empty".to_string(),
+        ));
+    }
+    let file_name = entry
+        .relative_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.relative_path);
+    let target_relative_path = format!("{archive_folder}/{file_name}");
+    if target_relative_path == entry.relative_path {
+        return Err(WriteError::Conflict(format!(
+            "Note is already archived: {}",
+            entry.relative_path
+        )));
+    }
+    move_or_rename_note(
+        vault_root,
+        index,
+        entry,
+        &target_relative_path,
+        expected_content_hash,
+    )
+}
+
 pub fn delete_note(
     vault_root: &Path,
     index: &VaultIndex,

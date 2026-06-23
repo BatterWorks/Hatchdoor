@@ -29,6 +29,7 @@ Copy `.env.example` to `.env`:
 - `PORT=42824`
 - `VAULT_REFRESH_SECONDS=2`
 - `HATCHDOOR_CACHE_DB=/data/cache/hatchdoor-cache.sqlite3`
+- `HATCHDOOR_ARCHIVE_PREFIX=90-archive/`
 - `HATCHDOOR_MCP_ENABLED=false`
 - `HATCHDOOR_MCP_BEARER_TOKEN=`
 - `HATCHDOOR_MCP_ALLOWED_ORIGINS=http://127.0.0.1,http://localhost`
@@ -36,6 +37,7 @@ Copy `.env.example` to `.env`:
 
 `VAULT_REFRESH_SECONDS` is kept for compatibility with forced refresh internals. Normal cache updates are driven by the recursive vault watcher.
 `HATCHDOOR_CACHE_DB` points to Hatchdoor's generated SQLite cache. Keep it outside the Markdown vault.
+`HATCHDOOR_ARCHIVE_PREFIX` controls which vault folder is treated as archived by wikilink resolution and archive-note writes.
 `RUST_LOG` controls structured backend log verbosity.
 
 ## SQLite cache/read model
@@ -212,6 +214,7 @@ Vault-safe MCP tools:
 - `rename_note` -> rename a note, rewrite wikilink backlinks, move referenced assets, and rewrite other asset references
 - `move_note` -> move a note folder, rewrite wikilink backlinks, move referenced assets, and rewrite other asset references
 - `move_rename_note` -> move and rename in one operation
+- `archive_note` -> move a note to the configured archive folder, rewrite wikilink backlinks, move referenced assets, and rewrite other asset references
 - `delete_note` -> move a note and referenced assets to `.hatchdoor-trash`, rewrite other asset references, and remove backlinks to the deleted note
 - `import_attachment` -> import a staged attachment into the vault
 - `move_attachment` / `rename_attachment` -> move or rename an attachment and rewrite note references

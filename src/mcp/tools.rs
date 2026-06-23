@@ -7,9 +7,9 @@ use crate::search::SearchRequest;
 use crate::vault::VaultIndex;
 use crate::vault::{
     AttachmentOutcome, SectionMode, WriteError, WriteOutcome, allowed_attachment_extensions,
-    append_note, create_note, delete_attachment, delete_note, edit_note, import_attachment,
-    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
-    replace_section, update_note,
+    append_note, archive_note, create_note, delete_attachment, delete_note, edit_note,
+    import_attachment, list_note_attachments, move_attachment, move_or_rename_note,
+    rename_attachment, replace_section, update_note,
 };
 
 use super::config::McpConfig;
@@ -53,7 +53,7 @@ pub async fn handle_tools_call(
             "usage": "Enable HATCHDOOR_MCP_WRITE_ENABLED to use staged attachment imports."
         }))),
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "rename_note" | "move_note" | "move_rename_note" | "delete_note"
+        | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
         | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
             if config.write_enabled =>
         {
@@ -69,6 +69,7 @@ pub async fn handle_tools_call(
                 "rename_note" => rename_note_tool(state, arguments).await,
                 "move_note" => move_note_tool(state, arguments).await,
                 "move_rename_note" => move_rename_note_tool(state, arguments).await,
+                "archive_note" => archive_note_tool(state, arguments).await,
                 "delete_note" => delete_note_tool(state, arguments).await,
                 "import_attachment" => import_attachment_tool(state, arguments, config).await,
                 "move_attachment" => move_attachment_tool(state, arguments).await,
@@ -88,6 +89,7 @@ pub async fn handle_tools_call(
         | "rename_note"
         | "move_note"
         | "move_rename_note"
+        | "archive_note"
         | "delete_note"
         | "import_attachment"
         | "move_attachment"
@@ -570,6 +572,26 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
     Ok(write_success(outcome, warning))
 }
 
+async fn archive_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: ArchiveNoteArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid archive_note arguments: {error}"))
+    })?;
+    let index = current_index(&state).await?;
+    let entry = note_entry(&index, &args.slug)?;
+    let outcome = archive_note(
+        &state.vault_path,
+        &index,
+        &entry,
+        &state.archive_prefix,
+        &args.expected_content_hash,
+    )
+    .map_err(write_error_to_jsonrpc)?;
+    refresh_after_write(&state).await?;
+    record_note_write(&state, "archive", &outcome, args.commit_summary);
+    let warning = git_sync_warning(&state).await;
+    Ok(write_success(outcome, warning))
+}
+
 async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
     let args: DeleteNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid delete_note arguments: {error}"))
@@ -992,6 +1014,21 @@ fn write_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(true, false)
         }),
         json!({
+            "name": "archive_note",
+            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1},
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["slug", "expected_content_hash"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
             "name": "delete_note",
             "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, move referenced assets with it, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
@@ -1187,6 +1224,15 @@ struct MoveNoteArgs {
 struct MoveRenameNoteArgs {
     slug: String,
     target_relative_path: String,
+    expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveNoteArgs {
+    slug: String,
     expected_content_hash: String,
     #[serde(default)]
     commit_summary: Option<String>,
