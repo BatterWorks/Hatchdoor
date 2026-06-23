@@ -71,9 +71,6 @@ export function ExplorerPane({
               New
             </UiButton>
           ) : null}
-          <UiButton className="close-note" onClick={onRefreshTree}>
-            Refresh
-          </UiButton>
         </div>
       </header>
 
@@ -119,8 +116,7 @@ export function ExplorerPane({
       ) : null}
       {tree ? (
         <p className="explorer-notes-label">
-          Notes{" "}
-          <span className="explorer-notes-count">{countNotes(tree)}</span>
+          Notes <span className="explorer-notes-count">{countNotes(tree)}</span>
         </p>
       ) : null}
       {tree ? (

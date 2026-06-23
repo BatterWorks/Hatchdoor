@@ -523,9 +523,6 @@ function App() {
     }
     await copyText(activeNote.exportContent ?? "");
   }, [activeNote]);
-  const toggleProperties = useCallback(() => {
-    window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
-  }, []);
   const downloadMarkdown = useCallback(() => {
     if (!activeNote) {
       return;
@@ -701,7 +698,6 @@ function App() {
         onOpenSearch={() => setSearchOpen(true)}
         onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}
         onCloseActionsMenu={() => setActionsMenuOpen(false)}
-        onRefreshVault={() => void refreshVault()}
         onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
@@ -723,7 +719,6 @@ function App() {
           setNoteActionError(null);
           setNoteActionDialog("delete");
         }}
-        onToggleProperties={toggleProperties}
         onCycleTheme={cycleTheme}
       />
 
