@@ -56,8 +56,12 @@ export async function normalizeImageForUpload(
       IMAGE_UPLOAD_WEBP_TYPE,
       IMAGE_UPLOAD_WEBP_QUALITY,
     );
-    return new File([blob], webpFilename(file.name), {
-      type: IMAGE_UPLOAD_WEBP_TYPE,
+    const extension = extensionForImageType(blob.type);
+    if (!extension) {
+      return file;
+    }
+    return new File([blob], filenameWithExtension(file.name, extension), {
+      type: blob.type,
       lastModified: file.lastModified,
     });
   } catch {
@@ -111,9 +115,22 @@ function canvasToBlob(
   });
 }
 
-function webpFilename(filename: string): string {
+function extensionForImageType(type: string): string | null {
+  switch (type) {
+    case "image/webp":
+      return "webp";
+    case "image/png":
+      return "png";
+    case "image/jpeg":
+      return "jpg";
+    default:
+      return null;
+  }
+}
+
+function filenameWithExtension(filename: string, extension: string): string {
   const trimmed = filename.trim() || "attachment";
   return /\.[^./\\]+$/.test(trimmed)
-    ? trimmed.replace(/\.[^./\\]+$/, ".webp")
-    : `${trimmed}.webp`;
+    ? trimmed.replace(/\.[^./\\]+$/, `.${extension}`)
+    : `${trimmed}.${extension}`;
 }
