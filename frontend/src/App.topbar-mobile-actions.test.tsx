@@ -122,50 +122,48 @@ describe("App mobile and topbar actions", () => {
     });
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(
-        async (input: RequestInfo | URL) => {
-          const url = String(input);
-          if (url.includes("/api/tree")) {
-            return new Response(
-              JSON.stringify({
-                name: "Vault",
-                folders: [],
-                notes: [{ title: "Home", slug: "home" }],
-              }),
-              { status: 200 },
-            );
-          }
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
 
-          if (url.includes("/api/note/home/links")) {
-            return new Response(
-              JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-              { status: 200 },
-            );
-          }
+        if (url.includes("/api/note/home/links")) {
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
 
-          if (url.includes("/api/note/home")) {
-            return new Response(
-              JSON.stringify({
-                note: {
-                  title: "Home",
-                  slug: "home",
-                  relative_path: "Home",
-                  content: "# Home",
-                },
-              }),
-              { status: 200 },
-            );
-          }
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "# Home",
+              },
+            }),
+            { status: 200 },
+          );
+        }
 
-          if (url.includes("/api/resolve-batch")) {
-            return new Response(JSON.stringify({ results: [] }), {
-              status: 200,
-            });
-          }
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+          });
+        }
 
-          return new Response("not found", { status: 404 });
-        },
-      );
+        return new Response("not found", { status: 404 });
+      });
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
@@ -179,6 +177,9 @@ describe("App mobile and topbar actions", () => {
     expect(screen.getByText("Offline")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(
+      screen.getByRole("button", { name: "More actions" }),
+    ).toHaveAttribute("aria-expanded", "true");
     expect(screen.queryByRole("menuitem", { name: "Search" })).toBeNull();
     expect(
       screen.queryByRole("menuitem", { name: "Refresh vault" }),
@@ -199,5 +200,71 @@ describe("App mobile and topbar actions", () => {
         String(call[0]).includes("/api/refresh"),
       ),
     ).toBe(false);
+  });
+
+  it("closes the note overflow menu when clicking outside", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/note/home/links")) {
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "# Home",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    const actions = screen.getByRole("button", { name: "More actions" });
+    fireEvent.click(actions);
+    expect(actions).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("menuitem", { name: "Copy note link" }),
+    ).toBeInTheDocument();
+
+    fireEvent.pointerDown(document.body);
+
+    await waitFor(() => {
+      expect(actions).toHaveAttribute("aria-expanded", "false");
+    });
+    expect(
+      screen.queryByRole("menuitem", { name: "Copy note link" }),
+    ).toBeNull();
   });
 });
