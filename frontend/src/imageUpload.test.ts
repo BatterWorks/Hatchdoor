@@ -58,6 +58,32 @@ describe("normalizeImageForUpload", () => {
     expect(normalized.size).toBe(10);
   });
 
+  it("uses the actual canvas output type when webp is unsupported", async () => {
+    const { deps } = normalizerDeps({
+      blob: new Blob(["png-bytes"], { type: "image/png" }),
+    });
+    const file = new File(["jpg-bytes"], "photo.jpeg", {
+      type: "image/jpeg",
+    });
+
+    const normalized = await normalizeImageForUpload(file, deps);
+
+    expect(normalized.name).toBe("photo.png");
+    expect(normalized.type).toBe("image/png");
+    expect(normalized.size).toBe(9);
+  });
+
+  it("returns the original file when canvas returns an unsupported type", async () => {
+    const { deps } = normalizerDeps({
+      blob: new Blob(["png-bytes"], { type: "" }),
+    });
+    const file = new File(["jpg-bytes"], "photo.jpeg", {
+      type: "image/jpeg",
+    });
+
+    await expect(normalizeImageForUpload(file, deps)).resolves.toBe(file);
+  });
+
   it("keeps animated gifs on the original upload path", async () => {
     const { deps } = normalizerDeps();
     const file = new File(["gif-bytes"], "animation.gif", {
