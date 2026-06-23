@@ -19,6 +19,7 @@ function outcome(overrides: Partial<WriteOutcome> = {}): WriteOutcome {
     slug: "home",
     relative_path: "Home.md",
     content_hash: "hash",
+    quality_warnings: [],
     git_sync_warning: null,
     rewritten_notes: 0,
     moved_assets: 0,
@@ -198,6 +199,11 @@ describe("writeApi", () => {
     expect(
       describeWriteOutcome(outcome({ git_sync_warning: "push failed" })),
     ).toBe("Git sync warning: push failed");
+    expect(
+      describeWriteOutcome(
+        outcome({ quality_warnings: ["added final newline"] }),
+      ),
+    ).toBe("Write quality: added final newline");
     expect(describeWriteOutcome(outcome({ rewritten_notes: 1 }))).toBe(
       "Updated 1 linking note.",
     );

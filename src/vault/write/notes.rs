@@ -25,6 +25,68 @@ pub enum SectionMode {
     After,
 }
 
+struct PreparedNoteContent {
+    content: String,
+    warnings: Vec<String>,
+}
+
+fn prepare_note_content(content: &str) -> Result<PreparedNoteContent, WriteError> {
+    if content.contains('\0') {
+        return Err(WriteError::InvalidInput(
+            "note content cannot contain NUL bytes".to_string(),
+        ));
+    }
+
+    let mut warnings = Vec::new();
+    let mut normalized = content.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized != content {
+        warnings.push("normalized CRLF/CR line endings to LF".to_string());
+    }
+    if !normalized.is_empty() && !normalized.ends_with('\n') {
+        normalized.push('\n');
+        warnings.push("added final newline".to_string());
+    }
+    warnings.extend(frontmatter_warnings(&normalized));
+
+    Ok(PreparedNoteContent {
+        content: normalized,
+        warnings,
+    })
+}
+
+fn frontmatter_warnings(content: &str) -> Vec<String> {
+    let Some(rest) = content.strip_prefix("---\n") else {
+        return Vec::new();
+    };
+
+    let mut warnings = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut closed = false;
+    for line in rest.lines() {
+        if line.trim() == "---" {
+            closed = true;
+            break;
+        }
+        if line.starts_with(char::is_whitespace) {
+            continue;
+        }
+        let Some((key, _)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        if !seen.insert(key.to_string()) {
+            warnings.push(format!("frontmatter has duplicate key: {key}"));
+        }
+    }
+    if !closed {
+        warnings.push("frontmatter opening marker has no closing marker".to_string());
+    }
+    warnings
+}
+
 pub fn create_note(
     vault_root: &Path,
     relative_path: &str,
@@ -41,12 +103,14 @@ pub fn create_note(
 
     create_parent_dir_inside_root(vault_root, &path, "note")?;
 
-    atomic_write(&path, content)?;
+    let prepared = prepare_note_content(content)?;
+    atomic_write(&path, &prepared.content)?;
     let normalized = normalize_note_relative_path(relative_path)?;
     Ok(WriteOutcome {
         slug: None,
         relative_path: Some(strip_md_extension(&normalized).to_string()),
-        content_hash: Some(content_hash(content)),
+        content_hash: Some(content_hash(&prepared.content)),
+        quality_warnings: prepared.warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -60,11 +124,13 @@ pub fn update_note(
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
-    atomic_write(&entry.path, content)?;
+    let prepared = prepare_note_content(content)?;
+    atomic_write(&entry.path, &prepared.content)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(content)),
+        content_hash: Some(content_hash(&prepared.content)),
+        quality_warnings: prepared.warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -88,11 +154,13 @@ pub fn append_note(
         current.push('\n');
     }
     current.push_str(content);
-    atomic_write(&entry.path, &current)?;
+    let prepared = prepare_note_content(&current)?;
+    atomic_write(&entry.path, &prepared.content)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&current)),
+        content_hash: Some(content_hash(&prepared.content)),
+        quality_warnings: prepared.warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -135,11 +203,13 @@ pub fn edit_note(
     } else {
         current.replacen(old_string, new_string, 1)
     };
-    atomic_write(&entry.path, &updated)?;
+    let prepared = prepare_note_content(&updated)?;
+    atomic_write(&entry.path, &prepared.content)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&updated)),
+        content_hash: Some(content_hash(&prepared.content)),
+        quality_warnings: prepared.warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -168,11 +238,13 @@ pub fn replace_section(
         SectionMode::Before => splice(&current[..start], content, &current[start..]),
         SectionMode::After => splice(&current[..end], content, &current[end..]),
     };
-    atomic_write(&entry.path, &updated)?;
+    let prepared = prepare_note_content(&updated)?;
+    atomic_write(&entry.path, &prepared.content)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
-        content_hash: Some(content_hash(&updated)),
+        content_hash: Some(content_hash(&prepared.content)),
+        quality_warnings: prepared.warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,
@@ -330,6 +402,7 @@ pub fn move_or_rename_note(
         slug: None,
         relative_path: Some(target_without_ext),
         content_hash: Some(content_hash(&moved_content)),
+        quality_warnings: Vec::new(),
         rewritten_notes,
         moved_assets,
         trashed_path: None,
@@ -380,6 +453,7 @@ pub fn delete_note(
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
         content_hash: None,
+        quality_warnings: Vec::new(),
         rewritten_notes,
         moved_assets,
         trashed_path: Some(trash_relative),
