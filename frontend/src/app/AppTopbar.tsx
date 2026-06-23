@@ -24,7 +24,6 @@ type TopbarProps = {
   onOpenSearch: () => void;
   onToggleActionsMenu: () => void;
   onCloseActionsMenu: () => void;
-  onRefreshVault: () => void;
   onCopyPageContent: () => void;
   onCopyNoteLink: () => void;
   onDownloadMarkdown: () => void;
@@ -34,7 +33,6 @@ type TopbarProps = {
   onMoveNote: () => void;
   onArchiveNote: () => void;
   onDeleteNote: () => void;
-  onToggleProperties: () => void;
   onCycleTheme: () => void;
 };
 
@@ -51,7 +49,6 @@ export function AppTopbar({
   onOpenSearch,
   onToggleActionsMenu,
   onCloseActionsMenu,
-  onRefreshVault,
   onCopyPageContent,
   onCopyNoteLink,
   onDownloadMarkdown,
@@ -61,7 +58,6 @@ export function AppTopbar({
   onMoveNote,
   onArchiveNote,
   onDeleteNote,
-  onToggleProperties,
   onCycleTheme,
 }: TopbarProps) {
   const crumbText = activeNote
@@ -174,26 +170,6 @@ export function AppTopbar({
             </button>
             {actionsMenuOpen ? (
               <div className="topbar-menu" role="menu">
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onOpenSearch();
-                  }}
-                >
-                  Search
-                </UiButton>
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onRefreshVault();
-                  }}
-                >
-                  Refresh vault
-                </UiButton>
                 {writeEnabled ? (
                   <UiButton
                     className="close-note"
@@ -302,16 +278,6 @@ export function AppTopbar({
                     Copy note link
                   </UiButton>
                 ) : null}
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onToggleProperties();
-                  }}
-                >
-                  Toggle properties
-                </UiButton>
               </div>
             ) : null}
           </div>

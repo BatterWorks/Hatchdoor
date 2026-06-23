@@ -109,7 +109,7 @@ describe("App mobile and topbar actions", () => {
     });
   });
 
-  it("executes refresh/copy/toggle actions and marks stale tree after refresh failure", async () => {
+  it("executes remaining note actions from the mobile overflow menu", async () => {
     Object.defineProperty(navigator, "onLine", {
       configurable: true,
       value: false,
@@ -120,34 +120,20 @@ describe("App mobile and topbar actions", () => {
       configurable: true,
       value: { writeText: clipboardWrite },
     });
-    const dispatchSpy = vi.spyOn(window, "dispatchEvent");
-
-    let treeCalls = 0;
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(
-        async (input: RequestInfo | URL, init?: RequestInit) => {
+        async (input: RequestInfo | URL) => {
           const url = String(input);
           if (url.includes("/api/tree")) {
-            treeCalls += 1;
-            if (treeCalls === 1) {
-              return new Response(
-                JSON.stringify({
-                  name: "Vault",
-                  folders: [],
-                  notes: [{ title: "Home", slug: "home" }],
-                }),
-                { status: 200 },
-              );
-            }
-            return new Response("boom", { status: 500 });
-          }
-
-          if (url.includes("/api/refresh")) {
-            expect(init?.method).toBe("POST");
-            return new Response(JSON.stringify({ refreshed: true }), {
-              status: 200,
-            });
+            return new Response(
+              JSON.stringify({
+                name: "Vault",
+                folders: [],
+                notes: [{ title: "Home", slug: "home" }],
+              }),
+              { status: 200 },
+            );
           }
 
           if (url.includes("/api/note/home/links")) {
@@ -193,20 +179,14 @@ describe("App mobile and topbar actions", () => {
     expect(screen.getByText("Offline")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Refresh vault" }),
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText("Tree Stale")).toBeInTheDocument();
-    });
+    expect(screen.queryByRole("menuitem", { name: "Search" })).toBeNull();
     expect(
-      fetchSpy.mock.calls.some((call) =>
-        String(call[0]).includes("/api/refresh"),
-      ),
-    ).toBe(true);
+      screen.queryByRole("menuitem", { name: "Refresh vault" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: "Toggle properties" }),
+    ).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "Copy note link" }),
     );
@@ -214,18 +194,10 @@ describe("App mobile and topbar actions", () => {
       expect(clipboardWrite).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    fireEvent.click(
-      await screen.findByRole("menuitem", { name: "Toggle properties" }),
-    );
-    expect(dispatchSpy).toHaveBeenCalled();
-    const toggleDispatched = dispatchSpy.mock.calls.some((call) => {
-      const event = call[0];
-      return (
-        event instanceof Event &&
-        event.type === "hatchdoor:toggle-note-properties"
-      );
-    });
-    expect(toggleDispatched).toBe(true);
+    expect(
+      fetchSpy.mock.calls.some((call) =>
+        String(call[0]).includes("/api/refresh"),
+      ),
+    ).toBe(false);
   });
 });
