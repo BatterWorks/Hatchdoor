@@ -16,6 +16,10 @@ export function describeWriteOutcome(outcome: WriteOutcome): string | null {
   if (outcome.git_sync_warning) {
     parts.push(`Git sync warning: ${outcome.git_sync_warning}`);
   }
+  const qualityWarnings = outcome.quality_warnings ?? [];
+  if (qualityWarnings.length > 0) {
+    parts.push(`Write quality: ${qualityWarnings.join(" ")}`);
+  }
   if (outcome.rewritten_notes > 0) {
     parts.push(
       `Updated ${outcome.rewritten_notes} linking note${

@@ -580,7 +580,7 @@ mod tests {
             .expect("read from refreshed cache")
             .expect("new note");
         assert_eq!(note.relative_path, "Projects/New");
-        assert_eq!(note.content, "# New\ncreated from MCP");
+        assert_eq!(note.content, "# New\ncreated from MCP\n");
     }
 
     #[tokio::test]
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(body["result"]["structuredContent"]["ok"], true);
         assert_eq!(
             std::fs::read_to_string(state.vault_path.join("Home.md")).expect("read"),
-            "# Home\nALPHA token\n[[Plan]]"
+            "# Home\nALPHA token\n[[Plan]]\n"
         );
 
         let cache = state.cache.read().await;
@@ -621,7 +621,7 @@ mod tests {
             .read_note_by_slug("home")
             .expect("read refreshed cache")
             .expect("home note");
-        assert_eq!(note.content, "# Home\nALPHA token\n[[Plan]]");
+        assert_eq!(note.content, "# Home\nALPHA token\n[[Plan]]\n");
     }
 
     #[tokio::test]

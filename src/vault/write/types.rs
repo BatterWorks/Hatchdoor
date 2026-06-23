@@ -6,6 +6,7 @@ pub struct WriteOutcome {
     pub slug: Option<String>,
     pub relative_path: Option<String>,
     pub content_hash: Option<String>,
+    pub quality_warnings: Vec<String>,
     pub rewritten_notes: usize,
     pub moved_assets: usize,
     pub trashed_path: Option<String>,

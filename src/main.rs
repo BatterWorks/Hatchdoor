@@ -942,6 +942,7 @@ mod tests {
             "slug",
             "relative_path",
             "content_hash",
+            "quality_warnings",
             "rewritten_notes",
             "moved_assets",
             "trashed_path",

@@ -22,7 +22,7 @@ fn create_note_rejects_traversal_and_writes_markdown() {
     create_note(root, "Projects/New", "# New", false).expect("create");
     assert_eq!(
         fs::read_to_string(root.join("Projects/New.md")).expect("read"),
-        "# New"
+        "# New\n"
     );
 }
 
@@ -38,7 +38,61 @@ fn update_note_requires_matching_hash() {
         Err(WriteError::Conflict(_))
     ));
     update_note(entry, "new", &content_hash("old")).expect("update");
-    assert_eq!(fs::read_to_string(path).expect("read"), "new");
+    assert_eq!(fs::read_to_string(path).expect("read"), "new\n");
+}
+
+#[test]
+fn write_quality_normalizes_safe_markdown_formatting() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let outcome = create_note(root, "Quality", "# Quality\r\nBody", false).expect("create");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Quality.md")).expect("read"),
+        "# Quality\nBody\n"
+    );
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "normalized CRLF/CR line endings to LF".to_string(),
+            "added final newline".to_string()
+        ]
+    );
+    assert_eq!(
+        outcome.content_hash,
+        Some(content_hash("# Quality\nBody\n"))
+    );
+}
+
+#[test]
+fn write_quality_reports_frontmatter_warnings() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let outcome = create_note(
+        root,
+        "Quality",
+        "---\ntags: [a]\ntags: [b]\n# Missing close\n",
+        false,
+    )
+    .expect("create");
+
+    assert_eq!(
+        outcome.quality_warnings,
+        vec![
+            "frontmatter has duplicate key: tags".to_string(),
+            "frontmatter opening marker has no closing marker".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn write_quality_rejects_nul_bytes() {
+    let tmp = TempDir::new().expect("tempdir");
+    assert!(matches!(
+        create_note(tmp.path(), "Bad", "hello\0world", false),
+        Err(WriteError::InvalidInput(message)) if message.contains("NUL")
+    ));
+    assert!(!tmp.path().join("Bad.md").exists());
 }
 
 #[test]
@@ -58,8 +112,14 @@ fn edit_note_replaces_unique_string() {
     )
     .expect("edit");
 
-    assert_eq!(fs::read_to_string(&path).expect("read"), "alpha BETA gamma");
-    assert_eq!(outcome.content_hash, Some(content_hash("alpha BETA gamma")));
+    assert_eq!(
+        fs::read_to_string(&path).expect("read"),
+        "alpha BETA gamma\n"
+    );
+    assert_eq!(
+        outcome.content_hash,
+        Some(content_hash("alpha BETA gamma\n"))
+    );
 }
 
 #[test]
@@ -102,7 +162,7 @@ fn edit_note_replace_all_replaces_every_occurrence() {
 
     edit_note(entry, "x", "y", &content_hash("x x x"), true).expect("edit");
 
-    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y");
+    assert_eq!(fs::read_to_string(&path).expect("read"), "y y y\n");
 }
 
 #[test]
