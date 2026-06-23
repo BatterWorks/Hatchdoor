@@ -121,7 +121,8 @@
   background: var(--paper);
   color: var(--ink);
   padding: 0.35rem 0.45rem;
-  font: inherit;
+  font-family: inherit;
+  font-size: 1rem;
 }
 
 .note-editor-conflict {
@@ -238,10 +239,24 @@
 }
 
 .note-editor-preview {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--rule);
   border-radius: 6px;
   padding: 0.75rem 0.9rem;
   min-height: 8rem;
+  overflow-x: auto;
+}
+
+.note-editor-preview
+  :where(.table-wrap, .code-block, .mermaid, pre, img, .katex-display) {
+  max-width: 100%;
+}
+
+.note-editor-preview :where(pre, .katex-display) {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .folder-new-note {
