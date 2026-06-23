@@ -68,7 +68,8 @@ export function useResolvedWikilinks(
             const anchor = extractAnchor(parsed.target);
             const hash = anchor ? `#${anchor}` : "";
             const prefix = resolved.archived ? "/__archived__/" : "/n/";
-            return `[${escapeMarkdownLabel(parsed.label)}](${prefix}${resolved.slug}${hash})`;
+            const label = wikilinkDisplayLabel(body, parsed.label, resolved.archived);
+            return `[${escapeMarkdownLabel(label)}](${prefix}${resolved.slug}${hash})`;
           }
           return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
         },
@@ -131,6 +132,18 @@ function extractAnchor(target: string): string {
     return target.slice(caretIdx + 1);
   }
   return "";
+}
+
+function wikilinkDisplayLabel(
+  body: string,
+  fallbackLabel: string,
+  archived: boolean,
+): string {
+  if (body.includes("|") || archived) {
+    return fallbackLabel;
+  }
+  const parts = fallbackLabel.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts.at(-1) ?? fallbackLabel;
 }
 
 function normalizeRelativePath(baseDir: string, target: string): string {

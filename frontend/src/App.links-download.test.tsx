@@ -130,6 +130,78 @@ describe("App links/download", () => {
     });
   });
 
+  it("shows folder context only for archived wikilinks without aliases", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content:
+                  "See [[40-reference/idea - example 1]] and [[90-archive/idea - example 2]]",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  target: "40-reference/idea - example 1",
+                  slug: "idea-example-1",
+                  archived: false,
+                },
+                {
+                  target: "90-archive/idea - example 2",
+                  slug: "idea-example-2",
+                  archived: true,
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const activeLink = await screen.findByRole("link", {
+      name: "idea - example 1",
+    });
+    expect(activeLink).toHaveAttribute("href", "/n/idea-example-1");
+
+    const archivedLink = await screen.findByRole("link", {
+      name: "90-archive/idea - example 2",
+    });
+    expect(archivedLink).toHaveClass("archived-link");
+    expect(archivedLink).toHaveAttribute("href", "/n/idea-example-2");
+  });
+
   it("opens external markdown links in a new tab", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
