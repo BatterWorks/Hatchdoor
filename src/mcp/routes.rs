@@ -626,6 +626,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rename_note_tool_returns_new_slug_and_refreshes_cache() {
+        let (state, _tmp) = test_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            post_json_with_auth(
+                state.clone(),
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":56,
+                    "method":"tools/call",
+                    "params": {
+                        "name": "rename_note",
+                        "arguments": {
+                            "slug": "home",
+                            "new_title": "Renamed Home",
+                            "expected_content_hash": hash
+                        }
+                    }
+                }),
+                write_config(),
+            ),
+        )
+        .await
+        .expect("rename_note response timed out");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(content["slug"], "renamed-home");
+        assert_eq!(content["relative_path"], "Renamed Home");
+        assert!(state.vault_path.join("Renamed Home.md").exists());
+        assert!(!state.vault_path.join("Home.md").exists());
+
+        let cache = state.cache.read().await;
+        let note = cache
+            .sqlite
+            .read_note_by_slug("renamed-home")
+            .expect("read refreshed cache")
+            .expect("renamed note");
+        assert_eq!(note.relative_path, "Renamed Home");
+        assert_eq!(note.content, "# Home\nalpha token\n[[Plan]]");
+    }
+
+    #[tokio::test]
     async fn replace_section_tool_overwrites_section() {
         let (state, _tmp) = test_state();
         let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");

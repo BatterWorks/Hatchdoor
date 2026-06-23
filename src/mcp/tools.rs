@@ -406,10 +406,7 @@ async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "create", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "create", outcome, args.commit_summary).await
 }
 
 async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -420,10 +417,7 @@ async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "update", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "update", outcome, args.commit_summary).await
 }
 
 async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -435,10 +429,7 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
     let entry = note_entry(&index, &args.slug)?;
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "append", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "append", outcome, args.commit_summary).await
 }
 
 async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -455,10 +446,7 @@ async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
         args.replace_all.unwrap_or(false),
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "edit", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "edit", outcome, args.commit_summary).await
 }
 
 async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -486,10 +474,7 @@ async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "replace_section", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "replace_section", outcome, args.commit_summary).await
 }
 
 async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -513,10 +498,7 @@ async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "rename", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "rename", outcome, args.commit_summary).await
 }
 
 async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -544,10 +526,7 @@ async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "move", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "move", outcome, args.commit_summary).await
 }
 
 async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -566,10 +545,7 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "move_rename", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "move_rename", outcome, args.commit_summary).await
 }
 
 async fn archive_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -586,10 +562,7 @@ async fn archive_note_tool(state: AppState, arguments: Value) -> Result<Value, J
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "archive", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "archive", outcome, args.commit_summary).await
 }
 
 async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -605,10 +578,7 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "delete", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "delete", outcome, args.commit_summary).await
 }
 
 async fn import_attachment_tool(
@@ -750,6 +720,39 @@ async fn refresh_after_write(state: &AppState) -> Result<(), JsonRpcFailure> {
     refresh_now(state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))
+}
+
+async fn finalize_note_write(
+    state: &AppState,
+    op: &str,
+    mut outcome: WriteOutcome,
+    commit_summary: Option<String>,
+) -> Result<Value, JsonRpcFailure> {
+    refresh_after_write(state).await?;
+    if outcome.slug.is_none() && outcome.relative_path.is_some() && outcome.content_hash.is_some() {
+        let index = current_index(state).await?;
+        let relative_path = outcome
+            .relative_path
+            .as_deref()
+            .expect("relative_path checked above");
+        outcome.slug = slug_for_relative_path(&index, relative_path);
+        if outcome.slug.is_none() {
+            return Err(JsonRpcFailure::internal(
+                "note write completed but refreshed index did not contain the note",
+            ));
+        }
+    }
+    record_note_write(state, op, &outcome, commit_summary);
+    let warning = git_sync_warning(state).await;
+    Ok(write_success(outcome, warning))
+}
+
+fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<String> {
+    index
+        .ordered_entries()
+        .into_iter()
+        .find(|entry| entry.relative_path == relative_path)
+        .map(|entry| entry.slug)
 }
 
 fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
