@@ -492,7 +492,7 @@ describe("App write mode", () => {
         slug: "home",
         content: "# Home\nStale draft",
         baseContentHash: "old-hash",
-        savedAt: 1781630000000,
+        savedAt: Date.now(),
       }),
     );
     mockReadAndWriteApi();

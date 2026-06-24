@@ -152,6 +152,7 @@ describe("App links/download", () => {
                 title: "Home",
                 slug: "home",
                 relative_path: "Home",
+                content_hash: "hash-1",
                 content:
                   "See [[40-reference/idea - example 1]] and [[90-archive/idea - example 2]]",
               },
