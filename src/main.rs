@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
@@ -14,10 +14,12 @@ use hatchdoor::cache::SqliteCache;
 use hatchdoor::embed::{Embedder, FastembedEmbedder};
 use hatchdoor::git::{self, GitConfig};
 use hatchdoor::handlers::{
-    graph_handler, health_handler, note_download_handler, note_handler, note_links_handler,
-    recently_modified_handler, refresh_handler, resolve_batch_handler, resolve_handler,
-    search_handler, spa_index_handler, stats_handler, tree_handler, vault_asset_handler,
-    vault_events_handler,
+    archive_note_handler, create_note_handler, delete_note_handler, graph_handler, health_handler,
+    move_note_handler, move_rename_note_handler, note_download_handler, note_handler,
+    note_links_handler, recently_modified_handler, refresh_handler, rename_note_handler,
+    resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, stats_handler,
+    tree_handler, update_note_handler, upload_attachment_handler, vault_asset_handler,
+    vault_events_handler, write_capabilities_handler,
 };
 use hatchdoor::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use hatchdoor::vault_watcher::spawn_vault_watcher;
@@ -45,7 +47,21 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .route("/api/tree", get(tree_handler))
         .route("/api/vault-events", get(vault_events_handler))
         .route("/api/recently-modified", get(recently_modified_handler))
-        .route("/api/note/{slug}", get(note_handler))
+        .route("/api/note", post(create_note_handler))
+        .route("/api/attachment", post(upload_attachment_handler))
+        .route(
+            "/api/note/{slug}",
+            get(note_handler)
+                .put(update_note_handler)
+                .delete(delete_note_handler),
+        )
+        .route("/api/note/{slug}/rename", patch(rename_note_handler))
+        .route("/api/note/{slug}/move", patch(move_note_handler))
+        .route("/api/note/{slug}/archive", patch(archive_note_handler))
+        .route(
+            "/api/note/{slug}/move-rename",
+            patch(move_rename_note_handler),
+        )
         .route("/api/note/{slug}/download", get(note_download_handler))
         .route("/api/note/{slug}/links", get(note_links_handler))
         .route("/api/resolve", get(resolve_handler))
@@ -54,6 +70,7 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .route("/api/stats", get(stats_handler))
         .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
+        .route("/api/write-capabilities", get(write_capabilities_handler))
         .route("/vault-assets/{*path}", get(vault_asset_handler));
 
     let protected = match web_bearer_token {
@@ -167,6 +184,7 @@ async fn run_server() {
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
         embedder,
+        web_auth_enabled: config.web_bearer_token.is_some(),
         vault_write_lock,
         git_sync,
         mcp_config,
@@ -311,11 +329,13 @@ mod tests {
     }
 
     fn app_for_tests() -> (Router, TempDir) {
-        let (app, tmp, _state) = app_for_tests_with_state();
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         (app, tmp)
     }
 
-    fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
+    fn app_for_tests_with_web_auth(
+        web_bearer_token: Option<Arc<str>>,
+    ) -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -329,6 +349,7 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: web_bearer_token.is_some(),
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
@@ -336,7 +357,11 @@ mod tests {
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         };
 
-        (build_router(state.clone(), None), tmp, state)
+        (build_router(state.clone(), web_bearer_token), tmp, state)
+    }
+
+    fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
+        app_for_tests_with_web_auth(None)
     }
 
     #[tokio::test]
@@ -436,6 +461,7 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
@@ -481,8 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn web_token_guards_api_routes_but_not_health_or_spa() {
-        let (_app, _tmp, state) = app_for_tests_with_state();
-        let app = build_router(state, Some(Arc::from("secret-token")));
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
 
         let no_token = app
             .clone()
@@ -597,5 +622,435 @@ mod tests {
             .expect("body");
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(payload["notes"][0]["slug"], "home");
+    }
+
+    #[tokio::test]
+    async fn router_wires_write_capabilities_route() {
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["enabled"], true);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or("").contains("unauthenticated"))
+        );
+    }
+
+    #[tokio::test]
+    async fn router_wires_write_capabilities_with_web_token() {
+        let (_app, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
+        let app = build_router(state, Some(Arc::from("secret-token")));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .header("authorization", "Bearer secret-token")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(authorized.status(), StatusCode::OK);
+        let body = to_bytes(authorized.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["enabled"], true);
+        assert!(payload["warnings"].as_array().expect("warnings").is_empty());
+    }
+
+    #[tokio::test]
+    async fn router_uploads_attachment_into_vault() {
+        let (app, tmp) = app_for_tests();
+        let boundary = "hatchdoor-test-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"target_relative_path\"\r\n\r\n\
+             Attachments/pasted.png\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"pasted.png\"\r\n\
+             Content-Type: image/png\r\n\r\n"
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(b"png-bytes".iter().copied())
+        .chain(format!("\r\n--{boundary}--\r\n").into_bytes())
+        .collect::<Vec<_>>();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/attachment")
+                    .method("POST")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            json["attachment"]["relative_path"],
+            "Attachments/pasted.png"
+        );
+        assert_eq!(json["attachment"]["size_bytes"], 9);
+        assert_eq!(
+            std::fs::read(tmp.path().join("vault/Attachments/pasted.png")).expect("file"),
+            b"png-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_api_updates_note_and_rejects_stale_hash() {
+        let (app, _tmp) = app_for_tests();
+
+        let note_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let note_body = to_bytes(note_response.into_body(), usize::MAX)
+            .await
+            .expect("note body");
+        let note_payload: serde_json::Value = serde_json::from_slice(&note_body).expect("json");
+        let hash = note_payload["note"]["content_hash"].as_str().expect("hash");
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Home\nupdated\n","expected_content_hash":"{hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update.status(), StatusCode::OK);
+
+        let stale = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Home\nstale overwrite\n","expected_content_hash":"{hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_update_payload_missing_expected_hash() {
+        let (app, _tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r##"{"content":"# Home\nupdated\n"}"##))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_create_path_traversal() {
+        let (app, _tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"../escape.md","content":"# Nope\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn write_api_delete_rejects_stale_hash() {
+        let (app, _tmp) = app_for_tests();
+
+        let note_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let note_body = to_bytes(note_response.into_body(), usize::MAX)
+            .await
+            .expect("note body");
+        let note_payload: serde_json::Value = serde_json::from_slice(&note_body).expect("json");
+        let original_hash = note_payload["note"]["content_hash"].as_str().expect("hash");
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Home\nfresh content\n","expected_content_hash":"{original_hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(update.status(), StatusCode::OK);
+
+        let stale_delete = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{original_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn write_api_successful_write_updates_vault_revision() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        let before = state.vault_revision.load(Ordering::SeqCst);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Projects/Revision Note.md","content":"# Revision Note\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = state.vault_revision.load(Ordering::SeqCst);
+        assert!(
+            after > before,
+            "vault revision should advance after refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_api_creates_renames_moves_and_deletes_note() {
+        let (app, _tmp) = app_for_tests();
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Projects/New Note.md","content":"# New Note\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(create.status(), StatusCode::OK);
+        let create_body = to_bytes(create.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let created: serde_json::Value = serde_json::from_slice(&create_body).expect("json");
+        let created_object = created.as_object().expect("object");
+        for field in [
+            "ok",
+            "slug",
+            "relative_path",
+            "content_hash",
+            "quality_warnings",
+            "rewritten_notes",
+            "moved_assets",
+            "trashed_path",
+            "git_sync_warning",
+        ] {
+            assert!(created_object.contains_key(field), "missing field {field}");
+        }
+        assert_eq!(created["ok"], true);
+        let slug = created["slug"].as_str().expect("slug");
+        let hash = created["content_hash"].as_str().expect("hash");
+
+        let duplicate_create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Projects/New Note.md","content":"# Duplicate\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(duplicate_create.status(), StatusCode::CONFLICT);
+
+        let rename = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{slug}/rename"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"new_title":"Renamed Note","expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(rename.status(), StatusCode::OK);
+        let rename_body = to_bytes(rename.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let renamed: serde_json::Value = serde_json::from_slice(&rename_body).expect("json");
+        let renamed_slug = renamed["slug"].as_str().expect("renamed slug");
+        let renamed_hash = renamed["content_hash"].as_str().expect("renamed hash");
+
+        let move_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{renamed_slug}/move"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"target_folder":"Archive","expected_content_hash":"{renamed_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(move_response.status(), StatusCode::OK);
+        let move_body = to_bytes(move_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let moved: serde_json::Value = serde_json::from_slice(&move_body).expect("json");
+        let moved_slug = moved["slug"].as_str().expect("moved slug");
+        let moved_hash = moved["content_hash"].as_str().expect("moved hash");
+
+        let archive = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{moved_slug}/archive"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{moved_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(archive.status(), StatusCode::OK);
+        let archive_body = to_bytes(archive.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let archived: serde_json::Value = serde_json::from_slice(&archive_body).expect("json");
+        let archived_slug = archived["slug"].as_str().expect("archived slug");
+        let archived_hash = archived["content_hash"].as_str().expect("archived hash");
+        assert_eq!(archived["relative_path"], "90-archive/Renamed Note");
+
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/note/{archived_slug}"))
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{archived_hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(delete.status(), StatusCode::OK);
     }
 }

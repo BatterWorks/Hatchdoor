@@ -55,6 +55,11 @@ body.resizing {
     box-shadow: var(--shadow-overlay);
     padding: 0.5rem;
     gap: 0.2rem;
+    transform: translateY(calc(100% + 1.25rem));
+  }
+
+  .topbar-menu[data-open="true"] {
+    transform: translateY(0);
   }
 
   .topbar-menu .ui-button,

@@ -7,9 +7,9 @@ use crate::search::SearchRequest;
 use crate::vault::VaultIndex;
 use crate::vault::{
     AttachmentOutcome, SectionMode, WriteError, WriteOutcome, allowed_attachment_extensions,
-    append_note, create_note, delete_attachment, delete_note, edit_note, import_attachment,
-    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
-    replace_section, update_note,
+    append_note, archive_note, create_note, delete_attachment, delete_note, edit_note,
+    import_attachment, list_note_attachments, move_attachment, move_or_rename_note,
+    rename_attachment, replace_section, update_note,
 };
 
 use super::config::McpConfig;
@@ -53,7 +53,7 @@ pub async fn handle_tools_call(
             "usage": "Enable HATCHDOOR_MCP_WRITE_ENABLED to use staged attachment imports."
         }))),
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "rename_note" | "move_note" | "move_rename_note" | "delete_note"
+        | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
         | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
             if config.write_enabled =>
         {
@@ -69,6 +69,7 @@ pub async fn handle_tools_call(
                 "rename_note" => rename_note_tool(state, arguments).await,
                 "move_note" => move_note_tool(state, arguments).await,
                 "move_rename_note" => move_rename_note_tool(state, arguments).await,
+                "archive_note" => archive_note_tool(state, arguments).await,
                 "delete_note" => delete_note_tool(state, arguments).await,
                 "import_attachment" => import_attachment_tool(state, arguments, config).await,
                 "move_attachment" => move_attachment_tool(state, arguments).await,
@@ -88,6 +89,7 @@ pub async fn handle_tools_call(
         | "rename_note"
         | "move_note"
         | "move_rename_note"
+        | "archive_note"
         | "delete_note"
         | "import_attachment"
         | "move_attachment"
@@ -404,10 +406,7 @@ async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "create", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "create", outcome, args.commit_summary).await
 }
 
 async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -418,10 +417,7 @@ async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "update", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "update", outcome, args.commit_summary).await
 }
 
 async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -433,10 +429,7 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
     let entry = note_entry(&index, &args.slug)?;
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "append", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "append", outcome, args.commit_summary).await
 }
 
 async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -453,10 +446,7 @@ async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
         args.replace_all.unwrap_or(false),
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "edit", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "edit", outcome, args.commit_summary).await
 }
 
 async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -484,10 +474,7 @@ async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "replace_section", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "replace_section", outcome, args.commit_summary).await
 }
 
 async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -511,10 +498,7 @@ async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "rename", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "rename", outcome, args.commit_summary).await
 }
 
 async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -542,10 +526,7 @@ async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "move", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "move", outcome, args.commit_summary).await
 }
 
 async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -564,10 +545,24 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "move_rename", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "move_rename", outcome, args.commit_summary).await
+}
+
+async fn archive_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+    let args: ArchiveNoteArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid archive_note arguments: {error}"))
+    })?;
+    let index = current_index(&state).await?;
+    let entry = note_entry(&index, &args.slug)?;
+    let outcome = archive_note(
+        &state.vault_path,
+        &index,
+        &entry,
+        &state.archive_prefix,
+        &args.expected_content_hash,
+    )
+    .map_err(write_error_to_jsonrpc)?;
+    finalize_note_write(&state, "archive", outcome, args.commit_summary).await
 }
 
 async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
@@ -583,10 +578,7 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
-    refresh_after_write(&state).await?;
-    record_note_write(&state, "delete", &outcome, args.commit_summary);
-    let warning = git_sync_warning(&state).await;
-    Ok(write_success(outcome, warning))
+    finalize_note_write(&state, "delete", outcome, args.commit_summary).await
 }
 
 async fn import_attachment_tool(
@@ -730,6 +722,39 @@ async fn refresh_after_write(state: &AppState) -> Result<(), JsonRpcFailure> {
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))
 }
 
+async fn finalize_note_write(
+    state: &AppState,
+    op: &str,
+    mut outcome: WriteOutcome,
+    commit_summary: Option<String>,
+) -> Result<Value, JsonRpcFailure> {
+    refresh_after_write(state).await?;
+    if outcome.slug.is_none() && outcome.relative_path.is_some() && outcome.content_hash.is_some() {
+        let index = current_index(state).await?;
+        let relative_path = outcome
+            .relative_path
+            .as_deref()
+            .expect("relative_path checked above");
+        outcome.slug = slug_for_relative_path(&index, relative_path);
+        if outcome.slug.is_none() {
+            return Err(JsonRpcFailure::internal(
+                "note write completed but refreshed index did not contain the note",
+            ));
+        }
+    }
+    record_note_write(state, op, &outcome, commit_summary);
+    let warning = git_sync_warning(state).await;
+    Ok(write_success(outcome, warning))
+}
+
+fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<String> {
+    index
+        .ordered_entries()
+        .into_iter()
+        .find(|entry| entry.relative_path == relative_path)
+        .map(|entry| entry.slug)
+}
+
 fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     match error {
         WriteError::InvalidInput(message) => JsonRpcFailure::invalid_params(message),
@@ -744,6 +769,7 @@ fn write_success(outcome: WriteOutcome, git_sync_warning: Option<String>) -> Val
         "slug": outcome.slug,
         "relative_path": outcome.relative_path,
         "content_hash": outcome.content_hash,
+        "quality_warnings": outcome.quality_warnings,
         "rewritten_notes": outcome.rewritten_notes,
         "moved_assets": outcome.moved_assets,
         "trashed_path": outcome.trashed_path,
@@ -991,6 +1017,21 @@ fn write_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(true, false)
         }),
         json!({
+            "name": "archive_note",
+            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1},
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["slug", "expected_content_hash"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
             "name": "delete_note",
             "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, move referenced assets with it, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
@@ -1193,6 +1234,15 @@ struct MoveRenameNoteArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ArchiveNoteArgs {
+    slug: String,
+    expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DeleteNoteArgs {
     slug: String,
     expected_content_hash: String,
@@ -1247,6 +1297,7 @@ mod record_tests {
             slug: Some("new".to_string()),
             relative_path: Some("Projects/New".to_string()),
             content_hash: Some("h".to_string()),
+            quality_warnings: Vec::new(),
             rewritten_notes: 0,
             moved_assets: 0,
             trashed_path: None,

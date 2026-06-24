@@ -7,3 +7,374 @@
 @import "./styles/responsive.css";
 @import "./styles/stats.css";
 @import "./styles/graph.css";
+
+.write-notice {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0.5rem 1rem 0;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.9rem;
+}
+
+.write-notice-messages {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.write-notice-dismiss {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.note-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.note-edit-button {
+  flex: none;
+}
+
+.note-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.note-editor-modes {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.note-editor-hint {
+  margin-left: auto;
+  font-size: 0.78rem;
+  opacity: 0.6;
+}
+
+.note-editor-input {
+  position: relative;
+}
+
+.note-editor-input.drag-active .note-editor-textarea {
+  border-color: var(--accent, var(--ink));
+  box-shadow: inset 0 0 0 1px var(--accent, var(--ink));
+}
+
+.note-editor-drop-target {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent, var(--ink));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--paper) 86%, transparent);
+  color: var(--ink);
+  font-size: 0.9rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.note-editor-properties {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface, rgba(127, 127, 127, 0.06));
+}
+
+.note-editor-property {
+  display: grid;
+  gap: 0.3rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.note-editor-property-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.note-editor-property input {
+  min-width: 0;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0.35rem 0.45rem;
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+.note-editor-conflict {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.85rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--surface, rgba(127, 127, 127, 0.06));
+}
+
+.note-editor-conflict-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.note-editor-conflict-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.note-editor-conflict-header p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.note-editor-conflict-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.note-editor-conflict-primary {
+  font-weight: 700;
+}
+
+.note-editor-conflict-secondary {
+  opacity: 0.75;
+}
+
+.note-editor-conflict-diff {
+  display: grid;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+}
+
+.note-editor-conflict-line {
+  display: grid;
+  grid-template-columns: 4.5rem 1fr;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.note-editor-conflict-line:last-child {
+  border-bottom: 0;
+}
+
+.note-editor-conflict-line.disk {
+  background: rgba(190, 85, 75, 0.12);
+}
+
+.note-editor-conflict-line.draft {
+  background: rgba(70, 120, 170, 0.12);
+}
+
+.note-editor-conflict-marker {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.note-editor-conflict-line code {
+  white-space: pre-wrap;
+}
+
+.note-editor-autocomplete {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin: 0.15rem 0 0;
+  padding: 0.25rem;
+  list-style: none;
+  max-height: 14rem;
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+
+.note-editor-autocomplete-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.4rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.note-editor-autocomplete-item.active,
+.note-editor-autocomplete-item:hover {
+  background: var(--hover, rgba(127, 127, 127, 0.15));
+}
+
+.note-editor-preview {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.75rem 0.9rem;
+  min-height: 8rem;
+  overflow-x: auto;
+}
+
+.note-editor-preview
+  :where(.table-wrap, .code-block, .mermaid, pre, img, .katex-display) {
+  max-width: 100%;
+}
+
+.note-editor-preview :where(pre, .katex-display) {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.folder-new-note {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  opacity: 0;
+  padding: 0 0.3rem;
+}
+
+.folder-item summary:hover .folder-new-note,
+.folder-new-note:focus-visible {
+  opacity: 0.8;
+}
+
+.note-editor-notice {
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.note-editor-notice.attachment-loading {
+  border-style: dashed;
+}
+
+.note-editor-notice.attachment-success {
+  border-color: color-mix(in srgb, var(--ink) 28%, var(--rule));
+}
+
+.note-editor-notice.attachment-error {
+  border-color: rgba(190, 85, 75, 0.5);
+  background: rgba(190, 85, 75, 0.08);
+}
+
+@media (max-width: 720px) {
+  .note-editor-properties {
+    grid-template-columns: 1fr;
+  }
+
+  .note-editor-conflict-actions {
+    width: 100%;
+  }
+
+  .note-editor-conflict-actions .ui-button {
+    flex: 1 1 100%;
+  }
+
+  .note-editor-conflict-line {
+    grid-template-columns: 3.75rem 1fr;
+  }
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: var(--overlay-bg);
+}
+
+.modal-panel {
+  width: min(520px, 100%);
+  max-height: min(720px, calc(100vh - 2rem));
+  overflow: auto;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+  padding: 1rem;
+}
+
+.modal-panel h2 {
+  margin: 0 0 0.5rem;
+}
+
+.modal-panel form {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.modal-panel label {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.modal-panel input,
+.modal-panel textarea {
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.65rem;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.modal-panel textarea {
+  min-height: 8rem;
+  resize: vertical;
+  font:
+    0.95rem/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}

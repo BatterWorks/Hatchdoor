@@ -10,11 +10,12 @@ mod types;
 mod tests;
 
 pub use attachments::{
-    delete_attachment, import_attachment, list_note_attachments, move_attachment, rename_attachment,
+    delete_attachment, import_attachment, import_attachment_bytes, list_note_attachments,
+    move_attachment, rename_attachment,
 };
 pub use notes::{
-    SectionMode, append_note, create_note, delete_note, edit_note, move_or_rename_note,
-    replace_section, update_note,
+    SectionMode, append_note, archive_note, create_note, delete_note, edit_note,
+    move_or_rename_note, replace_section, update_note,
 };
 pub use paths::allowed_attachment_extensions;
-pub use types::{AttachmentOutcome, WriteError, WriteOutcome};
+pub use types::{AttachmentInfo, AttachmentOutcome, WriteError, WriteOutcome};

@@ -89,6 +89,46 @@ pub fn import_attachment(
     })
 }
 
+pub fn import_attachment_bytes(
+    vault_root: &Path,
+    target_relative_path: &str,
+    bytes: &[u8],
+    max_bytes: u64,
+    overwrite: bool,
+) -> Result<AttachmentOutcome, WriteError> {
+    let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
+    ensure_allowed_attachment_path(&target_path)?;
+    create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
+
+    let size = bytes.len().min(u64::MAX as usize) as u64;
+    if size > max_bytes {
+        return Err(WriteError::InvalidInput(format!(
+            "attachment exceeds max size: {size} > {max_bytes}",
+        )));
+    }
+    if target_path.exists() && !overwrite {
+        return Err(WriteError::Conflict(format!(
+            "Attachment already exists: {}",
+            normalize_attachment_relative_path(target_relative_path)?
+        )));
+    }
+
+    fs::write(&target_path, bytes).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to write attachment '{}': {error}",
+            target_path.display()
+        ))
+    })?;
+
+    Ok(AttachmentOutcome {
+        attachment: attachment_info(vault_root, &target_path)?,
+        rewritten_notes: 0,
+        trashed_path: None,
+        cleanup_warning: None,
+        affected_paths: vec![target_path],
+    })
+}
+
 pub fn move_attachment(
     vault_root: &Path,
     index: &VaultIndex,
