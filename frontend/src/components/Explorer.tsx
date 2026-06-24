@@ -91,11 +91,15 @@ export function FolderTree({
   currentPath,
   expandedFolders,
   onExpandedFoldersChange,
+  writeEnabled,
+  onCreateNoteInFolder,
 }: {
   root: ExplorerFolder;
   currentPath: string;
   expandedFolders: Record<string, boolean>;
   onExpandedFoldersChange: (expanded: Record<string, boolean>) => void;
+  writeEnabled: boolean;
+  onCreateNoteInFolder: (folderPath: string) => void;
 }) {
   const currentSlug = pathToNoteSlug(currentPath);
   const activePathFolders = useMemo(
@@ -113,6 +117,8 @@ export function FolderTree({
           folderPath={folder.name}
           expandedFolders={expandedFolders}
           activePathFolders={activePathFolders}
+          writeEnabled={writeEnabled}
+          onCreateNoteInFolder={onCreateNoteInFolder}
           onToggleFolder={(path, open) =>
             onExpandedFoldersChange({ ...expandedFolders, [path]: open })
           }
@@ -131,6 +137,8 @@ function FolderNode({
   folderPath,
   expandedFolders,
   activePathFolders,
+  writeEnabled,
+  onCreateNoteInFolder,
   onToggleFolder,
 }: {
   folder: ExplorerFolder;
@@ -138,6 +146,8 @@ function FolderNode({
   folderPath: string;
   expandedFolders: Record<string, boolean>;
   activePathFolders: Set<string>;
+  writeEnabled: boolean;
+  onCreateNoteInFolder: (folderPath: string) => void;
   onToggleFolder: (path: string, open: boolean) => void;
 }) {
   const shouldOpen =
@@ -156,6 +166,21 @@ function FolderNode({
       >
         <summary title={folderPath}>
           <span className="folder-label">{folder.name}</span>
+          {writeEnabled ? (
+            <button
+              type="button"
+              className="folder-new-note"
+              aria-label={`New note in ${folderPath}`}
+              title={`New note in ${folderPath}`}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onCreateNoteInFolder(folderPath);
+              }}
+            >
+              +
+            </button>
+          ) : null}
         </summary>
         <ul className="tree">
           {folder.folders.map((child) => (
@@ -166,6 +191,8 @@ function FolderNode({
               folderPath={`${folderPath}/${child.name}`}
               expandedFolders={expandedFolders}
               activePathFolders={activePathFolders}
+              writeEnabled={writeEnabled}
+              onCreateNoteInFolder={onCreateNoteInFolder}
               onToggleFolder={onToggleFolder}
             />
           ))}

@@ -175,6 +175,7 @@ mod tests {
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(McpConfig::disabled()),
@@ -461,6 +462,7 @@ mod tests {
         assert!(names.contains(&"edit_note"));
         assert!(names.contains(&"replace_section"));
         assert!(names.contains(&"move_rename_note"));
+        assert!(names.contains(&"archive_note"));
         assert!(names.contains(&"delete_note"));
         assert!(names.contains(&"import_attachment"));
         assert!(names.contains(&"move_attachment"));
@@ -579,7 +581,7 @@ mod tests {
             .expect("read from refreshed cache")
             .expect("new note");
         assert_eq!(note.relative_path, "Projects/New");
-        assert_eq!(note.content, "# New\ncreated from MCP");
+        assert_eq!(note.content, "# New\ncreated from MCP\n");
     }
 
     #[tokio::test]
@@ -611,7 +613,7 @@ mod tests {
         assert_eq!(body["result"]["structuredContent"]["ok"], true);
         assert_eq!(
             std::fs::read_to_string(state.vault_path.join("Home.md")).expect("read"),
-            "# Home\nALPHA token\n[[Plan]]"
+            "# Home\nALPHA token\n[[Plan]]\n"
         );
 
         let cache = state.cache.read().await;
@@ -620,7 +622,53 @@ mod tests {
             .read_note_by_slug("home")
             .expect("read refreshed cache")
             .expect("home note");
-        assert_eq!(note.content, "# Home\nALPHA token\n[[Plan]]");
+        assert_eq!(note.content, "# Home\nALPHA token\n[[Plan]]\n");
+    }
+
+    #[tokio::test]
+    async fn rename_note_tool_returns_new_slug_and_refreshes_cache() {
+        let (state, _tmp) = test_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            post_json_with_auth(
+                state.clone(),
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":56,
+                    "method":"tools/call",
+                    "params": {
+                        "name": "rename_note",
+                        "arguments": {
+                            "slug": "home",
+                            "new_title": "Renamed Home",
+                            "expected_content_hash": hash
+                        }
+                    }
+                }),
+                write_config(),
+            ),
+        )
+        .await
+        .expect("rename_note response timed out");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(content["slug"], "renamed-home");
+        assert_eq!(content["relative_path"], "Renamed Home");
+        assert!(state.vault_path.join("Renamed Home.md").exists());
+        assert!(!state.vault_path.join("Home.md").exists());
+
+        let cache = state.cache.read().await;
+        let note = cache
+            .sqlite
+            .read_note_by_slug("renamed-home")
+            .expect("read refreshed cache")
+            .expect("renamed note");
+        assert_eq!(note.relative_path, "Renamed Home");
+        assert_eq!(note.content, "# Home\nalpha token\n[[Plan]]");
     }
 
     #[tokio::test]

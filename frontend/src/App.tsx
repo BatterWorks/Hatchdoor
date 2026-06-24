@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -33,6 +34,10 @@ import { useIsMobile } from "./app/useIsMobile";
 import { useTheme } from "./app/useTheme";
 import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
 import { copyText } from "./clipboard";
+import {
+  NoteActionsDialog,
+  type NoteActionDialogKind,
+} from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
 import { TokenPrompt } from "./components/TokenPrompt";
@@ -40,6 +45,19 @@ import { GraphPage } from "./components/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { isExplorerTreeEqual } from "./stateCompare";
+import {
+  archiveNote,
+  createNote,
+  deleteNote,
+  describeWriteOutcome,
+  getWriteCapabilities,
+  moveNote,
+  renameNote,
+} from "./writeApi";
+import { validateNotePath } from "./writePaths";
+import { pruneNoteDrafts } from "./writeDrafts";
+import { collectFolderPaths } from "./app/folderPaths";
+import { flattenNoteCandidates } from "./app/noteCandidates";
 import type {
   ActiveNoteMeta,
   ExplorerFolder,
@@ -79,6 +97,14 @@ function App() {
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [vaultRevision, setVaultRevision] = useState(0);
   const [authRequired, setAuthRequired] = useState(false);
+  const [writeEnabled, setWriteEnabled] = useState(false);
+  const [writeWarnings, setWriteWarnings] = useState<string[]>([]);
+  const [writeNotice, setWriteNotice] = useState<string | null>(null);
+  const [editRequestId, setEditRequestId] = useState(0);
+  const [noteActionDialog, setNoteActionDialog] =
+    useState<NoteActionDialogKind | null>(null);
+  const [noteActionError, setNoteActionError] = useState<string | null>(null);
+  const [noteActionInitialFolder, setNoteActionInitialFolder] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
@@ -128,6 +154,45 @@ function App() {
   useEffect(() => {
     onUnauthorized(() => setAuthRequired(true));
     return () => onUnauthorized(null);
+  }, []);
+
+  const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
+  const noteCandidates = useMemo(() => flattenNoteCandidates(tree), [tree]);
+
+  const openCreateDialog = useCallback((folder: string) => {
+    setNoteActionError(null);
+    setNoteActionInitialFolder(folder);
+    setNoteActionDialog("create");
+  }, []);
+
+  useEffect(() => {
+    // Drafts only bridge an interrupted edit; drop ones older than a week.
+    pruneNoteDrafts(7 * 24 * 60 * 60 * 1000);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const capabilities = await getWriteCapabilities();
+        if (!cancelled) {
+          setWriteEnabled(Boolean(capabilities.enabled));
+          setWriteWarnings(
+            Array.isArray(capabilities.warnings) ? capabilities.warnings : [],
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setWriteEnabled(false);
+          setWriteWarnings([]);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -311,6 +376,19 @@ function App() {
         return;
       }
 
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "n" &&
+        writeEnabled &&
+        !isEditableTarget(event.target)
+      ) {
+        // Works in installed/standalone PWA contexts; harmless where the
+        // browser reserves the shortcut.
+        event.preventDefault();
+        openCreateDialog("");
+        return;
+      }
+
       if (event.key === "/" && !isEditableTarget(event.target)) {
         event.preventDefault();
         setSearchOpen(true);
@@ -319,7 +397,7 @@ function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [openCreateDialog, writeEnabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -445,9 +523,6 @@ function App() {
     }
     await copyText(activeNote.exportContent ?? "");
   }, [activeNote]);
-  const toggleProperties = useCallback(() => {
-    window.dispatchEvent(new Event("hatchdoor:toggle-note-properties"));
-  }, []);
   const downloadMarkdown = useCallback(() => {
     if (!activeNote) {
       return;
@@ -463,6 +538,133 @@ function App() {
     anchor.click();
     anchor.remove();
   }, [activeNote]);
+
+  const closeNoteActionDialog = useCallback(() => {
+    setNoteActionDialog(null);
+    setNoteActionError(null);
+    setNoteActionInitialFolder("");
+  }, []);
+
+  const requireActiveNoteHash = useCallback(() => {
+    if (!activeNote?.slug || !activeNote.contentHash) {
+      throw new Error("Current note is not ready for write actions");
+    }
+    return { slug: activeNote.slug, contentHash: activeNote.contentHash };
+  }, [activeNote]);
+
+  const handleCreateNote = useCallback(
+    async (relativePath: string, content: string) => {
+      setNoteActionError(null);
+      const pathError = validateNotePath(relativePath, { label: "Note path" });
+      if (pathError) {
+        setNoteActionError(pathError);
+        return;
+      }
+      try {
+        const outcome = await createNote(relativePath, content);
+        setNoteActionDialog(null);
+        setWriteNotice(describeWriteOutcome(outcome));
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        }
+      } catch (error) {
+        setNoteActionError(
+          error instanceof Error ? error.message : "Create failed",
+        );
+      }
+    },
+    [navigate, refreshVault],
+  );
+
+  const handleRenameNote = useCallback(
+    async (newTitle: string) => {
+      setNoteActionError(null);
+      const trimmed = newTitle.trim();
+      if (!trimmed) {
+        setNoteActionError("New title is required.");
+        return;
+      }
+      try {
+        const { slug, contentHash } = requireActiveNoteHash();
+        const outcome = await renameNote(slug, trimmed, contentHash);
+        setNoteActionDialog(null);
+        setWriteNotice(describeWriteOutcome(outcome));
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        }
+      } catch (error) {
+        setNoteActionError(
+          error instanceof Error ? error.message : "Rename failed",
+        );
+      }
+    },
+    [navigate, refreshVault, requireActiveNoteHash],
+  );
+
+  const handleMoveNote = useCallback(
+    async (targetFolder: string) => {
+      setNoteActionError(null);
+      const pathError = validateNotePath(targetFolder, {
+        allowEmpty: true,
+        label: "Target folder",
+      });
+      if (pathError) {
+        setNoteActionError(pathError);
+        return;
+      }
+      try {
+        const { slug, contentHash } = requireActiveNoteHash();
+        const outcome = await moveNote(slug, targetFolder, contentHash);
+        setNoteActionDialog(null);
+        setWriteNotice(describeWriteOutcome(outcome));
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        }
+      } catch (error) {
+        setNoteActionError(
+          error instanceof Error ? error.message : "Move failed",
+        );
+      }
+    },
+    [navigate, refreshVault, requireActiveNoteHash],
+  );
+
+  const handleArchiveNote = useCallback(async () => {
+    setNoteActionError(null);
+    try {
+      const { slug, contentHash } = requireActiveNoteHash();
+      const outcome = await archiveNote(slug, contentHash);
+      setNoteActionDialog(null);
+      setWriteNotice(describeWriteOutcome(outcome));
+      await refreshVault();
+      if (outcome.slug) {
+        navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+      }
+    } catch (error) {
+      setNoteActionError(
+        error instanceof Error ? error.message : "Archive failed",
+      );
+    }
+  }, [navigate, refreshVault, requireActiveNoteHash]);
+
+  const handleDeleteNote = useCallback(async () => {
+    setNoteActionError(null);
+    try {
+      const { slug, contentHash } = requireActiveNoteHash();
+      const outcome = await deleteNote(slug, contentHash);
+      setNoteActionDialog(null);
+      setWriteNotice(describeWriteOutcome(outcome));
+      await refreshVault();
+      navigate("/");
+    } catch (error) {
+      setNoteActionError(
+        error instanceof Error ? error.message : "Delete failed",
+      );
+    }
+  }, [navigate, refreshVault, requireActiveNoteHash]);
 
   return (
     <div
@@ -485,6 +687,7 @@ function App() {
       )}
       <AppTopbar
         activeNote={activeNote}
+        writeEnabled={writeEnabled}
         isMobile={isMobile}
         isOnline={isOnline}
         treeIsStale={treeIsStale}
@@ -495,18 +698,58 @@ function App() {
         onOpenSearch={() => setSearchOpen(true)}
         onToggleActionsMenu={() => setActionsMenuOpen((prev) => !prev)}
         onCloseActionsMenu={() => setActionsMenuOpen(false)}
-        onRefreshVault={() => void refreshVault()}
         onCopyPageContent={() => void copyPageContent()}
         onCopyNoteLink={() => void copyNoteLink()}
         onDownloadMarkdown={() => downloadMarkdown()}
-        onToggleProperties={toggleProperties}
+        onEditNote={() => setEditRequestId((prev) => prev + 1)}
+        onNewNote={() => openCreateDialog("")}
+        onRenameNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("rename");
+        }}
+        onMoveNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("move");
+        }}
+        onArchiveNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("archive");
+        }}
+        onDeleteNote={() => {
+          setNoteActionError(null);
+          setNoteActionDialog("delete");
+        }}
         onCycleTheme={cycleTheme}
       />
+
+      {writeWarnings.length > 0 || writeNotice ? (
+        <div className="write-notice" role="status">
+          <div className="write-notice-messages">
+            {writeWarnings.map((warning) => (
+              <span key={warning}>{warning}</span>
+            ))}
+            {writeNotice ? <span>{writeNotice}</span> : null}
+          </div>
+          <button
+            type="button"
+            className="write-notice-dismiss"
+            aria-label="Dismiss notice"
+            onClick={() => {
+              setWriteNotice(null);
+              setWriteWarnings([]);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
 
       <div className="app-layout">
         <ExplorerPane
           explorerPaneRef={explorerPaneRef}
           drawerOpen={drawerOpen}
+          writeEnabled={writeEnabled}
+          onCreateNoteInFolder={openCreateDialog}
           locationPathname={location.pathname}
           recentNotes={recentNotes}
           modifiedNotes={modifiedNotes}
@@ -564,7 +807,9 @@ function App() {
           />
         ) : null}
 
-        <main className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}>
+        <main
+          className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}
+        >
           <Routes>
             <Route path="/" element={<EmptyState />} />
             <Route path="/stats" element={<StatsPage />} />
@@ -577,6 +822,10 @@ function App() {
                   onTagSelect={openSearchForTag}
                   propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
                   vaultRevision={vaultRevision}
+                  writeEnabled={writeEnabled}
+                  editRequestId={editRequestId}
+                  onWriteNotice={setWriteNotice}
+                  noteCandidates={noteCandidates}
                 />
               }
             />
@@ -616,6 +865,23 @@ function App() {
             const suffix = params.toString();
             navigate(`/n/${selection.slug}${suffix ? `?${suffix}` : ""}`);
           }}
+        />
+      ) : null}
+
+      {noteActionDialog ? (
+        <NoteActionsDialog
+          kind={noteActionDialog}
+          error={noteActionError}
+          folderPaths={folderPaths}
+          initialFolder={noteActionInitialFolder}
+          onClose={closeNoteActionDialog}
+          onCreate={(relativePath, content) =>
+            void handleCreateNote(relativePath, content)
+          }
+          onRename={(newTitle) => void handleRenameNote(newTitle)}
+          onMove={(targetFolder) => void handleMoveNote(targetFolder)}
+          onArchive={() => void handleArchiveNote()}
+          onDelete={() => void handleDeleteNote()}
         />
       ) : null}
     </div>

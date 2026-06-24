@@ -14,6 +14,7 @@ export type Note = {
   slug: string;
   relative_path: string;
   content: string;
+  content_hash: string;
 };
 
 export type NoteLink = {
@@ -31,11 +32,42 @@ export type NoteLinksResponse = {
   links: NoteLinks;
 };
 
+export type WriteCapabilities = {
+  enabled: boolean;
+  warnings: string[];
+};
+
+export type WriteOutcome = {
+  ok: boolean;
+  slug: string | null;
+  relative_path: string | null;
+  content_hash: string | null;
+  quality_warnings: string[];
+  git_sync_warning: string | null;
+  rewritten_notes: number;
+  moved_assets: number;
+  trashed_path: string | null;
+};
+
+export type AttachmentOutcome = {
+  ok: boolean;
+  attachment: {
+    relative_path: string;
+    size_bytes: number;
+    content_hash: string;
+  };
+  git_sync_warning: string | null;
+  rewritten_notes: number;
+  trashed_path: string | null;
+  cleanup_warning: string | null;
+};
+
 export type ActiveNoteMeta = {
   title: string;
   slug: string;
   relativePath: string;
   exportContent?: string;
+  contentHash?: string;
 };
 
 export type RecentNote = ActiveNoteMeta & {
@@ -126,7 +158,12 @@ export type VaultStats = {
   modified_this_month: NoteList;
 };
 
-export type GraphNode = { slug: string; title: string; primary_tag: string | null; backlink_count: number };
+export type GraphNode = {
+  slug: string;
+  title: string;
+  primary_tag: string | null;
+  backlink_count: number;
+};
 export type GraphEdge = { source: string; target: string };
 export type GraphData = { nodes: GraphNode[]; edges: GraphEdge[] };
 

@@ -77,6 +77,8 @@ pub struct AppState {
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
     pub embedder: Arc<dyn Embedder>,
+    /// True when the web API is protected by `HATCHDOOR_WEB_BEARER_TOKEN`.
+    pub web_auth_enabled: bool,
     /// Serializes vault file mutations against git sync tree operations.
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Present only when git sync is enabled.
@@ -256,6 +258,7 @@ mod tests {
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
             embedder,
+            web_auth_enabled: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),

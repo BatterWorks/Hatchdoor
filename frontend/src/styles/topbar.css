@@ -44,14 +44,18 @@
   font-family: var(--font-display);
   font-size: 46px;
   font-weight: 800;
-  font-variation-settings: "wdth" 78, "wght" 800;
+  font-variation-settings:
+    "wdth" 78,
+    "wght" 800;
   letter-spacing: 0.04em;
 }
 
 /* Breadcrumb — col 2 */
 .topbar-crumb {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 96, "wght" 400;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 400;
   font-size: 0.85rem;
   color: var(--muted);
   min-width: 0;
@@ -70,7 +74,9 @@
 
 .topbar-crumb-here {
   color: var(--ink);
-  font-variation-settings: "wdth" 96, "wght" 500;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 500;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -91,7 +97,9 @@
   align-items: center;
   gap: 0.65rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 96, "wght" 500;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 500;
   font-size: 0.86rem;
   color: var(--muted);
   border: 1px solid var(--rule-strong);
@@ -99,7 +107,9 @@
   padding: 0.36rem 0.85rem;
   min-width: 13rem;
   cursor: pointer;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
   border-radius: 0;
 }
 
@@ -140,7 +150,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
   border-radius: 0;
   padding: 0;
 }
@@ -187,6 +199,10 @@
   color: var(--err-fg);
 }
 
+.topbar-menu-host {
+  position: relative;
+}
+
 /* Popover menu */
 .topbar-menu {
   position: absolute;
@@ -200,6 +216,25 @@
   background: var(--bg);
   box-shadow: var(--shadow-float);
   z-index: 70;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.75rem);
+  visibility: hidden;
+  transition:
+    transform 160ms ease,
+    opacity 160ms ease,
+    visibility 0s linear 160ms;
+}
+
+.topbar-menu[data-open="true"] {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
+  transition:
+    transform 160ms ease,
+    opacity 160ms ease,
+    visibility 0s;
 }
 
 /* Mobile meta row (below topbar) */
@@ -215,7 +250,9 @@
   border: 0;
   color: var(--muted);
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 96, "wght" 400;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 400;
   font-size: 0.82rem;
   line-height: 1.28;
   padding: 0.12rem 0.2rem;

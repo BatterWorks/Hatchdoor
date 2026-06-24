@@ -19,15 +19,16 @@ afterEach(() => {
 
 describe("App enhancements", () => {
   it("persists expanded folders in localStorage", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          name: "Vault",
-          folders: [{ name: "Projects", folders: [], notes: [] }],
-          notes: [],
-        }),
-        { status: 200 },
-      ),
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            name: "Vault",
+            folders: [{ name: "Projects", folders: [], notes: [] }],
+            notes: [],
+          }),
+          { status: 200 },
+        ),
     );
 
     render(

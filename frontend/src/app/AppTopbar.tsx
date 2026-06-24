@@ -1,4 +1,4 @@
-import type { Ref } from "react";
+import { useEffect, useRef, type Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
 import type { ActiveNoteMeta } from "../types";
@@ -13,6 +13,7 @@ const THEME_LABEL: Record<Theme, string> = {
 
 type TopbarProps = {
   activeNote: ActiveNoteMeta | null;
+  writeEnabled: boolean;
   isMobile: boolean;
   isOnline: boolean;
   treeIsStale: boolean;
@@ -23,16 +24,21 @@ type TopbarProps = {
   onOpenSearch: () => void;
   onToggleActionsMenu: () => void;
   onCloseActionsMenu: () => void;
-  onRefreshVault: () => void;
   onCopyPageContent: () => void;
   onCopyNoteLink: () => void;
   onDownloadMarkdown: () => void;
-  onToggleProperties: () => void;
+  onEditNote: () => void;
+  onNewNote: () => void;
+  onRenameNote: () => void;
+  onMoveNote: () => void;
+  onArchiveNote: () => void;
+  onDeleteNote: () => void;
   onCycleTheme: () => void;
 };
 
 export function AppTopbar({
   activeNote,
+  writeEnabled,
   isMobile,
   isOnline,
   treeIsStale,
@@ -43,16 +49,38 @@ export function AppTopbar({
   onOpenSearch,
   onToggleActionsMenu,
   onCloseActionsMenu,
-  onRefreshVault,
   onCopyPageContent,
   onCopyNoteLink,
   onDownloadMarkdown,
-  onToggleProperties,
+  onEditNote,
+  onNewNote,
+  onRenameNote,
+  onMoveNote,
+  onArchiveNote,
+  onDeleteNote,
   onCycleTheme,
 }: TopbarProps) {
+  const actionsMenuRef = useRef<HTMLDivElement>(null);
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
+
+  useEffect(() => {
+    if (!actionsMenuOpen) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && actionsMenuRef.current?.contains(target)) {
+        return;
+      }
+      onCloseActionsMenu();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [actionsMenuOpen, onCloseActionsMenu]);
 
   return (
     <>
@@ -89,7 +117,12 @@ export function AppTopbar({
             {/* Accent square */}
             <rect x="24" y="24" width="12" height="12" fill="var(--hot)" />
             {/* Wordmark text */}
-            <text className="brand-wordmark-text" x="76" y="47" aria-hidden="true">
+            <text
+              className="brand-wordmark-text"
+              x="76"
+              y="47"
+              aria-hidden="true"
+            >
               HATCHDOOR
             </text>
           </svg>
@@ -142,7 +175,7 @@ export function AppTopbar({
           >
             {THEME_ICON[theme]}
           </button>
-          <div style={{ position: "relative" }}>
+          <div className="topbar-menu-host" ref={actionsMenuRef}>
             <button
               type="button"
               className="icon-button"
@@ -153,76 +186,121 @@ export function AppTopbar({
             >
               ···
             </button>
-            {actionsMenuOpen ? (
-              <div className="topbar-menu" role="menu">
+            <div
+              className="topbar-menu"
+              role="menu"
+              aria-hidden={!actionsMenuOpen}
+              data-open={actionsMenuOpen}
+            >
+              {writeEnabled ? (
                 <UiButton
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
                     onCloseActionsMenu();
-                    onOpenSearch();
+                    onNewNote();
                   }}
                 >
-                  Search
+                  New note
                 </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
                 <UiButton
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
                     onCloseActionsMenu();
-                    onRefreshVault();
+                    onEditNote();
                   }}
                 >
-                  Refresh vault
+                  Edit note
                 </UiButton>
-                {activeNote ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onCopyPageContent();
-                    }}
-                  >
-                    Copy page content
-                  </UiButton>
-                ) : null}
-                {activeNote ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onDownloadMarkdown();
-                    }}
-                  >
-                    Download .md
-                  </UiButton>
-                ) : null}
-                {activeNote ? (
-                  <UiButton
-                    className="close-note"
-                    role="menuitem"
-                    onClick={() => {
-                      onCloseActionsMenu();
-                      onCopyNoteLink();
-                    }}
-                  >
-                    Copy note link
-                  </UiButton>
-                ) : null}
+              ) : null}
+              {activeNote && writeEnabled ? (
                 <UiButton
                   className="close-note"
                   role="menuitem"
                   onClick={() => {
                     onCloseActionsMenu();
-                    onToggleProperties();
+                    onRenameNote();
                   }}
                 >
-                  Toggle properties
+                  Rename note
                 </UiButton>
-              </div>
-            ) : null}
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onMoveNote();
+                  }}
+                >
+                  Move note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onArchiveNote();
+                  }}
+                >
+                  Archive note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onDeleteNote();
+                  }}
+                >
+                  Delete note
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onCopyPageContent();
+                  }}
+                >
+                  Copy page content
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onDownloadMarkdown();
+                  }}
+                >
+                  Download .md
+                </UiButton>
+              ) : null}
+              {activeNote ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onCopyNoteLink();
+                  }}
+                >
+                  Copy note link
+                </UiButton>
+              ) : null}
+            </div>
           </div>
         </div>
       </header>
