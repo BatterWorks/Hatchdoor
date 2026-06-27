@@ -8,3 +8,5 @@ frontend/dist
 /.fastembed_cache
 .claude/
 .superpowers/
+# CodeGraph local index (machine-local, do not commit)
+.codegraph/
