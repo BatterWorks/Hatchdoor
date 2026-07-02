@@ -33,8 +33,9 @@ const DEFAULT_CONFIG = {
     affectedHint: 'the concrete runtime condition(s) that trigger it (e.g. two concurrent writes, crash between file-write and commit, poisoned RwLock, git push rejected, malformed note path)',
   },
 
-  // Strict: everything is verified. medium gets the full 3-lens panel; low gets 1 vote.
-  severityPolicy: { critical: 3, high: 3, medium: 3, low: 1 },
+  // Everything is verified (low still gets 1 vote, so nothing is finder-self-certified),
+  // but medium drops to a single code-truth lens to save tokens. critical/high get the full panel.
+  severityPolicy: { critical: 3, high: 3, medium: 1, low: 1 },
 
   lenses: [
     {
