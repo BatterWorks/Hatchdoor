@@ -1,0 +1,42 @@
+[
+  {
+    "idx": 1,
+    "verdicts": [
+      {
+        "title": "Viewport meta lacks viewport-fit=cover, so every env(safe-area-inset-*) resolves to 0",
+        "refuted": false,
+        "reason": "Confirmed: index.html:14 has no viewport-fit=cover, and the codebase does rely on env(safe-area-inset-*) in the cited spots (topbar.css:4-8, responsive.css:10,53,86-87,95,144,148). Per spec this makes all those insets resolve to 0 today, a genuine defect affecting notched/home-indicator devices."
+      },
+      {
+        "title": "Hotbar element and topbar padding both add safe-area-inset-top (double top inset once viewport-fit is fixed)",
+        "refuted": false,
+        "reason": "Confirmed: topbar.css:4 sets .hotbar height using env(safe-area-inset-top) as a physical element, and responsive.css:10 and :144 independently add the same env(safe-area-inset-top) to the topbar's own padding-top. This is a real double-counting bug, latent only because finding 1 currently zeroes the inset."
+      },
+      {
+        "title": "Create/rename modal is vertically centered with 100vh cap and no visualViewport handling, so the on-screen keyboard hides its inputs",
+        "refuted": false,
+        "reason": "Confirmed: App.css:320-329 .modal-backdrop is position:fixed, inset:0, align-items:center with no scroll allowance on the backdrop, and .modal-panel (App.css:331-339) uses max-height: min(720px, calc(100vh - 2rem)) with no dvh/svh or visualViewport-driven sizing, unlike the drawer's described handling. This is a real risk of keyboard occlusion on iOS Safari/WebKit for the write-mode create/rename dialog."
+      }
+    ]
+  },
+  {
+    "idx": 2,
+    "verdicts": [
+      {
+        "title": "Viewport meta lacks viewport-fit=cover, so every env(safe-area-inset-*) resolves to 0",
+        "refuted": false,
+        "reason": "Confirmed at frontend/index.html:14 the viewport meta is exactly `content=\"width=device-width, initial-scale=1.0\"` with no viewport-fit=cover. This is a well-documented WebKit behavior: without viewport-fit=cover, env(safe-area-inset-*) values resolve to 0px, so any CSS depending on them for notch/home-indicator padding is inert on affected devices (notched iPhones, PWA install). Real defect."
+      }
+    ]
+  },
+  {
+    "idx": 3,
+    "verdicts": [
+      {
+        "title": "Viewport meta lacks viewport-fit=cover, so every env(safe-area-inset-*) resolves to 0",
+        "refuted": false,
+        "reason": "Confirmed at frontend/index.html:14 — the viewport meta is exactly `<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />` with no viewport-fit=cover. Per spec/WebKit behavior, without viewport-fit=cover the viewport does not expand under the safe areas, so env(safe-area-inset-*) resolves to 0 on notched/home-indicator devices, making any CSS relying on those env() values (topbar padding, note-pane bottom padding, mobile bottom action menu, search panel) ineffective on those clients. This is a genuine, easily verifiable defect."
+      }
+    ]
+  }
+]

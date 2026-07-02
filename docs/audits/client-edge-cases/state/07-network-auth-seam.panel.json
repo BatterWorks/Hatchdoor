@@ -1,0 +1,22 @@
+[
+  {
+    "idx": 1,
+    "verdicts": [
+      {
+        "title": "Attachment upload silently capped at axum's 2 MB default body limit, contradicting the advertised 10 MB max",
+        "refuted": false,
+        "reason": "Confirmed: build_router() in src/main.rs (lines 43-108) never calls DefaultBodyLimit or any body-limit layer, and a repo-wide grep for DefaultBodyLimit/body_limit/RequestBodyLimit under src/ returns nothing. Axum's implicit default body limit is 2 MB, which silently disagrees with mcp::config's default max_attachment_bytes = 10 * 1024 * 1024 (src/mcp/config.rs:82). On the client, frontend/src/writeApi.ts uploadAttachment (line 94) and imageUpload.ts's normalizer (which returns the original file on any createImageBitmap failure, line 67-68, and skips normalization for gif/svg) impose no client-side size check before posting the multipart body via apiFetch. This is a genuine, unmitigated contract mismatch between advertised and enforced limits."
+      },
+      {
+        "title": "EventSource for /api/vault-events has no onerror/close handling, causing a silent infinite 401 reconnect loop that never surfaces the TokenPrompt",
+        "refuted": false,
+        "reason": "Confirmed: frontend/src/App.tsx creates `new EventSource(withAccessToken(\"/api/vault-events\"))` at line 212, registers only the 'vault-revision' listener (line 226), and the cleanup only calls removeEventListener/close (lines 227-230) -- no 'error' listener, no readyState check, and no wiring to onUnauthorized/unauthorizedHandler, which is exclusively invoked from apiFetch's 401 check (frontend/src/api.ts:61-63). Native EventSource auto-reconnects on error per spec, so a 401 here (unavoidable if require_web_token guards the route, as in src/main.rs's protected router) produces a silent, unbounded reconnect loop invisible to the rest of the app's auth-prompt flow."
+      },
+      {
+        "title": "No fetch timeout or AbortController anywhere — stalled requests leave permanent spinners on iOS Safari/PWA after network transitions",
+        "refuted": false,
+        "reason": "Confirmed: apiFetch in frontend/src/api.ts (lines 45-65) calls `fetch(input, finalInit)` with no signal parameter, and a repo-wide grep for AbortController/AbortSignal/signal: under frontend/src returns zero matches. There is no timeout mechanism anywhere in the fetch layer, matching the claim exactly; this is a real, unmitigated gap regardless of platform-specific severity framing."
+      }
+    ]
+  }
+]
