@@ -12,9 +12,11 @@ verified by a **3-lens panel** — `code-truth` / `failure-injection` /
 run concurrently; each self-checkpoints to `state/`, so a resume picks up exactly
 where an interrupt left off.
 
-**Verification is strict:** `severityPolicy = { critical:3, high:3, medium:3, low:1 }`
-— even low-severity findings get a vote, so the finder cannot self-certify a
-data-loss or security bug into the report unchecked.
+**Verification:** `severityPolicy = { critical:3, high:3, medium:1, low:1 }`
+— critical/high get the full 3-lens panel; medium and low each get a single
+`code-truth` vote. Even low findings are verified, so the finder cannot
+self-certify a data-loss or security bug into the report unchecked, while
+keeping token cost down.
 
 **A category is "done" when both its `NN-slug.md` report AND
 `state/NN-slug.verdicts.json` exist.** `SUMMARY.md` is built deterministically
