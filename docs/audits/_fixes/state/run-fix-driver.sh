@@ -15,6 +15,10 @@
 # ============================================================================
 set -uo pipefail
 
+# cron runs with a bare PATH — put claude, the node toolchain (node/npm/npx/
+# codegraph), and cargo/rustup back on it so the workflow's subagents can shell out.
+export PATH="/home/battermanz/.local/bin:/home/battermanz/.nvm/versions/node/v24.14.0/bin:/home/battermanz/.cargo/bin:$PATH"
+
 REPO="/home/battermanz/coding/hatchdoor"
 DIR="$REPO/docs/audits/_fixes"
 STATE="$DIR/state"
