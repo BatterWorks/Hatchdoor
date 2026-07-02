@@ -1,0 +1,42 @@
+[
+  {
+    "idx": 1,
+    "verdicts": [
+      {
+        "title": "GraphPage redraws unconditionally at 60fps with per-frame O(n log n) sort + O(n²) label deconfliction + repeated getComputedStyle — pegs mobile CPU/GPU on large vaults",
+        "refuted": false,
+        "reason": "Confirmed in code: startLoop() (447-453) schedules requestAnimationFrame(tick) with no idle/settle check tied to simulation alpha; render() unconditionally calls cssVar() six times per frame (204-209), each hitting getComputedStyle(document.documentElement) fresh (cssVar at line 57-58 has no caching), sorts all nodes by backlink_count every frame (337), and runs collidesWithPlaced via placed.some() (375-376) against a placed array pre-seeded with every visible node (365-370) for each label candidate, plus per-candidate ctx.measureText (390). This is genuinely O(n log n + n²) work executed every frame indefinitely, with no mechanism to skip frames once the layout has stabilized."
+      },
+      {
+        "title": "Canvas buffer-resize inside render() recenters the transform and discards the user's pan whenever clientWidth/clientHeight changes",
+        "refuted": false,
+        "reason": "Confirmed at lines 163-173: on any mismatch between the canvas backing store size and clientWidth*dpr/clientHeight*dpr, render() sets canvas.width/height and resets transformRef to {x: cssW/2, y: cssH/2, k}, discarding the previous x/y pan and only preserving k. Since this check runs every frame, any transient clientHeight change (e.g., iOS Safari toolbar collapse/expand during scroll) will trigger a full recenter, wiping the user's pan position."
+      },
+      {
+        "title": "Read view clips wide KaTeX display equations — overflow-x:auto fix is applied only to the editor preview, not to the published note body",
+        "refuted": false,
+        "reason": "Confirmed: App.css only scopes the '.katex-display' overflow-x:auto rule (256-260) under '.note-editor-preview'. The read view uses '.note-content' > '.note-body' (NotePage.tsx lines 546/613), which has no equivalent katex overflow rule in note-content.css, and its ancestor '.note-pane' sets overflow-x: hidden (note-content.css line 9). A wide KaTeX display block in the published note therefore has no horizontal scroll affordance and would be clipped by the ancestor's overflow-x:hidden, while the editor preview correctly scrolls."
+      }
+    ]
+  },
+  {
+    "idx": 2,
+    "verdicts": [
+      {
+        "title": "GraphPage redraws unconditionally at 60fps with per-frame O(n log n) sort + O(n²) label deconfliction + repeated getComputedStyle — pegs mobile CPU/GPU on large vaults",
+        "refuted": false,
+        "reason": "Code confirms the claim exactly. startLoop (447-453) has no settle/idle detection — cancelAnimationFrame only fires on unmount (539), not when the simulation cools; grep for stop/settled/idle logic found nothing gating the RAF loop. Each render() call does: cssVar() -> getComputedStyle six times (204-209); a full array sort by backlink_count every frame (337-338); builds a placed[] array pre-seeded with every visible node (365-370) and runs collidesWithPlaced via placed.some() (375-376) for each label candidate against up to N placed entries and up to 4 candidate positions each (398-417), which is O(n²)-ish in node count; and ctx.measureText per label candidate per frame (390). This all runs unconditionally at ~60fps forever, confirming the performance defect for large vaults on constrained (mobile) clients."
+      }
+    ]
+  },
+  {
+    "idx": 3,
+    "verdicts": [
+      {
+        "title": "GraphPage redraws unconditionally at 60fps with per-frame O(n log n) sort + O(n²) label deconfliction + repeated getComputedStyle — pegs mobile CPU/GPU on large vaults",
+        "refuted": false,
+        "reason": "Verified against frontend/src/components/GraphPage.tsx:447-453 (startLoop) and 152-443 (render). startLoop's tick() calls render() then immediately re-schedules requestAnimationFrame with no alpha/settle check anywhere in the file (confirmed via grep for alphaMin/simulation.stop/settle logic — none exists); the loop only stops on unmount via cancelAnimationFrame. Inside render(): cssVar() is called six times per frame (204-209), each doing getComputedStyle; nodes are sorted every frame to compute hubMinBacklinks (337); labelCandidates are deconflicted via collidesWithPlaced which does placed.some() over a placed array pre-seeded with every visible node (365-370) for each label candidate and again for each candidate position (405-417), which is O(n²) in visible node count; ctx.measureText is called per label candidate per frame (390). All of this genuinely runs unconditionally every animation frame regardless of whether the simulation has cooled or the view is static, matching the claim exactly."
+      }
+    ]
+  }
+]

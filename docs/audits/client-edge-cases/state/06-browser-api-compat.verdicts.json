@@ -1,0 +1,87 @@
+[
+  {
+    "title": "Unpolyfilled Array/String .at(-1) crashes on Safari < 15.4 while build target floor is safari14",
+    "severity": "medium",
+    "affectedClients": [
+      "desktop Safari 14-15.3",
+      "iOS Safari 14-15.3",
+      "iOS installed PWA 14-15.3"
+    ],
+    "file": "frontend/src/components/note-page/wikilinks.ts",
+    "line": "146",
+    "description": "wikilinks.ts:146 (`return parts.at(-1) ?? fallbackLabel;`) and NotePage.tsx:333 (`matchHeading.split(\" > \").at(-1) ?? matchHeading`) call Array.prototype.at / String.prototype.at. Vite has no `build.target` in vite.config.ts, so it uses the default 'modules' preset whose baseline is [es2020, edge88, firefox78, chrome87, safari14]. esbuild does NOT down-level runtime methods like `.at()` (only syntax), so the code ships verbatim. `.at()` first shipped in Safari/iOS 15.4 (March 2022).",
+    "why": "On Safari/iOS 14.x-15.3 `arr.at` is undefined, so the call throws `TypeError: parts.at is not a function`. wikilinks.ts runs while rendering wikilink labels in note bodies (very common path), so the whole note render throws; NotePage.tsx:333 breaks heading-anchored navigation. This is an engine-version gap between the declared build floor (safari14) and an API that needs 15.4.",
+    "fixSketch": "Set build.target to a floor that guarantees `.at` (safari15.4+) and document it, or avoid `.at(-1)`: use `parts[parts.length - 1]`. Same for NotePage.tsx:333.",
+    "survives": true,
+    "status": "verified",
+    "refutes": 0,
+    "votes": 1,
+    "verdicts": [
+      {
+        "title": "Unpolyfilled Array/String .at(-1) crashes on Safari < 15.4 while build target floor is safari14",
+        "refuted": false,
+        "reason": "Confirmed: vite.config.ts sets no build.target, so Vite/esbuild use the default 'modules' preset (baseline includes safari14), and esbuild only down-levels syntax, not runtime methods like Array.prototype.at/String.prototype.at. wikilinks.ts:146 calls `.at(-1)` directly on the hot wikilink-label render path with no guard/polyfill. Array.prototype.at shipped in Safari 15.4 (Mar 2022), so on Safari/iOS 14.x-15.3 this throws TypeError and breaks wikilink rendering — a genuine gap between the declared build floor and the API actually used."
+      }
+    ]
+  },
+  {
+    "title": "Search dialog input relies on React autoFocus; iOS WebKit will not raise the soft keyboard",
+    "severity": "medium",
+    "affectedClients": [
+      "iOS Safari",
+      "iOS installed PWA"
+    ],
+    "file": "frontend/src/components/SearchDialog.tsx",
+    "line": "159",
+    "description": "The search field uses `autoFocus` (line 159) and is also programmatically focused via `inputRef.current?.focus()` (line 205). React applies autoFocus during commit (a microtask after the click that opened the dialog), and the ArrowUp focus() call is inside a keydown handler on the list, not on the input.",
+    "why": "WebKit on iOS only presents the on-screen keyboard when `.focus()` runs synchronously inside a user-gesture handler. Because React's autoFocus fires after the gesture ends, iOS Safari/PWA focuses the field (caret shows) but the keyboard does not pop up, so the user must tap the field a second time before typing. Desktop Chrome/Firefox/Edge and Android Chrome are unaffected.",
+    "fixSketch": "Focus the input synchronously inside the same tap handler that opens the dialog, rather than depending on autoFocus/effect-time focus.",
+    "survives": false,
+    "status": "verified",
+    "refutes": 1,
+    "votes": 1,
+    "verdicts": [
+      {
+        "title": "Search dialog input relies on React autoFocus; iOS WebKit will not raise the soft keyboard",
+        "refuted": true,
+        "reason": "The dialog is opened either via a button's onClick (App.tsx onOpenSearch) or a window keydown listener, both discrete user-gesture events. React 18 flushes updates from discrete events (click, keydown) synchronously before the handler returns rather than deferring to a later microtask/macrotask, so the autoFocus-driven .focus() call in SearchDialog.tsx:159 commits within the same synchronous gesture-handling stack, not 'a microtask after the click ends' as claimed. The finding's premise about React's commit timing is inaccurate, and in practice React modals with autoFocus reliably raise the iOS keyboard when triggered by a tap. This is a speculative/uncorroborated claim, not a demonstrated defect in the cited code."
+      }
+    ]
+  },
+  {
+    "title": "copyNoteLink calls navigator.clipboard.writeText unguarded with no execCommand fallback (inconsistent with clipboard.ts)",
+    "severity": "low",
+    "affectedClients": [
+      "iOS Safari (non-HTTPS/self-hosted HTTP)",
+      "any client in an insecure context"
+    ],
+    "file": "frontend/src/App.tsx",
+    "line": "515",
+    "description": "copyNoteLink calls `await navigator.clipboard.writeText(window.location.href)` directly. `navigator.clipboard` is undefined outside a secure context (http:// origins, common for self-hosted LAN deployments). Everywhere else copying routes through clipboard.ts:3 which guards `navigator.clipboard?.writeText` and falls back to a textarea + execCommand. copyNoteLink bypasses that helper.",
+    "why": "In an insecure context `navigator.clipboard` is undefined so `.writeText` throws; the try/catch swallows it and 'copy note link' silently does nothing with no fallback. Self-hosters running over plain HTTP on a LAN get a dead button. Secure HTTPS launches are unaffected.",
+    "fixSketch": "Route copyNoteLink through the existing copyText() helper in clipboard.ts so it gets the `?.` guard and execCommand fallback, and surface a failure notice instead of swallowing.",
+    "survives": true,
+    "status": "unverified",
+    "refutes": 0,
+    "votes": 0,
+    "verdicts": []
+  },
+  {
+    "title": "Folder autocomplete uses <datalist>, which degrades on iOS/older WebKit",
+    "severity": "low",
+    "affectedClients": [
+      "iOS Safari (older/varies)",
+      "iOS installed PWA"
+    ],
+    "file": "frontend/src/components/NoteActionsDialog.tsx",
+    "line": "143",
+    "description": "The Create and Move forms drive folder suggestions with `<input list=...>` + `<datalist>` (FolderDatalist at lines 143-148; inputs at 179-186 and 263-270). datalist rendering is uneven on WebKit: iOS Safari historically had no dropdown UI and support remains inconsistent across iOS versions, and it is unstyleable.",
+    "why": "On affected iOS WebKit the datalist dropdown of existing folder paths does not appear, so the folder autocomplete affordance is silently missing. It is a graceful degradation (plain text input still works) rather than a break, hence low severity, but it is an uneven-support surface for the iPhone/iPad PWA target.",
+    "fixSketch": "If folder suggestions matter on mobile, replace the datalist with a custom filtered dropdown (autocomplete.ts already has a matching pattern), or accept the degradation explicitly.",
+    "survives": true,
+    "status": "unverified",
+    "refutes": 0,
+    "votes": 0,
+    "verdicts": []
+  }
+]
