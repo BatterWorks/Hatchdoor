@@ -32,6 +32,26 @@ enum RunMode {
     Unknown(String),
 }
 
+/// Hosts that only accept connections from the local machine. Binding to any
+/// other address exposes the port to the network.
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host.trim(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
+}
+
+/// Refuse to serve mutating routes unauthenticated on a public interface. A
+/// non-loopback bind with no web token would let anyone on the network
+/// create/overwrite/delete vault notes, guarded only by a log line.
+fn check_web_auth_posture(host: &str, has_web_token: bool) -> Result<(), String> {
+    if !is_loopback_host(host) && !has_web_token {
+        return Err(format!(
+            "HOST={host} is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to \
+             start unauthenticated on a public interface. Set HATCHDOOR_WEB_BEARER_TOKEN, or bind \
+             to 127.0.0.1 (optionally behind an authenticating proxy)."
+        ));
+    }
+    Ok(())
+}
+
 fn parse_run_mode(args: &[String]) -> RunMode {
     match args.get(1).map(String::as_str) {
         None => RunMode::Serve,
@@ -154,11 +174,9 @@ async fn run_server() {
         std::process::exit(1);
     }));
 
-    if config.host == "0.0.0.0" && config.web_bearer_token.is_none() {
-        info!(
-            "HOST=0.0.0.0 with no HATCHDOOR_WEB_BEARER_TOKEN set: the API is reachable \
-             unauthenticated on all interfaces. Set a token or front it with an authenticating proxy."
-        );
+    if let Err(message) = check_web_auth_posture(&config.host, config.web_bearer_token.is_some()) {
+        error!("{message}");
+        std::process::exit(1);
     }
 
     let sqlite = Arc::new(
@@ -338,6 +356,21 @@ fn run_healthcheck() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_auth_posture_refuses_public_bind_without_token() {
+        // Non-loopback host with no web token must refuse to start.
+        assert!(check_web_auth_posture("0.0.0.0", false).is_err());
+        assert!(check_web_auth_posture("192.168.1.50", false).is_err());
+        assert!(check_web_auth_posture("::", false).is_err());
+        // A token makes any host acceptable.
+        assert!(check_web_auth_posture("0.0.0.0", true).is_ok());
+        // Loopback is fine without a token (only reachable from this machine).
+        assert!(check_web_auth_posture("127.0.0.1", false).is_ok());
+        assert!(check_web_auth_posture("localhost", false).is_ok());
+        assert!(check_web_auth_posture("::1", false).is_ok());
+    }
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use std::sync::atomic::Ordering;
