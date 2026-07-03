@@ -27,6 +27,10 @@ impl SqliteCache {
         index: &VaultIndex,
         embedder: &dyn Embedder,
     ) -> Result<(), String> {
+        // If the embedding model changed since the last build, rebuild from
+        // scratch so no vectors from the old model are reused (mixed-model vector
+        // spaces make cosine/L2 distances meaningless).
+        self.reset_if_embedder_changed(embedder)?;
         let entries = index.ordered_entries();
         let current_paths = entries
             .iter()
@@ -92,6 +96,14 @@ impl SqliteCache {
 
         tx.commit()
             .map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
+
+        // Release the writer lock before set_metadata re-acquires it, otherwise
+        // this self-deadlocks (the guard `conn` still holds the same Mutex).
+        drop(conn);
+
+        // Record which model produced these vectors so a future build with a
+        // different model triggers reset_if_embedder_changed above.
+        self.set_metadata("embedder_id", &embedder.identity())?;
         Ok(())
     }
 
@@ -738,6 +750,79 @@ mod chunk_integration_tests {
         assert!(
             note_chunk_count(&cache, "a") > 0,
             "note must be re-chunked once the embedder recovers, not stuck Unchanged"
+        );
+    }
+
+    /// Wraps a StubEmbedder with a caller-chosen identity and a call counter, so
+    /// tests can simulate swapping the embedding model.
+    struct IdentifiedEmbedder {
+        inner: StubEmbedder,
+        id: String,
+        embed_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl IdentifiedEmbedder {
+        fn new(id: &str) -> Self {
+            Self {
+                inner: StubEmbedder::new(384),
+                id: id.to_string(),
+                embed_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+    impl Embedder for IdentifiedEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.embed_calls
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            self.inner.embedding_dim()
+        }
+        fn identity(&self) -> String {
+            self.id.clone()
+        }
+        fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
+            self.inner.tokenizer()
+        }
+    }
+
+    #[test]
+    fn swapping_the_embedder_model_rebuilds_the_vector_index() {
+        // Two models with the same dimension but different identities. Reusing
+        // the first model's vectors for unchanged notes under the second model
+        // would mix two incompatible embedding spaces in one vec0 index.
+        let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        let model_a = IdentifiedEmbedder::new("model-a");
+        cache
+            .replace_from_index_with_embedder(&index, &model_a)
+            .expect("first build");
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("model-a")
+        );
+
+        // Same vault content, different model. The note is byte-identical, so
+        // content-hash change-detection would treat it as Unchanged and reuse
+        // model-a's vectors — unless the identity change forces a rebuild.
+        let model_b = IdentifiedEmbedder::new("model-b");
+        cache
+            .replace_from_index_with_embedder(&index, &model_b)
+            .expect("second build");
+
+        assert!(
+            model_b
+                .embed_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0,
+            "a model swap must re-embed the vault, not reuse the old model's vectors"
+        );
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("model-b"),
+            "the new model's identity must be stamped"
         );
     }
 
