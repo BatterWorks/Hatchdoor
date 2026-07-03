@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::cache::parse::content_hash;
@@ -30,19 +31,44 @@ pub(super) fn ensure_content_hash(entry: &NoteEntry, expected: &str) -> Result<(
 
 pub(super) fn atomic_write(path: &Path, content: &str) -> Result<(), WriteError> {
     let tmp = path.with_extension("md.hatchdoor-tmp");
-    fs::write(&tmp, content).map_err(|error| {
+
+    // Write and fsync the temp file so its bytes are durable BEFORE the rename.
+    // Without the fsync, a crash just after the rename can leave the note file's
+    // name pointing at data the OS never flushed (an empty or truncated file).
+    let mut file = fs::File::create(&tmp).map_err(|error| {
         WriteError::Io(format!(
-            "failed to write temporary note '{}': {error}",
+            "failed to create temporary note '{}': {error}",
             tmp.display()
         ))
     })?;
+    file.write_all(content.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            let _ = fs::remove_file(&tmp);
+            WriteError::Io(format!(
+                "failed to write temporary note '{}': {error}",
+                tmp.display()
+            ))
+        })?;
+    drop(file);
+
     fs::rename(&tmp, path).map_err(|error| {
         let _ = fs::remove_file(&tmp);
         WriteError::Io(format!(
             "failed to replace note '{}': {error}",
             path.display()
         ))
-    })
+    })?;
+
+    // fsync the parent directory so the rename itself (a directory metadata
+    // change) survives a crash — otherwise the durable temp data can still be
+    // lost if the directory entry update was not flushed.
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
 }
 
 /// Move a set of assets, all-or-nothing. If any move fails, the assets already
@@ -98,6 +124,21 @@ pub(super) fn import_attachment_file(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn atomic_write_persists_content_and_leaves_no_temp_file() {
+        let dir = tempdir().expect("tempdir");
+        let note = dir.path().join("Note.md");
+        atomic_write(&note, "# Note\nbody\n").expect("write");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "# Note\nbody\n");
+        // The temp sidecar must be renamed away, not left behind.
+        assert!(!note.with_extension("md.hatchdoor-tmp").exists());
+
+        // Overwriting an existing note replaces content atomically.
+        atomic_write(&note, "# Note\nupdated\n").expect("overwrite");
+        assert_eq!(fs::read_to_string(&note).unwrap(), "# Note\nupdated\n");
+        assert!(!note.with_extension("md.hatchdoor-tmp").exists());
+    }
 
     #[test]
     fn move_assets_rolls_back_already_moved_on_failure() {

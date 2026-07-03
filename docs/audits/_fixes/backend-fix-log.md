@@ -20,6 +20,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `swapping_the_embedder_model_rebuilds_the_vector_index` — build with `model-a`, rebuild the byte-identical vault with `model-b`, assert `model-b` actually re-embeds (call count > 0) and `embedder_id` becomes `model-b`. RED: `embedder_id` was never stamped (None) and the unchanged note reused model-a's vectors.
 - **Commit:** _(see git log)_
 
+### ✅ 04-MED — `atomic_write` did not fsync the temp file or parent dir (`vault/write/fs_ops.rs`)
+- **Fix:** `atomic_write` now creates the temp file, `write_all` + `sync_all()` (fsync data+metadata) it before the rename, and fsyncs the parent directory after the rename so the directory entry change is durable. Previously a crash right after `fs::rename` returned could leave the note's name pointing at never-flushed (empty/truncated) data.
+- **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
+- **Commit:** _(see git log)_
+
 ### ✅ 01-MED — A panicking lock holder permanently poisons the SqliteCache writer Mutex (`cache/mod.rs`)
 - **Fix:** `connection()` (and the read-pool lock) now recover a poisoned `Mutex` via `unwrap_or_else(|p| p.into_inner())` instead of returning an error. A panic while the lock was held used to wedge every future reindex/cache write for the process lifetime. The SQLite connection stays consistent across a panic (a rusqlite `Transaction` rolls back on unwind), so recovering the guard is safe.
 - **Test (RED→GREEN):** `writer_lock_recovers_after_a_panicking_holder` — a thread panics while holding the writer lock; a later `set_metadata`/`get_metadata` must still succeed. RED failed with "connection lock poisoned". All 36 cache tests green.
