@@ -30,6 +30,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
 - **Commit:** _(see git log)_
 
+### ✅ 04-LOW — Dead `allow_trash_collision` branch broke deleting a note whose asset name is already in trash (`vault/write/assets.rs`)
+- **Fix:** the collision check was `if destination_asset.exists() { Err } if allow_trash_collision && destination_asset.exists() { Err }` — the first `if` fired unconditionally, so the second (trash-collision) branch was unreachable and a trashed asset of the same name always failed the delete. Now, when `allow_trash_collision` is set (delete-to-trash), the destination is resolved via the existing `unique_trash_attachment_relative_path` helper (e.g. `foo.png` → `foo-2.png`) instead of erroring; the hard conflict only applies to real move/rename destinations.
+- **Test (RED→GREEN):** `trashing_an_asset_whose_name_already_exists_in_trash_picks_a_unique_name`. RED returned `Conflict`.
+- **Commit:** _(see git log)_
+
 ### ✅ 01-MED — A panicking lock holder permanently poisons the SqliteCache writer Mutex (`cache/mod.rs`)
 - **Fix:** `connection()` (and the read-pool lock) now recover a poisoned `Mutex` via `unwrap_or_else(|p| p.into_inner())` instead of returning an error. A panic while the lock was held used to wedge every future reindex/cache write for the process lifetime. The SQLite connection stays consistent across a panic (a rusqlite `Transaction` rolls back on unwind), so recovering the guard is safe.
 - **Test (RED→GREEN):** `writer_lock_recovers_after_a_panicking_holder` — a thread panics while holding the writer lock; a later `set_metadata`/`get_metadata` must still succeed. RED failed with "connection lock poisoned". All 36 cache tests green.
