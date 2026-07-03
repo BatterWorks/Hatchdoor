@@ -15,6 +15,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 
 ## Medium tier
 
+### ✅ 01-MED — A panicking lock holder permanently poisons the SqliteCache writer Mutex (`cache/mod.rs`)
+- **Fix:** `connection()` (and the read-pool lock) now recover a poisoned `Mutex` via `unwrap_or_else(|p| p.into_inner())` instead of returning an error. A panic while the lock was held used to wedge every future reindex/cache write for the process lifetime. The SQLite connection stays consistent across a panic (a rusqlite `Transaction` rolls back on unwind), so recovering the guard is safe.
+- **Test (RED→GREEN):** `writer_lock_recovers_after_a_panicking_holder` — a thread panics while holding the writer lock; a later `set_metadata`/`get_metadata` must still succeed. RED failed with "connection lock poisoned". All 36 cache tests green.
+- **Commit:** _(see git log)_
+
 ### ✅ 03-MED — No timed retry: a transient remote failure strands commits unpushed (`git/task.rs`)
 - **Fix:** `run_loop` now arms a bounded exponential backoff (`RETRY_BASE=5s` → `RETRY_MAX=300s`) after a sync that failed transiently. New `next_record_or_retry` races the backoff timer against `receiver.recv()`: when the timer wins it re-runs `run_one_sync` with an empty batch (no new write needed) and grows/clears the backoff based on the outcome; a new write wins the race and resets to base. `run_one_sync` now returns whether the failure was transient (`Remote`/`Other`) — a conflict, dirty tree, or validation error is *not* retried (it needs the remote or a human to change first), so the loop never spins.
 - **Test (RED→GREEN):** `failed_sync_is_retried_without_a_new_write` — a push that always fails is attempted ≥2 times after a single write, only via the backoff timer. RED had exactly 1 attempt (no retry path). All 23 git tests green.
