@@ -17,7 +17,14 @@ use super::parse::{
 };
 
 pub enum UpsertOutcome {
-    Wrote { slug: String },
+    /// The note row was written; `content` is the file text already read (and
+    /// hashed) during the upsert, threaded on so chunking reuses it instead of
+    /// reading the file a second time (which could see a mid-reindex edit and
+    /// chunk content that disagrees with the stored content_hash).
+    Wrote {
+        slug: String,
+        content: String,
+    },
     Unchanged,
 }
 
@@ -58,8 +65,9 @@ impl SqliteCache {
         let mut per_note_failures: usize = 0;
 
         for entry in &entries {
-            if let UpsertOutcome::Wrote { slug } = upsert_note_if_changed(&tx, entry, now)? {
-                match chunk_and_embed_note(&tx, &slug, entry, embedder) {
+            if let UpsertOutcome::Wrote { slug, content } = upsert_note_if_changed(&tx, entry, now)?
+            {
+                match chunk_and_embed_note(&tx, &slug, &content, embedder) {
                     Ok(stats) => {
                         chunks_embedded += stats.embedded;
                         chunks_reused += stats.reused;
@@ -242,6 +250,7 @@ fn upsert_note_if_changed(
     upsert_note_content(tx, entry, &content, &hash, snapshot, indexed_at)?;
     Ok(UpsertOutcome::Wrote {
         slug: entry.slug.clone(),
+        content,
     })
 }
 
@@ -486,17 +495,11 @@ pub struct ChunkStats {
 fn chunk_and_embed_note(
     tx: &Transaction<'_>,
     slug: &str,
-    entry: &NoteEntry,
+    content: &str,
     embedder: &dyn Embedder,
 ) -> Result<ChunkStats, String> {
-    let content = fs::read_to_string(&entry.path).map_err(|e| {
-        format!(
-            "failed reading note for chunking '{}': {e}",
-            entry.path.display()
-        )
-    })?;
     let tokenizer = embedder.tokenizer();
-    let chunking = chunk_note(&content, tokenizer, ChunkOptions::default());
+    let chunking = chunk_note(content, tokenizer, ChunkOptions::default());
     if chunking.chunks.is_empty() {
         replace_chunks_for_note(tx, slug, &[], None, None)?;
         return Ok(ChunkStats {

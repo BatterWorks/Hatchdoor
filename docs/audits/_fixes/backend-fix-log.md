@@ -71,6 +71,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `redact_query_token_hides_only_the_access_token`.
 - **Commit:** _(see git log)_
 
+### ✅ 02-LOW — Note content read twice per reindex (TOCTOU) (`cache/populate.rs`)
+- **Fix:** `upsert_note_if_changed` read + hashed the file, then `chunk_and_embed_note` read the same file a *second* time; a mid-reindex edit between the two reads could chunk content that disagrees with the stored `content_hash`. `UpsertOutcome::Wrote` now carries the already-read `content`, threaded into `chunk_and_embed_note` (which dropped its own `fs::read_to_string` and the now-unused `entry` param). One read per note, chunk text guaranteed to match the stored hash.
+- **Test:** behavior-preserving refactor — covered by the existing chunk/embed suite (`cache::` 38 tests green before and after); no isolated RED since the window is an inherently racy TOCTOU, not unit-triggerable.
+- **Commit:** _(see git log)_
+
 ### ✅ 02-LOW — Interrupted first-time schema init bricked startup (`cache/schema.rs`)
 - **Fix:** two parts. (1) `existing_schema_version` now returns a `SchemaState` enum; the two half-initialised states (objects but no metadata table; metadata table but no `schema_version` row) return `Corrupt` and `ensure_schema` **wipes + rebuilds** them (with a `warn!`) instead of returning a hard error that `main.rs` turned into `exit(1)` on every restart. (2) `create_schema`'s DDL is now wrapped in `BEGIN;`/`COMMIT;`, so an interrupted build rolls back to an empty DB (a clean "fresh" state) rather than leaving the half-created state at all.
 - **Test (RED→GREEN):** `interrupted_schema_init_rebuilds_instead_of_bricking_startup` — open on disk, delete the `schema_version` row to mimic the crash window, reopen must rebuild (not error). RED failed with "metadata exists but schema_version is missing".
