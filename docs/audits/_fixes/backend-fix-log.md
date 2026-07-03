@@ -20,6 +20,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `swapping_the_embedder_model_rebuilds_the_vector_index` — build with `model-a`, rebuild the byte-identical vault with `model-b`, assert `model-b` actually re-embeds (call count > 0) and `embedder_id` becomes `model-b`. RED: `embedder_id` was never stamped (None) and the unchanged note reused model-a's vectors.
 - **Commit:** _(see git log)_
 
+### ✅ 04-MED — Multi-file backlink/asset rewrites applied with no rollback (`vault/write/rewrites.rs`)
+- **Fix:** `apply_rewrites` is now all-or-nothing. It captures each target's current content before overwriting it and, if any later write fails, restores every file already written in the batch (reverse order). Previously a failure on the k-th of N notes left the first k-1 rewritten, leaving dangling/duplicated backlinks and asset references across the vault after a failed move/rename/delete/archive.
+- **Test (RED→GREEN):** `apply_rewrites_rolls_back_written_files_when_a_later_write_fails` — first rewrite lands, second (to a non-existent dir) fails; the first must be restored to its original content. RED left it as "new A".
+- **Commit:** _(see git log)_
+
 ### ✅ 04-MED — `atomic_write` did not fsync the temp file or parent dir (`vault/write/fs_ops.rs`)
 - **Fix:** `atomic_write` now creates the temp file, `write_all` + `sync_all()` (fsync data+metadata) it before the rename, and fsyncs the parent directory after the rename so the directory entry change is durable. Previously a crash right after `fs::rename` returned could leave the note's name pointing at never-flushed (empty/truncated) data.
 - **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
