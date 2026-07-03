@@ -1,0 +1,92 @@
+[
+  {
+    "title": "MCP read-only mode has no authentication and /mcp bypasses the web-auth layer, exposing the entire vault",
+    "severity": "high",
+    "affected": [
+      "HATCHDOOR_MCP_ENABLED=true with write mode off and no HATCHDOOR_MCP_BEARER_TOKEN (the documented read-only configuration)",
+      "Operator sets HATCHDOOR_WEB_BEARER_TOKEN to lock down the HTTP API but leaves MCP read-only",
+      "HOST=0.0.0.0 / container port exposed beyond localhost"
+    ],
+    "file": "src/main.rs",
+    "line": "86",
+    "description": "The `/mcp` route is registered on the open router (main.rs:86) BEFORE `.merge(protected)` (main.rs:87), so the web bearer-token middleware applied to the protected sub-router (main.rs:76-82) never runs for MCP. MCP's own gate, `validate_mcp_request` (src/mcp/config.rs:108-165), only enforces a bearer token when `config.bearer_token` is `Some`, and `McpConfig::validate` (src/mcp/config.rs:97-105) only requires a token when `write_enabled` is true. In read-only mode the token is therefore optional and typically unset, so any client that can reach the port can call `get_tree`, `get_note`, `search_notes`, `get_note_links`, and `resolve_wikilink` and read the full contents of a private vault with no credential. The Origin allowlist (config.rs:122-131) only blocks browsers that send a disallowed Origin header; a non-browser client (curl, script) sends no Origin and passes.",
+    "why": "The vault is a private personal knowledge base and is the confidentiality boundary. An operator who enables MCP read access and locks down the web API with HATCHDOOR_WEB_BEARER_TOKEN reasonably assumes the whole surface is authenticated, but /mcp silently is not — it is a second, unauthenticated read path to the same data. For a public launch on an exposed port this is full unauthenticated vault disclosure.",
+    "fixSketch": "Either mount /mcp behind the same web-auth layer, or require an MCP bearer token whenever MCP is enabled (make McpConfig::validate reject enabled && bearer_token.is_none() regardless of write mode), or at minimum reject requests that carry no credential when the listener is non-loopback.",
+    "id": 0,
+    "survives": true,
+    "status": "verified",
+    "refutes": 0,
+    "votes": 3,
+    "expectedVotes": 3,
+    "incompleteVotes": false,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Confirmed: main.rs registers /mcp on the outer Router before .merge(protected); the web bearer-token middleware is only .layer()'d onto the protected sub-router, so it never wraps /mcp. validate_mcp_request in config.rs only requires a bearer token when write_enabled is true (config.validate()), so in read-only mode config.bearer_token is None and the token-check block is skipped entirely, leaving only the optional/spoofable Origin check. Mechanism as described is real in the code."
+      },
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Confirmed from main.rs: /mcp is registered on the outer Router (line 86) before .merge(protected) (line 87), and the web bearer-token middleware is only .layer()'d onto the protected sub-router (lines 76-82). No other auth gate wraps /mcp at this layer. This is a static routing/auth-boundary gap, not a race/crash/atomicity issue, so the failure-injection lens has no basis to refute it — the described bypass is real and reproducible on every request, not contingent on any adverse timing condition."
+      },
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "main.rs confirms the claimed route ordering: /mcp (line 86) is registered on the outer Router before .merge(protected) (line 87), and no additional middleware layer wraps /mcp with the web bearer-token check anywhere in this file. There is also an explicit acknowledgment at line 122-127 that HOST=0.0.0.0 without HATCHDOOR_WEB_BEARER_TOKEN is unauthenticated, but that log message only covers the general API surface and would mislead an operator into thinking a token secures the whole app, not realizing /mcp is separately gated only by McpConfig's own optional bearer_token. Nothing in main.rs mitigates the finding (no wrapping auth layer, no unreachable-code condition); the severity claim (full unauthenticated read disclosure of a private vault when write_enabled=false and no MCP token is set) is plausible and not overstated. This is outside my lens to refute."
+      }
+    ]
+  },
+  {
+    "title": "initialize ignores the client's requested protocolVersion, and later requests require an exact version-header match, which can lock out otherwise-compatible clients",
+    "severity": "low",
+    "affected": [
+      "MCP client that negotiates or was built against a different protocol draft (e.g. sends MCP-Protocol-Version: 2025-06-18 on follow-up requests)"
+    ],
+    "file": "src/mcp/routes.rs",
+    "line": "104",
+    "description": "`handle_initialize` (routes.rs:104-118) always returns the hard-coded `PROTOCOL_VERSION` ('2025-11-25', config.rs:10) and never inspects the `protocolVersion` the client sent in the initialize params. Then `validate_mcp_request` (config.rs:150-162) rejects any subsequent request whose `MCP-Protocol-Version` header is not byte-for-byte '2025-11-25' with error -32002. A client that negotiated or defaults to a nearby supported draft will be told '2025-11-25' at initialize but then have every follow-up call hard-rejected, with no content-negotiation fallback.",
+    "why": "This is an interop/robustness gap in the protocol handshake: the server dictates a single version and refuses everything else instead of negotiating, so version-skewed but otherwise-valid clients fail after a seemingly successful initialize.",
+    "fixSketch": "Echo/negotiate the client's requested protocolVersion in the initialize response when supported, and accept a small set of known-compatible version-header values (or omit strict header equality) rather than a single exact string.",
+    "id": 1,
+    "survives": true,
+    "status": "verified",
+    "refutes": 0,
+    "votes": 1,
+    "expectedVotes": 1,
+    "incompleteVotes": false,
+    "verdicts": [
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "Confirmed: handle_initialize() in routes.rs takes no params and always returns the hard-coded PROTOCOL_VERSION constant, never reading request.params.protocolVersion. validate_mcp_request in config.rs rejects any request carrying an MCP-Protocol-Version/Mcp-Protocol-Version header that isn't byte-identical to PROTOCOL_VERSION, replying with -32002. The described handshake gap is real in the code as written."
+      }
+    ]
+  },
+  {
+    "title": "Inconsistent error surface for 'note not found' between read and write tools",
+    "severity": "low",
+    "affected": [
+      "MCP client calling get_note/get_note_links vs update_note/edit_note/etc. against a slug that does not exist"
+    ],
+    "file": "src/mcp/tools.rs",
+    "line": "716",
+    "description": "A missing note is reported two different ways depending on the tool. For reads, `get_note_tool` (tools.rs:291) and `get_note_links_tool` (tools.rs:306) return a tool result with `isError:true` via `tool_error`. For writes, `note_entry` (tools.rs:708-717) maps the same condition to `JsonRpcFailure::invalid_params` (JSON-RPC protocol error -32602). So the identical runtime condition ('Note not found: {slug}') surfaces once as a tool-level error inside a successful result and once as a transport-level JSON-RPC error object.",
+    "why": "MCP clients treat `isError` tool results and JSON-RPC error objects differently (the former is fed back to the model for retry, the latter is a protocol failure). Reporting the same not-found state through two channels makes client handling and the model's recovery behavior inconsistent across tools.",
+    "fixSketch": "Pick one representation for 'not found' (most naturally a tool_error/isError result for both read and write tools) and route note_entry's not-found case through it instead of invalid_params.",
+    "id": 2,
+    "survives": true,
+    "status": "verified",
+    "refutes": 0,
+    "votes": 1,
+    "expectedVotes": 1,
+    "incompleteVotes": false,
+    "verdicts": [
+      {
+        "id": 2,
+        "refuted": false,
+        "reason": "Confirmed: get_note_tool (tools.rs ~291) and get_note_links_tool (~306) return Ok(tool_error(...)) for a missing note (isError:true inside a successful JSON-RPC result), while note_entry (tools.rs 707-716, used by write tools) returns Err(JsonRpcFailure::invalid_params(...)) for the identical 'Note not found: {slug}' condition, which becomes a JSON-RPC protocol error object. The inconsistency is real and as cited."
+      }
+    ]
+  }
+]

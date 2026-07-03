@@ -1,0 +1,42 @@
+[
+  {
+    "lens": 0,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Confirmed: main.rs registers /mcp on the outer Router before .merge(protected); the web bearer-token middleware is only .layer()'d onto the protected sub-router, so it never wraps /mcp. validate_mcp_request in config.rs only requires a bearer token when write_enabled is true (config.validate()), so in read-only mode config.bearer_token is None and the token-check block is skipped entirely, leaving only the optional/spoofable Origin check. Mechanism as described is real in the code."
+      },
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "Confirmed: handle_initialize() in routes.rs takes no params and always returns the hard-coded PROTOCOL_VERSION constant, never reading request.params.protocolVersion. validate_mcp_request in config.rs rejects any request carrying an MCP-Protocol-Version/Mcp-Protocol-Version header that isn't byte-identical to PROTOCOL_VERSION, replying with -32002. The described handshake gap is real in the code as written."
+      },
+      {
+        "id": 2,
+        "refuted": false,
+        "reason": "Confirmed: get_note_tool (tools.rs ~291) and get_note_links_tool (~306) return Ok(tool_error(...)) for a missing note (isError:true inside a successful JSON-RPC result), while note_entry (tools.rs 707-716, used by write tools) returns Err(JsonRpcFailure::invalid_params(...)) for the identical 'Note not found: {slug}' condition, which becomes a JSON-RPC protocol error object. The inconsistency is real and as cited."
+      }
+    ]
+  },
+  {
+    "lens": 1,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Confirmed from main.rs: /mcp is registered on the outer Router (line 86) before .merge(protected) (line 87), and the web bearer-token middleware is only .layer()'d onto the protected sub-router (lines 76-82). No other auth gate wraps /mcp at this layer. This is a static routing/auth-boundary gap, not a race/crash/atomicity issue, so the failure-injection lens has no basis to refute it — the described bypass is real and reproducible on every request, not contingent on any adverse timing condition."
+      }
+    ]
+  },
+  {
+    "lens": 2,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "main.rs confirms the claimed route ordering: /mcp (line 86) is registered on the outer Router before .merge(protected) (line 87), and no additional middleware layer wraps /mcp with the web bearer-token check anywhere in this file. There is also an explicit acknowledgment at line 122-127 that HOST=0.0.0.0 without HATCHDOOR_WEB_BEARER_TOKEN is unauthenticated, but that log message only covers the general API surface and would mislead an operator into thinking a token secures the whole app, not realizing /mcp is separately gated only by McpConfig's own optional bearer_token. Nothing in main.rs mitigates the finding (no wrapping auth layer, no unreachable-code condition); the severity claim (full unauthenticated read disclosure of a private vault when write_enabled=false and no MCP token is set) is plausible and not overstated. This is outside my lens to refute."
+      }
+    ]
+  }
+]

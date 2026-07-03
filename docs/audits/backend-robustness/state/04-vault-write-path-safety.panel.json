@@ -1,0 +1,47 @@
+[
+  {
+    "lens": 0,
+    "verdicts": [
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "notes.rs:467-475 confirms the claimed order exactly: move_assets(&asset_moves) at 467, then fs::rename(entry.path -> trash_path) at 468-474 which maps IO errors via `?` with no compensating action, then apply_rewrites at 475. If the rename fails, the function returns Err immediately after move_assets has already succeeded, and there is no call anywhere in delete_note to move assets back or any rollback helper. This matches move_or_rename_note's contrasting safe order (rename at 376 before move_assets at 383) and the fact that move_attachment/delete_attachment paths use rollback_rewrites while delete_note has no such call. The mechanism is real as described."
+      },
+      {
+        "id": 2,
+        "refuted": false,
+        "reason": "rewrites.rs:168-177 shows apply_rewrites iterating rewrites, calling atomic_write per entry and pushing to `written`, returning Err(e) on the first failing atomic_write via `?` with no unwind/restore of the previously-written files in `written`. Each write is atomic individually (via fs_ops::atomic_write) but the set is not, exactly as claimed. And notes.rs confirms apply_rewrites is called after the note's own fs::rename in both move_or_rename_note (l.384, after rename at 376) and delete_note (l.475, after rename at 468-474), so a failure there does leave a moved/trashed note plus a partial rewrite set. No rollback mechanism is invoked in either caller for this stage."
+      },
+      {
+        "id": 3,
+        "refuted": false,
+        "reason": "fs_ops.rs:31-46 atomic_write does fs::write(&tmp, content) then fs::rename(&tmp, path), with no File::sync_all/sync_data call on the temp file and no fsync of the parent directory anywhere in the function or its callers in this file. This is exactly the classic write-then-rename-without-fsync durability gap described; the code as written has no durability guarantee beyond what the OS decides to flush, matching the claim precisely."
+      },
+      {
+        "id": 4,
+        "refuted": false,
+        "reason": "assets.rs:47-58 confirms the dead-code structure exactly: the unconditional `if destination_asset.exists() { return Err(...) }` at 47-52 returns before the `if allow_trash_collision && destination_asset.exists()` branch at 53-58 can ever be reached, since both conditions test the same unchanged predicate with the first already having returned on true. Since delete_note (notes.rs) calls asset_move_plan with allow_trash_collision=true and destination_dir under trash, and trashed asset names are not uniquified (only note filenames are via unique_trash_relative_path), a colliding asset name in trash causes an unconditional Conflict error via the first branch, blocking delete_note entirely. The mechanism and control-flow claim are accurate."
+      }
+    ]
+  },
+  {
+    "lens": 1,
+    "verdicts": [
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "Confirmed by direct read of delete_note (lines 447-496): move_assets(&asset_moves) runs at line 467 before fs::rename(entry.path -> trash_path) at line 468. If the rename fails, the function returns WriteError::Io immediately with no code path to move the already-relocated assets back to their original location -- there is no rollback_rewrites or asset-move-undo call in the error arm. This leaves the original note (still at entry.path) referencing attachments that have already been physically relocated into .hatchdoor-trash, a genuine half-applied mutation reachable without any crash, just an ordinary rename failure (e.g. permission denied, cross-device on trash dir, disk full). The sibling move_or_rename_note (lines ~376-411) does rename the note first (target_path via rename, implied earlier) then move_assets after, which is the safer order and confirms delete_note's ordering is the outlier. Failure-injection lens finds this fully real: inject 'fs::rename to trash fails' and the described corruption occurs exactly as claimed."
+      }
+    ]
+  },
+  {
+    "lens": 2,
+    "verdicts": [
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "Confirmed by reading lines 447-496: move_assets(&asset_moves) at l.467 executes before fs::rename(entry.path, trash_path) at l.468, and there is no rollback of the already-moved assets if the rename fails (the function just returns WriteError::Io). No transaction/lock/retry mechanism in this file mitigates it. Contrast with move_or_rename_note (renames note at l.376/382 before move_assets at l.383) confirms the safe pattern exists elsewhere but isn't applied here. My lens (already-handled) finds no mitigation, so the finding stands."
+      }
+    ]
+  }
+]
