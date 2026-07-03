@@ -6,7 +6,7 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
     create_parent_dir_inside_root, ensure_existing_path_inside_root, is_trashed_path,
-    relative_link_target, same_existing_path,
+    relative_link_target, same_existing_path, unique_trash_attachment_relative_path,
 };
 use super::rewrites::{parse_fence_marker, rewrite_content_or_read};
 use super::types::{AssetMove, TextRewrite, WriteError};
@@ -42,15 +42,20 @@ pub(super) fn asset_move_plan(
         if is_trashed_path(vault_root, &source_asset)? {
             continue;
         }
-        let destination_asset = destination_dir.join(&relative_asset);
+        let destination_asset = if allow_trash_collision {
+            // Trashing a note: the destination lives under .hatchdoor-trash and
+            // may already hold an asset of the same relative path from an earlier
+            // delete. Relocate to a unique name rather than failing the delete.
+            let relative_str = relative_asset.to_string_lossy();
+            vault_root.join(unique_trash_attachment_relative_path(
+                vault_root,
+                &relative_str,
+            )?)
+        } else {
+            destination_dir.join(&relative_asset)
+        };
         create_parent_dir_inside_root(vault_root, &destination_asset, "asset")?;
-        if destination_asset.exists() {
-            return Err(WriteError::Conflict(format!(
-                "Destination asset already exists: {}",
-                destination_asset.display()
-            )));
-        }
-        if allow_trash_collision && destination_asset.exists() {
+        if !allow_trash_collision && destination_asset.exists() {
             return Err(WriteError::Conflict(format!(
                 "Destination asset already exists: {}",
                 destination_asset.display()
@@ -404,5 +409,49 @@ fn asset_path_from_target(target: &str) -> Option<PathBuf> {
         Some(path.to_path_buf())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn trashing_an_asset_whose_name_already_exists_in_trash_picks_a_unique_name() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        // A note referencing an attachment, and the attachment itself.
+        fs::write(
+            root.join("Note.md"),
+            "# Note\n![img](Attachments/foo.png)\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("Attachments")).unwrap();
+        fs::write(root.join("Attachments/foo.png"), "img").unwrap();
+
+        // A previous delete already trashed an asset of the same relative path.
+        fs::create_dir_all(root.join(".hatchdoor-trash/Attachments")).unwrap();
+        fs::write(root.join(".hatchdoor-trash/Attachments/foo.png"), "older").unwrap();
+
+        let index = VaultIndex::build(root).expect("index");
+        let entry = index
+            .ordered_entries()
+            .into_iter()
+            .find(|e| e.slug == "note")
+            .expect("note entry");
+        let trash_note = root.join(".hatchdoor-trash/Note.md");
+
+        // Deleting to trash must not fail just because the asset name already
+        // exists in trash; it should relocate to a unique name instead.
+        let (moves, _rewrites) = asset_move_plan(root, &index, &entry, &trash_note, true, &[])
+            .expect("plan must succeed");
+        assert_eq!(moves.len(), 1);
+        assert_eq!(
+            moves[0].destination,
+            root.join(".hatchdoor-trash/Attachments/foo-2.png"),
+            "colliding trashed asset should get a unique suffix"
+        );
     }
 }
