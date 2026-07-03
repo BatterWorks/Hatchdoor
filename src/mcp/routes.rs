@@ -7,8 +7,7 @@ use serde_json::{Value, json};
 use crate::app_state::AppState;
 
 use super::config::{
-    McpConfig, PROTOCOL_VERSION, SERVER_INSTRUCTIONS, negotiate_protocol_version,
-    validate_mcp_request,
+    McpConfig, SERVER_INSTRUCTIONS, negotiate_protocol_version, validate_mcp_request,
 };
 use super::protocol::{
     JsonRpcFailure, JsonRpcRequest, jsonrpc_error_response, jsonrpc_success_response,
