@@ -824,6 +824,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_tool_missing_note_is_a_tool_error_not_a_protocol_error() {
+        // Reads surface a missing note as an isError tool result; write tools
+        // must do the same, not a JSON-RPC -32602 protocol error, so clients
+        // (and the model's retry logic) handle "not found" consistently.
+        let (state, _tmp) = test_state();
+        let response = post_json_with_auth(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":30,
+                "method":"tools/call",
+                "params": {
+                    "name":"edit_note",
+                    "arguments":{
+                        "slug":"does-not-exist",
+                        "old_string":"a",
+                        "new_string":"b",
+                        "expected_content_hash":"deadbeef"
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["result"]["isError"], true,
+            "missing note on a write tool should be an isError tool result"
+        );
+        assert!(
+            body.get("error").is_none(),
+            "missing note must not be a JSON-RPC protocol error"
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_tool_returns_json_rpc_error() {
         let (state, _tmp) = test_state();
         let response = post_json(

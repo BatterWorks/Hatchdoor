@@ -31,7 +31,7 @@ pub async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    match name {
+    let outcome = match name {
         "search_notes" => search_notes_tool(state, arguments).await,
         "get_note" => get_note_tool(state, arguments).await,
         "get_note_links" => get_note_links_tool(state, arguments).await,
@@ -101,6 +101,14 @@ pub async fn handle_tools_call(
         other => Err(JsonRpcFailure::invalid_params(format!(
             "Unknown MCP tool: {other}"
         ))),
+    };
+
+    // Tool-level failures (e.g. "note not found") are rendered as an isError
+    // tool result so read and write tools report the same conditions the same
+    // way; genuine protocol errors stay JSON-RPC errors.
+    match outcome {
+        Err(failure) if failure.tool_level => Ok(tool_error(failure.message)),
+        other => other,
     }
 }
 
@@ -713,7 +721,7 @@ fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry,
     index
         .find_by_slug(slug)
         .cloned()
-        .ok_or_else(|| JsonRpcFailure::invalid_params(format!("Note not found: {slug}")))
+        .ok_or_else(|| JsonRpcFailure::not_found(format!("Note not found: {slug}")))
 }
 
 async fn refresh_after_write(state: &AppState) -> Result<(), JsonRpcFailure> {
