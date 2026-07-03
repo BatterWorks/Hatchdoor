@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { apiFetch } from "../api";
+import { readErrorMessage } from "../apiError";
 
 import { StateBlock } from "./ui";
 import type {
@@ -208,7 +209,8 @@ export function StatsPage() {
       setError(null);
       try {
         const res = await apiFetch("/api/stats");
-        if (!res.ok) throw new Error(`Stats failed: ${res.status}`);
+        if (!res.ok)
+          throw new Error(await readErrorMessage(res, "Stats failed"));
         const data = (await res.json()) as VaultStats;
         if (!cancelled) setStats(data);
       } catch (err) {

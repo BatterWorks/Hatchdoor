@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetch } from "../api";
+import { readErrorMessage } from "../apiError";
 import {
   forceSimulation,
   forceLink,
@@ -102,7 +103,8 @@ export function GraphPage() {
       setError(null);
       try {
         const res = await apiFetch("/api/graph");
-        if (!res.ok) throw new Error(`Graph fetch failed: ${res.status}`);
+        if (!res.ok)
+          throw new Error(await readErrorMessage(res, "Graph fetch failed"));
         const data = (await res.json()) as GraphData;
         if (cancelled) return;
 

@@ -33,6 +33,7 @@ import {
 import { useIsMobile } from "./app/useIsMobile";
 import { useTheme } from "./app/useTheme";
 import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
+import { readErrorMessage } from "./apiError";
 import { copyText } from "./clipboard";
 import {
   NoteActionsDialog,
@@ -124,7 +125,7 @@ function App() {
     try {
       const res = await apiFetch("/api/tree");
       if (!res.ok) {
-        throw new Error(`Failed loading tree: ${res.status}`);
+        throw new Error(await readErrorMessage(res, "Failed loading tree"));
       }
       const nextTree = (await res.json()) as ExplorerFolder;
       setTree((prev) =>
@@ -142,7 +143,9 @@ function App() {
       const params = new URLSearchParams({ limit: "5" });
       const res = await apiFetch(`/api/recently-modified?${params.toString()}`);
       if (!res.ok) {
-        throw new Error(`Failed loading modified notes: ${res.status}`);
+        throw new Error(
+          await readErrorMessage(res, "Failed loading modified notes"),
+        );
       }
       const json = (await res.json()) as RecentlyModifiedResponse;
       setModifiedNotes(json.notes.slice(0, 5));
@@ -427,7 +430,7 @@ function App() {
           });
           const res = await apiFetch(`/api/search?${params.toString()}`);
           if (!res.ok) {
-            throw new Error(`Search failed: ${res.status}`);
+            throw new Error(await readErrorMessage(res, "Search failed"));
           }
           const json = (await res.json()) as SearchResponse;
           if (!cancelled) {

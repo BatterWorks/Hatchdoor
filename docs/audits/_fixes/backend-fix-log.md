@@ -25,6 +25,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `apply_rewrites_rolls_back_written_files_when_a_later_write_fails` — first rewrite lands, second (to a non-existent dir) fails; the first must be restored to its original content. RED left it as "new A".
 - **Commit:** _(see git log)_
 
+### ✅ 07-MED — Read-path handlers discarded the server's `{error}` body, showing only the status (`frontend`)
+- **Fix:** every read fetch threw `Failed loading X: <status>` without parsing the server's structured `{error}` JSON, so a 404's "Note not found: <slug>" or a 500's real cause was replaced by a bare code. Added a shared `readErrorMessage(res, fallback)` helper (mirrors writeApi's `parseError`) and used it in all read fetches: `NotePage` (note, links, reload), `App` (tree, recently-modified, search), `GraphPage`, `StatsPage`.
+- **Test (RED→GREEN):** `apiError.test.ts` — returns the server error field when present, falls back to `<fallback>: <status>` otherwise. Frontend: typecheck clean, 127 tests pass.
+- **Commit:** _(see git log)_
+
 ### ✅ 04-MED — `atomic_write` did not fsync the temp file or parent dir (`vault/write/fs_ops.rs`)
 - **Fix:** `atomic_write` now creates the temp file, `write_all` + `sync_all()` (fsync data+metadata) it before the rename, and fsyncs the parent directory after the rename so the directory entry change is durable. Previously a crash right after `fs::rename` returned could leave the note's name pointing at never-flushed (empty/truncated) data.
 - **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
