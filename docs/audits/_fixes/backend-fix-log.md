@@ -15,6 +15,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 
 ## Medium tier
 
+### ✅ 03-MED — No timed retry: a transient remote failure strands commits unpushed (`git/task.rs`)
+- **Fix:** `run_loop` now arms a bounded exponential backoff (`RETRY_BASE=5s` → `RETRY_MAX=300s`) after a sync that failed transiently. New `next_record_or_retry` races the backoff timer against `receiver.recv()`: when the timer wins it re-runs `run_one_sync` with an empty batch (no new write needed) and grows/clears the backoff based on the outcome; a new write wins the race and resets to base. `run_one_sync` now returns whether the failure was transient (`Remote`/`Other`) — a conflict, dirty tree, or validation error is *not* retried (it needs the remote or a human to change first), so the loop never spins.
+- **Test (RED→GREEN):** `failed_sync_is_retried_without_a_new_write` — a push that always fails is attempted ≥2 times after a single write, only via the backoff timer. RED had exactly 1 attempt (no retry path). All 23 git tests green.
+- **Commit:** _(see git log)_
+
 ### ✅ 02/03/03/03-MED+LOW — Sync only staged the batch's paths, stranding/blocking every other on-disk vault change (`git/sync.rs`)
 **One root fix resolves four findings** (03-MED re-stage, 03-MED dirty-tree-blocks-push, 01-MED crash-strands-edit, 03-LOW spurious-dirty race). Root cause: `stage_and_commit` staged only the explicit batch paths, so any other working-tree change was neither committed (→ stranded out of git) nor allowed through a merge (→ `DirtyWorkingTree` refusal blocked all pushes forever).
 - **Fix:** replaced `stage_and_commit` with `commit_working_tree`, which stages the **whole** working tree (`add_all` + `update_all` = `git add -A`, honouring `.gitignore`) and commits if it differs from HEAD. Used in `commit_local` (so batch + stranded + manual + startup-flush edits are all captured) and at the top of `integrate_fetched` (so a write that raced into the lock-free fetch window, or a manual edit, is committed **before** the merge). Removed the merge-time `DirtyWorkingTree` refusal + `dirty_tracked_files` helper: pending edits are now auto-committed (they are the source of truth on disk) instead of being refused forever or force-discarded. Conflicts still abort cleanly and keep the local commit.
