@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, patch, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
@@ -40,7 +41,21 @@ fn parse_run_mode(args: &[String]) -> RunMode {
     }
 }
 
+/// Multipart framing (boundary lines, field headers, the small
+/// `target_relative_path` text field) wrapped around the uploaded file. The
+/// attachment body limit is the configured max file size plus this slack, so a
+/// file right at the advertised cap is not rejected by the framework before the
+/// handler's own precise size check runs. Non-attachment routes keep axum's
+/// small default limit.
+const ATTACHMENT_MULTIPART_OVERHEAD: u64 = 64 * 1024;
+
 fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
+    let attachment_body_limit = state
+        .mcp_config
+        .max_attachment_bytes
+        .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
+        .min(usize::MAX as u64) as usize;
+
     // Routes that expose vault data. When a web token is configured they sit
     // behind the auth layer; the SPA shell, /health, and /mcp stay open.
     let protected = Router::new()
@@ -48,7 +63,10 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .route("/api/vault-events", get(vault_events_handler))
         .route("/api/recently-modified", get(recently_modified_handler))
         .route("/api/note", post(create_note_handler))
-        .route("/api/attachment", post(upload_attachment_handler))
+        .route(
+            "/api/attachment",
+            post(upload_attachment_handler).layer(DefaultBodyLimit::max(attachment_body_limit)),
+        )
         .route(
             "/api/note/{slug}",
             get(note_handler)
@@ -742,6 +760,53 @@ mod tests {
         assert_eq!(
             std::fs::read(tmp.path().join("vault/Attachments/pasted.png")).expect("file"),
             b"png-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn router_accepts_attachment_between_2mb_and_configured_max() {
+        // The default McpConfig caps attachments at 10 MB. A 3 MB upload is well
+        // within that, but exceeds axum's built-in 2 MB body limit — without an
+        // explicit DefaultBodyLimit the framework rejects it before the handler
+        // (and its real size check) ever runs.
+        let (app, tmp) = app_for_tests();
+        let boundary = "hatchdoor-test-boundary";
+        let file_bytes = vec![b'x'; 3 * 1024 * 1024];
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"target_relative_path\"\r\n\r\n\
+             Attachments/big.png\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"big.png\"\r\n\
+             Content-Type: image/png\r\n\r\n"
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(file_bytes.iter().copied())
+        .chain(format!("\r\n--{boundary}--\r\n").into_bytes())
+        .collect::<Vec<_>>();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/attachment")
+                    .method("POST")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(tmp.path().join("vault/Attachments/big.png"))
+                .expect("file")
+                .len(),
+            3 * 1024 * 1024
         );
     }
 
