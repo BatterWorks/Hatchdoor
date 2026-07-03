@@ -5,6 +5,11 @@ Running log of fixes applied against the findings in
 severity tiers (high → medium → low), TDD (test-first, watch-fail, minimal
 fix), one commit per fix.
 
+**Status: COMPLETE.** All 26 findings resolved — fixed, or consciously
+deferred/skipped by user decision (2). Full backend suite green (257 tests),
+frontend green (127 tests). One MED (embedding-in-transaction) skipped to keep
+reindex atomic; one LOW (scoped asset tokens) left as a follow-up feature.
+
 Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another finding.
 
 ## Dedup notes
