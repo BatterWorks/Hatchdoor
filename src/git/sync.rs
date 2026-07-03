@@ -211,27 +211,28 @@ fn recover_interrupted_state(repo: &Repository) -> Result<Option<git2::Repositor
     Ok(Some(state))
 }
 
-/// Local phase: heal any interrupted merge, stage the batch's paths, and commit
-/// if the tree changed. Touches only the working tree and `.git` — no network —
-/// so callers hold the vault-write lock across this. Returns whether a commit
-/// was made and whether the remote phases are needed.
+/// Local phase: heal any interrupted merge, stage the whole working tree, and
+/// commit if it differs from HEAD. Touches only the working tree and `.git` — no
+/// network — so callers hold the vault-write lock across this. Returns whether a
+/// commit was made and whether the remote phases are needed.
+///
+/// `paths` (the current write batch) is retained for the `SyncOps` contract and
+/// the commit message, but staging is deliberately whole-tree, not batch-scoped
+/// — see `commit_working_tree`.
 pub fn commit_local(
     config: &GitConfig,
     paths: &[PathBuf],
     message: &str,
 ) -> Result<CommitOutcome, GitError> {
+    let _ = paths;
     let repo = Repository::open(&config.vault_path)?;
     // Heal a repo left half-merged by an earlier crash before touching the index,
-    // otherwise stage_and_commit's write_tree would fail on the conflicted index.
+    // otherwise commit_working_tree's write_tree would fail on the conflicted index.
     if let Some(state) = recover_interrupted_state(&repo)? {
         tracing::warn!("git sync: recovered repository from interrupted {state:?} state");
     }
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| GitError::Other("repository is bare".to_string()))?
-        .to_path_buf();
 
-    let committed = stage_and_commit(&repo, config, &workdir, paths, message)?;
+    let committed = commit_working_tree(&repo, config, message)?;
     let needs_remote = committed || has_unpushed(config)?;
     Ok(CommitOutcome {
         committed,
@@ -259,6 +260,12 @@ pub fn fetch_remote(config: &GitConfig) -> Result<(), GitError> {
 /// callers hold the vault-write lock across this. Assumes `fetch_remote` ran.
 pub fn integrate_fetched(config: &GitConfig) -> Result<(), GitError> {
     let repo = Repository::open(&config.vault_path)?;
+    // A write may have raced into the lock-free fetch window, or a note may have
+    // been edited by hand directly on the server. Commit any such pending
+    // working-tree changes before merging: they are the source of truth on disk,
+    // so they must not be discarded by the merge's force checkout, and an
+    // uncommitted tracked edit must not block the merge (and thus every push).
+    commit_working_tree(&repo, config, "hatchdoor: local vault changes")?;
     let local_oid = repo.refname_to_id(&format!("refs/heads/{}", config.branch))?;
     let remote_ref = format!("refs/remotes/{}/{}", config.remote, config.branch);
     let remote_oid = match repo.refname_to_id(&remote_ref) {
@@ -308,29 +315,25 @@ pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<Sync
     })
 }
 
-/// Stage the batch's paths and create a commit if the tree changed.
-/// Returns true when a commit was created.
-fn stage_and_commit(
+/// Stage the entire working tree — new, modified, and deleted files, honouring
+/// `.gitignore` — and create a commit if the result differs from HEAD. Returns
+/// true when a commit was created.
+///
+/// Staging is deliberately whole-tree rather than scoped to the current write
+/// batch. A batch path stranded by an earlier failed commit, a note edited
+/// directly on the server, or a write that raced into the sync window must all
+/// be captured; otherwise the edit is stranded out of git and, if it touches a
+/// tracked file, later wedges every remote-integrating merge.
+fn commit_working_tree(
     repo: &Repository,
     config: &GitConfig,
-    workdir: &Path,
-    paths: &[PathBuf],
     message: &str,
 ) -> Result<bool, GitError> {
     let mut index = repo.index()?;
-    for absolute in paths {
-        let relative = match absolute.strip_prefix(workdir) {
-            Ok(rel) => rel,
-            // Path outside the repo — ignore defensively.
-            Err(_) => continue,
-        };
-        if absolute.exists() {
-            index.add_path(relative)?;
-        } else {
-            // Deletions / rename sources: ignore "not in index" errors.
-            let _ = index.remove_path(relative);
-        }
-    }
+    // add_all stages new + modified files; update_all (git add -u) additionally
+    // stages deletions of tracked files removed from disk. Together = git add -A.
+    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
+    index.update_all(["*"].iter(), None)?;
     index.write()?;
 
     let tree_oid = index.write_tree()?;
@@ -358,14 +361,9 @@ fn merge_remote(
     local_oid: git2::Oid,
 ) -> Result<(), GitError> {
     // The merge below ends in a force checkout that resets the working tree to
-    // HEAD. If a tracked file was edited by hand on the server and never
-    // committed (Hatchdoor only stages MCP-written paths), that force checkout
-    // would silently discard it. Refuse instead so the edit can be preserved.
-    let dirty = dirty_tracked_files(repo)?;
-    if !dirty.is_empty() {
-        return Err(GitError::DirtyWorkingTree { files: dirty });
-    }
-
+    // HEAD. Any uncommitted tracked edit that force checkout would discard has
+    // already been committed by `integrate_fetched` (its caller) before we get
+    // here, so the working tree is clean and nothing is silently lost.
     let mut merge_opts = MergeOptions::new();
     repo.merge(&[their], Some(&mut merge_opts), None)?;
 
@@ -410,27 +408,6 @@ fn merge_remote(
     // Make the working tree match the new HEAD.
     repo.checkout_head(Some(git2::build::CheckoutBuilder::new().force()))?;
     Ok(())
-}
-
-/// Tracked files with uncommitted working-tree changes (modified, deleted,
-/// renamed, or type-changed). Untracked and ignored files are excluded.
-fn dirty_tracked_files(repo: &Repository) -> Result<Vec<String>, GitError> {
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(false).include_ignored(false);
-    let statuses = repo.statuses(Some(&mut opts))?;
-    let dirty_mask = git2::Status::WT_MODIFIED
-        | git2::Status::WT_DELETED
-        | git2::Status::WT_TYPECHANGE
-        | git2::Status::WT_RENAMED;
-    let mut files = Vec::new();
-    for entry in statuses.iter() {
-        if entry.status().intersects(dirty_mask)
-            && let Some(path) = entry.path()
-        {
-            files.push(path.to_string());
-        }
-    }
-    Ok(files)
 }
 
 fn push(repo: &Repository, config: &GitConfig) -> Result<(), GitError> {
@@ -719,12 +696,12 @@ mod tests {
     }
 
     #[test]
-    fn sync_refuses_to_overwrite_uncommitted_manual_edit() {
+    fn sync_auto_commits_uncommitted_manual_edit_instead_of_refusing() {
         let (_tmp, work, remote) = init_repo_with_remote();
         let config = base_config(&work);
 
-        // Remote moves ahead with an unrelated new file, so integrating it would
-        // be a clean merge ending in a force checkout.
+        // Remote moves ahead with an unrelated new file, so integrating it is a
+        // clean merge that ends in a force checkout.
         {
             let tmp = TempDir::new().unwrap();
             let clone = tmp.path().join("other");
@@ -741,22 +718,53 @@ mod tests {
         // A human edits a tracked file directly on the server, uncommitted.
         fs::write(work.join("Home.md"), "# Home\nhand edited\n").unwrap();
 
-        // An MCP write to a different file triggers a sync.
+        // An MCP write to a different file triggers a sync. The manual edit is a
+        // pending change to the vault (the source of truth), so it must be
+        // committed and pushed — not refused forever, and not force-discarded.
         let local = work.join("Local.md");
         fs::write(&local, "# Local\n").unwrap();
-        let err = sync(&config, &[local], "hatchdoor: add Local").unwrap_err();
+        let report = sync(&config, &[local], "hatchdoor: add Local").unwrap();
+        assert_eq!(report.outcome, SyncOutcome::Pushed { committed: true });
 
-        match err {
-            GitError::DirtyWorkingTree { files } => {
-                assert!(files.iter().any(|f| f == "Home.md"), "got {files:?}");
-            }
-            other => panic!("expected dirty working tree, got {other:?}"),
-        }
-
-        // The manual edit survives rather than being reset to HEAD.
+        // The manual edit survives locally and reached the remote.
         assert_eq!(
             fs::read_to_string(work.join("Home.md")).unwrap(),
             "# Home\nhand edited\n"
+        );
+        let repo = Repository::open_bare(&remote).unwrap();
+        let oid = repo.refname_to_id("refs/heads/main").unwrap();
+        let tree = repo.find_commit(oid).unwrap().tree().unwrap();
+        let entry = tree.get_name("Home.md").expect("Home.md in remote tree");
+        let obj = entry.to_object(&repo).unwrap();
+        let blob = obj.as_blob().unwrap();
+        assert!(
+            std::str::from_utf8(blob.content())
+                .unwrap()
+                .contains("hand edited"),
+            "manual edit should have been committed and pushed"
+        );
+    }
+
+    #[test]
+    fn sync_commits_uncommitted_vault_changes_not_in_the_batch() {
+        // A vault file written to disk but stranded out of git (its batch's
+        // commit failed, the process crashed before the debounced commit, or a
+        // write raced the sync window) must be captured by a later sync even
+        // when that sync's batch does not name it — here, an empty batch that
+        // stands in for startup_flush.
+        let (_tmp, work, remote) = init_repo_with_remote();
+        let config = base_config(&work);
+        fs::write(work.join("Stranded.md"), "# Stranded\n").unwrap();
+
+        let report = sync(&config, &[], "hatchdoor: flush").unwrap();
+        assert_eq!(report.outcome, SyncOutcome::Pushed { committed: true });
+
+        let repo = Repository::open_bare(&remote).unwrap();
+        let oid = repo.refname_to_id("refs/heads/main").unwrap();
+        let tree = repo.find_commit(oid).unwrap().tree().unwrap();
+        assert!(
+            tree.get_name("Stranded.md").is_some(),
+            "stranded vault file should have been committed and pushed"
         );
     }
 }

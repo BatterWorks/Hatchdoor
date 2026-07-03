@@ -13,6 +13,14 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 
 ---
 
+## Medium tier
+
+### ✅ 02/03/03/03-MED+LOW — Sync only staged the batch's paths, stranding/blocking every other on-disk vault change (`git/sync.rs`)
+**One root fix resolves four findings** (03-MED re-stage, 03-MED dirty-tree-blocks-push, 01-MED crash-strands-edit, 03-LOW spurious-dirty race). Root cause: `stage_and_commit` staged only the explicit batch paths, so any other working-tree change was neither committed (→ stranded out of git) nor allowed through a merge (→ `DirtyWorkingTree` refusal blocked all pushes forever).
+- **Fix:** replaced `stage_and_commit` with `commit_working_tree`, which stages the **whole** working tree (`add_all` + `update_all` = `git add -A`, honouring `.gitignore`) and commits if it differs from HEAD. Used in `commit_local` (so batch + stranded + manual + startup-flush edits are all captured) and at the top of `integrate_fetched` (so a write that raced into the lock-free fetch window, or a manual edit, is committed **before** the merge). Removed the merge-time `DirtyWorkingTree` refusal + `dirty_tracked_files` helper: pending edits are now auto-committed (they are the source of truth on disk) instead of being refused forever or force-discarded. Conflicts still abort cleanly and keep the local commit.
+- **Test (RED→GREEN):** `sync_commits_uncommitted_vault_changes_not_in_the_batch` (empty batch still flushes a stranded file — RED was `NoChanges`); `sync_auto_commits_uncommitted_manual_edit_instead_of_refusing` (rewrote the old `sync_refuses_...` test — RED was `DirtyWorkingTree`, now the edit is committed + pushed). All 22 git tests green.
+- **Commit:** _(see git log)_
+
 ## High tier
 
 ### ✅ 03-HIGH — Crash mid-merge wedges all future syncs (`git/sync.rs`)
