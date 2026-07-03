@@ -22,6 +22,16 @@ pub struct SyncReport {
     pub outcome: SyncOutcome,
 }
 
+/// Result of the local commit phase: whether a new commit was created, and
+/// whether the remote must be contacted (either we committed, or earlier
+/// commits are still unpushed). When `needs_remote` is false the sync is a
+/// no-op and no network I/O should happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitOutcome {
+    pub committed: bool,
+    pub needs_remote: bool,
+}
+
 /// All errors are non-fatal to the server; they are recorded and surfaced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitError {
@@ -201,8 +211,15 @@ fn recover_interrupted_state(repo: &Repository) -> Result<Option<git2::Repositor
     Ok(Some(state))
 }
 
-/// Stage the given absolute paths, commit, fetch, integrate, and push.
-pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<SyncReport, GitError> {
+/// Local phase: heal any interrupted merge, stage the batch's paths, and commit
+/// if the tree changed. Touches only the working tree and `.git` — no network —
+/// so callers hold the vault-write lock across this. Returns whether a commit
+/// was made and whether the remote phases are needed.
+pub fn commit_local(
+    config: &GitConfig,
+    paths: &[PathBuf],
+    message: &str,
+) -> Result<CommitOutcome, GitError> {
     let repo = Repository::open(&config.vault_path)?;
     // Heal a repo left half-merged by an earlier crash before touching the index,
     // otherwise stage_and_commit's write_tree would fail on the conflicted index.
@@ -215,18 +232,79 @@ pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<Sync
         .to_path_buf();
 
     let committed = stage_and_commit(&repo, config, &workdir, paths, message)?;
+    let needs_remote = committed || has_unpushed(config)?;
+    Ok(CommitOutcome {
+        committed,
+        needs_remote,
+    })
+}
 
-    if !committed && !has_unpushed(config)? {
+/// Network read phase: fetch the configured branch. Only reads/writes `.git`
+/// (remote-tracking refs and the object store); it does NOT touch the working
+/// tree, so it is safe — and important — to run WITHOUT the vault-write lock so
+/// a slow or hanging remote cannot block concurrent vault writes.
+pub fn fetch_remote(config: &GitConfig) -> Result<(), GitError> {
+    let repo = Repository::open(&config.vault_path)?;
+    let mut remote = repo.find_remote(&config.remote)?;
+    let mut fetch_opts = FetchOptions::new();
+    fetch_opts.remote_callbacks(remote_callbacks(config));
+    remote
+        .fetch(&[&config.branch], Some(&mut fetch_opts), None)
+        .map_err(|e| GitError::Remote(e.message().to_string()))?;
+    Ok(())
+}
+
+/// Integrate phase: if the already-fetched remote-tracking ref is ahead, merge
+/// it into the local branch (may write the working tree via a checkout), so
+/// callers hold the vault-write lock across this. Assumes `fetch_remote` ran.
+pub fn integrate_fetched(config: &GitConfig) -> Result<(), GitError> {
+    let repo = Repository::open(&config.vault_path)?;
+    let local_oid = repo.refname_to_id(&format!("refs/heads/{}", config.branch))?;
+    let remote_ref = format!("refs/remotes/{}/{}", config.remote, config.branch);
+    let remote_oid = match repo.refname_to_id(&remote_ref) {
+        Ok(oid) => oid,
+        Err(_) => return Ok(()), // remote has no such branch yet; push will create it
+    };
+
+    let (_ahead, behind) = repo.graph_ahead_behind(local_oid, remote_oid)?;
+    if behind == 0 {
+        return Ok(()); // we are up to date or strictly ahead; push will fast-forward
+    }
+
+    let their = repo.find_annotated_commit(remote_oid)?;
+    merge_remote(&repo, config, &their, local_oid)
+}
+
+/// Network write phase: push the local branch to the remote. Reads local refs
+/// and uploads objects; does NOT touch the working tree, so it runs WITHOUT the
+/// vault-write lock.
+pub fn push_branch(config: &GitConfig) -> Result<(), GitError> {
+    let repo = Repository::open(&config.vault_path)?;
+    push(&repo, config)
+}
+
+/// Stage the given absolute paths, commit, fetch, integrate, and push.
+///
+/// This composes the phase functions above in order. The background task calls
+/// the phases directly so it can hold the vault-write lock only across the
+/// local/working-tree phases (`commit_local`, `integrate_fetched`) and release
+/// it across the network phases (`fetch_remote`, `push_branch`).
+pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<SyncReport, GitError> {
+    let commit = commit_local(config, paths, message)?;
+    if !commit.needs_remote {
         return Ok(SyncReport {
             outcome: SyncOutcome::NoChanges,
         });
     }
 
-    integrate_remote(&repo, config)?;
-    push(&repo, config)?;
+    fetch_remote(config)?;
+    integrate_fetched(config)?;
+    push_branch(config)?;
 
     Ok(SyncReport {
-        outcome: SyncOutcome::Pushed { committed },
+        outcome: SyncOutcome::Pushed {
+            committed: commit.committed,
+        },
     })
 }
 
@@ -271,32 +349,6 @@ fn stage_and_commit(
         repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
     }
     Ok(true)
-}
-
-/// Fetch the configured branch and, if the remote moved ahead, merge it into
-/// the local branch. A conflicting merge aborts and returns `GitError::Conflict`.
-fn integrate_remote(repo: &Repository, config: &GitConfig) -> Result<(), GitError> {
-    let mut remote = repo.find_remote(&config.remote)?;
-    let mut fetch_opts = FetchOptions::new();
-    fetch_opts.remote_callbacks(remote_callbacks(config));
-    remote
-        .fetch(&[&config.branch], Some(&mut fetch_opts), None)
-        .map_err(|e| GitError::Remote(e.message().to_string()))?;
-
-    let local_oid = repo.refname_to_id(&format!("refs/heads/{}", config.branch))?;
-    let remote_ref = format!("refs/remotes/{}/{}", config.remote, config.branch);
-    let remote_oid = match repo.refname_to_id(&remote_ref) {
-        Ok(oid) => oid,
-        Err(_) => return Ok(()), // remote has no such branch yet; push will create it
-    };
-
-    let (_ahead, behind) = repo.graph_ahead_behind(local_oid, remote_oid)?;
-    if behind == 0 {
-        return Ok(()); // we are up to date or strictly ahead; push will fast-forward
-    }
-
-    let their = repo.find_annotated_commit(remote_oid)?;
-    merge_remote(repo, config, &their, local_oid)
 }
 
 fn merge_remote(
