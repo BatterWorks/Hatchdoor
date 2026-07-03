@@ -10,6 +10,7 @@ import {
 import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
 import { apiFetch } from "../api";
+import { readErrorMessage } from "../apiError";
 import { normalizeImageForUpload } from "../imageUpload";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -114,7 +115,7 @@ export function NotePage({
       try {
         const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
         if (!res.ok) {
-          throw new Error(`Failed loading note: ${res.status}`);
+          throw new Error(await readErrorMessage(res, "Failed loading note"));
         }
         const json = (await res.json()) as { note: Note };
         if (slug !== currentSlugRef.current) return;
@@ -133,7 +134,7 @@ export function NotePage({
     try {
       const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}/links`);
       if (!res.ok) {
-        throw new Error(`Failed loading note links: ${res.status}`);
+        throw new Error(await readErrorMessage(res, "Failed loading note links"));
       }
       const json = (await res.json()) as NoteLinksResponse;
       if (slug !== currentSlugRef.current) return;
@@ -403,7 +404,7 @@ export function NotePage({
     try {
       const res = await apiFetch(`/api/note/${encodeURIComponent(note.slug)}`);
       if (!res.ok) {
-        throw new Error(`Failed loading note: ${res.status}`);
+        throw new Error(await readErrorMessage(res, "Failed loading note"));
       }
       const json = (await res.json()) as { note: Note };
       setNote(json.note);
