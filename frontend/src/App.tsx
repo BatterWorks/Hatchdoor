@@ -56,7 +56,7 @@ import {
   renameNote,
 } from "./writeApi";
 import { validateNotePath } from "./writePaths";
-import { pruneNoteDrafts } from "./writeDrafts";
+import { clearCreateDraft, pruneNoteDrafts } from "./writeDrafts";
 import { collectFolderPaths } from "./app/folderPaths";
 import { flattenNoteCandidates } from "./app/noteCandidates";
 import type {
@@ -565,6 +565,7 @@ function App() {
       }
       try {
         const outcome = await createNote(relativePath, content);
+        clearCreateDraft();
         setNoteActionDialog(null);
         setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();

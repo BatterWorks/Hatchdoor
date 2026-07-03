@@ -13,6 +13,53 @@ export function createDraftKey(): string {
   return "hatchdoor:draft:create";
 }
 
+export type CreateDraft = {
+  folder: string;
+  name: string;
+  content: string;
+  savedAt: number;
+};
+
+export function loadCreateDraft(): CreateDraft | null {
+  try {
+    const raw = window.localStorage.getItem(createDraftKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CreateDraft>;
+    if (
+      typeof parsed.folder !== "string" ||
+      typeof parsed.name !== "string" ||
+      typeof parsed.content !== "string" ||
+      typeof parsed.savedAt !== "number"
+    ) {
+      return null;
+    }
+    return {
+      folder: parsed.folder,
+      name: parsed.name,
+      content: parsed.content,
+      savedAt: parsed.savedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveCreateDraft(draft: CreateDraft): void {
+  try {
+    window.localStorage.setItem(createDraftKey(), JSON.stringify(draft));
+  } catch {
+    // Storage can fail in private browsing or when quota is exceeded.
+  }
+}
+
+export function clearCreateDraft(): void {
+  try {
+    window.localStorage.removeItem(createDraftKey());
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 export function loadNoteDraft(slug: string): NoteDraft | null {
   try {
     const raw = window.localStorage.getItem(noteDraftKey(slug));
@@ -66,7 +113,10 @@ const NOTE_DRAFT_PREFIX = "hatchdoor:draft:note:";
  * interrupted edit; without pruning they accumulate in localStorage forever.
  * Returns the number of drafts removed.
  */
-export function pruneNoteDrafts(maxAgeMs: number, now: number = Date.now()): number {
+export function pruneNoteDrafts(
+  maxAgeMs: number,
+  now: number = Date.now(),
+): number {
   let removed = 0;
   try {
     const staleKeys: string[] = [];
