@@ -95,9 +95,13 @@ impl McpConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        if self.enabled && self.write_enabled && self.bearer_token.is_none() {
+        // Read-only MCP still exposes the entire vault (get_tree/get_note/
+        // search_notes/...) with no other credential, and /mcp bypasses the web
+        // auth layer, so require a token whenever MCP is enabled — not only in
+        // write mode.
+        if self.enabled && self.bearer_token.is_none() {
             return Err(
-                "HATCHDOOR_MCP_WRITE_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing"
+                "HATCHDOOR_MCP_ENABLED is set but HATCHDOOR_MCP_BEARER_TOKEN is missing"
                     .to_string(),
             );
         }
@@ -110,12 +114,12 @@ pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(
         return Err(Box::new(StatusCode::NOT_FOUND.into_response()));
     }
 
-    if config.write_enabled && config.bearer_token.is_none() {
+    if config.bearer_token.is_none() {
         return Err(Box::new(jsonrpc_error_response(
             StatusCode::UNAUTHORIZED,
             Value::Null,
             -32001,
-            "MCP write mode requires HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+            "MCP requires HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
         )));
     }
 
@@ -219,10 +223,27 @@ mod tests {
     }
 
     #[test]
-    fn validate_allows_read_only_without_token() {
+    fn validate_rejects_enabled_without_token() {
         let mut config = McpConfig::disabled();
         config.enabled = true;
+        // Read-only mode still exposes the whole vault, so a token is required
+        // whenever MCP is enabled at all — not only in write mode.
+        assert!(config.validate().is_err());
+
+        config.bearer_token = Some("token".to_string());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_mcp_request_rejects_read_only_without_token() {
+        let mut config = McpConfig::disabled();
+        config.enabled = true;
+        config.write_enabled = false;
+        config.bearer_token = None;
+
+        let result = validate_mcp_request(&HeaderMap::new(), &config);
+        let response = *result.expect_err("read-only MCP without a token must be rejected");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

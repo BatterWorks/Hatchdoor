@@ -72,13 +72,17 @@ rm ./data/cache/hatchdoor-cache.sqlite3
 docker compose restart hatchdoor
 ```
 
-The embedded MCP endpoint is disabled by default. Enable it only when OpenClaw should be allowed to query Hatchdoor:
+The embedded MCP endpoint is disabled by default. Enabling it requires a bearer
+token — even in read-only mode, because `/mcp` bypasses the web auth layer and
+its read tools (`get_tree`, `get_note`, `search_notes`, …) expose the entire
+vault. Hatchdoor refuses to start if MCP is enabled without a token.
 
 ```env
 HATCHDOOR_MCP_ENABLED=true
+HATCHDOOR_MCP_BEARER_TOKEN=change-me
 ```
 
-Write-capable MCP tools are a separate opt-in and require bearer auth:
+Write-capable MCP tools are a separate opt-in on top of that:
 
 ```env
 HATCHDOOR_MCP_WRITE_ENABLED=true
@@ -94,11 +98,7 @@ HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10485760
 HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=true
 ```
 
-If Hatchdoor is reachable beyond localhost, set a bearer token and configure OpenClaw to send it:
-
-```env
-HATCHDOOR_MCP_BEARER_TOKEN=change-me
-```
+Configure OpenClaw to send the same bearer token as an `Authorization: Bearer <token>` header on every MCP request.
 
 ## Run
 

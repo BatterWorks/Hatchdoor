@@ -20,7 +20,8 @@ use super::sync::{CommitOutcome, GitError, SyncOutcome, has_unpushed, unpushed_c
 pub struct SyncOps {
     /// Stage + commit the batch (working tree + index only). Reports whether the
     /// remote phases are needed. Runs UNDER the vault lock.
-    pub commit: Box<dyn Fn(&GitConfig, &[PathBuf], &str) -> Result<CommitOutcome, GitError> + Send + Sync>,
+    pub commit:
+        Box<dyn Fn(&GitConfig, &[PathBuf], &str) -> Result<CommitOutcome, GitError> + Send + Sync>,
     /// Fetch the remote branch (network read, no working-tree change). Runs
     /// WITHOUT the vault lock.
     pub fetch: Box<dyn Fn(&GitConfig) -> Result<(), GitError> + Send + Sync>,
@@ -54,7 +55,11 @@ impl GitSyncHandle {
 /// Spawn the background sync task. `vault_lock` is the shared vault-mutation lock,
 /// also acquired by MCP write tools. `ops` performs the actual git work in four
 /// phases; in production these call `super::sync::*`, and tests inject fakes.
-pub fn spawn_sync_task(config: GitConfig, vault_lock: Arc<Mutex<()>>, ops: SyncOps) -> GitSyncHandle {
+pub fn spawn_sync_task(
+    config: GitConfig,
+    vault_lock: Arc<Mutex<()>>,
+    ops: SyncOps,
+) -> GitSyncHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
     let status = Arc::new(RwLock::new(GitSyncStatus::enabled()));
     let task_status = status.clone();
