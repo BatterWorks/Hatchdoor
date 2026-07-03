@@ -179,9 +179,36 @@ fn same_path(a: &Path, b: &Path) -> bool {
     canon(a) == canon(b)
 }
 
+/// If a previous operation (typically a merge) was interrupted — e.g. the
+/// process was killed after `repo.merge()` but before `cleanup_state()` — the
+/// repository is left in a non-`Clean` state with a half-merged, possibly
+/// conflicted index. Every later sync would then fail at `write_tree` with an
+/// opaque "not fully merged index" error and the subsystem would be wedged
+/// until a human ran `git merge --abort`. Reset the working tree/index back to
+/// HEAD and clear the in-progress state so the sync starts from a clean slate;
+/// the remote integration is simply redone. Returns the state we recovered
+/// from, if any.
+fn recover_interrupted_state(repo: &Repository) -> Result<Option<git2::RepositoryState>, GitError> {
+    let state = repo.state();
+    if state == git2::RepositoryState::Clean {
+        return Ok(None);
+    }
+    if let Some(head_oid) = repo.head().ok().and_then(|h| h.target()) {
+        let head_commit = repo.find_commit(head_oid)?;
+        repo.reset(head_commit.as_object(), ResetType::Hard, None)?;
+    }
+    repo.cleanup_state()?;
+    Ok(Some(state))
+}
+
 /// Stage the given absolute paths, commit, fetch, integrate, and push.
 pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<SyncReport, GitError> {
     let repo = Repository::open(&config.vault_path)?;
+    // Heal a repo left half-merged by an earlier crash before touching the index,
+    // otherwise stage_and_commit's write_tree would fail on the conflicted index.
+    if let Some(state) = recover_interrupted_state(&repo)? {
+        tracing::warn!("git sync: recovered repository from interrupted {state:?} state");
+    }
     let workdir = repo
         .workdir()
         .ok_or_else(|| GitError::Other("repository is bare".to_string()))?
@@ -593,6 +620,50 @@ mod tests {
         // Conflict aborts but keeps our local commit, which is now unpushed.
         let _ = sync(&config, &[work.join("Home.md")], "hatchdoor: edit Home").unwrap_err();
         assert_eq!(unpushed_count(&config).unwrap(), 1);
+    }
+
+    #[test]
+    fn sync_recovers_from_interrupted_merge_state() {
+        let (_tmp, work, remote) = init_repo_with_remote();
+        let config = base_config(&work);
+
+        // Simulate a crash mid-merge: the remote and local both change the same
+        // line, we start a merge (which records a conflicted index and puts the
+        // repo into RepositoryState::Merge) and then are "killed" before
+        // committing or calling cleanup_state().
+        {
+            advance_remote(&remote, "# Home\nremote line\n");
+            let repo = Repository::open(&work).unwrap();
+            fs::write(work.join("Home.md"), "# Home\nlocal line\n").unwrap();
+            commit_all(&repo, "local edit");
+            let mut rmt = repo.find_remote("origin").unwrap();
+            rmt.fetch(&["main"], None, None).unwrap();
+            drop(rmt);
+            let remote_oid = repo.refname_to_id("refs/remotes/origin/main").unwrap();
+            let their = repo.find_annotated_commit(remote_oid).unwrap();
+            repo.merge(&[&their], None, None).unwrap();
+            assert_ne!(
+                repo.state(),
+                git2::RepositoryState::Clean,
+                "precondition: repo should be left in a merge state"
+            );
+        }
+
+        // A later sync must not be permanently wedged at write_tree on the
+        // half-merged index. It should recover (reset to HEAD + cleanup_state),
+        // then surface the genuine divergence as a clean Conflict — not an opaque
+        // "not fully merged" Other error — and leave the repo Clean.
+        let err = sync(&config, &[], "hatchdoor: later sync").unwrap_err();
+        assert!(
+            matches!(err, GitError::Conflict { .. }),
+            "expected a clean Conflict after recovery, got {err:?}"
+        );
+        let repo = Repository::open(&work).unwrap();
+        assert_eq!(
+            repo.state(),
+            git2::RepositoryState::Clean,
+            "repo should be left in a clean state, not wedged in Merge"
+        );
     }
 
     #[test]
