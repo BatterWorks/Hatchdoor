@@ -15,6 +15,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 
 ## Medium tier
 
+### ✅ 02-MED — Embeddings reused across a model swap, mixing incompatible vector spaces (`cache/`)
+- **Fix:** added `Embedder::identity()` (model id + dim; `FastembedEmbedder` → e.g. `NomicEmbedTextV15-768`, `StubEmbedder` → `stub-384`). `replace_from_index_with_embedder` now (1) calls new `reset_if_embedder_changed`, which wipes + recreates the schema when the cache already carries a *different* embedder id (so no old-model vectors are preserved via `preserve_existing_vectors`), and (2) stamps the current `embedder.identity()` into metadata after commit. The production build/reindex paths use this base method, so identity is now recorded and validated in prod (previously only the test-only `_stamped` path wrote it). A cache with no stored id (fresh, or built by the old code) is left alone and simply stamped — there is no prior model to conflict with.
+- **Test (RED→GREEN):** `swapping_the_embedder_model_rebuilds_the_vector_index` — build with `model-a`, rebuild the byte-identical vault with `model-b`, assert `model-b` actually re-embeds (call count > 0) and `embedder_id` becomes `model-b`. RED: `embedder_id` was never stamped (None) and the unchanged note reused model-a's vectors.
+- **Commit:** _(see git log)_
+
 ### ✅ 01-MED — A panicking lock holder permanently poisons the SqliteCache writer Mutex (`cache/mod.rs`)
 - **Fix:** `connection()` (and the read-pool lock) now recover a poisoned `Mutex` via `unwrap_or_else(|p| p.into_inner())` instead of returning an error. A panic while the lock was held used to wedge every future reindex/cache write for the process lifetime. The SQLite connection stays consistent across a panic (a rusqlite `Transaction` rolls back on unwind), so recovering the guard is safe.
 - **Test (RED→GREEN):** `writer_lock_recovers_after_a_panicking_holder` — a thread panics while holding the writer lock; a later `set_metadata`/`get_metadata` must still succeed. RED failed with "connection lock poisoned". All 36 cache tests green.

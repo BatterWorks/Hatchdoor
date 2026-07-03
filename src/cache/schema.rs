@@ -2,6 +2,7 @@ use rusqlite::OptionalExtension;
 use tracing::warn;
 
 use super::SqliteCache;
+use crate::embed::Embedder;
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
@@ -33,6 +34,29 @@ impl SqliteCache {
                 Ok(())
             }
         }
+    }
+
+    /// If the cache already carries a *different* embedder identity than the one
+    /// about to build it, wipe and recreate the schema so no vectors from the
+    /// previous model survive into the new one's index (mixing embedding spaces
+    /// silently ruins semantic search). A cache with no stored identity yet
+    /// (fresh, or built by a version that never stamped it) is left alone — the
+    /// build stamps the current identity and there is no old model to conflict.
+    pub fn reset_if_embedder_changed(&self, embedder: &dyn Embedder) -> Result<(), String> {
+        let current = embedder.identity();
+        if let Some(stored) = self.get_metadata("embedder_id")?
+            && stored != current
+        {
+            warn!(
+                old = %stored,
+                new = %current,
+                "embedder identity changed; rebuilding the SQLite cache from scratch"
+            );
+            let conn = self.connection()?;
+            wipe_schema(&conn)?;
+            create_schema(&conn, embedder.embedding_dim())?;
+        }
+        Ok(())
     }
 }
 
