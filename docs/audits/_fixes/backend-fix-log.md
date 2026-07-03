@@ -50,6 +50,12 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `trashing_an_asset_whose_name_already_exists_in_trash_picks_a_unique_name`. RED returned `Conflict`.
 - **Commit:** _(see git log)_
 
+### ✅ 06-LOW (partial) — Web token in `?access_token=` leaked into trace spans (`src/auth.rs`, `main.rs`)
+- **Fix:** the request trace span logged the full URI, so at debug level the web token carried by `<img>`/download URLs (`?access_token=…`) was recorded. Replaced `DefaultMakeSpan` with a custom span whose `uri` field runs the query through new `redact_query_token` (`access_token=REDACTED`), so the raw token never reaches the span.
+- **Deferred (feature, not a LOW-sized fix):** the token still rides in the URL itself (browser history, proxy access logs, Referer). Fully closing that needs a short-lived, scoped signed token (or a cookie derived from the Authorization header) for asset/download URLs — a frontend+backend change tracked separately, not attempted here.
+- **Test (RED→GREEN):** `redact_query_token_hides_only_the_access_token`.
+- **Commit:** _(see git log)_
+
 ### ✅ 02-LOW — Interrupted first-time schema init bricked startup (`cache/schema.rs`)
 - **Fix:** two parts. (1) `existing_schema_version` now returns a `SchemaState` enum; the two half-initialised states (objects but no metadata table; metadata table but no `schema_version` row) return `Corrupt` and `ensure_schema` **wipes + rebuilds** them (with a `warn!`) instead of returning a hard error that `main.rs` turned into `exit(1)` on every restart. (2) `create_schema`'s DDL is now wrapped in `BEGIN;`/`COMMIT;`, so an interrupted build rolls back to an empty DB (a clean "fresh" state) rather than leaving the half-created state at all.
 - **Test (RED→GREEN):** `interrupted_schema_init_rebuilds_instead_of_bricking_startup` — open on disk, delete the `schema_version` row to mimic the crash window, reopen must rebuild (not error). RED failed with "metadata exists but schema_version is missing".

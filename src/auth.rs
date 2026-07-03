@@ -60,6 +60,21 @@ fn request_is_authorized(request: &Request, expected: &[u8]) -> bool {
     false
 }
 
+/// Rewrite the `access_token` value in a query string to `REDACTED`. The web
+/// token can ride in the query for `<img>`/download navigations, and the request
+/// trace span logs the full URI (at debug level), so the raw token must never
+/// reach the span. Other query parameters are preserved.
+pub fn redact_query_token(query: &str) -> String {
+    query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some(("access_token", _)) => "access_token=REDACTED".to_string(),
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 fn access_token_from_query(query: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;
@@ -124,6 +139,19 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secre"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn redact_query_token_hides_only_the_access_token() {
+        assert_eq!(
+            redact_query_token("foo=1&access_token=super-secret&bar=2"),
+            "foo=1&access_token=REDACTED&bar=2"
+        );
+        assert_eq!(redact_query_token("foo=1"), "foo=1");
+        assert_eq!(
+            redact_query_token("access_token=x"),
+            "access_token=REDACTED"
+        );
     }
 
     #[test]

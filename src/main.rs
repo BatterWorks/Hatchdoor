@@ -6,7 +6,7 @@ use axum::routing::{get, patch, post};
 use dotenvy::dotenv;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
-use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
 use hatchdoor::app_state::{AppConfig, AppState, build_cache_with_sqlite, init_logging};
@@ -120,7 +120,24 @@ fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
         .fallback_service(ServeDir::new("frontend/dist"))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::new().include_headers(false))
+                // Custom span so the URI logged never contains the raw web token
+                // that `<img>`/download URLs may carry as ?access_token=...
+                .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+                    let target = match request.uri().query() {
+                        Some(query) => format!(
+                            "{}?{}",
+                            request.uri().path(),
+                            hatchdoor::auth::redact_query_token(query)
+                        ),
+                        None => request.uri().path().to_string(),
+                    };
+                    tracing::info_span!(
+                        "request",
+                        method = %request.method(),
+                        uri = %target,
+                        version = ?request.version(),
+                    )
+                })
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
         .with_state(state)
