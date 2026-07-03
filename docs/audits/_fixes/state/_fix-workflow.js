@@ -1,6 +1,6 @@
 export const meta = {
   name: 'audit-fix-implementer',
-  description: 'Resumable, verification-gated implementer of confirmed audit findings (backend + client). Works in an isolated worktree, one commit per fix that passes the full build+test gate, reverts+flags any that fail. Never merges.',
+  description: 'Resumable, verification-gated implementer of confirmed client-edge-case audit findings. Works in a scratch worktree, one commit per fix that passes the full build+test gate, reverts+flags any that fail. The driver fast-forwards passing commits onto development.',
   phases: [
     { title: 'Setup', detail: 'clean the worktree, collect confirmed high+medium findings, load the ledger' },
     { title: 'Fix', detail: 'per finding: test-first (red) where testable, implement, gate (build+test+lint), commit or revert+flag', model: 'opus' },
@@ -21,8 +21,9 @@ const CONFIG = {
   branch: 'audit-fixes',
   dir: '/home/battermanz/coding/hatchdoor/docs/audits/_fixes',
 
-  // Only these severities are attempted. Low (finder-unverified) is never auto-edited.
-  severities: ['high', 'medium'],
+  // Only these severities are attempted. Lows are finder-unverified — included by
+  // user decision; they still carry survives===true in the client verdicts files.
+  severities: ['high', 'medium', 'low'],
 
   // Up to this many repair attempts after a failing gate before reverting+flagging.
   repairAttempts: 1,
@@ -33,8 +34,8 @@ const CONFIG = {
   tddWhereTestable: true,
 
   // Where the confirmed findings live. Each glob yields <slug>.verdicts.json arrays.
+  // Backend audit is already fixed (on development) — client-edge-cases only.
   auditStateGlobs: [
-    '/home/battermanz/coding/hatchdoor/docs/audits/backend-robustness/state',
     '/home/battermanz/coding/hatchdoor/docs/audits/client-edge-cases/state',
   ],
 
@@ -209,14 +210,14 @@ function commitPrompt(f) {
 // ============================  DRIVER  ======================================
 phase('Setup')
 
-// Guard: both audits must be complete (their SUMMARY.md exist). The shell driver
-// also checks this, but double-check so a manual run can't jump the gun.
+// Guard: the client-edge-case audit must be complete (its SUMMARY.md exists).
+// The shell driver also checks this, but double-check so a manual run can't jump the gun.
 const ready = await sh(
-  `test -s ${CONFIG.repoRoot}/docs/audits/backend-robustness/SUMMARY.md && test -s ${CONFIG.repoRoot}/docs/audits/client-edge-cases/SUMMARY.md && echo READY || echo WAIT`,
-  'guard:audits-complete',
+  `test -s ${CONFIG.repoRoot}/docs/audits/client-edge-cases/SUMMARY.md && echo READY || echo WAIT`,
+  'guard:audit-complete',
 )
 if (!/READY/.test(ready.out)) {
-  log('Audits not complete yet (missing a SUMMARY.md) — nothing to fix. Exiting.')
+  log('Client audit not complete yet (missing SUMMARY.md) — nothing to fix. Exiting.')
   return { waiting: true }
 }
 
@@ -318,7 +319,7 @@ function buildFixesReport() {
   done.sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9))
   const failed = [...ledger.failed].sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9))
   let md = `# Audit fixes — implementation log\n\n`
-  md += `Automated implementation of confirmed **${CONFIG.severities.join(' / ')}** findings from the backend-robustness and client-edge-case audits. Where a finding was deterministically testable, a failing test was written first (red) and the fix made it pass (green); otherwise the fix was regression-gated. Every committed fix passed the full build + test gate in an isolated worktree on branch \`${CONFIG.branch}\` (never merged). Review before integrating.\n\n`
+  md += `Automated implementation of confirmed **${CONFIG.severities.join(' / ')}** findings from the client-edge-case audit. Where a finding was deterministically testable, a failing test was written first (red) and the fix made it pass (green); otherwise the fix was regression-gated. Every committed fix passed the full build + test gate in a scratch worktree, then the driver fast-forwarded it onto \`development\`. Each carries an \`${KEY_TRAILER}\` trailer. Review the \`regr\` rows by hand.\n\n`
   md += `**${done.length} committed · ${failed.length} flagged for human · ${pending.length === 0 ? 'all findings processed' : pending.length + ' still pending'}.**\n\n`
   const tddCount = done.filter((d) => d.mode === 'tdd').length
   md += `## Committed fixes\n\n`
