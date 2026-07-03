@@ -132,7 +132,10 @@ mod tests {
         // The first move must have been rolled back: a.png back at its source,
         // and not left at the destination. b.png never moved.
         assert!(src_a.exists(), "a.png should be rolled back to its source");
-        assert!(!dst_a.exists(), "a.png should not remain at the destination");
+        assert!(
+            !dst_a.exists(),
+            "a.png should not remain at the destination"
+        );
         assert!(src_b.exists(), "b.png should still be at its source");
     }
 }

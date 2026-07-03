@@ -135,7 +135,8 @@ mod tests {
             host_attachment_staging_path: None,
             advertise_host_paths: false,
             max_attachment_bytes: 10 * 1024 * 1024,
-            bearer_token: None,
+            // MCP now requires a token whenever enabled, even read-only.
+            bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![
                 "http://127.0.0.1".to_string(),
                 "http://localhost".to_string(),
@@ -193,13 +194,15 @@ mod tests {
     }
 
     async fn post_json(state: AppState, payload: Value, config: McpConfig) -> Response {
-        handle_mcp_post(
-            state,
-            &HeaderMap::new(),
-            Bytes::from(payload.to_string()),
-            &config,
-        )
-        .await
+        // Read-only MCP is authenticated now, so attach the standard test token.
+        // Tests that assert token rejection override config.bearer_token to a
+        // different value, which no longer matches this header.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        handle_mcp_post(state, &headers, Bytes::from(payload.to_string()), &config).await
     }
 
     async fn post_json_with_auth(state: AppState, payload: Value, config: McpConfig) -> Response {
@@ -235,7 +238,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_mcp_returns_method_not_allowed_when_sse_is_not_available() {
-        let response = handle_mcp_get(&HeaderMap::new(), &enabled_config()).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let response = handle_mcp_get(&headers, &enabled_config()).await;
 
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(
@@ -251,6 +259,10 @@ mod tests {
         headers.insert(
             "MCP-Protocol-Version",
             HeaderValue::from_static("2025-06-18"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
         );
         let response = handle_mcp_post(
             state,
