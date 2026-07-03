@@ -618,8 +618,11 @@ fn write_payload<T>(
 ) -> Result<T, (StatusCode, Json<ErrorResponse>)> {
     match payload {
         Ok(Json(payload)) => Ok(payload),
+        // Preserve the rejection's real status (e.g. 413 for a body over the
+        // length limit, 415 for a bad content-type) instead of flattening every
+        // JSON rejection to 400; the {error} body is unchanged.
         Err(rejection) => Err((
-            StatusCode::BAD_REQUEST,
+            rejection.status(),
             Json(ErrorResponse {
                 error: rejection.body_text(),
             }),

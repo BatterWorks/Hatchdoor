@@ -879,7 +879,32 @@ mod tests {
             .await
             .expect("response");
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Well-formed JSON missing a required field is a 422 (Unprocessable
+        // Entity) — the real status axum's Json extractor reports. write_payload
+        // now preserves it instead of masking every rejection as 400.
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn write_api_oversized_json_body_reports_413_not_400() {
+        // A JSON write body over axum's 2 MB limit is a length-limit rejection
+        // (413), not a malformed-body one (400). write_payload must preserve the
+        // rejection's real status for clients/proxies that key off status codes.
+        let (app, _tmp) = app_for_tests();
+        let big = "x".repeat(3 * 1024 * 1024);
+        let body = format!(r#"{{"relative_path":"Big.md","content":"{big}"}}"#);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

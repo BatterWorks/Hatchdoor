@@ -30,6 +30,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
 - **Commit:** _(see git log)_
 
+### ✅ 07-LOW — JSON write-body rejections coerced to 400 regardless of real status (`handlers/write_api.rs`)
+- **Fix:** `write_payload` now returns `rejection.status()` instead of a hardcoded `BAD_REQUEST`, keeping the `{error}` body. A body over the length limit is now 413, a bad content-type 415, and a well-formed-but-invalid body 422 — previously all flattened to 400, which misleads status-code-based clients/proxies/monitoring.
+- **Test (RED→GREEN):** `write_api_oversized_json_body_reports_413_not_400` (a >2 MB JSON body → 413). Also updated `write_api_rejects_update_payload_missing_expected_hash` to expect 422 (the correct status for a missing required field); the frontend only special-cases 409 and otherwise shows the `{error}` message, so this is UX-neutral.
+- **Commit:** _(see git log)_
+
 ### ✅ 04-LOW — Dead `allow_trash_collision` branch broke deleting a note whose asset name is already in trash (`vault/write/assets.rs`)
 - **Fix:** the collision check was `if destination_asset.exists() { Err } if allow_trash_collision && destination_asset.exists() { Err }` — the first `if` fired unconditionally, so the second (trash-collision) branch was unreachable and a trashed asset of the same name always failed the delete. Now, when `allow_trash_collision` is set (delete-to-trash), the destination is resolved via the existing `unique_trash_attachment_relative_path` helper (e.g. `foo.png` → `foo-2.png`) instead of erroring; the hard conflict only applies to real move/rename destinations.
 - **Test (RED→GREEN):** `trashing_an_asset_whose_name_already_exists_in_trash_picks_a_unique_name`. RED returned `Conflict`.
