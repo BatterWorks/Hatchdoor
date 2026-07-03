@@ -62,7 +62,14 @@ impl SqliteCache {
                     }
                     Err(e) => {
                         per_note_failures += 1;
-                        tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; skipped");
+                        tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; marking note for re-embed on next reindex");
+                        // The notes row was just written with the new content_hash,
+                        // but chunk/vector tables are now stale (or empty for a new
+                        // note). Change-detection keys off content_hash, so without
+                        // this the note would look Unchanged forever and never be
+                        // re-chunked. Invalidate the stored hash so the next reindex
+                        // re-processes the note once the embedder recovers.
+                        invalidate_note_content_hash(&tx, &slug)?;
                     }
                 }
             }
@@ -146,6 +153,20 @@ fn cached_note_state(
     )
     .optional()
     .map_err(|error| format!("failed reading cached state for '{relative_path}': {error}"))
+}
+
+/// Force a note to be re-processed on the next reindex by clearing its stored
+/// content hash. Used when chunking/embedding failed for the note after its
+/// `notes` row was already written, so the cache does not silently keep a note
+/// whose chunks/vectors disagree with its content. The empty string can never
+/// equal a real content hash, so change-detection will always re-fire.
+fn invalidate_note_content_hash(tx: &Transaction<'_>, slug: &str) -> Result<(), String> {
+    tx.execute(
+        "UPDATE notes SET content_hash = '' WHERE slug = ?1",
+        params![slug],
+    )
+    .map_err(|error| format!("failed invalidating content hash for '{slug}': {error}"))?;
+    Ok(())
 }
 
 fn delete_note_by_relative_path(tx: &Transaction<'_>, relative_path: &str) -> Result<(), String> {
@@ -656,6 +677,68 @@ mod chunk_integration_tests {
             std::fs::write(dir.path().join(name), body).expect("write");
         }
         dir
+    }
+
+    /// Embedder whose `embed` always fails, to simulate a transient embedding
+    /// error (OOM, model timeout, read race) for a note during reindex.
+    struct FailingEmbedder {
+        inner: StubEmbedder,
+    }
+    impl Embedder for FailingEmbedder {
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Err("simulated embed failure".to_string())
+        }
+        fn embedding_dim(&self) -> usize {
+            self.inner.embedding_dim()
+        }
+        fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
+            self.inner.tokenizer()
+        }
+    }
+
+    fn note_chunk_count(cache: &SqliteCache, slug: &str) -> i64 {
+        cache
+            .connection()
+            .expect("conn")
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = ?1",
+                [slug],
+                |r| r.get(0),
+            )
+            .expect("count")
+    }
+
+    #[test]
+    fn per_note_embed_failure_self_heals_on_next_reindex() {
+        let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        // First reindex: embedding fails. The failure is swallowed (the build
+        // still completes) and the note is left with NO chunks.
+        let failing = Arc::new(FailingEmbedder {
+            inner: StubEmbedder::new(384),
+        });
+        cache
+            .replace_from_index_with_embedder(&index, failing.as_ref())
+            .expect("first populate completes despite per-note failure");
+        assert_eq!(
+            note_chunk_count(&cache, "a"),
+            0,
+            "embed failed, so the note has no chunks yet"
+        );
+
+        // Second reindex with a working embedder must RE-CHUNK the note rather
+        // than treating it as Unchanged (change-detection keys off content_hash,
+        // which the failed first pass must have invalidated).
+        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        cache
+            .replace_from_index_with_embedder(&index, working.as_ref())
+            .expect("second populate");
+        assert!(
+            note_chunk_count(&cache, "a") > 0,
+            "note must be re-chunked once the embedder recovers, not stuck Unchanged"
+        );
     }
 
     #[test]

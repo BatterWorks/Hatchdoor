@@ -25,3 +25,8 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `network_phase_does_not_hold_vault_lock` — injects a `fetch` that blocks (hung remote) and asserts `vault_write_lock.try_lock()` succeeds while it blocks. Proved it bites by temporarily reintroducing the whole-op lock (test went RED/hung). All 21 git tests green; binary builds.
 - **Residual:** git2-rs exposes no reliable connect-phase timeout, so a hung network op still stalls the *sync task* itself (unpushed changes accumulate — covered by the 03-MED "no timed retry" finding, fixed later). The write path is no longer affected, which was the HIGH impact.
 - **Commit:** _(see git log)_
+
+### ✅ 02-HIGH — Per-note embed failure permanently diverges the cache (`cache/populate.rs`)
+- **Fix:** in `replace_from_index_with_embedder`, when `chunk_and_embed_note` fails for a note (whose `notes` row was already written with the new `content_hash`), call new `invalidate_note_content_hash(slug)` to reset the stored hash to `""`. Change-detection keys off `content_hash`, so this guarantees the note is re-processed on the next reindex (startup / watcher / MCP write / `/api/refresh`) once the embedder recovers — instead of being seen as `Unchanged` forever with stale or absent chunks. Catches both the brand-new-note (0 chunks, invisible to semantic search) and updated-note (stale chunks) cases; no schema change.
+- **Test (RED→GREEN):** `per_note_embed_failure_self_heals_on_next_reindex` — first reindex with a `FailingEmbedder` leaves the note with 0 chunks (failure swallowed); a second reindex with a working embedder must re-chunk it. RED showed it stuck `Unchanged` (0 chunks); GREEN re-chunks.
+- **Commit:** _(see git log)_
