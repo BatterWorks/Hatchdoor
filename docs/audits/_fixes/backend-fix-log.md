@@ -30,6 +30,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
 - **Commit:** _(see git log)_
 
+### ✅ 05-LOW — Inconsistent "note not found" surface between MCP read and write tools (`mcp/tools.rs`)
+- **Fix:** read tools return a missing note as an `isError` tool result, but write tools' `note_entry` returned a JSON-RPC `-32602` protocol error. Added `JsonRpcFailure::not_found` (carries a `tool_level` flag); `handle_tools_call` renders any `tool_level` failure as `tool_error(...)` at the single dispatch point, so all tools report "not found" the same way. Empty/invalid slug stays a protocol `invalid_params` (matching reads). No per-tool churn across the 11 write tools.
+- **Test (RED→GREEN):** `write_tool_missing_note_is_a_tool_error_not_a_protocol_error` — `edit_note` on a missing slug returns `result.isError == true`, no `error` object. RED returned a `-32602`.
+- **Commit:** _(see git log)_
+
 ### ✅ 07-LOW — JSON write-body rejections coerced to 400 regardless of real status (`handlers/write_api.rs`)
 - **Fix:** `write_payload` now returns `rejection.status()` instead of a hardcoded `BAD_REQUEST`, keeping the `{error}` body. A body over the length limit is now 413, a bad content-type 415, and a well-formed-but-invalid body 422 — previously all flattened to 400, which misleads status-code-based clients/proxies/monitoring.
 - **Test (RED→GREEN):** `write_api_oversized_json_body_reports_413_not_400` (a >2 MB JSON body → 413). Also updated `write_api_rejects_update_payload_missing_expected_hash` to expect 422 (the correct status for a missing required field); the frontend only special-cases 409 and otherwise shows the `{error}` message, so this is UX-neutral.
