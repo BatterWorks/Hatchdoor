@@ -30,6 +30,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test:** `atomic_write_persists_content_and_leaves_no_temp_file` (content round-trips on create + overwrite, temp sidecar removed). NB: fsync *durability* across power loss is not observable in a unit test, so this is a regression guard for the rewrite, not a RED for the flush itself (same limitation noted for 04-HIGH).
 - **Commit:** _(see git log)_
 
+### ✅ 05-LOW — MCP protocol version was exact-match, locking out compatible clients (`mcp/config.rs`, `routes.rs`)
+- **Fix:** `initialize` hard-coded the server version and ignored the client's requested `protocolVersion`; follow-up requests then required a byte-exact `MCP-Protocol-Version` header. Added `SUPPORTED_PROTOCOL_VERSIONS` (current + known prior revisions), `is_supported_protocol_version`, and `negotiate_protocol_version`. `validate_mcp_request` now accepts any supported header value; `handle_initialize(params)` echoes the client's requested version when supported, else the preferred one — so whatever is negotiated at initialize is accepted on later requests.
+- **Test (RED→GREEN):** `supported_alternate_protocol_version_header_is_accepted` (a `2025-06-18` header now returns tools instead of `-32002`), `initialize_echoes_supported_client_protocol_version`. Updated `unsupported_protocol_version_is_rejected` to use a truly unknown version.
+- **Commit:** _(see git log)_
+
 ### ✅ 05-LOW — Inconsistent "note not found" surface between MCP read and write tools (`mcp/tools.rs`)
 - **Fix:** read tools return a missing note as an `isError` tool result, but write tools' `note_entry` returned a JSON-RPC `-32602` protocol error. Added `JsonRpcFailure::not_found` (carries a `tool_level` flag); `handle_tools_call` renders any `tool_level` failure as `tool_error(...)` at the single dispatch point, so all tools report "not found" the same way. Empty/invalid slug stays a protocol `invalid_params` (matching reads). No per-tool churn across the 11 write tools.
 - **Test (RED→GREEN):** `write_tool_missing_note_is_a_tool_error_not_a_protocol_error` — `edit_note` on a missing slug returns `result.isError == true`, no `error` object. RED returned a `-32602`.
