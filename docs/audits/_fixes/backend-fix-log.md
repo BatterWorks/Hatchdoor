@@ -15,6 +15,16 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 
 ## Medium tier
 
+### ✅ 06-MED — Insecure-by-default web auth on a public bind (`src/main.rs`) — **user decision**
+- **Decision (user):** refuse to start on a non-loopback host when no web token is set (loopback stays open). Chosen over "auto read-only" and "louder warning".
+- **Fix:** added `is_loopback_host` (`127.0.0.1`/`::1`/`[::1]`/`localhost`) and `check_web_auth_posture(host, has_token)`, which returns an error when the host is non-loopback and `HATCHDOOR_WEB_BEARER_TOKEN` is unset. `run_server` logs it via `error!` and `exit(1)` instead of the previous info-level "reachable unauthenticated" note. Documented the hard requirement in `.env.example`.
+- **⚠️ Deploy impact:** the batterbrain deploy runs `HOST=0.0.0.0`; it now **must** have `HATCHDOOR_WEB_BEARER_TOKEN` set in `.env` or the container won't boot.
+- **Test (RED→GREEN):** `web_auth_posture_refuses_public_bind_without_token`.
+- **Commit:** _(see git log)_
+
+### ⏭️ 02-MED — Embedding inside one big write transaction (WAL growth / no incremental durability) — **skipped by user**
+- **Decision (user):** skip the batch-commit refactor to keep reindex atomic (readers never see a partially-rebuilt cache); accept the WAL-growth / no-crash-progress risk on large rebuilds. The small TOCTOU read-once cleanup (02-LOW / #10) was still applied separately.
+
 ### ✅ 02-MED — Embeddings reused across a model swap, mixing incompatible vector spaces (`cache/`)
 - **Fix:** added `Embedder::identity()` (model id + dim; `FastembedEmbedder` → e.g. `NomicEmbedTextV15-768`, `StubEmbedder` → `stub-384`). `replace_from_index_with_embedder` now (1) calls new `reset_if_embedder_changed`, which wipes + recreates the schema when the cache already carries a *different* embedder id (so no old-model vectors are preserved via `preserve_existing_vectors`), and (2) stamps the current `embedder.identity()` into metadata after commit. The production build/reindex paths use this base method, so identity is now recorded and validated in prod (previously only the test-only `_stamped` path wrote it). A cache with no stored id (fresh, or built by the old code) is left alone and simply stamped — there is no prior model to conflict with.
 - **Test (RED→GREEN):** `swapping_the_embedder_model_rebuilds_the_vector_index` — build with `model-a`, rebuild the byte-identical vault with `model-b`, assert `model-b` actually re-embeds (call count > 0) and `embedder_id` becomes `model-b`. RED: `embedder_id` was never stamped (None) and the unchanged note reused model-a's vectors.
