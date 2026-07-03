@@ -40,19 +40,22 @@ const CONFIG = {
   ],
 
   // Verification gates, run INSIDE the worktree. Language auto-detected from the
-  // changed files. Formatters run first (auto-fix, never a failure reason), then
-  // the hard checks. Any non-zero check = gate fail.
+  // changed files. Formatters are applied to ONLY the changed files (see
+  // gatePrompt) so unrelated files are never reformatted into a fix's commit,
+  // then the hard checks run. Any non-zero check = gate fail.
   gates: {
     rust: {
       match: (f) => f.endsWith('.rs') || f === 'Cargo.toml',
       cwd: '.',
+      // scoped in gatePrompt; cargo fmt is whole-crate but deterministic
       format: ['cargo fmt'],
       checks: ['cargo build --locked', 'cargo test --locked', 'cargo clippy --all-targets --locked -- -D warnings'],
     },
     frontend: {
       match: (f) => f.startsWith('frontend/'),
       cwd: 'frontend',
-      format: ['npx prettier --write .', 'npx eslint . --fix'],
+      // scoped to the changed files in gatePrompt — NOT run across the whole tree
+      format: ['npx prettier --write <changed files>', 'npx eslint --fix <changed files>'],
       checks: ['npm run typecheck', 'npm run test', 'npm run lint', 'npm run build'],
     },
   },
@@ -188,12 +191,15 @@ Return {"filesChanged": ["<repo-relative paths you edited>"], "summary": "<one l
 function gatePrompt(f) {
   return `You are the verification gate for an audit fix in the worktree ${WT}. Repo languages: Rust (root Cargo) + a Vite/TS frontend in frontend/.
 
-1. Determine changed files: run \`git -C ${WT} status --porcelain\`. Map to languages: any *.rs or Cargo.toml => rust; any frontend/* => frontend.
-2. For EACH detected language, cd into the worktree and run, IN ORDER, stopping at the first failure:
-   - rust (cwd ${WT}): ${CONFIG.gates.rust.format.join(' ; ')} ; then ${CONFIG.gates.rust.checks.join(' ; ')}
-   - frontend (cwd ${WT}/frontend): ${CONFIG.gates.frontend.format.join(' ; ')} ; then ${CONFIG.gates.frontend.checks.join(' ; ')}
-   The formatters auto-fix style and are NOT failures. A non-zero exit on any CHECK is a gate failure.
-3. If nothing changed (empty status), that is a PASS with ranLangs [] (the fix abstained).
+1. Determine changed files: run \`git -C ${WT} status --porcelain\`. Map to languages: any *.rs or Cargo.toml => rust; any frontend/* => frontend. Record the EXACT changed paths per language.
+2. FORMAT ONLY THE CHANGED FILES — never the whole tree. Running a formatter across the whole project reformats unrelated files and pollutes this fix's commit; that is forbidden. Formatters auto-fix style and are NOT a failure.
+   - frontend (cwd ${WT}/frontend): if there are changed frontend files, run \`npx prettier --write <files>\` and then \`npx eslint --fix <files>\`, where <files> is the space-separated list of the changed frontend/* paths from step 1 expressed relative to ${WT}/frontend (strip the leading "frontend/"). Pass the explicit file list — do NOT pass "." or a glob. If there are no changed frontend files, skip both.
+   - rust (cwd ${WT}): if there are changed rust files, run \`cargo fmt\` (whole-crate rustfmt is acceptable — it only reorders the crate's own formatting and is deterministic).
+3. Run the CHECKS for each detected language, IN ORDER, stopping at the first failure. A non-zero exit on any CHECK is a gate failure. (Checks are read-only / whole-project; that is fine.)
+   - frontend (cwd ${WT}/frontend): ${CONFIG.gates.frontend.checks.join(' ; ')}
+   - rust (cwd ${WT}): ${CONFIG.gates.rust.checks.join(' ; ')}
+4. Before returning, re-run \`git -C ${WT} status --porcelain\` and CONFIRM only the intended fix/test files are modified — if a formatter touched anything outside the changed set, revert those unrelated files with \`git -C ${WT} checkout -- <path>\` so the commit stays scoped to this finding.
+5. If nothing changed (empty status), that is a PASS with ranLangs [] (the fix abstained).
 
 Return {"pass": <true iff every check of every detected language exited 0>, "ranLangs": ["rust"/"frontend"...], "failingCheck": "<the command that failed, if any>", "failLog": "<last ~3000 chars of the failing command's output, else empty>"}.`
 }
