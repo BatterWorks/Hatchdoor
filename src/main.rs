@@ -166,7 +166,12 @@ async fn run_server() {
             let handle = git::spawn_sync_task(
                 git_config.clone(),
                 vault_write_lock.clone(),
-                |cfg, paths, msg| git::sync(cfg, paths, msg).map(|report| report.outcome),
+                git::SyncOps {
+                    commit: Box::new(|cfg, paths, msg| git::commit_local(cfg, paths, msg)),
+                    fetch: Box::new(git::fetch_remote),
+                    integrate: Box::new(git::integrate_fetched),
+                    push: Box::new(git::push_branch),
+                },
             );
             info!("Git sync enabled");
             Some(handle)
