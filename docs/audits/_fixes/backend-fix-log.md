@@ -50,6 +50,11 @@ Legend: ✅ fixed · ⏭️ deferred/decision · 🔁 deduped into another findi
 - **Test (RED→GREEN):** `trashing_an_asset_whose_name_already_exists_in_trash_picks_a_unique_name`. RED returned `Conflict`.
 - **Commit:** _(see git log)_
 
+### ✅ 02-LOW — Interrupted first-time schema init bricked startup (`cache/schema.rs`)
+- **Fix:** two parts. (1) `existing_schema_version` now returns a `SchemaState` enum; the two half-initialised states (objects but no metadata table; metadata table but no `schema_version` row) return `Corrupt` and `ensure_schema` **wipes + rebuilds** them (with a `warn!`) instead of returning a hard error that `main.rs` turned into `exit(1)` on every restart. (2) `create_schema`'s DDL is now wrapped in `BEGIN;`/`COMMIT;`, so an interrupted build rolls back to an empty DB (a clean "fresh" state) rather than leaving the half-created state at all.
+- **Test (RED→GREEN):** `interrupted_schema_init_rebuilds_instead_of_bricking_startup` — open on disk, delete the `schema_version` row to mimic the crash window, reopen must rebuild (not error). RED failed with "metadata exists but schema_version is missing".
+- **Commit:** _(see git log)_
+
 ### ✅ 01-MED — A panicking lock holder permanently poisons the SqliteCache writer Mutex (`cache/mod.rs`)
 - **Fix:** `connection()` (and the read-pool lock) now recover a poisoned `Mutex` via `unwrap_or_else(|p| p.into_inner())` instead of returning an error. A panic while the lock was held used to wedge every future reindex/cache write for the process lifetime. The SQLite connection stays consistent across a panic (a rusqlite `Transaction` rolls back on unwind), so recovering the guard is safe.
 - **Test (RED→GREEN):** `writer_lock_recovers_after_a_panicking_holder` — a thread panics while holding the writer lock; a later `set_metadata`/`get_metadata` must still succeed. RED failed with "connection lock poisoned". All 36 cache tests green.
