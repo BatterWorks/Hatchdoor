@@ -32,6 +32,12 @@ pub struct SyncOps {
     pub push: Box<dyn Fn(&GitConfig) -> Result<(), GitError> + Send + Sync>,
 }
 
+/// Backoff bounds for re-attempting a sync that failed for a transient reason
+/// (remote/network/auth). Without this, a brief outage strands committed vault
+/// edits unpushed until the next write or a full process restart.
+const RETRY_BASE: Duration = Duration::from_secs(5);
+const RETRY_MAX: Duration = Duration::from_secs(300);
+
 /// Handle stored in AppState so write tools can enqueue records and readers can
 /// observe status. `None` everywhere when git sync is disabled.
 #[derive(Clone)]
@@ -97,16 +103,30 @@ async fn run_loop(
     startup_flush: bool,
 ) {
     let mut batch: Vec<WriteRecord> = Vec::new();
+    // When a sync fails transiently, `retry_after` holds the backoff before the
+    // next unprompted re-attempt (empty batch). `None` means nothing to retry.
+    let mut retry_after: Option<Duration> = None;
 
     // Immediately flush any commits stranded by an earlier outage, rather than
     // waiting for the first write to trigger a debounced sync.
-    if startup_flush {
-        run_one_sync(&config, &vault_lock, &status, &ops, Vec::new()).await;
+    if startup_flush && run_one_sync(&config, &vault_lock, &status, &ops, Vec::new()).await {
+        retry_after = Some(RETRY_BASE);
     }
 
     loop {
-        // Wait for the first record (or channel close).
-        let first = match receiver.recv().await {
+        // Wait for the first record (or channel close). If a previous sync failed
+        // transiently, also race a backoff timer that re-attempts the push with
+        // no new write, so a brief remote outage self-heals.
+        let first = match next_record_or_retry(
+            &mut receiver,
+            &config,
+            &vault_lock,
+            &status,
+            &ops,
+            &mut retry_after,
+        )
+        .await
+        {
             Some(record) => record,
             None => break,
         };
@@ -129,7 +149,7 @@ async fn run_loop(
             }
         }
 
-        run_one_sync(
+        let failed = run_one_sync(
             &config,
             &vault_lock,
             &status,
@@ -137,7 +157,41 @@ async fn run_loop(
             std::mem::take(&mut batch),
         )
         .await;
+        // A fresh write already reset the debounce; start any new backoff from
+        // the base rather than compounding a prior one.
+        retry_after = failed.then_some(RETRY_BASE);
         update_pending(&status, 0).await;
+    }
+}
+
+/// Await the next queued write. If `retry_after` is set (a previous sync failed
+/// transiently), also race a backoff timer: when it fires first, re-attempt the
+/// sync with an empty batch and either clear the backoff (success) or grow it
+/// toward `RETRY_MAX` (still failing), then keep waiting. Returns `None` only
+/// when the channel closes.
+async fn next_record_or_retry(
+    receiver: &mut mpsc::UnboundedReceiver<WriteRecord>,
+    config: &GitConfig,
+    vault_lock: &Arc<Mutex<()>>,
+    status: &Arc<RwLock<GitSyncStatus>>,
+    ops: &Arc<SyncOps>,
+    retry_after: &mut Option<Duration>,
+) -> Option<WriteRecord> {
+    loop {
+        let delay = match *retry_after {
+            Some(delay) => delay,
+            None => return receiver.recv().await,
+        };
+
+        let timer = tokio::time::sleep(delay);
+        tokio::pin!(timer);
+        tokio::select! {
+            maybe = receiver.recv() => return maybe,
+            _ = &mut timer => {
+                let failed = run_one_sync(config, vault_lock, status, ops, Vec::new()).await;
+                *retry_after = failed.then(|| (delay * 2).min(RETRY_MAX));
+            }
+        }
     }
 }
 
@@ -202,13 +256,17 @@ where
         .unwrap_or_else(|join_err| Err(GitError::Other(format!("sync task panicked: {join_err}"))))
 }
 
+/// Runs one sync and records status. Returns `true` when the attempt failed for
+/// a transient reason (remote/network/other) and should be re-attempted on a
+/// backoff; `false` on success or on a non-transient failure (conflict / dirty
+/// tree / validation) that a bare re-attempt cannot fix.
 async fn run_one_sync(
     config: &GitConfig,
     vault_lock: &Arc<Mutex<()>>,
     status: &Arc<RwLock<GitSyncStatus>>,
     ops: &Arc<SyncOps>,
     batch: Vec<WriteRecord>,
-) {
+) -> bool {
     let message = build_commit_message(&batch);
     let mut paths: Vec<PathBuf> = batch
         .iter()
@@ -243,10 +301,16 @@ async fn run_one_sync(
                     info!(committed, "git sync: pushed")
                 }
             }
+            false
         }
         Err(err) => {
             guard.last_ok = false;
             let message = err.to_string();
+            // Remote/other failures are typically transient (network, auth blip,
+            // non-fast-forward) and worth an automatic retry. A conflict, dirty
+            // tree, or validation error needs the remote or a human to change
+            // first, so hammering it would just spin.
+            let transient = matches!(err, GitError::Remote(_) | GitError::Other(_));
             match &err {
                 GitError::Conflict { .. } => warn!("git sync conflict: {message}"),
                 GitError::DirtyWorkingTree { .. } => warn!("git sync skipped: {message}"),
@@ -254,6 +318,7 @@ async fn run_one_sync(
             }
             guard.last_error = Some(message);
             guard.last_error_kind = Some(err.kind().to_string());
+            transient
         }
     }
 }
@@ -402,6 +467,55 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1, "one coalesced sync");
         assert_eq!(batch_sizes.lock().await.as_slice(), &[3]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_sync_is_retried_without_a_new_write() {
+        // A transient remote failure must self-heal: after a sync whose push
+        // fails, the task re-attempts on a backoff timer even though no further
+        // write arrives, instead of stranding the commit unpushed until restart.
+        let push_calls = Arc::new(AtomicUsize::new(0));
+        let pc = push_calls.clone();
+        let config = unused_config(1);
+        let lock = Arc::new(Mutex::new(()));
+        let handle = spawn_sync_task(
+            config,
+            lock,
+            SyncOps {
+                commit: Box::new(|_c, _p, _m| {
+                    Ok(CommitOutcome {
+                        committed: true,
+                        needs_remote: true,
+                    })
+                }),
+                fetch: Box::new(|_| Ok(())),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(move |_| {
+                    pc.fetch_add(1, Ordering::SeqCst);
+                    Err(GitError::Remote("remote down".into()))
+                }),
+            },
+        );
+
+        handle.record(WriteRecord {
+            op: "update".into(),
+            target: "n".into(),
+            affected_paths: vec![PathBuf::from("/v/n.md")],
+            summary: None,
+        });
+        tokio::task::yield_now().await;
+        // Past the 1s debounce: first sync runs, push #1 fails.
+        tokio::time::advance(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        // No new write. Past the retry backoff: push must be attempted again.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+
+        assert!(
+            push_calls.load(Ordering::SeqCst) >= 2,
+            "a failed sync should be retried without a new write (got {} push attempts)",
+            push_calls.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test(start_paused = true)]
