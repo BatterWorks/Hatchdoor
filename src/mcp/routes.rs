@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 
 use crate::app_state::AppState;
 
-use super::config::{McpConfig, PROTOCOL_VERSION, SERVER_INSTRUCTIONS, validate_mcp_request};
+use super::config::{
+    McpConfig, PROTOCOL_VERSION, SERVER_INSTRUCTIONS, negotiate_protocol_version,
+    validate_mcp_request,
+};
 use super::protocol::{
     JsonRpcFailure, JsonRpcRequest, jsonrpc_error_response, jsonrpc_success_response,
 };
@@ -86,7 +89,7 @@ async fn handle_mcp_post(
     };
 
     let result = match request.method.as_str() {
-        "initialize" => Ok(handle_initialize()),
+        "initialize" => Ok(handle_initialize(request.params.as_ref())),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools_list(config) })),
         "tools/call" => handle_tools_call(state, request.params, config).await,
@@ -101,9 +104,13 @@ async fn handle_mcp_post(
     }
 }
 
-fn handle_initialize() -> Value {
+fn handle_initialize(params: Option<&Value>) -> Value {
+    let requested = params
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str);
+    let protocol_version = negotiate_protocol_version(requested);
     json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
                 "listChanged": false
@@ -258,7 +265,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "MCP-Protocol-Version",
-            HeaderValue::from_static("2025-06-18"),
+            HeaderValue::from_static("2019-01-01"),
         );
         headers.insert(
             header::AUTHORIZATION,
@@ -275,6 +282,54 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], -32002);
+    }
+
+    #[tokio::test]
+    async fn supported_alternate_protocol_version_header_is_accepted() {
+        // A client negotiated to a known-compatible earlier revision must not be
+        // hard-rejected on follow-up requests just because it isn't the newest.
+        let (state, _tmp) = test_state();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "MCP-Protocol-Version",
+            HeaderValue::from_static("2025-06-18"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let response = handle_mcp_post(
+            state,
+            &headers,
+            Bytes::from(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string()),
+            &enabled_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["result"]["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_supported_client_protocol_version() {
+        let (state, _tmp) = test_state();
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(
+            body["result"]["protocolVersion"], "2025-06-18",
+            "server should echo the client's requested supported version"
+        );
     }
 
     #[tokio::test]
