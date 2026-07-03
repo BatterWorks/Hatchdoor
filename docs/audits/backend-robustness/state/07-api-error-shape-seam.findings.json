@@ -1,0 +1,43 @@
+{
+  "findings": [
+    {
+      "title": "Attachment uploads over 2MB fail with a misleading 400 error, contradicting the advertised 10MB limit (no DefaultBodyLimit configured)",
+      "severity": "high",
+      "affected": [
+        "any /api/attachment upload whose multipart body exceeds axum's default 2MB limit (a normalized webp screenshot at 2560px edge, a GIF/SVG/PDF, or any file the client sends unchanged)",
+        "the handler's real HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10MB check at src/handlers/write_api.rs:186 is never reached for 2-10MB files"
+      ],
+      "file": "src/main.rs",
+      "line": "43-108",
+      "description": "build_router installs no axum DefaultBodyLimit override (grep of src/ finds none), so axum's built-in 2MB request-body cap governs the Multipart extractor in upload_attachment_handler. When a body exceeds 2MB, `field.bytes().await` (src/handlers/write_api.rs:145) returns a length-limit error and the handler responds 400 with JSON `{error: \"invalid file field: <length limit exceeded>\"}` (write_api.rs:148-155). Meanwhile the server's own limit is 10MB (src/mcp/config.rs:82) and is advertised to clients as `max_bytes` via get_attachment_import_config (src/mcp/tools.rs:52). The frontend surfaces the raw backend message through parseError/uploadAttachment (frontend/src/writeApi.ts:44-54,101-108), so the user sees \"invalid file field: length limit exceeded\" at 2MB even though the nominal limit is 10MB.",
+      "why": "This is a real, user-facing break of a core write feature (image paste / attachment upload) on a public launch: the effective limit (2MB) is 5x smaller than what the backend enforces and advertises, and the error text points the user at a nonexistent 'invalid file field' problem instead of a size problem. The 10MB validation path and its clean error message are dead code for the HTTP surface.",
+      "fixSketch": "Add `.layer(DefaultBodyLimit::max(state.mcp_config.max_attachment_bytes as usize + slack))` to the attachment route (or the protected router), so the Multipart extractor allows bodies up to the configured attachment cap and the handler's own size check + clean error message actually run. Keep the JSON body routes at a small limit."
+    },
+    {
+      "title": "Read-path handlers discard the server's structured {error} JSON body and surface only the numeric HTTP status",
+      "severity": "medium",
+      "affected": [
+        "GET /api/note/{slug} returning 404 with {error: \"Note not found: <slug>\"} (src/handlers/api.rs:262-270) rendered to the user as \"Failed loading note: 404\"",
+        "GET /api/tree, /api/search, /api/stats, /api/graph, /api/recently-modified on any 500/503 (e.g. sqlite_cache/health failure returning internal_error {error} or 503) where the real cause message is dropped"
+      ],
+      "file": "frontend/src/components/NotePage.tsx",
+      "line": "116-118",
+      "description": "Every read fetch throws `new Error(\\`Failed loading X: ${res.status}\\`)` without ever parsing the response body: NotePage.tsx:117 (note), :136 (links), App.tsx:127 (tree), :145 (recently-modified), :430 (search), GraphPage/StatsPage similarly. The Rust handlers uniformly return an ErrorResponse `{error: string}` body (api_types.rs:93-96) with a descriptive message (e.g. api.rs:262 note-not-found, app_state internal_error for 500s). The frontend read layer never calls anything like writeApi.ts's parseError, so all of that server-provided diagnostic text is thrown away and replaced by a bare status code.",
+      "why": "Not data-loss, but on a public launch this hides the actual backend failure reason from users and support, and is inconsistent with the write path (writeApi.ts parseError does read `{error}`). A 500 whose `{error}` explains a cache/index failure is indistinguishable from any other 500 in the UI.",
+      "fixSketch": "Give the read paths a shared helper mirroring writeApi.ts parseError: on !res.ok, try res.json() -> json.error (string), fall back to `${status} ${statusText}`, and throw that message. Reuse it in NotePage/App/GraphPage/StatsPage."
+    },
+    {
+      "title": "JSON write-body rejections are coerced to 400 regardless of the rejection's real status (e.g. body-too-large -> 400 instead of 413)",
+      "severity": "low",
+      "affected": [
+        "any JSON write body (POST /api/note, PUT/PATCH/DELETE /api/note/{slug}) that exceeds axum's 2MB JSON limit: JsonRejection carries a 413 status but write_payload emits 400",
+        "clients that key off status codes rather than the {error} string"
+      ],
+      "file": "src/handlers/write_api.rs",
+      "line": "616-628",
+      "description": "write_payload maps every JsonRejection to a hardcoded StatusCode::BAD_REQUEST while taking the message from rejection.body_text(). Axum's JsonRejection has variants with distinct statuses (missing/invalid content-type = 415, length-limit = 413, parse error = 400/422); all are flattened to 400. The body shape is still correct JSON `{error}` (so the frontend's parseError works and 409-vs-other logic in NotePage.tsx:461 is unaffected), but the status-code contract is lossy: a too-large note body reports 400 'bad request' rather than 413. Note this is strictly better than the multipart path (finding 1), which is why it is low.",
+      "why": "Low launch impact: the frontend only special-cases 409 (writeApi.ts:57-59) and otherwise shows the message, so behavior degrades gracefully. It is a contract inaccuracy worth noting for any client (or proxy/monitoring) that reasons about status codes.",
+      "fixSketch": "Return `rejection.status()` instead of a hardcoded StatusCode::BAD_REQUEST in write_payload, preserving the JSON `{error: rejection.body_text()}` body."
+    }
+  ]
+}

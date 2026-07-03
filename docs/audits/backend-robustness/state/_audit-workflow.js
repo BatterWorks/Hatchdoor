@@ -116,8 +116,8 @@ const DEFAULT_CONFIG = {
 //      engine already holds — no LLM re-reading files, can't silently no-op.
 //  (4) config/engine split (the block above).
 //  (5) severityPolicy knob: verification depth per severity is per-job.
-//  (6) categories run concurrently (parallel); per-category disk checkpoints
-//      keep resume interrupt-safe regardless of ordering.
+//  (6) categories run STRICTLY SEQUENTIALLY (one agent at a time); the finder
+//      writes its own findings.json, so an interrupt loses at most the current step.
 //  (7) cross-category dedup of confirmed findings in the rollup (by file:line).
 //  (8) all durable state is small, engine-owned JSON blobs; the loader validates
 //      and treats an unparseable/absent checkpoint as "redo", never as done.
@@ -196,7 +196,7 @@ Primary sources to read (use codegraph_explore and Read; repo root is ${CONFIG.r
 
 Find REAL issues that exist in THIS code — not generic lore. Every finding MUST cite an actual file and line you have read. For each, put in \`affected\` ${CONFIG.domain.affectedHint} and explain the concrete reason. Prefer fewer, concrete, code-grounded findings over a long speculative list. If a sub-area is genuinely solid, do not invent issues. Severity reflects launch impact (critical = broken / data-loss / security on a target).
 
-Return {"findings": [...]} via the schema. Do NOT write any files — the engine persists your findings.`
+CHECKPOINT: After analysis, use the Write tool to save the findings as {"findings": [...]} to ${STATE}/${cat.slug}.findings.json. Then return the same object via the schema.`
 }
 
 function panelPrompt(cat, subset, lensIdx) {
@@ -255,8 +255,9 @@ Return: {"findings": <array or []>, "panel": <array or []>, "verified": <array o
     log(`▶ ${cat.slug}: finding…`)
     const r = await agent(finderPrompt(cat), { label: `find:${cat.slug}`, phase: 'Find', ...CONFIG.models.finder, schema: FINDINGS_SCHEMA })
     if (!r) throw new Error(`finder failed for ${cat.slug}`)
+    // The finder already wrote findings.json itself (its CHECKPOINT step). We stamp
+    // stable ids in memory here; on resume the loader re-stamps by index identically.
     findings = (r.findings || []).map((f, i) => ({ ...f, id: i })) // (2) stamp stable ids
-    await writeBlob(F, JSON.stringify(findings, null, 2), `ckpt-find:${cat.slug}`)
   } else {
     // ensure ids exist (older checkpoints / resumes)
     findings = findings.map((f, i) => ({ ...f, id: typeof f.id === 'number' ? f.id : i }))
@@ -374,9 +375,18 @@ function buildSummary(results) {
 // ============================  DRIVER  ======================================
 log(`${CONFIG.jobSlug}: ${CONFIG.categories.length} categories; policy ${JSON.stringify(CONFIG.severityPolicy)}; ${maxLenses} max lenses`)
 
-// (6) categories run concurrently; each self-checkpoints so resume stays interrupt-safe.
-const settled = await parallel(CONFIG.categories.map((cat) => () => runCategory(cat)))
-const results = settled.filter(Boolean)
+// Categories run STRICTLY SEQUENTIALLY — one agent at a time, one category fully
+// (find → checkpoint → verify → checkpoint → report) before the next starts. A
+// category whose finder or panel throws is dropped and retried on resume; its
+// findings.json (written by the finder itself) persists so the retry is cheap.
+const results = []
+for (const cat of CONFIG.categories) {
+  try {
+    results.push(await runCategory(cat))
+  } catch (e) {
+    log(`⚠ ${cat.slug} failed this run (${e.message}) — will resume next run; finder work is cached.`)
+  }
+}
 const failed = CONFIG.categories.length - results.length
 if (failed > 0) log(`⚠ ${failed} category(ies) did not complete this run — rerun to resume them (finder work is cached).`)
 

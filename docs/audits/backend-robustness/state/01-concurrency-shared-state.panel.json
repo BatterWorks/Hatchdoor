@@ -1,0 +1,42 @@
+[
+  {
+    "lens": 0,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Lines 148-166 confirm run_one_sync acquires vault_lock.lock().await at line 149 and holds the guard until line 166, spanning the entire spawn_blocking call that invokes runner(...) (git fetch/push via git2) with no timeout wrapper anywhere in this function or run_loop. The mechanism as described is exactly what the code does."
+      },
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "GitSyncHandle::record (line 23) matches the claim: it only pushes onto an unbounded in-memory mpsc channel and its own doc comment says it 'drops silently if the background task has stopped.' Nothing durable is written here, and the crash-recovery path (startup_flush at lines 48-51/87-89) is gated purely on has_unpushed comparing local vs remote commits, not on whether a WriteRecord was queued. The described gap between file write and channel enqueue durability is real as far as this file's mechanics go."
+      },
+      {
+        "id": 2,
+        "refuted": false,
+        "reason": "conn is a std::sync::Mutex<Connection> (line 12, line 32), and connection() (line 164) simply maps a poison error to a string via lock().map_err(...) rather than recovering/clearing the poison (e.g. via into_inner or a parking_lot mutex). Since std::sync::Mutex poisoning is permanent for the mutex's lifetime, any panic while the guard is held (e.g. during the cited reindex-transaction scenario) would indeed make every subsequent connection() call fail for the rest of the process. The mechanism claimed is real in this code."
+      }
+    ]
+  },
+  {
+    "lens": 1,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Confirmed by reading src/git/task.rs:149-166: vault_lock is acquired at line 149 (_guard) and not dropped until line 166, which is after the .await on spawn_blocking (line 159) that runs the git2 fetch/push (via runner(...)) and unpushed_count. No timeout wraps this call. A hanging/slow remote therefore blocks the lock release indefinitely, and any other task calling vault_lock.lock().await (HTTP write handlers, MCP write tools) is blocked for the same unbounded duration. This is a genuine availability failure under the stated adverse condition, not mitigated by any timeout, cancellation, or lock-scoping in the visible code."
+      }
+    ]
+  },
+  {
+    "lens": 2,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "Confirmed by reading src/git/task.rs:128-166: run_one_sync acquires vault_lock at line 149 (_guard) before calling tokio::task::spawn_blocking which runs runner(...) doing the actual git2 fetch/push network I/O, and the lock is not dropped until line 166 after the blocking task completes. There is no timeout wrapping the spawn_blocking call, no tokio::time::timeout, and no evidence of any retry/circuit-breaker that would bound this. The comment on line 148 ('Hold the vault lock across the blocking git work so no MCP write races it') shows this coupling is deliberate but does not mitigate the availability risk described. No other guard in this file limits git2 network call duration, so a hanging remote genuinely blocks vault_lock acquisition for all HTTP/MCP writers indefinitely. Severity as high is reasonable given full write-path stall. Not refuted."
+      }
+    ]
+  }
+]

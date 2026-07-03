@@ -1,0 +1,42 @@
+[
+  {
+    "lens": 0,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "build_router (src/main.rs:43-108) has no DefaultBodyLimit layer anywhere in the chain, confirming axum's default 2MB cap applies. write_api.rs:145-156 confirms field.bytes().await error path returns 400 with 'invalid file field: <err>' message exactly as claimed."
+      },
+      {
+        "id": 1,
+        "refuted": false,
+        "reason": "NotePage.tsx:117 verified verbatim: throw new Error(`Failed loading note: ${res.status}`) with no body parsing, matching the claim exactly; same pattern at line 136 for note links."
+      },
+      {
+        "id": 2,
+        "refuted": false,
+        "reason": "write_payload at write_api.rs:616-628 verified verbatim: every JsonRejection variant is mapped to hardcoded StatusCode::BAD_REQUEST with message from rejection.body_text(), exactly as claimed."
+      }
+    ]
+  },
+  {
+    "lens": 1,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "src/main.rs build_router (lines 43-108) applies only TraceLayer and the optional web-token auth middleware via .layer(); there is no DefaultBodyLimit layer anywhere in the router construction. This confirms the premise that axum's built-in 2MB body cap governs all routes including the multipart attachment upload, contradicting the advertised 10MB limit. Nothing in main.rs shows an atomic-operation guarantee or rollback that would prevent this outcome -- it's a router configuration gap, not a race/crash scenario, so my failure-injection lens finds no basis to refute it."
+      }
+    ]
+  },
+  {
+    "lens": 2,
+    "verdicts": [
+      {
+        "id": 0,
+        "refuted": false,
+        "reason": "src/main.rs's router construction (build_router, lines ~43-108) applies no DefaultBodyLimit layer or RequestBodyLimitLayer -- only middleware::from_fn_with_state for auth and other layers unrelated to body size. No guard mitigates this from within main.rs; axum's built-in 2MB default therefore governs Multipart parsing, contradicting the advertised 10MB limit. Nothing in the cited file makes this unreachable or trivial."
+      }
+    ]
+  }
+]
