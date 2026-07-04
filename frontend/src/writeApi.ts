@@ -50,7 +50,37 @@ async function parseError(res: Response): Promise<string> {
   } catch {
     // Fall back to status text below.
   }
-  return `${res.status} ${res.statusText}`.trim();
+  return `${res.status} ${statusFallbackText(res)}`.trim();
+}
+
+function statusFallbackText(res: Response): string {
+  if (res.statusText.trim()) {
+    return res.statusText.trim();
+  }
+  switch (res.status) {
+    case 400:
+      return "Bad Request";
+    case 401:
+      return "Unauthorized";
+    case 403:
+      return "Forbidden";
+    case 404:
+      return "Not Found";
+    case 409:
+      return "Conflict";
+    case 413:
+      return "Payload Too Large";
+    case 500:
+      return "Internal Server Error";
+    case 502:
+      return "Bad Gateway";
+    case 503:
+      return "Service Unavailable";
+    case 504:
+      return "Gateway Timeout";
+    default:
+      return "HTTP Error";
+  }
 }
 
 function makeWriteError(message: string, status: number): Error {

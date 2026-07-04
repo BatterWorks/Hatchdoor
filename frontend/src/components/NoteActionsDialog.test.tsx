@@ -26,6 +26,33 @@ function renderCreateDialog() {
   );
 }
 
+describe("NoteActionsDialog folder suggestions", () => {
+  it("uses a custom folder suggestion list instead of datalist", () => {
+    render(
+      <NoteActionsDialog
+        kind="create"
+        error={null}
+        folderPaths={["Projects", "Projects/Launch"]}
+        initialFolder=""
+        onClose={() => {}}
+        onCreate={() => {}}
+        onRename={() => {}}
+        onMove={() => {}}
+        onArchive={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+
+    expect(document.querySelector("datalist")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Projects" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Projects/Launch" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("NoteActionsDialog create draft persistence", () => {
   it("persists typed create-note content so an auto-update reload does not lose it", () => {
     renderCreateDialog();

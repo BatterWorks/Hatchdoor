@@ -134,7 +134,9 @@ export function NotePage({
     try {
       const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}/links`);
       if (!res.ok) {
-        throw new Error(await readErrorMessage(res, "Failed loading note links"));
+        throw new Error(
+          await readErrorMessage(res, "Failed loading note links"),
+        );
       }
       const json = (await res.json()) as NoteLinksResponse;
       if (slug !== currentSlugRef.current) return;
@@ -331,7 +333,8 @@ export function NotePage({
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
     } else if (matchHeading) {
-      const lastSegment = matchHeading.split(" > ").at(-1) ?? matchHeading;
+      const parts = matchHeading.split(" > ");
+      const lastSegment = parts[parts.length - 1] ?? matchHeading;
       jumpToHeading(slugifyHeading(lastSegment));
     }
 
@@ -611,7 +614,7 @@ export function NotePage({
             )}
           />
         ) : (
-          <div ref={noteBodyRef} className="note-body">
+          <div ref={noteBodyRef} className="note-body" dir="auto">
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={rehypePlugins}

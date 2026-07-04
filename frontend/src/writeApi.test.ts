@@ -248,4 +248,34 @@ describe("writeApi", () => {
       message: "boom",
     });
   });
+
+  it("explains common non-JSON infrastructure errors without relying on statusText", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      new Response("<html>bad gateway</html>", {
+        status: 502,
+        statusText: "",
+        headers: { "content-type": "text/html" },
+      }),
+    );
+
+    await expect(createNote("Home", "# Home")).rejects.toMatchObject({
+      name: "WriteApiError",
+      message: "502 Bad Gateway",
+    });
+
+    mockedApiFetch.mockResolvedValueOnce(
+      new Response("too large", {
+        status: 413,
+        statusText: "",
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    await expect(
+      uploadAttachment(new File(["x"], "x.png"), "x.png"),
+    ).rejects.toMatchObject({
+      name: "WriteApiError",
+      message: "413 Payload Too Large",
+    });
+  });
 });
