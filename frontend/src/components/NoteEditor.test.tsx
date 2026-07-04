@@ -92,6 +92,47 @@ describe("NoteEditor attachment uploads", () => {
     expect(textarea).toHaveValue("# Body\n![[Attachments/pasted.png]]");
   });
 
+  it("uploads Safari pasted images exposed only through clipboard items", async () => {
+    const uploadAttachment = vi
+      .fn()
+      .mockResolvedValue("Attachments/safari-paste.png");
+    const saveContent = vi.fn();
+
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={saveContent}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    textarea.setSelectionRange(7, 7);
+    const file = new File(["png-bytes"], "safari-paste.png", {
+      type: "image/png",
+    });
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [],
+        items: [
+          {
+            kind: "file",
+            type: "image/png",
+            getAsFile: () => file,
+          },
+        ],
+      },
+    });
+
+    await screen.findByText(
+      "Inserted attachment: Attachments/safari-paste.png",
+    );
+    expect(uploadAttachment).toHaveBeenCalledWith(file);
+    expect(textarea).toHaveValue("# Body\n![[Attachments/safari-paste.png]]");
+  });
+
   it("shows a visible drop target while dragging an image over the editor", () => {
     const uploadAttachment = vi.fn();
 

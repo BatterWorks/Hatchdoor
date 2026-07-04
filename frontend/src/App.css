@@ -259,6 +259,36 @@
   overflow-y: hidden;
 }
 
+.note-body :where(.katex-display) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.folder-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: -0.35rem;
+}
+
+.folder-suggestions button {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 0.28rem 0.45rem;
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .folder-suggestions button:hover {
+    background: var(--paper-2);
+  }
+}
+
 .folder-new-note {
   margin-left: auto;
   border: none;
@@ -322,15 +352,17 @@
   inset: 0;
   z-index: 80;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 1rem;
+  padding: max(1rem, env(safe-area-inset-top)) 1rem
+    max(1rem, env(safe-area-inset-bottom));
   background: var(--overlay-bg);
+  overflow: auto;
 }
 
 .modal-panel {
   width: min(520px, 100%);
-  max-height: min(720px, calc(100vh - 2rem));
+  max-height: min(720px, calc(var(--visual-viewport-height, 100dvh) - 2rem));
   overflow: auto;
   border: 1px solid var(--rule);
   border-radius: 8px;

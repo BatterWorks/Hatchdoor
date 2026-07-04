@@ -7,7 +7,7 @@ body.resizing {
   .app-topbar {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.6rem;
-    padding: calc(0.6rem + env(safe-area-inset-top)) 0.75rem 0.6rem;
+    padding: 0.6rem 0.75rem;
   }
 
   /* Hide search trigger on mobile (icon button used instead) */
@@ -140,10 +140,6 @@ body.resizing {
 }
 
 @media (display-mode: standalone) {
-  .app-topbar {
-    padding-top: calc(0.9rem + env(safe-area-inset-top));
-  }
-
   .note-pane {
     padding-bottom: calc(3rem + env(safe-area-inset-bottom));
   }

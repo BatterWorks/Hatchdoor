@@ -32,7 +32,13 @@ import {
 } from "./app/storage";
 import { useIsMobile } from "./app/useIsMobile";
 import { useTheme } from "./app/useTheme";
-import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
+import {
+  apiFetch,
+  notifyUnauthorized,
+  onUnauthorized,
+  setToken,
+  withAccessToken,
+} from "./api";
 import { readErrorMessage } from "./apiError";
 import { copyText } from "./clipboard";
 import {
@@ -96,6 +102,9 @@ function App() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
+  const [visualViewportHeight, setVisualViewportHeight] = useState(
+    () => window.visualViewport?.height ?? window.innerHeight,
+  );
   const [vaultRevision, setVaultRevision] = useState(0);
   const [authRequired, setAuthRequired] = useState(false);
   const [writeEnabled, setWriteEnabled] = useState(false);
@@ -226,11 +235,17 @@ function App() {
         // Ignore malformed event payloads; the next valid revision will resync.
       }
     };
+    const onEventSourceError = () => {
+      events.close();
+      notifyUnauthorized();
+    };
 
     events.addEventListener("vault-revision", onVaultRevision);
+    events.addEventListener("error", onEventSourceError);
 
     return () => {
       events.removeEventListener("vault-revision", onVaultRevision);
+      events.removeEventListener("error", onEventSourceError);
       events.close();
     };
   }, []);
@@ -284,6 +299,29 @@ function App() {
     }
     setActionsMenuOpen(false);
   }, [location.pathname, isMobile]);
+
+  useLayoutEffect(() => {
+    const updateVisualViewportHeight = () => {
+      setVisualViewportHeight(
+        window.visualViewport?.height ?? window.innerHeight,
+      );
+    };
+
+    updateVisualViewportHeight();
+    window.addEventListener("resize", updateVisualViewportHeight);
+    window.visualViewport?.addEventListener(
+      "resize",
+      updateVisualViewportHeight,
+    );
+
+    return () => {
+      window.removeEventListener("resize", updateVisualViewportHeight);
+      window.visualViewport?.removeEventListener(
+        "resize",
+        updateVisualViewportHeight,
+      );
+    };
+  }, []);
 
   useLayoutEffect(() => {
     if (!isMobile) {
@@ -514,11 +552,7 @@ function App() {
     if (!activeNote) {
       return;
     }
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-    } catch {
-      // Ignore clipboard errors in unsupported contexts.
-    }
+    await copyText(window.location.href);
   }, [activeNote]);
   const copyPageContent = useCallback(async () => {
     if (!activeNote) {
@@ -676,6 +710,7 @@ function App() {
       style={
         {
           "--mobile-drawer-top": `${mobileDrawerTop}px`,
+          "--visual-viewport-height": `${Math.round(visualViewportHeight)}px`,
           "--sidebar-width": `${sidebarWidth}px`,
         } as CSSProperties
       }

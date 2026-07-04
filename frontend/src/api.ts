@@ -4,6 +4,7 @@
 // query parameter for contexts that cannot set headers (<img>, downloads, SSE).
 
 const TOKEN_KEY = "hatchdoor_web_token";
+export const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
 
 export function getToken(): string | null {
   try {
@@ -47,6 +48,24 @@ export async function apiFetch(
   init?: RequestInit,
 ): Promise<Response> {
   const token = getToken();
+  const timeoutController = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    timeoutController.abort(
+      new DOMException("Request timed out", "AbortError"),
+    );
+  }, DEFAULT_FETCH_TIMEOUT_MS);
+  const callerSignal = init?.signal;
+  const abortFromCaller = () => {
+    timeoutController.abort(
+      callerSignal?.reason ?? new DOMException("Aborted", "AbortError"),
+    );
+  };
+  if (callerSignal?.aborted) {
+    abortFromCaller();
+  } else {
+    callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+  }
+
   let finalInit = init;
   if (token) {
     finalInit = {
@@ -57,11 +76,24 @@ export async function apiFetch(
       },
     };
   }
-  const res = await fetch(input, finalInit);
-  if (res.status === 401) {
-    unauthorizedHandler?.();
+
+  try {
+    const res = await fetch(input, {
+      ...finalInit,
+      signal: timeoutController.signal,
+    });
+    if (res.status === 401) {
+      unauthorizedHandler?.();
+    }
+    return res;
+  } finally {
+    window.clearTimeout(timeoutId);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
-  return res;
+}
+
+export function notifyUnauthorized(): void {
+  unauthorizedHandler?.();
 }
 
 /**

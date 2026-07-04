@@ -44,7 +44,9 @@ export function useResolvedWikilinks(
             for (const result of json.results) {
               map.set(
                 result.target,
-                result.slug ? { slug: result.slug, archived: result.archived } : null,
+                result.slug
+                  ? { slug: result.slug, archived: result.archived }
+                  : null,
               );
             }
           }
@@ -68,7 +70,11 @@ export function useResolvedWikilinks(
             const anchor = extractAnchor(parsed.target);
             const hash = anchor ? `#${anchor}` : "";
             const prefix = resolved.archived ? "/__archived__/" : "/n/";
-            const label = wikilinkDisplayLabel(body, parsed.label, resolved.archived);
+            const label = wikilinkDisplayLabel(
+              body,
+              parsed.label,
+              resolved.archived,
+            );
             return `[${escapeMarkdownLabel(label)}](${prefix}${resolved.slug}${hash})`;
           }
           return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
@@ -143,7 +149,7 @@ function wikilinkDisplayLabel(
     return fallbackLabel;
   }
   const parts = fallbackLabel.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.at(-1) ?? fallbackLabel;
+  return parts[parts.length - 1] ?? fallbackLabel;
 }
 
 function normalizeRelativePath(baseDir: string, target: string): string {

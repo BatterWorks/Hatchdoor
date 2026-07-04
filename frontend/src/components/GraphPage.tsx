@@ -216,12 +216,6 @@ export function GraphPage() {
       if (canvas.width !== needW || canvas.height !== needH) {
         canvas.width = needW;
         canvas.height = needH;
-        // Re-centre world origin whenever the canvas is resized.
-        transformRef.current = {
-          x: cssW / 2,
-          y: cssH / 2,
-          k: transformRef.current.k,
-        };
       }
     }
 

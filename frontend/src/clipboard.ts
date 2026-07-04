@@ -8,17 +8,24 @@ export async function copyText(value: string): Promise<boolean> {
     // Fallback below for non-secure contexts / unsupported clipboard API.
   }
 
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.top = "-1000px";
-  textarea.style.left = "-1000px";
-  document.body.appendChild(textarea);
+  const target = document.createElement("span");
+  target.textContent = value;
+  target.setAttribute("contenteditable", "true");
+  target.style.position = "fixed";
+  target.style.top = "-1000px";
+  target.style.left = "-1000px";
+  target.style.whiteSpace = "pre";
+  document.body.appendChild(target);
 
-  textarea.select();
-  textarea.setSelectionRange(0, textarea.value.length);
-  const copied = document.execCommand("copy");
-  document.body.removeChild(textarea);
-  return copied;
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.selectNodeContents(target);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  try {
+    return document.execCommand("copy");
+  } finally {
+    selection?.removeAllRanges();
+    document.body.removeChild(target);
+  }
 }
