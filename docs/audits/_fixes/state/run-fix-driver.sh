@@ -25,6 +25,16 @@ set -uo pipefail
 # codegraph), and cargo/rustup back on it so the workflow's subagents can shell out.
 export PATH="/home/battermanz/.local/bin:/home/battermanz/.nvm/versions/node/v24.14.0/bin:/home/battermanz/.cargo/bin:$PATH"
 
+# CRITICAL: the Workflow tool runs in the BACKGROUND and returns a task id
+# immediately; the real work finishes later via a notification. In a headless
+# `claude -p` session there is no event loop to await that, so by default the
+# print session terminates the still-running workflow after a 600s ceiling —
+# killing it after ~1 fix and discarding in-flight work. A large ceiling lets a
+# tick run the whole workflow to completion (or until the usage cap); if a
+# subagent ever hangs, the tick still yields eventually and the next resumable
+# tick continues, rather than holding the flock forever. 4h = 14400000 ms.
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS=14400000
+
 REPO="/home/battermanz/coding/hatchdoor"
 DIR="$REPO/docs/audits/_fixes"
 STATE="$DIR/state"
