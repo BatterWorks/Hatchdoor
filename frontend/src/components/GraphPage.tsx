@@ -56,7 +56,32 @@ function nodeColor(tag: string | null, alpha = 1): string {
 }
 
 function cssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+}
+
+interface ThemeColors {
+  bg: string;
+  paper: string;
+  rule: string;
+  ink: string;
+  muted: string;
+  hot: string;
+}
+
+// getComputedStyle forces a synchronous style recalc, so the six theme reads
+// are resolved once here and cached — refreshed only when the theme changes
+// rather than on every animation frame.
+function readThemeColors(): ThemeColors {
+  return {
+    bg: cssVar("--bg"),
+    paper: cssVar("--paper"),
+    rule: cssVar("--rule"),
+    ink: cssVar("--ink"),
+    muted: cssVar("--muted"),
+    hot: cssVar("--hot"),
+  };
 }
 
 // ── component ─────────────────────────────────────────────────────────────────
@@ -83,11 +108,30 @@ export function GraphPage() {
   const activeTagsRef = useRef<Set<string>>(new Set());
   const lastClickSlugRef = useRef<string | null>(null);
   const rafRef = useRef<number>(0);
+  const runningRef = useRef(false);
+  const themeColorsRef = useRef<ThemeColors | null>(null);
+  if (themeColorsRef.current === null)
+    themeColorsRef.current = readThemeColors();
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null);
-  const dragRef = useRef<{ node: SimNode; startX: number; startY: number } | null>(null);
-  const panRef = useRef<{ startX: number; startY: number; ox: number; oy: number } | null>(null);
-  const zoomAnimRef = useRef<{ targetK: number; cx: number; cy: number } | null>(null);
-  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(null);
+  const dragRef = useRef<{
+    node: SimNode;
+    startX: number;
+    startY: number;
+  } | null>(null);
+  const panRef = useRef<{
+    startX: number;
+    startY: number;
+    ox: number;
+    oy: number;
+  } | null>(null);
+  const zoomAnimRef = useRef<{
+    targetK: number;
+    cx: number;
+    cy: number;
+  } | null>(null);
+  const pinchRef = useRef<{ dist: number; cx: number; cy: number } | null>(
+    null,
+  );
 
   // keep activeTagsRef in sync
   useEffect(() => {
@@ -127,7 +171,9 @@ export function GraphPage() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ── hit test ────────────────────────────────────────────────────────────────
@@ -171,7 +217,11 @@ export function GraphPage() {
         canvas.width = needW;
         canvas.height = needH;
         // Re-centre world origin whenever the canvas is resized.
-        transformRef.current = { x: cssW / 2, y: cssH / 2, k: transformRef.current.k };
+        transformRef.current = {
+          x: cssW / 2,
+          y: cssH / 2,
+          k: transformRef.current.k,
+        };
       }
     }
 
@@ -182,9 +232,10 @@ export function GraphPage() {
       const logCurrent = Math.log(t.k);
       const logTarget = Math.log(anim.targetK);
       const diff = logTarget - logCurrent;
-      const newK = Math.abs(diff) < 0.0008
-        ? (zoomAnimRef.current = null, anim.targetK)
-        : Math.exp(logCurrent + diff * 0.18);
+      const newK =
+        Math.abs(diff) < 0.0008
+          ? ((zoomAnimRef.current = null), anim.targetK)
+          : Math.exp(logCurrent + diff * 0.18);
       transformRef.current = {
         k: newK,
         x: anim.cx - ((anim.cx - t.x) / t.k) * newK,
@@ -202,13 +253,14 @@ export function GraphPage() {
     const hovered = hoveredRef.current;
     const selected = selectedRef.current;
 
-    // theme colors
-    const bgColor = cssVar("--bg");
-    const paperColor = cssVar("--paper");
-    const ruleColor = cssVar("--rule");
-    const inkColor = cssVar("--ink");
-    const mutedColor = cssVar("--muted");
-    const hotColor = cssVar("--hot");
+    // theme colors — cached; refreshed only on theme change, not per frame
+    const theme = themeColorsRef.current ?? readThemeColors();
+    const bgColor = theme.bg;
+    const paperColor = theme.paper;
+    const ruleColor = theme.rule;
+    const inkColor = theme.ink;
+    const mutedColor = theme.muted;
+    const hotColor = theme.hot;
 
     // clear
     ctx.fillStyle = bgColor;
@@ -223,10 +275,16 @@ export function GraphPage() {
     const gridOffX = ((x % gridStep) + gridStep) % gridStep;
     const gridOffY = ((y % gridStep) + gridStep) % gridStep;
     for (let gx = gridOffX; gx < W; gx += gridStep) {
-      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(gx, 0);
+      ctx.lineTo(gx, H);
+      ctx.stroke();
     }
     for (let gy = gridOffY; gy < H; gy += gridStep) {
-      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, gy);
+      ctx.lineTo(W, gy);
+      ctx.stroke();
     }
     ctx.restore();
 
@@ -236,7 +294,6 @@ export function GraphPage() {
 
     const nodes = simNodesRef.current;
     const links = simLinksRef.current;
-
 
     // determine which nodes are "visible" based on tag filter
     const isVisible = (node: SimNode) => {
@@ -249,8 +306,10 @@ export function GraphPage() {
     if (selected) {
       connectedSlugs.add(selected.slug);
       for (const link of links) {
-        if (link.source.slug === selected.slug) connectedSlugs.add(link.target.slug);
-        if (link.target.slug === selected.slug) connectedSlugs.add(link.source.slug);
+        if (link.source.slug === selected.slug)
+          connectedSlugs.add(link.target.slug);
+        if (link.target.slug === selected.slug)
+          connectedSlugs.add(link.source.slug);
       }
     }
 
@@ -267,11 +326,14 @@ export function GraphPage() {
       if (selected) {
         const srcConn = connectedSlugs.has(src.slug);
         const tgtConn = connectedSlugs.has(tgt.slug);
-        if (srcConn && tgtConn) { alpha = 0.55; color = hotColor; }
-        else alpha = 0.04;
+        if (srcConn && tgtConn) {
+          alpha = 0.55;
+          color = hotColor;
+        } else alpha = 0.04;
       } else if (hovered) {
         if (src.slug === hovered.slug || tgt.slug === hovered.slug) {
-          alpha = 0.6; color = hotColor;
+          alpha = 0.6;
+          color = hotColor;
         } else {
           alpha = 0.06;
         }
@@ -284,7 +346,10 @@ export function GraphPage() {
       ctx.lineTo(tgt.x, tgt.y);
       ctx.strokeStyle = color;
       ctx.globalAlpha = alpha;
-      ctx.lineWidth = selected && connectedSlugs.has(src.slug) && connectedSlugs.has(tgt.slug) ? 1.5 / k : 1 / k;
+      ctx.lineWidth =
+        selected && connectedSlugs.has(src.slug) && connectedSlugs.has(tgt.slug)
+          ? 1.5 / k
+          : 1 / k;
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
@@ -321,7 +386,11 @@ export function GraphPage() {
       ctx.fill();
 
       // node border
-      ctx.strokeStyle = isSelected ? hotColor : isHovered ? inkColor : paperColor;
+      ctx.strokeStyle = isSelected
+        ? hotColor
+        : isHovered
+          ? inkColor
+          : paperColor;
       ctx.lineWidth = (isSelected || isHovered ? 2 : 1) / k;
       ctx.globalAlpha = isHovered || isSelected ? 1 : alpha * 0.6;
       ctx.stroke();
@@ -332,12 +401,15 @@ export function GraphPage() {
     // are candidates; lower it as zoom increases to admit more nodes.
     const labelThreshold = 10 / Math.sqrt(k);
     const LABEL_SCREEN_SIZE = 12; // px on screen — constant regardless of zoom
-    const LABEL_PAD_X = 5;        // screen-px padding (converted to world below)
+    const LABEL_PAD_X = 5; // screen-px padding (converted to world below)
     const LABEL_PAD_Y = 3;
 
     // Hub threshold: top 10% by backlink count always get a label (guaranteed).
-    const sortedCounts = nodes.map((n) => n.backlink_count).sort((a, b) => a - b);
-    const hubMinBacklinks = sortedCounts[Math.floor(sortedCounts.length * 0.9)] ?? 0;
+    const sortedCounts = nodes
+      .map((n) => n.backlink_count)
+      .sort((a, b) => a - b);
+    const hubMinBacklinks =
+      sortedCounts[Math.floor(sortedCounts.length * 0.9)] ?? 0;
 
     // Collect candidates: hovered/selected first, then hubs, then rest by importance.
     const seen = new Set<string>();
@@ -355,8 +427,14 @@ export function GraphPage() {
     if (selected && selected !== hovered) pushLabel(selected, true);
     // Sort remaining candidates by importance so hubs win deconfliction.
     const ranked = nodes
-      .filter((n) => isVisible(n) && n.slug !== hovered?.slug && n.slug !== selected?.slug
-        && (n.backlink_count >= hubMinBacklinks || nodeRadius(n.backlink_count) * k >= labelThreshold))
+      .filter(
+        (n) =>
+          isVisible(n) &&
+          n.slug !== hovered?.slug &&
+          n.slug !== selected?.slug &&
+          (n.backlink_count >= hubMinBacklinks ||
+            nodeRadius(n.backlink_count) * k >= labelThreshold),
+      )
       .sort((a, b) => b.backlink_count - a.backlink_count);
     for (const n of ranked) pushLabel(n, n.backlink_count >= hubMinBacklinks);
 
@@ -364,18 +442,41 @@ export function GraphPage() {
     // Pre-seed with every visible node circle so labels can't overlap nodes.
     // Each entry carries the owning slug so a node's own label can self-exclude.
     const NODE_MARGIN = 4; // extra px around each circle
-    const placed: Array<{ sx: number; sy: number; sw: number; sh: number; slug?: string }> = nodes
-      .filter(isVisible)
-      .map((n) => {
-        const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
-        return { sx: n.x * k + x - rScr, sy: n.y * k + y - rScr, sw: rScr * 2, sh: rScr * 2, slug: n.slug };
-      });
+    const placed: Array<{
+      sx: number;
+      sy: number;
+      sw: number;
+      sh: number;
+      slug?: string;
+    }> = nodes.filter(isVisible).map((n) => {
+      const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
+      return {
+        sx: n.x * k + x - rScr,
+        sy: n.y * k + y - rScr,
+        sw: rScr * 2,
+        sh: rScr * 2,
+        slug: n.slug,
+      };
+    });
 
     const fontSize = LABEL_SCREEN_SIZE / k;
     ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
 
-    const collidesWithPlaced = (sx: number, sy: number, sw: number, sh: number, ownSlug: string) =>
-      placed.some((p) => p.slug !== ownSlug && sx < p.sx + p.sw && sx + sw > p.sx && sy < p.sy + p.sh && sy + sh > p.sy);
+    const collidesWithPlaced = (
+      sx: number,
+      sy: number,
+      sw: number,
+      sh: number,
+      ownSlug: string,
+    ) =>
+      placed.some(
+        (p) =>
+          p.slug !== ownSlug &&
+          sx < p.sx + p.sw &&
+          sx + sw > p.sx &&
+          sy < p.sy + p.sh &&
+          sy + sh > p.sy,
+      );
 
     for (const node of labelCandidates) {
       const r = nodeRadius(node.backlink_count);
@@ -388,7 +489,8 @@ export function GraphPage() {
       ctx.textAlign = "center";
       ctx.textBaseline = "top";
 
-      const label = node.title.length > 28 ? node.title.slice(0, 26) + "…" : node.title;
+      const label =
+        node.title.length > 28 ? node.title.slice(0, 26) + "…" : node.title;
       const metrics = ctx.measureText(label);
       const padX = LABEL_PAD_X / k;
       const padY = LABEL_PAD_Y / k;
@@ -398,10 +500,10 @@ export function GraphPage() {
 
       // Candidate positions: below, above, right, left.
       const candidates = [
-        { bx: node.x - bw / 2,       by: node.y + r + gap },
-        { bx: node.x - bw / 2,       by: node.y - r - gap - bh },
-        { bx: node.x + r + gap,       by: node.y - bh / 2 },
-        { bx: node.x - r - gap - bw,  by: node.y - bh / 2 },
+        { bx: node.x - bw / 2, by: node.y + r + gap },
+        { bx: node.x - bw / 2, by: node.y - r - gap - bh },
+        { bx: node.x + r + gap, by: node.y - bh / 2 },
+        { bx: node.x - r - gap - bw, by: node.y - bh / 2 },
       ];
 
       // Pick the first position that doesn't collide with any placed region.
@@ -446,10 +548,28 @@ export function GraphPage() {
 
   // ── animation loop ───────────────────────────────────────────────────────────
 
-  const startLoop = useCallback(() => {
+  // Draw one frame and keep looping only while something is actually moving
+  // (simulation still warm, an animated zoom, or an active drag/pan/pinch).
+  // Once everything settles the rAF loop stops entirely instead of spinning a
+  // core at 60fps forever; interaction handlers call requestRender() to wake it.
+  const requestRender = useCallback(() => {
+    if (runningRef.current) return;
+    runningRef.current = true;
     const tick = () => {
       render();
-      rafRef.current = requestAnimationFrame(tick);
+      const sim = simRef.current;
+      const simActive = !!sim && sim.alpha() > sim.alphaMin();
+      const busy =
+        simActive ||
+        zoomAnimRef.current !== null ||
+        dragRef.current !== null ||
+        panRef.current !== null ||
+        pinchRef.current !== null;
+      if (busy) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else {
+        runningRef.current = false;
+      }
     };
     rafRef.current = requestAnimationFrame(tick);
   }, [render]);
@@ -492,16 +612,28 @@ export function GraphPage() {
 
     simRef.current?.stop();
     const sim = forceSimulation<SimNode>(nodes)
-      .force("link", forceLink<SimNode, SimLink>(links).id((d) => d.slug).distance(60).strength(0.4))
+      .force(
+        "link",
+        forceLink<SimNode, SimLink>(links)
+          .id((d) => d.slug)
+          .distance(60)
+          .strength(0.4),
+      )
       .force("charge", forceManyBody<SimNode>().strength(-180).distanceMax(400))
       .force("center", forceCenter<SimNode>(0, 0))
-      .force("collide", forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4))
+      .force(
+        "collide",
+        forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4),
+      )
       .alphaDecay(0.02);
 
     simRef.current = sim;
+    requestRender();
 
-    return () => { sim.stop(); };
-  }, [graphData]);
+    return () => {
+      sim.stop();
+    };
+  }, [graphData, requestRender]);
 
   // ── canvas resize ───────────────────────────────────────────────────────────
 
@@ -524,22 +656,55 @@ export function GraphPage() {
       // is always visible regardless of when the sim initialised.
       if (!centred) {
         centred = true;
-        transformRef.current = { x: rect.width / 2, y: rect.height / 2, k: 0.9 };
+        transformRef.current = {
+          x: rect.width / 2,
+          y: rect.height / 2,
+          k: 0.9,
+        };
       }
+      requestRender();
     };
 
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
     return () => ro.disconnect();
-  }, []);
+  }, [requestRender]);
 
   // ── start render loop ────────────────────────────────────────────────────────
 
   useEffect(() => {
-    startLoop();
-    return () => { cancelAnimationFrame(rafRef.current); };
-  }, [startLoop]);
+    requestRender();
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      runningRef.current = false;
+    };
+  }, [requestRender]);
+
+  // Refresh cached theme colors when the theme changes (data-theme attribute
+  // for explicit themes, media query for the "auto" theme) and redraw once.
+  useEffect(() => {
+    const refresh = () => {
+      themeColorsRef.current = readThemeColors();
+      requestRender();
+    };
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    mq.addEventListener("change", refresh);
+    return () => {
+      observer.disconnect();
+      mq.removeEventListener("change", refresh);
+    };
+  }, [requestRender]);
+
+  // Redraw when the tag filter changes (state only touches refs otherwise).
+  useEffect(() => {
+    requestRender();
+  }, [activeTags, requestRender]);
 
   // ── mouse/touch events ───────────────────────────────────────────────────────
 
@@ -586,6 +751,7 @@ export function GraphPage() {
       if (hit !== hoveredRef.current) {
         hoveredRef.current = hit;
         canvas.style.cursor = hit ? "pointer" : "grab";
+        requestRender();
       }
     };
 
@@ -606,6 +772,7 @@ export function GraphPage() {
         };
         canvas.style.cursor = "grabbing";
       }
+      requestRender();
     };
 
     const onMouseUp = (e: MouseEvent) => {
@@ -622,7 +789,8 @@ export function GraphPage() {
             void navigate(`/n/${node.slug}`);
             lastClickSlugRef.current = null;
           } else {
-            selectedRef.current = selectedRef.current?.slug === node.slug ? null : node;
+            selectedRef.current =
+              selectedRef.current?.slug === node.slug ? null : node;
             lastClickSlugRef.current = node.slug;
             setTimeout(() => {
               if (lastClickSlugRef.current === node.slug) {
@@ -647,6 +815,7 @@ export function GraphPage() {
       }
 
       canvas.style.cursor = hitTest(cx, cy) ? "pointer" : "grab";
+      requestRender();
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -658,12 +827,14 @@ export function GraphPage() {
       const baseK = zoomAnimRef.current?.targetK ?? transformRef.current.k;
       const targetK = Math.max(0.1, Math.min(8, baseK * factor));
       zoomAnimRef.current = { targetK, cx, cy };
+      requestRender();
     };
 
     const onMouseLeave = () => {
       hoveredRef.current = null;
       dragRef.current = null;
       panRef.current = null;
+      requestRender();
     };
 
     // ── touch helpers ────────────────────────────────────────────────────────
@@ -675,6 +846,7 @@ export function GraphPage() {
 
     const onTouchStart = (e: TouchEvent) => {
       e.preventDefault();
+      requestRender();
 
       if (e.touches.length === 2) {
         // Begin pinch — cancel any ongoing pan/drag
@@ -699,7 +871,8 @@ export function GraphPage() {
           dragRef.current = { node: hit, startX: cx, startY: cy };
         } else {
           panRef.current = {
-            startX: cx, startY: cy,
+            startX: cx,
+            startY: cy,
             ox: transformRef.current.x,
             oy: transformRef.current.y,
           };
@@ -735,8 +908,10 @@ export function GraphPage() {
         const { cx, cy } = getTouchPos(e.touches[0]);
 
         if (panRef.current) {
-          transformRef.current.x = panRef.current.ox + (cx - panRef.current.startX);
-          transformRef.current.y = panRef.current.oy + (cy - panRef.current.startY);
+          transformRef.current.x =
+            panRef.current.ox + (cx - panRef.current.startX);
+          transformRef.current.y =
+            panRef.current.oy + (cy - panRef.current.startY);
           return;
         }
 
@@ -755,13 +930,15 @@ export function GraphPage() {
 
     const onTouchEnd = (e: TouchEvent) => {
       e.preventDefault();
+      requestRender();
 
       if (e.touches.length >= 1) {
         // One finger lifted while two were down — transition to single-finger pan
         pinchRef.current = null;
         const { cx, cy } = getTouchPos(e.touches[0]);
         panRef.current = {
-          startX: cx, startY: cy,
+          startX: cx,
+          startY: cy,
           ox: transformRef.current.x,
           oy: transformRef.current.y,
         };
@@ -774,8 +951,9 @@ export function GraphPage() {
       const { cx, cy } = getTouchPos(last);
 
       if (dragRef.current) {
-        const moved = Math.abs(cx - dragRef.current.startX) > 8
-                   || Math.abs(cy - dragRef.current.startY) > 8;
+        const moved =
+          Math.abs(cx - dragRef.current.startX) > 8 ||
+          Math.abs(cy - dragRef.current.startY) > 8;
 
         if (!moved) {
           const node = dragRef.current.node;
@@ -783,10 +961,12 @@ export function GraphPage() {
             void navigate(`/n/${node.slug}`);
             lastClickSlugRef.current = null;
           } else {
-            selectedRef.current = selectedRef.current?.slug === node.slug ? null : node;
+            selectedRef.current =
+              selectedRef.current?.slug === node.slug ? null : node;
             lastClickSlugRef.current = node.slug;
             setTimeout(() => {
-              if (lastClickSlugRef.current === node.slug) lastClickSlugRef.current = null;
+              if (lastClickSlugRef.current === node.slug)
+                lastClickSlugRef.current = null;
             }, 500);
           }
         }
@@ -796,8 +976,9 @@ export function GraphPage() {
         simRef.current?.alphaTarget(0).restart();
         dragRef.current = null;
       } else if (panRef.current) {
-        const moved = Math.abs(cx - panRef.current.startX) > 8
-                   || Math.abs(cy - panRef.current.startY) > 8;
+        const moved =
+          Math.abs(cx - panRef.current.startX) > 8 ||
+          Math.abs(cy - panRef.current.startY) > 8;
         if (!moved) {
           selectedRef.current = null;
           lastClickSlugRef.current = null;
@@ -827,7 +1008,7 @@ export function GraphPage() {
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
     };
-  }, [hitTest, navigate]);
+  }, [hitTest, navigate, requestRender]);
 
   // ── tag filter toggle ────────────────────────────────────────────────────────
 
@@ -857,10 +1038,19 @@ export function GraphPage() {
           <button
             key={tag}
             className={`graph-tag-chip${active ? " active" : ""}`}
-            style={active ? { "--chip-hue": String(hue) } as React.CSSProperties : undefined}
+            style={
+              active
+                ? ({ "--chip-hue": String(hue) } as React.CSSProperties)
+                : undefined
+            }
             onClick={() => toggleTag(tag)}
           >
-            {active && <span className="graph-tag-dot" style={{ background: `hsl(${hue}, 60%, 58%)` }} />}
+            {active && (
+              <span
+                className="graph-tag-dot"
+                style={{ background: `hsl(${hue}, 60%, 58%)` }}
+              />
+            )}
             {tag}
           </button>
         );
@@ -894,9 +1084,14 @@ export function GraphPage() {
               aria-expanded={filterOpen}
             >
               <span className="graph-filter-toggle-label">
-                Tags{activeTags.size > 0 && <span className="graph-filter-badge">{activeTags.size}</span>}
+                Tags
+                {activeTags.size > 0 && (
+                  <span className="graph-filter-badge">{activeTags.size}</span>
+                )}
               </span>
-              <span className="graph-filter-caret" aria-hidden>▾</span>
+              <span className="graph-filter-caret" aria-hidden>
+                ▾
+              </span>
             </button>
           )}
         </div>
@@ -905,7 +1100,8 @@ export function GraphPage() {
         <div className="graph-tags-desktop">{tagChips}</div>
 
         <p className="graph-hint">
-          Scroll to zoom · Drag background to pan · Click node to select · Double-click to open
+          Scroll to zoom · Drag background to pan · Click node to select ·
+          Double-click to open
         </p>
       </div>
 
