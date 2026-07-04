@@ -18,7 +18,9 @@
 
 .stats-title {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 85, "wght" 700;
+  font-variation-settings:
+    "wdth" 85,
+    "wght" 700;
   font-size: clamp(1.8rem, 4vw, 2.4rem);
   text-transform: uppercase;
   letter-spacing: -0.02em;
@@ -68,7 +70,9 @@
 
 .stats-metric-num {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 80, "wght" 700;
+  font-variation-settings:
+    "wdth" 80,
+    "wght" 700;
   font-size: 1.9rem;
   line-height: 1;
   letter-spacing: -0.04em;
@@ -111,7 +115,9 @@
 
 .stats-section-title {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 90, "wght" 700;
+  font-variation-settings:
+    "wdth" 90,
+    "wght" 700;
   font-size: 0.76rem;
   text-transform: uppercase;
   letter-spacing: 0.1em;
@@ -397,7 +403,9 @@
   background: var(--paper);
   padding: 0.16rem 0.55rem;
   text-decoration: none;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
 }
 
 .stats-pill:hover {
@@ -421,7 +429,9 @@
 
 .stats-twin-num {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 82, "wght" 700;
+  font-variation-settings:
+    "wdth" 82,
+    "wght" 700;
   font-size: 1.45rem;
   letter-spacing: -0.03em;
   line-height: 1;
@@ -447,7 +457,9 @@
 
 .stats-single-num {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 82, "wght" 700;
+  font-variation-settings:
+    "wdth" 82,
+    "wght" 700;
   font-size: 2rem;
   letter-spacing: -0.04em;
   line-height: 1;
@@ -466,7 +478,9 @@
 /* ── BIG COUNT ────────────────────────────────────────────────── */
 .stats-big-count {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 82, "wght" 700;
+  font-variation-settings:
+    "wdth" 82,
+    "wght" 700;
   font-size: 1.9rem;
   letter-spacing: -0.04em;
   line-height: 1;
@@ -492,14 +506,24 @@
 
 .stats-loading-strip {
   height: 4.5rem;
-  background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2));
+  background: linear-gradient(
+    90deg,
+    var(--paper-2),
+    var(--paper),
+    var(--paper-2)
+  );
   background-size: 200% 100%;
   animation: shimmer 1.2s linear infinite;
 }
 
 .stats-loading-block {
   height: 12rem;
-  background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2));
+  background: linear-gradient(
+    90deg,
+    var(--paper-2),
+    var(--paper),
+    var(--paper-2)
+  );
   background-size: 200% 100%;
   animation: shimmer 1.2s linear infinite;
 }
@@ -516,7 +540,9 @@
   align-items: center;
   gap: 0.3rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 92, "wght" 600;
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
   font-size: 0.72rem;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -525,7 +551,9 @@
   background: var(--bg);
   color: var(--ink-soft);
   text-decoration: none;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease),
     border-color var(--dur) var(--ease);
 }
 

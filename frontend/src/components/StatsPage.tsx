@@ -73,7 +73,9 @@ function RankedList({ notes }: { notes: LinkedNoteRef[] }) {
           <Link className="stats-ranked-title" to={`/n/${n.slug}`}>
             {n.title}
           </Link>
-          <span className="stats-ranked-meta">{n.backlink_count} backlinks</span>
+          <span className="stats-ranked-meta">
+            {n.backlink_count} backlinks
+          </span>
         </div>
       ))}
     </div>
@@ -248,7 +250,9 @@ export function StatsPage() {
     <div className="stats-page">
       {/* Header */}
       <div className="stats-page-header">
-        <p className="stats-eyebrow">Vault · {new Date().toISOString().slice(0, 10)}</p>
+        <p className="stats-eyebrow">
+          Vault · {new Date().toISOString().slice(0, 10)}
+        </p>
         <h1 className="stats-title">Stats</h1>
         <p className="stats-subtitle">
           A complete overview of your vault — notes, links, tags, and writing

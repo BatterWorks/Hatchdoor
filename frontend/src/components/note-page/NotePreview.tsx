@@ -27,7 +27,10 @@ export function NotePreview({
   relativePath: string;
 }) {
   const parsed = useMemo(() => parseFrontmatter(content), [content]);
-  const markdown = useResolvedWikilinks(stripBlockIds(parsed.body), relativePath);
+  const markdown = useResolvedWikilinks(
+    stripBlockIds(parsed.body),
+    relativePath,
+  );
   const components = useMemo(
     () => createNoteMarkdownComponents(relativePath, new Map<string, number>()),
     [relativePath],

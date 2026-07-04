@@ -4,9 +4,12 @@ import { readErrorMessage } from "./apiError";
 
 describe("readErrorMessage", () => {
   it("returns the server's structured error message when present", async () => {
-    const res = new Response(JSON.stringify({ error: "Note not found: home" }), {
-      status: 404,
-    });
+    const res = new Response(
+      JSON.stringify({ error: "Note not found: home" }),
+      {
+        status: 404,
+      },
+    );
     expect(await readErrorMessage(res, "Failed loading note")).toBe(
       "Note not found: home",
     );
