@@ -21,7 +21,19 @@ export type ImageUploadNormalizerDeps = {
 };
 
 const browserImageDeps: ImageUploadNormalizerDeps = {
-  createImageBitmap: (file) => window.createImageBitmap(file),
+  createImageBitmap: async (file) => {
+    try {
+      // Bake EXIF orientation into pixels before the canvas re-encode, which
+      // strips EXIF. WebKit does not auto-orient without this option, so
+      // portrait phone photos would otherwise be stored sideways.
+      return await window.createImageBitmap(file, {
+        imageOrientation: "from-image",
+      });
+    } catch {
+      // Fallback for engines that reject the imageOrientation option.
+      return window.createImageBitmap(file);
+    }
+  },
   createCanvas: () => document.createElement("canvas"),
 };
 

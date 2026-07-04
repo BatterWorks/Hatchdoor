@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   IMAGE_UPLOAD_MAX_EDGE,
@@ -102,6 +102,38 @@ describe("normalizeImageForUpload", () => {
 
     await expect(normalizeImageForUpload(file, deps)).resolves.toBe(file);
     expect(deps.createImageBitmap).not.toHaveBeenCalled();
+  });
+
+  describe("default browser decode deps", () => {
+    const originalCreateImageBitmap = (
+      window as unknown as { createImageBitmap?: unknown }
+    ).createImageBitmap;
+
+    beforeEach(() => {
+      (window as unknown as { createImageBitmap: unknown }).createImageBitmap =
+        vi.fn().mockResolvedValue({ width: 3000, height: 4000 });
+    });
+
+    afterEach(() => {
+      (window as unknown as { createImageBitmap?: unknown }).createImageBitmap =
+        originalCreateImageBitmap;
+    });
+
+    it("applies EXIF orientation when decoding the source bitmap", async () => {
+      const file = new File(["jpg-bytes"], "portrait.jpg", {
+        type: "image/jpeg",
+      });
+
+      // Default deps route through window.createImageBitmap. Without
+      // { imageOrientation: "from-image" }, WebKit decodes ignoring the EXIF
+      // orientation tag, and the subsequent canvas re-encode strips EXIF, so
+      // portrait phone photos are baked sideways.
+      await normalizeImageForUpload(file);
+
+      expect(window.createImageBitmap).toHaveBeenCalledWith(file, {
+        imageOrientation: "from-image",
+      });
+    });
   });
 
   it("returns the original file if browser conversion fails", async () => {
