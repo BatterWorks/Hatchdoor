@@ -43,9 +43,9 @@ describe("writeDrafts", () => {
       savedAt: 1781630000000,
     });
 
-    expect(
-      window.localStorage.getItem("hatchdoor:draft:note:home"),
-    ).toContain('"slug":"home"');
+    expect(window.localStorage.getItem("hatchdoor:draft:note:home")).toContain(
+      '"slug":"home"',
+    );
     expect(loadNoteDraft("home")).toEqual({
       slug: "home",
       content: "# Home\nDraft",
@@ -93,7 +93,9 @@ describe("writeDrafts", () => {
     expect(removed).toBe(2);
     expect(loadNoteDraft("fresh")).not.toBeNull();
     expect(loadNoteDraft("stale")).toBeNull();
-    expect(window.localStorage.getItem("hatchdoor:draft:note:broken")).toBeNull();
+    expect(
+      window.localStorage.getItem("hatchdoor:draft:note:broken"),
+    ).toBeNull();
     expect(window.localStorage.getItem("unrelated:key")).toBe("keep");
   });
 });

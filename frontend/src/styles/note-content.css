@@ -724,7 +724,9 @@
 
 .note-body .pullquote figcaption {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 88, "wght" 600;
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 600;
   font-style: normal;
   font-size: 0.7rem;
   letter-spacing: 0.18em;

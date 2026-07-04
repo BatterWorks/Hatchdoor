@@ -4,8 +4,7 @@ export function parseWikilinkTarget(body: string): {
 } {
   const [targetRaw, aliasRaw] = body.split("|", 2);
   const target = (targetRaw || "").trim();
-  const label =
-    (aliasRaw || "").trim() || target.split(/[#^]/)[0].trim();
+  const label = (aliasRaw || "").trim() || target.split(/[#^]/)[0].trim();
   return { target, label };
 }
 
