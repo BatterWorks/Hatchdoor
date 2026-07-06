@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
@@ -90,6 +90,20 @@ struct AttachmentOutcomeResponse {
 }
 
 pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl IntoResponse {
+    if state.demo_mode {
+        return (
+            StatusCode::OK,
+            Json(WriteCapabilitiesResponse {
+                enabled: false,
+                warnings: vec![
+                    "Hatchdoor demo mode is read-only; browser write features are disabled."
+                        .to_string(),
+                ],
+            }),
+        )
+            .into_response();
+    }
+
     let vault_writable = vault_path_is_writable(&state.vault_path);
     let mut warnings = Vec::new();
     if vault_writable && !state.web_auth_enabled {
@@ -117,10 +131,27 @@ fn vault_path_is_writable(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
+    state.demo_mode.then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Hatchdoor demo mode is read-only; write operations are disabled."
+                    .to_string(),
+            }),
+        )
+            .into_response()
+    })
+}
+
 pub async fn upload_attachment_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let mut target_relative_path: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
 
@@ -210,6 +241,10 @@ pub async fn create_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<CreateNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -236,6 +271,10 @@ pub async fn update_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<UpdateNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -265,6 +304,10 @@ pub async fn rename_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<RenameNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -315,6 +358,10 @@ pub async fn move_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<MoveNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -361,6 +408,10 @@ pub async fn move_rename_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<MoveRenameNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -402,6 +453,10 @@ pub async fn archive_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<ArchiveNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -438,6 +493,10 @@ pub async fn delete_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<DeleteNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
