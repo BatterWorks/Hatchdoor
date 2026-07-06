@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
-use crate::vault::VaultIndex;
+use crate::vault::{VaultIndex, seed_empty_vault};
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -126,6 +126,12 @@ pub fn build_cache_with_sqlite(
     embedder: &dyn Embedder,
 ) -> Result<VaultCache, String> {
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
+    if seed_empty_vault(vault_path).map_err(|e| e.to_string())? {
+        info!(
+            vault_path = %vault_path.display(),
+            "Seeded fresh vault with Hatchdoor starter notes"
+        );
+    }
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
     sqlite.replace_from_index_with_embedder(&index, embedder)?;
 
@@ -246,6 +252,24 @@ mod tests {
 
         let addr = cfg.socket_addr().expect("valid addr");
         assert_eq!(addr.to_string(), "0.0.0.0:42824");
+    }
+
+    #[test]
+    fn build_cache_seeds_fresh_vault_before_indexing() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        let embedder = test_embedder();
+
+        let cache = build_cache(&vault_path, embedder.as_ref()).expect("build cache");
+
+        assert!(vault_path.join("README.md").is_file());
+        let note = cache
+            .sqlite
+            .read_note_by_slug("readme")
+            .expect("read note")
+            .expect("seeded welcome note");
+        assert_eq!(note.relative_path, "README");
+        assert!(note.content.contains("# Welcome to Hatchdoor"));
     }
 
     fn state_with_vault(vault_path: PathBuf) -> AppState {
