@@ -220,7 +220,7 @@ async fn run_server() {
                 git_config.clone(),
                 vault_write_lock.clone(),
                 git::SyncOps {
-                    commit: Box::new(|cfg, paths, msg| git::commit_local(cfg, paths, msg)),
+                    commit: Box::new(git::commit_local),
                     fetch: Box::new(git::fetch_remote),
                     integrate: Box::new(git::integrate_fetched),
                     push: Box::new(git::push_branch),
