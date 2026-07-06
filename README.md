@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/hatchdoor-wordmark.svg" alt="Hatchdoor" width="340">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/hatchdoor-wordmark-dark.png">
+    <img src="assets/hatchdoor-wordmark.png" alt="Hatchdoor" width="340">
+  </picture>
 </p>
 
 # Hatchdoor
