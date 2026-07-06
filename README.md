@@ -146,6 +146,14 @@ Current conventions:
 - Delete actions move notes and referenced assets under `.hatchdoor-trash`.
 - The SQLite cache should live outside the vault.
 
+## Project Docs
+
+- [Design system](docs/design-system.html): visual tokens, component patterns,
+  layout rules, and interaction states used by the frontend.
+- [Semantic search strategy](docs/adr/semantic-search-strategy.md): decision
+  record for shipping pure semantic search instead of hybrid retrieval or a
+  cross-encoder reranker in the runtime path.
+
 ## SQLite Cache
 
 Hatchdoor stores this generated read model in SQLite:
