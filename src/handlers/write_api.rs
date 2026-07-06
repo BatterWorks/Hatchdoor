@@ -90,21 +90,31 @@ struct AttachmentOutcomeResponse {
 }
 
 pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let warnings = if state.web_auth_enabled {
-        Vec::new()
-    } else {
-        vec![
+    let vault_writable = vault_path_is_writable(&state.vault_path);
+    let mut warnings = Vec::new();
+    if vault_writable && !state.web_auth_enabled {
+        warnings.push(
             "Frontend writes are enabled without requiring Hatchdoor web authentication; this is unauthenticated and should not be exposed to untrusted networks.".to_string(),
-        ]
-    };
+        );
+    }
+    if !vault_writable {
+        warnings
+            .push("Vault path is not writable; browser write features are disabled.".to_string());
+    }
     (
         StatusCode::OK,
         Json(WriteCapabilitiesResponse {
-            enabled: true,
+            enabled: vault_writable,
             warnings,
         }),
     )
         .into_response()
+}
+
+fn vault_path_is_writable(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(false)
 }
 
 pub async fn upload_attachment_handler(

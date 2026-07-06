@@ -105,7 +105,7 @@ fn is_allowed_asset_extension(path: &FsPath) -> bool {
         .map(|ext| {
             matches!(
                 ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "bmp"
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "bmp" | "pdf"
             )
         })
         .unwrap_or(false)
@@ -125,6 +125,7 @@ fn content_type_for_path(path: &FsPath) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("avif") => "image/avif",
         Some("bmp") => "image/bmp",
+        Some("pdf") => "application/pdf",
         _ => "application/octet-stream",
     }
 }
@@ -181,11 +182,20 @@ mod tests {
     }
 
     #[test]
-    fn is_allowed_asset_extension_filters_by_image_types() {
+    fn is_allowed_asset_extension_filters_by_embeddable_asset_types() {
         assert!(is_allowed_asset_extension(FsPath::new("diagram.png")));
         assert!(is_allowed_asset_extension(FsPath::new("photo.JPEG")));
+        assert!(is_allowed_asset_extension(FsPath::new("manual.PDF")));
         assert!(!is_allowed_asset_extension(FsPath::new("notes.md")));
         assert!(!is_allowed_asset_extension(FsPath::new("noext")));
+    }
+
+    #[test]
+    fn content_type_for_path_serves_pdf_attachments_inline() {
+        assert_eq!(
+            content_type_for_path(FsPath::new("Attachments/manual.pdf")),
+            "application/pdf"
+        );
     }
 
     #[test]

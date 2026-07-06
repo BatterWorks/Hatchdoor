@@ -34,9 +34,9 @@ describe("parseFrontmatterEntries", () => {
   });
 
   it("refuses nested mappings so structured editing cannot corrupt them", () => {
-    expect(
-      parseFrontmatterEntries("title: Home\nowner:\n  name: Ada"),
-    ).toEqual({ editable: false, entries: [] });
+    expect(parseFrontmatterEntries("title: Home\nowner:\n  name: Ada")).toEqual(
+      { editable: false, entries: [] },
+    );
   });
 });
 

@@ -208,6 +208,15 @@ pub async fn search_handler(
     let limit = query.limit.unwrap_or(10).clamp(1, 50);
     let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
     let mode = query.mode.unwrap_or_default();
+    if query.q.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "query cannot be empty".to_string(),
+            }),
+        )
+            .into_response();
+    }
     let q_len = query.q.len();
     debug!(
         query_len = q_len,

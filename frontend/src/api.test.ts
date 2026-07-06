@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { apiFetch, DEFAULT_FETCH_TIMEOUT_MS } from "./api";
+import { apiFetch, DEFAULT_FETCH_TIMEOUT_MS, setToken } from "./api";
 
 afterEach(() => {
+  window.localStorage.clear();
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -39,5 +40,21 @@ describe("apiFetch", () => {
     await vi.advanceTimersByTimeAsync(DEFAULT_FETCH_TIMEOUT_MS);
 
     await rejection;
+  });
+
+  it("preserves Headers instance values when attaching the bearer token", async () => {
+    setToken("secret-token");
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("ok"));
+
+    await apiFetch("/api/tree", {
+      headers: new Headers({ "X-Trace-Id": "trace-1" }),
+    });
+
+    const [, init] = fetchSpy.mock.calls[0] ?? [];
+    const headers = new Headers(init?.headers);
+    expect(headers.get("X-Trace-Id")).toBe("trace-1");
+    expect(headers.get("Authorization")).toBe("Bearer secret-token");
   });
 });

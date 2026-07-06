@@ -36,35 +36,6 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff2}"],
-        runtimeCaching: [
-          {
-            urlPattern: ({ request, url }) =>
-              request.method === "GET" && url.pathname === "/api/tree",
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "hatchdoor-api-tree",
-              networkTimeoutSeconds: 4,
-              expiration: {
-                maxEntries: 1,
-                maxAgeSeconds: 7 * 24 * 60 * 60,
-              },
-            },
-          },
-          {
-            urlPattern: ({ request, url }) =>
-              request.method === "GET" &&
-              /^\/api\/note\/[^/]+$/.test(url.pathname),
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "hatchdoor-api-note",
-              networkTimeoutSeconds: 4,
-              expiration: {
-                maxEntries: 80,
-                maxAgeSeconds: 7 * 24 * 60 * 60,
-              },
-            },
-          },
-        ],
         // Keep the SPA navigation fallback from swallowing server routes. On
         // iOS standalone PWAs the `download` attribute is ignored and the
         // anchor click becomes a navigation; without this denylist the service

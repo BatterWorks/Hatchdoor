@@ -226,7 +226,7 @@ describe("App navigation/search", () => {
     ).toBeGreaterThan(0);
   });
 
-  it("shows the token prompt and closes the stream when vault events error", async () => {
+  it("leaves transient vault event errors to EventSource reconnect logic", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -269,9 +269,11 @@ describe("App navigation/search", () => {
       window.__hatchdoorEventSources[0].emit("error", "");
     });
 
-    expect(
-      await screen.findByRole("dialog", { name: "Access token required" }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Access token required" }),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it("does not install the old vault polling interval", async () => {

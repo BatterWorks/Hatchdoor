@@ -42,11 +42,11 @@ describe("client audit launch contracts", () => {
     expect(mainSource).toContain("focus");
   });
 
-  it("runtime-caches read-only API data for offline installed sessions", () => {
-    expect(viteConfig).toContain("runtimeCaching");
-    expect(viteConfig).toContain("NetworkFirst");
-    expect(viteConfig).toContain("/api/tree");
-    expect(viteConfig).toContain("api\\/note");
+  it("does not runtime-cache authenticated API data in the service worker", () => {
+    expect(viteConfig).not.toContain("hatchdoor-api-tree");
+    expect(viteConfig).not.toContain("hatchdoor-api-note");
+    expect(viteConfig).not.toContain("/api/tree");
+    expect(viteConfig).not.toContain("api\\/note");
   });
 
   it("does not ship runtime .at() calls below the configured Safari floor", () => {
