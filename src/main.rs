@@ -765,6 +765,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_reports_write_capabilities_disabled_for_read_only_vault() {
+        let (app, tmp, state) = app_for_tests_with_state();
+        let vault_path = state.vault_path.clone();
+        let original_permissions = std::fs::metadata(&vault_path)
+            .expect("vault metadata")
+            .permissions();
+        let mut read_only_permissions = original_permissions.clone();
+        read_only_permissions.set_readonly(true);
+        std::fs::set_permissions(&vault_path, read_only_permissions).expect("make vault read-only");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        std::fs::set_permissions(&vault_path, original_permissions)
+            .expect("restore vault permissions");
+        drop(tmp);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["enabled"], false);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or("").contains("not writable"))
+        );
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .all(|warning| !warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("writes are enabled"))
+        );
+    }
+
+    #[tokio::test]
+    async fn router_returns_bad_request_for_empty_search_query() {
+        let (app, _tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/search?q=%20%20%20")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["error"], "query cannot be empty");
+    }
+
+    #[tokio::test]
     async fn router_uploads_attachment_into_vault() {
         let (app, tmp) = app_for_tests();
         let boundary = "hatchdoor-test-boundary";

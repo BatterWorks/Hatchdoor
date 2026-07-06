@@ -32,13 +32,7 @@ import {
 } from "./app/storage";
 import { useIsMobile } from "./app/useIsMobile";
 import { useTheme } from "./app/useTheme";
-import {
-  apiFetch,
-  notifyUnauthorized,
-  onUnauthorized,
-  setToken,
-  withAccessToken,
-} from "./api";
+import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
 import { readErrorMessage } from "./apiError";
 import { copyText } from "./clipboard";
 import {
@@ -235,17 +229,10 @@ function App() {
         // Ignore malformed event payloads; the next valid revision will resync.
       }
     };
-    const onEventSourceError = () => {
-      events.close();
-      notifyUnauthorized();
-    };
-
     events.addEventListener("vault-revision", onVaultRevision);
-    events.addEventListener("error", onEventSourceError);
 
     return () => {
       events.removeEventListener("vault-revision", onVaultRevision);
-      events.removeEventListener("error", onEventSourceError);
       events.close();
     };
   }, []);

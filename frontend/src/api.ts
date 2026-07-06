@@ -68,12 +68,11 @@ export async function apiFetch(
 
   let finalInit = init;
   if (token) {
+    const headers = new Headers(init?.headers);
+    headers.set("Authorization", `Bearer ${token}`);
     finalInit = {
       ...init,
-      headers: {
-        ...((init?.headers as Record<string, string>) ?? {}),
-        Authorization: `Bearer ${token}`,
-      },
+      headers,
     };
   }
 
