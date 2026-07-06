@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker.io/docker/dockerfile:1.7
 
-FROM rust:1.96-slim AS chef
+FROM docker.io/library/rust:1.96-slim AS chef
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev g++ perl make && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
@@ -22,7 +22,7 @@ ENV FASTEMBED_CACHE_DIR=/opt/fastembed
 RUN mkdir -p $FASTEMBED_CACHE_DIR \
  && ./target/release/hatchdoor --prefetch-embedder
 
-FROM node:24-slim AS frontend-builder
+FROM docker.io/library/node:24-slim AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
