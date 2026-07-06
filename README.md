@@ -1,208 +1,253 @@
+<p align="center">
+  <img src="assets/hatchdoor-wordmark.svg" alt="Hatchdoor" width="340">
+</p>
+
 # Hatchdoor
 
-Hatchdoor is a self-hosted web app for browsing and editing an
-Obsidian-style Markdown vault. It combines a Rust/Axum backend, a React/Vite
-PWA, a disposable SQLite read model, semantic search, and an optional
-Streamable HTTP MCP endpoint for agent access.
+Hatchdoor is a self-hosted web app for browsing, searching, and editing an
+Obsidian-style Markdown vault.
 
-The Markdown vault remains the source of truth. SQLite can be deleted and
-rebuilt from the vault at any time.
+Your Markdown files stay the source of truth. Hatchdoor builds a disposable
+SQLite read model for fast browsing, links, backlinks, keyword search, semantic
+search, graph data, and metadata. If the cache is deleted, Hatchdoor rebuilds it
+from the vault.
 
-## Features
+Hatchdoor was fully vibecoded with help from Claude Code and Codex.
 
-- Folder explorer generated from vault folders and Markdown files.
-- Note routes at `/n/:slug`.
-- Obsidian wikilink resolution for `[[Note]]`, `[[Folder/Note]]`, and
+## What You Get
+
+- A web UI for browsing folders and Markdown notes.
+- Clean note URLs at `/n/:slug`.
+- Obsidian-style wikilinks for `[[Note]]`, `[[Folder/Note]]`, and
   `[[Note|Alias]]`.
-- SQLite cache for note metadata, content, tags, headings, links, backlinks,
-  keyword search, semantic search, stats, and graph data.
-- Markdown rendering with GFM, math, Mermaid diagrams, images, frontmatter, and
-  broken-link styling.
-- Optional browser write mode for creating, editing, moving, archiving, deleting,
-  and uploading attachments.
-- Optional MCP endpoint for read and write tools.
-- Optional git sync for automatically committing and pushing Hatchdoor writes.
-- PWA build output with service worker caching for common read paths.
+- Markdown rendering with GitHub-flavored Markdown, math, Mermaid diagrams,
+  frontmatter, images, attachments, and broken-link styling.
+- Keyword search and semantic search.
+- Recent notes, backlinks, outbound links, stats, and graph views.
+- Browser write support when the vault mount is writable.
+- Attachment uploads and local asset serving.
+- Optional MCP endpoint for agent access.
+- Optional automatic git commits and pushes for Hatchdoor writes.
+- PWA assets and service worker caching for common read paths.
+
+## Who It Is For
+
+Hatchdoor is useful if you have a folder of Markdown notes and want a private
+web interface for them.
+
+It is beginner-friendly enough to run with Docker Compose, but it also includes
+advanced features for people who want agent access, git-backed vault sync,
+semantic search, and local development.
+
+Hatchdoor is not a hosted sync service, not a multi-user collaboration platform,
+and not a replacement for Obsidian. It is a self-hosted companion for a Markdown
+vault you control.
 
 ## Quick Start With Docker
 
-1. Copy the example environment file:
+### 1. Requirements
 
-   ```bash
-   cp .env.example .env
-   ```
+You need:
 
-2. Edit `.env`:
+- Docker
+- Docker Compose
+- A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
+  starter vault
 
-   ```env
-   HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
-   HOST_CACHE_PATH=./data/cache
-   HATCHDOOR_WEB_BEARER_TOKEN=choose-a-long-random-token
-   ```
+### 2. Create Your Config
 
-   Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so Docker
-   port publishing works. Hatchdoor refuses to start on a non-loopback bind
-   unless `HATCHDOOR_WEB_BEARER_TOKEN` is set.
+Copy the example environment file:
 
-3. Start the app:
+```bash
+cp .env.example .env
+```
 
-   ```bash
-   docker compose up -d
-   ```
+Edit `.env` and set at least these values:
 
-4. Open `http://localhost:42824` and enter the web bearer token when prompted.
+```env
+HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
+HOST_CACHE_PATH=./data/cache
+HATCHDOOR_WEB_BEARER_TOKEN=choose-a-long-random-token
+```
 
-Compose uses the published image:
+What these mean:
+
+- `HOST_VAULT_PATH` is your Markdown vault on the host machine.
+- `HOST_CACHE_PATH` stores Hatchdoor's generated SQLite cache.
+- `HATCHDOOR_WEB_BEARER_TOKEN` protects your notes in the browser.
+
+Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so the
+published port works. Hatchdoor refuses to start on a non-loopback bind unless
+`HATCHDOOR_WEB_BEARER_TOKEN` is set.
+
+### 3. Start Hatchdoor
+
+```bash
+docker compose up -d
+```
+
+Open:
+
+```text
+http://localhost:42824
+```
+
+Enter the web bearer token when prompted.
+
+### 4. Container Paths
+
+The Docker image is:
 
 ```text
 battermanz/hatchdoor:latest
 ```
 
-The container paths are:
+Docker Compose mounts:
 
-```text
-/data/vault               Markdown vault, source of truth
-/data/cache               generated SQLite cache
-/data/attachments-inbox   temporary attachment import staging folder
-```
+| Container path | Purpose |
+| --- | --- |
+| `/data/vault` | Markdown vault, source of truth |
+| `/data/cache` | Generated SQLite cache |
+| `/data/attachments-inbox` | Temporary staging folder for MCP attachment import |
 
-## Docker Permissions
+## Data And Safety Model
 
-The runtime image runs as a non-root user. The mounted cache directory must be
-writable by the container user, and browser/MCP write mode also requires the
-vault mount to be writable.
+Hatchdoor is designed around a simple rule: your Markdown vault is the source of
+truth.
 
-For read-only browsing, mount the vault read-only and keep only the cache path
-writable. For write features, make sure the host vault directory allows writes
-from the container runtime user or use a Docker volume with suitable ownership.
+- Markdown files live in `VAULT_PATH`.
+- SQLite is a generated cache and can be rebuilt.
+- The SQLite cache should live outside the vault.
+- Hatchdoor scans `.md` files under the vault, excluding `.hatchdoor-trash`.
+- Delete actions move notes and referenced assets into `.hatchdoor-trash`.
+- Archive actions move notes under `HATCHDOOR_ARCHIVE_PREFIX`.
+- Browser write actions are available only when the vault is writable.
+- MCP is disabled by default.
+- MCP requires its own bearer token whenever it is enabled.
+- Git sync is disabled by default.
 
-## Local Development
+If `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
+vault before the first index build. Existing vaults are not seeded or modified
+by this startup step.
 
-Build the frontend once:
+## Permissions
 
-```bash
-cd frontend
-npm ci
-npm run build
-cd ..
-```
+The Docker image runs as a non-root user.
 
-Run the backend:
+For read-only browsing:
 
-```bash
-cargo run
-```
+- Mount the vault read-only if you want.
+- Keep the cache directory writable.
 
-By default, local source runs bind to `127.0.0.1:42824` and read `./vault`.
-Override `VAULT_PATH` to point at a real local vault:
+For browser writes, MCP writes, attachment uploads, or git sync:
 
-```bash
-VAULT_PATH=/path/to/notes cargo run
-```
+- The vault mount must be writable by the container runtime user.
+- The cache directory must be writable.
+- The attachment staging directory must be writable when MCP attachment import is
+  enabled.
 
-For frontend dev mode:
-
-```bash
-# terminal 1
-cargo run
-
-# terminal 2
-cd frontend
-npm run dev
-```
+If Hatchdoor starts but write features are disabled, check the permissions on
+your vault mount and call `/api/write-capabilities` from an authenticated
+browser session.
 
 ## Configuration
 
 Copy `.env.example` to `.env` and adjust values.
 
-Important settings:
+### Basic Server And Storage
 
-- `HOST_VAULT_PATH`: host-side Markdown vault path for Docker Compose.
-- `VAULT_PATH`: runtime vault path read by Hatchdoor. In Docker this should
-  usually stay `/data/vault`.
-- `HOST_CACHE_PATH`: host-side directory for the generated SQLite cache.
-- `HATCHDOOR_CACHE_DB`: runtime SQLite cache file path.
-- `HOST`: bind host for local runs. Docker Compose overrides this to
-  `0.0.0.0` inside the container.
-- `PORT`: HTTP port, default `42824`.
-- `HATCHDOOR_WEB_BEARER_TOKEN`: protects `/api/*`, `/vault-assets/*`, and note
-  downloads. Required for non-loopback binds.
-- `HATCHDOOR_ARCHIVE_PREFIX`: vault-relative folder prefix used by archive
-  actions and archived-link styling. Default: `90-archive/`.
-- `RUST_LOG`: backend log filter.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HOST_VAULT_PATH` | `./vault` | Host-side vault path for Docker Compose |
+| `HOST_CACHE_PATH` | `./data/cache` | Host-side cache directory for Docker Compose |
+| `VAULT_PATH` | `/data/vault` | Runtime vault path read by Hatchdoor |
+| `HATCHDOOR_CACHE_DB` | `/data/cache/hatchdoor-cache.sqlite3` | Runtime SQLite cache file |
+| `HOST` | `127.0.0.1` | Bind host for local `cargo run` |
+| `PORT` | `42824` | HTTP port |
+| `RUST_LOG` | `hatchdoor=info,tower_http=info,axum::rejection=warn` | Backend logging filter |
 
-## Vault Layout
+### Web Authentication
 
-Hatchdoor scans every `.md` file under `VAULT_PATH`, except files under
-`.hatchdoor-trash`. Folder names come directly from your vault; Hatchdoor does
-not require a numbered PARA-style folder scheme.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HATCHDOOR_WEB_BEARER_TOKEN` | empty | Protects `/api/*`, `/vault-assets/*`, and note downloads |
 
-When `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
-vault before the first index build. The starter notes explain Hatchdoor basics,
-Markdown rendering, agent usage, and an optional folder organisation pattern.
-Existing vaults are never seeded or modified by this startup step.
-
-Current conventions:
-
-- The UI root is named `Vault`.
-- Note slugs are generated from Markdown filenames.
-- Duplicate filenames receive unique slug suffixes.
-- Archive actions move notes under `HATCHDOOR_ARCHIVE_PREFIX`.
-- Delete actions move notes and referenced assets under `.hatchdoor-trash`.
-- The SQLite cache should live outside the vault.
-
-## Project Docs
-
-- [Design system](docs/design-system.html): visual tokens, component patterns,
-  layout rules, and interaction states used by the frontend.
-- [Semantic search strategy](docs/adr/semantic-search-strategy.md): decision
-  record for shipping pure semantic search instead of hybrid retrieval or a
-  cross-encoder reranker in the runtime path.
-
-## SQLite Cache
-
-Hatchdoor stores this generated read model in SQLite:
-
-- note metadata and full Markdown content
-- normalized title/path lookup data
-- file modification time, size, and stable content hash
-- explorer tree data
-- FTS5 keyword search index
-- sqlite-vec semantic vectors
-- resolved wikilinks and backlinks
-- headings and tags
-
-A recursive vault watcher refreshes the cache after Markdown or asset changes.
-Browser clients subscribe to `/api/vault-events` and reload visible data when a
-refreshed revision is broadcast.
-
-Manual rebuild:
-
-```bash
-rm ./data/cache/hatchdoor-cache.sqlite3
-docker compose restart hatchdoor
-```
-
-## Authentication
-
-When `HATCHDOOR_WEB_BEARER_TOKEN` is set, protected web requests must send:
+When this token is set, protected requests must send:
 
 ```text
 Authorization: Bearer <token>
 ```
 
 The bundled PWA stores the token locally after a `401` response and attaches it
-to API calls. For image, download, and SSE URLs where headers cannot be set, the
-frontend appends an `access_token` query parameter.
+to API calls. For image, download, and server-sent-event URLs where headers
+cannot be set, the frontend appends an `access_token` query parameter.
 
-Hatchdoor refuses to start with `HOST=0.0.0.0` or any other non-loopback bind
-unless the web bearer token is set.
+Hatchdoor refuses to start with `HOST=0.0.0.0` or another non-loopback bind
+unless `HATCHDOOR_WEB_BEARER_TOKEN` is set.
 
-## MCP
+### Vault Behavior
 
-The embedded MCP endpoint is disabled by default. Enabling it requires a bearer
-token even in read-only mode, because `/mcp` bypasses the web auth layer and can
-expose the full vault.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | Vault-relative folder prefix used by archive actions and archived-link styling |
+
+## Using Hatchdoor
+
+### Browsing
+
+Hatchdoor builds a folder explorer from your vault folders and Markdown files.
+The UI root is named `Vault`. Folder names come directly from your filesystem;
+Hatchdoor does not require a PARA, Zettelkasten, or numbered folder scheme.
+
+### Note URLs And Links
+
+Note slugs are generated from Markdown filenames. Duplicate filenames receive
+unique suffixes so routes remain stable.
+
+Supported wikilinks include:
+
+```text
+[[Note]]
+[[Folder/Note]]
+[[Note|Alias]]
+```
+
+Hatchdoor resolves links, backlinks, headings, tags, graph data, and broken-link
+state into the SQLite cache.
+
+### Search
+
+Hatchdoor stores:
+
+- Full Markdown content
+- File metadata
+- Tags and headings
+- Wikilinks and backlinks
+- FTS5 keyword search data
+- sqlite-vec semantic vectors
+
+A recursive vault watcher refreshes the cache after Markdown or asset changes.
+Browser clients subscribe to `/api/vault-events` and reload visible data after a
+refreshed revision is broadcast.
+
+### Manual Cache Rebuild
+
+If you want to rebuild the cache from scratch:
+
+```bash
+rm ./data/cache/hatchdoor-cache.sqlite3
+docker compose restart hatchdoor
+```
+
+Adjust the path if you changed `HOST_CACHE_PATH`.
+
+## MCP Agent Access
+
+The embedded MCP endpoint is disabled by default. Enable it only for trusted
+clients.
+
+MCP requires a bearer token even in read-only mode because `/mcp` bypasses the
+web auth layer and can expose the full vault.
 
 ```env
 HATCHDOOR_MCP_ENABLED=true
@@ -215,6 +260,20 @@ Enable write tools separately:
 HATCHDOOR_MCP_WRITE_ENABLED=true
 ```
 
+Register the endpoint with a Streamable HTTP MCP client:
+
+```text
+http://127.0.0.1:42824/mcp
+```
+
+Send:
+
+```text
+Authorization: Bearer <token>
+```
+
+### MCP Attachment Import
+
 Attachment import uses a staging folder outside the vault:
 
 ```env
@@ -224,13 +283,9 @@ HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10485760
 HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=false
 ```
 
-Register the MCP endpoint with a Streamable HTTP client at:
-
-```text
-http://127.0.0.1:42824/mcp
-```
-
-Send the MCP bearer token as `Authorization: Bearer <token>`.
+Set `HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=true` only for local/dev agents that
+need to see the host staging path. Keep it false for shared or remote
+deployments.
 
 ## Git Sync
 
@@ -259,34 +314,159 @@ Requirements:
 Use the `get_git_sync_status` MCP tool to check whether recent writes were
 committed and pushed.
 
-## API
+## Running Without Docker
 
-- `GET /health`
-- `GET /api/tree`
-- `GET /api/recently-modified`
-- `GET /api/note/:slug`
-- `GET /api/note/:slug/links`
-- `GET /api/note/:slug/download`
-- `GET /api/resolve?target=...`
-- `POST /api/resolve-batch`
-- `GET /api/search?q=...`
-- `GET /api/stats`
-- `GET /api/graph`
-- `POST /api/refresh`
-- `GET /api/vault-events`
-- `GET /api/write-capabilities`
-- `POST /api/note`
-- `PUT /api/note/:slug`
-- `PATCH /api/note/:slug/rename`
-- `PATCH /api/note/:slug/move`
-- `PATCH /api/note/:slug/archive`
-- `PATCH /api/note/:slug/move-rename`
-- `DELETE /api/note/:slug`
-- `POST /api/attachment`
-- `GET /vault-assets/*path`
-- `POST /mcp`
+Build the frontend once:
 
-## Build And Publish The Docker Image
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+```
+
+Run the backend:
+
+```bash
+cargo run
+```
+
+By default, local source runs bind to `127.0.0.1:42824` and read `./vault`.
+Point Hatchdoor at a real vault with:
+
+```bash
+VAULT_PATH=/path/to/notes cargo run
+```
+
+For frontend dev mode:
+
+```bash
+# terminal 1
+cargo run
+
+# terminal 2
+cd frontend
+npm run dev
+```
+
+Optional: prefetch the embedder model used by semantic search:
+
+```bash
+cargo run -- --prefetch-embedder
+```
+
+## Troubleshooting
+
+### Hatchdoor refuses to start on `0.0.0.0`
+
+Set `HATCHDOOR_WEB_BEARER_TOKEN`, or bind to `127.0.0.1`.
+
+This is intentional. A non-loopback bind can expose your vault to the network,
+so Hatchdoor requires web authentication.
+
+### Docker starts, but the UI cannot write
+
+Check that the mounted vault directory is writable by the container runtime
+user. Browser write support depends on filesystem permissions.
+
+### Cache errors or stale data
+
+Delete the generated SQLite cache and restart:
+
+```bash
+rm ./data/cache/hatchdoor-cache.sqlite3
+docker compose restart hatchdoor
+```
+
+### The app starts with a starter vault
+
+Hatchdoor seeds starter notes only when `VAULT_PATH` contains no Markdown files.
+If you expected an existing vault, check `HOST_VAULT_PATH` in `.env`.
+
+### MCP returns `401` or `403`
+
+Check:
+
+- `HATCHDOOR_MCP_ENABLED=true`
+- `HATCHDOOR_MCP_BEARER_TOKEN` is set
+- The client sends `Authorization: Bearer <token>`
+- Browser-originated MCP requests come from an allowed origin in
+  `HATCHDOOR_MCP_ALLOWED_ORIGINS`
+
+### Git sync does not push
+
+Check:
+
+- The vault is a git repository root.
+- The current branch matches `HATCHDOOR_GIT_BRANCH`.
+- The remote exists in the repo config.
+- The HTTPS token can push.
+- There are no merge conflicts waiting for manual resolution.
+
+## API Reference
+
+Common routes:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health` | Health check |
+| `GET` | `/api/tree` | Folder and note tree |
+| `GET` | `/api/recently-modified` | Recently modified notes |
+| `GET` | `/api/note/:slug` | Read a note |
+| `GET` | `/api/note/:slug/links` | Outbound links and backlinks |
+| `GET` | `/api/note/:slug/download` | Download a Markdown export |
+| `GET` | `/api/resolve?target=...` | Resolve one wikilink target |
+| `POST` | `/api/resolve-batch` | Resolve multiple wikilink targets |
+| `GET` | `/api/search?q=...` | Search notes |
+| `GET` | `/api/stats` | Vault stats |
+| `GET` | `/api/graph` | Graph data |
+| `POST` | `/api/refresh` | Trigger cache refresh |
+| `GET` | `/api/vault-events` | Server-sent vault revision events |
+| `GET` | `/api/write-capabilities` | Check write availability |
+| `POST` | `/api/note` | Create a note |
+| `PUT` | `/api/note/:slug` | Update a note |
+| `PATCH` | `/api/note/:slug/rename` | Rename a note |
+| `PATCH` | `/api/note/:slug/move` | Move a note |
+| `PATCH` | `/api/note/:slug/archive` | Archive a note |
+| `PATCH` | `/api/note/:slug/move-rename` | Move and rename a note |
+| `DELETE` | `/api/note/:slug` | Move a note to trash |
+| `POST` | `/api/attachment` | Upload an attachment |
+| `GET` | `/vault-assets/*path` | Serve vault assets |
+| `POST` | `/mcp` | Streamable HTTP MCP endpoint |
+
+## Security Notes
+
+- Use a long random `HATCHDOOR_WEB_BEARER_TOKEN`.
+- Do not expose Hatchdoor publicly without HTTPS in front of it.
+- Keep MCP disabled unless you need it.
+- Treat MCP write mode as powerful: it can create, edit, move, delete, and
+  import content.
+- Keep the SQLite cache outside the vault.
+- Keep `.env` out of git.
+- Review Docker volume paths before starting the container.
+
+## Development
+
+Backend checks:
+
+```bash
+cargo fmt --check
+CARGO_BUILD_JOBS=1 cargo clippy --all-targets -- -D warnings
+CARGO_BUILD_JOBS=1 cargo test
+```
+
+Frontend checks:
+
+```bash
+cd frontend
+npm run format:check
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
+
+Build and publish the Docker image:
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
@@ -295,25 +475,13 @@ docker push battermanz/hatchdoor:2.2.0
 docker push battermanz/hatchdoor:latest
 ```
 
-## Checks
+## Project Docs
 
-Backend:
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all
-```
-
-Frontend:
-
-```bash
-cd frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
-```
+- [Design system](docs/design-system.html): visual tokens, component patterns,
+  layout rules, and interaction states used by the frontend.
+- [Semantic search strategy](docs/adr/semantic-search-strategy.md): decision
+  record for shipping pure semantic search instead of hybrid retrieval or a
+  cross-encoder reranker in the runtime path.
 
 ## License
 
