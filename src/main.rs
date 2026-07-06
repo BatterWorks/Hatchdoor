@@ -41,13 +41,39 @@ fn is_loopback_host(host: &str) -> bool {
 /// Refuse to serve mutating routes unauthenticated on a public interface. A
 /// non-loopback bind with no web token would let anyone on the network
 /// create/overwrite/delete vault notes, guarded only by a log line.
-fn check_web_auth_posture(host: &str, has_web_token: bool) -> Result<(), String> {
+fn check_web_auth_posture(host: &str, has_web_token: bool, demo_mode: bool) -> Result<(), String> {
+    if demo_mode {
+        return Ok(());
+    }
     if !is_loopback_host(host) && !has_web_token {
         return Err(format!(
             "HOST={host} is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to \
              start unauthenticated on a public interface. Set HATCHDOOR_WEB_BEARER_TOKEN, or bind \
-             to 127.0.0.1 (optionally behind an authenticating proxy)."
+             to 127.0.0.1. For a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
         ));
+    }
+    Ok(())
+}
+
+fn check_demo_mode_posture(
+    demo_mode: bool,
+    mcp_enabled: bool,
+    git_sync_enabled: bool,
+) -> Result<(), String> {
+    if !demo_mode {
+        return Ok(());
+    }
+    if mcp_enabled {
+        return Err(
+            "HATCHDOOR_DEMO_MODE=true is incompatible with HATCHDOOR_MCP_ENABLED=true; disable MCP for public demos."
+                .to_string(),
+        );
+    }
+    if git_sync_enabled {
+        return Err(
+            "HATCHDOOR_DEMO_MODE=true is incompatible with HATCHDOOR_GIT_SYNC_ENABLED=true; disable git sync for public demos."
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -174,7 +200,25 @@ async fn run_server() {
         std::process::exit(1);
     }));
 
-    if let Err(message) = check_web_auth_posture(&config.host, config.web_bearer_token.is_some()) {
+    if let Err(message) = check_web_auth_posture(
+        &config.host,
+        config.web_bearer_token.is_some(),
+        config.demo_mode,
+    ) {
+        error!("{message}");
+        std::process::exit(1);
+    }
+
+    let git_sync_config = GitConfig::from_env(config.vault_path.clone()).unwrap_or_else(|e| {
+        error!("Git sync configuration error: {e}");
+        std::process::exit(1);
+    });
+
+    if let Err(message) = check_demo_mode_posture(
+        config.demo_mode,
+        mcp_config.enabled,
+        git_sync_config.is_some(),
+    ) {
         error!("{message}");
         std::process::exit(1);
     }
@@ -207,9 +251,9 @@ async fn run_server() {
 
     let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
 
-    let git_sync = match GitConfig::from_env(config.vault_path.clone()) {
-        Ok(None) => None,
-        Ok(Some(git_config)) => {
+    let git_sync = match git_sync_config {
+        None => None,
+        Some(git_config) => {
             if let Err(e) = git::validate_repo(&git_config) {
                 error!("Git sync configuration invalid: {e}");
                 std::process::exit(1);
@@ -229,10 +273,6 @@ async fn run_server() {
             info!("Git sync enabled");
             Some(handle)
         }
-        Err(e) => {
-            error!("Git sync configuration error: {e}");
-            std::process::exit(1);
-        }
     };
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
@@ -243,6 +283,7 @@ async fn run_server() {
         vault_events,
         embedder,
         web_auth_enabled: config.web_bearer_token.is_some(),
+        demo_mode: config.demo_mode,
         vault_write_lock,
         git_sync,
         mcp_config,
@@ -360,15 +401,33 @@ mod tests {
     #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
         // Non-loopback host with no web token must refuse to start.
-        assert!(check_web_auth_posture("0.0.0.0", false).is_err());
-        assert!(check_web_auth_posture("192.168.1.50", false).is_err());
-        assert!(check_web_auth_posture("::", false).is_err());
+        assert!(check_web_auth_posture("0.0.0.0", false, false).is_err());
+        assert!(check_web_auth_posture("192.168.1.50", false, false).is_err());
+        assert!(check_web_auth_posture("::", false, false).is_err());
         // A token makes any host acceptable.
-        assert!(check_web_auth_posture("0.0.0.0", true).is_ok());
+        assert!(check_web_auth_posture("0.0.0.0", true, false).is_ok());
         // Loopback is fine without a token (only reachable from this machine).
-        assert!(check_web_auth_posture("127.0.0.1", false).is_ok());
-        assert!(check_web_auth_posture("localhost", false).is_ok());
-        assert!(check_web_auth_posture("::1", false).is_ok());
+        assert!(check_web_auth_posture("127.0.0.1", false, false).is_ok());
+        assert!(check_web_auth_posture("localhost", false, false).is_ok());
+        assert!(check_web_auth_posture("::1", false, false).is_ok());
+    }
+
+    #[test]
+    fn web_auth_posture_allows_public_bind_in_demo_mode() {
+        assert!(check_web_auth_posture("0.0.0.0", false, true).is_ok());
+        assert!(check_web_auth_posture("::", false, true).is_ok());
+    }
+
+    #[test]
+    fn demo_mode_posture_rejects_external_write_surfaces() {
+        assert!(check_demo_mode_posture(true, false, false).is_ok());
+        assert!(check_demo_mode_posture(false, true, true).is_ok());
+
+        let mcp_error = check_demo_mode_posture(true, true, false).expect_err("mcp rejected");
+        assert!(mcp_error.contains("HATCHDOOR_MCP_ENABLED"));
+
+        let git_error = check_demo_mode_posture(true, false, true).expect_err("git rejected");
+        assert!(git_error.contains("HATCHDOOR_GIT_SYNC_ENABLED"));
     }
 
     use axum::body::{Body, to_bytes};
@@ -409,6 +468,13 @@ mod tests {
     fn app_for_tests_with_web_auth(
         web_bearer_token: Option<Arc<str>>,
     ) -> (Router, TempDir, AppState) {
+        app_for_tests_with_web_auth_and_demo_mode(web_bearer_token, false)
+    }
+
+    fn app_for_tests_with_web_auth_and_demo_mode(
+        web_bearer_token: Option<Arc<str>>,
+        demo_mode: bool,
+    ) -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -423,6 +489,7 @@ mod tests {
             vault_events,
             embedder,
             web_auth_enabled: web_bearer_token.is_some(),
+            demo_mode,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
@@ -535,6 +602,7 @@ mod tests {
             vault_events,
             embedder,
             web_auth_enabled: false,
+            demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(hatchdoor::mcp::McpConfig::disabled()),
@@ -762,6 +830,36 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(payload["enabled"], true);
         assert!(payload["warnings"].as_array().expect("warnings").is_empty());
+    }
+
+    #[tokio::test]
+    async fn demo_mode_reports_write_capabilities_disabled() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["enabled"], false);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning.as_str().unwrap_or("").contains("demo mode"))
+        );
     }
 
     #[tokio::test]
@@ -1050,6 +1148,30 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn demo_mode_rejects_write_api_before_touching_vault() {
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let blocked_path = state.vault_path.join("Demo Write.md");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Demo Write.md","content":"# Should not exist\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!blocked_path.exists());
+        drop(tmp);
     }
 
     #[tokio::test]

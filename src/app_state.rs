@@ -24,6 +24,9 @@ pub struct AppConfig {
     /// When set, every `/api/*`, asset, and download request must present this
     /// token (Bearer header or `access_token` query parameter).
     pub web_bearer_token: Option<String>,
+    /// Public demo mode: allows unauthenticated public browsing while disabling
+    /// every app-level write surface.
+    pub demo_mode: bool,
     /// Folder prefix (with trailing slash) treated as archived in resolve results.
     pub archive_prefix: String,
 }
@@ -39,6 +42,9 @@ impl AppConfig {
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let demo_mode = env::var("HATCHDOOR_DEMO_MODE")
+            .map(|value| is_truthy(&value))
+            .unwrap_or(false);
         let archive_prefix = env::var("HATCHDOOR_ARCHIVE_PREFIX")
             .ok()
             .map(|value| value.trim().to_string())
@@ -53,6 +59,7 @@ impl AppConfig {
             host,
             port,
             web_bearer_token,
+            demo_mode,
             archive_prefix,
         })
     }
@@ -70,6 +77,13 @@ pub fn parse_port(input: &str) -> Result<u16, String> {
         .map_err(|e| format!("invalid PORT '{input}': {e}"))
 }
 
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub vault_path: PathBuf,
@@ -79,6 +93,8 @@ pub struct AppState {
     pub embedder: Arc<dyn Embedder>,
     /// True when the web API is protected by `HATCHDOOR_WEB_BEARER_TOKEN`.
     pub web_auth_enabled: bool,
+    /// True when public demo browsing is enabled and app-level writes are blocked.
+    pub demo_mode: bool,
     /// Serializes vault file mutations against git sync tree operations.
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Present only when git sync is enabled.
@@ -247,6 +263,7 @@ mod tests {
             host: "0.0.0.0".to_string(),
             port: 42824,
             web_bearer_token: None,
+            demo_mode: true,
             archive_prefix: "90-archive/".to_string(),
         };
 
@@ -283,6 +300,7 @@ mod tests {
             vault_events,
             embedder,
             web_auth_enabled: false,
+            demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),

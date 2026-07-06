@@ -78,7 +78,7 @@ What these mean:
 
 Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so the
 published port works. Hatchdoor refuses to start on a non-loopback bind unless
-`HATCHDOOR_WEB_BEARER_TOKEN` is set.
+`HATCHDOOR_WEB_BEARER_TOKEN` is set, except in explicit read-only demo mode.
 
 ### 3. Start Hatchdoor
 
@@ -171,6 +171,7 @@ Copy `.env.example` to `.env` and adjust values.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HATCHDOOR_WEB_BEARER_TOKEN` | empty | Protects `/api/*`, `/vault-assets/*`, and note downloads |
+| `HATCHDOOR_DEMO_MODE` | `false` | Allows unauthenticated public browsing while disabling Hatchdoor write features |
 
 When this token is set, protected requests must send:
 
@@ -184,6 +185,21 @@ cannot be set, the frontend appends an `access_token` query parameter.
 
 Hatchdoor refuses to start with `HOST=0.0.0.0` or another non-loopback bind
 unless `HATCHDOOR_WEB_BEARER_TOKEN` is set.
+
+For a public test instance that people can browse without credentials, use demo
+mode:
+
+```env
+HOST=0.0.0.0
+HATCHDOOR_DEMO_MODE=true
+HATCHDOOR_WEB_BEARER_TOKEN=
+HATCHDOOR_MCP_ENABLED=false
+HATCHDOOR_GIT_SYNC_ENABLED=false
+```
+
+Demo mode is intentionally read-only. It disables browser write operations,
+reports writes as unavailable through `/api/write-capabilities`, and refuses to
+start if MCP or automatic git sync are enabled.
 
 ### Vault Behavior
 
@@ -359,10 +375,12 @@ cargo run -- --prefetch-embedder
 
 ### Hatchdoor refuses to start on `0.0.0.0`
 
-Set `HATCHDOOR_WEB_BEARER_TOKEN`, or bind to `127.0.0.1`.
+Set `HATCHDOOR_WEB_BEARER_TOKEN`, bind to `127.0.0.1`, or enable
+`HATCHDOOR_DEMO_MODE=true` for a read-only public demo.
 
 This is intentional. A non-loopback bind can expose your vault to the network,
-so Hatchdoor requires web authentication.
+so Hatchdoor requires web authentication unless demo mode has disabled the app's
+write surfaces.
 
 ### Docker starts, but the UI cannot write
 
@@ -438,6 +456,7 @@ Common routes:
 
 - Use a long random `HATCHDOOR_WEB_BEARER_TOKEN`.
 - Do not expose Hatchdoor publicly without HTTPS in front of it.
+- Use `HATCHDOOR_DEMO_MODE=true` only for browse-only public test instances.
 - Keep MCP disabled unless you need it.
 - Treat MCP write mode as powerful: it can create, edit, move, delete, and
   import content.

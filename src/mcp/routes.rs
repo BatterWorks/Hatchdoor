@@ -183,6 +183,7 @@ mod tests {
             vault_events,
             embedder,
             web_auth_enabled: false,
+            demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(McpConfig::disabled()),
