@@ -1,8 +1,9 @@
 # Hatchdoor eval
 
-Developer harness for comparing embedding models against a labelled query set
-from the real vault. See `docs/superpowers/specs/2026-05-18-phase-1.5-eval-design.md`
-for the full design.
+Developer harness for comparing embedding models against a labelled query set.
+The checked-in `queries.jsonl` file is a tiny sample that targets the placeholder
+vault in this repository. For real measurements, create your own private query
+set against your own vault.
 
 ## Vault path
 
@@ -63,9 +64,9 @@ The first invocation per reranker downloads its ONNX weights (~150 MB and ~570 M
 
 `--initial-k` controls how many embedding candidates are passed to the reranker; default is 20. Metrics are still scored at k=5 and k=10 against the post-rerank order. A section is appended to `eval/results.md` with rank-pre / rank-post / Δ columns and median / p90 / max latency stats.
 
-## Adding queries
+## Adding private queries
 
-Edit `eval/queries.jsonl`. One JSON object per line:
+Copy or replace `eval/queries.jsonl`. One JSON object per line:
 
 ```
 {
@@ -77,5 +78,5 @@ Edit `eval/queries.jsonl`. One JSON object per line:
 }
 ```
 
-`expected_heading_path` and `anti_expected` are optional. Add queries when real
-use surfaces something the eval currently misses.
+`expected_heading_path` and `anti_expected` are optional. Keep personal or
+sensitive query sets out of public commits.

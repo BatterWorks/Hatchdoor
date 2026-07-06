@@ -1,8 +1,0 @@
-# Volatile fix-implementer runtime state — regenerated every tick, must never
-# dirty the tree (that would block the driver's fast-forward onto development).
-FIXES.md
-state/ledger.json
-state/fix-driver.log
-state/fix-driver.lock
-state/.fixes-complete
-state/.inflight

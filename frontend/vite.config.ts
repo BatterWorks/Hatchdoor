@@ -10,7 +10,7 @@ export default defineConfig({
       manifest: {
         name: "Hatchdoor",
         short_name: "Hatchdoor",
-        description: "Read-only Obsidian vault web frontend",
+        description: "Self-hosted Markdown vault web app",
         start_url: "/",
         display: "standalone",
         background_color: "#f4f1e8",

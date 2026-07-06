@@ -1,9 +1,13 @@
 services:
   hatchdoor:
-    image: 192.168.31.233:5000/hatchdoor:latest
+    image: battermanz/hatchdoor:latest
     container_name: hatchdoor
     env_file:
       - .env
+    environment:
+      # The process must bind the container interface for Docker port publishing
+      # to work. Set HATCHDOOR_WEB_BEARER_TOKEN in .env before running compose.
+      HOST: 0.0.0.0
     ports:
       - "42824:42824"
     volumes:
