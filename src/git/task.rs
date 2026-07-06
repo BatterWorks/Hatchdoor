@@ -20,17 +20,20 @@ use super::sync::{CommitOutcome, GitError, SyncOutcome, has_unpushed, unpushed_c
 pub struct SyncOps {
     /// Stage + commit the batch (working tree + index only). Reports whether the
     /// remote phases are needed. Runs UNDER the vault lock.
-    pub commit:
-        Box<dyn Fn(&GitConfig, &[PathBuf], &str) -> Result<CommitOutcome, GitError> + Send + Sync>,
+    pub commit: CommitOp,
     /// Fetch the remote branch (network read, no working-tree change). Runs
     /// WITHOUT the vault lock.
-    pub fetch: Box<dyn Fn(&GitConfig) -> Result<(), GitError> + Send + Sync>,
+    pub fetch: GitPhaseOp,
     /// Merge the fetched remote into the local branch if it moved ahead (may
     /// checkout the working tree). Runs UNDER the vault lock.
-    pub integrate: Box<dyn Fn(&GitConfig) -> Result<(), GitError> + Send + Sync>,
+    pub integrate: GitPhaseOp,
     /// Push the local branch (network write). Runs WITHOUT the vault lock.
-    pub push: Box<dyn Fn(&GitConfig) -> Result<(), GitError> + Send + Sync>,
+    pub push: GitPhaseOp,
 }
+
+pub type CommitOp =
+    Box<dyn Fn(&GitConfig, &[PathBuf], &str) -> Result<CommitOutcome, GitError> + Send + Sync>;
+pub type GitPhaseOp = Box<dyn Fn(&GitConfig) -> Result<(), GitError> + Send + Sync>;
 
 /// Backoff bounds for re-attempting a sync that failed for a transient reason
 /// (remote/network/auth). Without this, a brief outage strands committed vault
