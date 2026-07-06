@@ -8,6 +8,7 @@ RUN cargo install cargo-chef --locked
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY docs/starter-vault ./docs/starter-vault
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS rust-builder
@@ -15,6 +16,7 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY docs/starter-vault ./docs/starter-vault
 RUN cargo build --release --bin hatchdoor
 ENV FASTEMBED_CACHE_DIR=/opt/fastembed
 RUN mkdir -p $FASTEMBED_CACHE_DIR \

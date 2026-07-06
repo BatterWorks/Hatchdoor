@@ -137,6 +137,11 @@ Hatchdoor scans every `.md` file under `VAULT_PATH`, except files under
 `.hatchdoor-trash`. Folder names come directly from your vault; Hatchdoor does
 not require a numbered PARA-style folder scheme.
 
+When `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
+vault before the first index build. The starter notes explain Hatchdoor basics,
+Markdown rendering, agent usage, and an optional folder organisation pattern.
+Existing vaults are never seeded or modified by this startup step.
+
 Current conventions:
 
 - The UI root is named `Vault`.
