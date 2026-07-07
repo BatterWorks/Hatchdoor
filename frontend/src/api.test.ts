@@ -42,6 +42,37 @@ describe("apiFetch", () => {
     await rejection;
   });
 
+  it("honors a per-call timeoutMs override instead of the default timeout", async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(
+              init.signal?.reason ?? new DOMException("Aborted", "AbortError"),
+            );
+          });
+        }),
+    );
+
+    const request = apiFetch("/api/attachment", {
+      method: "POST",
+      timeoutMs: 60_000,
+    });
+    const rejection = expect(request).rejects.toMatchObject({
+      name: "AbortError",
+    });
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_FETCH_TIMEOUT_MS);
+    expect(aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(60_000 - DEFAULT_FETCH_TIMEOUT_MS);
+    expect(aborted).toBe(true);
+    await rejection;
+  });
+
   it("preserves Headers instance values when attaching the bearer token", async () => {
     setToken("secret-token");
     const fetchSpy = vi

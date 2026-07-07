@@ -38,6 +38,11 @@ export function onUnauthorized(handler: UnauthorizedHandler | null): void {
   unauthorizedHandler = handler;
 }
 
+/** `RequestInit` plus an optional per-call timeout override. Slow-by-nature
+ * requests (attachment uploads, note mutations on large vaults) need more than
+ * the default read timeout. */
+export type ApiFetchInit = RequestInit & { timeoutMs?: number };
+
 /**
  * Fetch wrapper that attaches the bearer token when one is stored and notifies
  * the unauthorized handler on a 401. When no token is stored the call is
@@ -45,15 +50,16 @@ export function onUnauthorized(handler: UnauthorizedHandler | null): void {
  */
 export async function apiFetch(
   input: RequestInfo | URL,
-  init?: RequestInit,
+  init?: ApiFetchInit,
 ): Promise<Response> {
+  const { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, ...requestInit } = init ?? {};
   const token = getToken();
   const timeoutController = new AbortController();
   const timeoutId = window.setTimeout(() => {
     timeoutController.abort(
       new DOMException("Request timed out", "AbortError"),
     );
-  }, DEFAULT_FETCH_TIMEOUT_MS);
+  }, timeoutMs);
   const callerSignal = init?.signal;
   const abortFromCaller = () => {
     timeoutController.abort(
@@ -66,12 +72,12 @@ export async function apiFetch(
     callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
   }
 
-  let finalInit = init;
+  let finalInit: RequestInit = requestInit;
   if (token) {
-    const headers = new Headers(init?.headers);
+    const headers = new Headers(requestInit.headers);
     headers.set("Authorization", `Bearer ${token}`);
     finalInit = {
-      ...init,
+      ...requestInit,
       headers,
     };
   }

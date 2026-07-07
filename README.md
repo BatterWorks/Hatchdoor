@@ -200,9 +200,16 @@ HATCHDOOR_MCP_ENABLED=false
 HATCHDOOR_GIT_SYNC_ENABLED=false
 ```
 
-Demo mode is intentionally read-only. It disables browser write operations,
-reports writes as unavailable through `/api/write-capabilities`, and refuses to
-start if MCP or automatic git sync are enabled.
+Demo mode is intentionally read-only. It disables browser write operations and
+the manual `/api/refresh` reindex, reports writes as unavailable through
+`/api/write-capabilities`, and refuses to start if MCP or automatic git sync are
+enabled.
+
+Demo mode does not rate-limit requests. Search computes an embedding per query
+and note downloads bundle attachments in memory, so an anonymous visitor can
+generate real CPU and memory load. Put a public demo behind a rate-limiting
+reverse proxy (e.g. nginx `limit_req`, Caddy `rate_limit`, or Traefik
+`rateLimit` middleware) before exposing it to the internet.
 
 ### Vault Behavior
 

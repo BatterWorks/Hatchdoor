@@ -192,7 +192,7 @@ where
 /// Coalescing refresh for the public `/api/refresh` endpoint: if a reindex is
 /// already running, skip rather than queue another full pass behind it. This
 /// defuses a request loop that would otherwise pin a CPU core (F-02).
-pub async fn refresh_if_needed(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+pub async fn refresh_coalescing(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let _refresh_guard = match state.refresh_lock.try_lock() {
         Ok(guard) => guard,
         Err(_) => {
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_if_needed_surfaces_errors() {
+    async fn refresh_coalescing_surfaces_errors() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -319,7 +319,7 @@ mod tests {
         let mut state = state_with_vault(vault_path);
         state.vault_path = dir.path().join("missing-vault");
 
-        let result = refresh_if_needed(&state).await;
+        let result = refresh_coalescing(&state).await;
         assert!(result.is_err());
     }
 
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_if_needed_broadcasts_revision_after_successful_refresh() {
+    async fn refresh_coalescing_broadcasts_revision_after_successful_refresh() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -347,7 +347,7 @@ mod tests {
         let mut events = state.vault_events.subscribe();
 
         std::fs::write(vault_path.join("Second.md"), "second").expect("write note");
-        refresh_if_needed(&state).await.expect("refresh");
+        refresh_coalescing(&state).await.expect("refresh");
 
         assert_eq!(events.recv().await.expect("revision"), 1);
     }

@@ -9,8 +9,10 @@ import {
   getWriteCapabilities,
   moveNote,
   renameNote,
+  MUTATION_FETCH_TIMEOUT_MS,
   updateNote,
   uploadAttachment,
+  UPLOAD_FETCH_TIMEOUT_MS,
 } from "./writeApi";
 import type { WriteOutcome } from "./types";
 
@@ -210,6 +212,41 @@ describe("writeApi", () => {
       "Attachments/pasted.png",
     );
     expect((init?.body as FormData).get("file")).toBe(file);
+  });
+
+  it("gives attachment uploads a timeout large enough for big files on slow links", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse({
+        ok: true,
+        attachment: {
+          relative_path: "Attachments/manual.pdf",
+          size_bytes: 9,
+          content_hash: "fnv1a64:test",
+        },
+        git_sync_warning: null,
+        rewritten_notes: 0,
+        trashed_path: null,
+        cleanup_warning: null,
+      }),
+    );
+
+    const file = new File(["pdf-bytes"], "manual.pdf", {
+      type: "application/pdf",
+    });
+    await uploadAttachment(file, "Attachments/manual.pdf");
+
+    const [, init] = mockedApiFetch.mock.calls[0] ?? [];
+    expect(init?.timeoutMs).toBe(UPLOAD_FETCH_TIMEOUT_MS);
+    expect(UPLOAD_FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
+  });
+
+  it("gives note mutations a longer timeout than reads", async () => {
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote("home", "# Updated", "hash-1");
+
+    const [, init] = mockedApiFetch.mock.calls[0] ?? [];
+    expect(init?.timeoutMs).toBe(MUTATION_FETCH_TIMEOUT_MS);
+    expect(MUTATION_FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
   });
 
   it("summarizes write outcome side effects", () => {
