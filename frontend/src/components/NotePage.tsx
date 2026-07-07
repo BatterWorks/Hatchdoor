@@ -9,9 +9,9 @@ import {
 
 import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
-import { apiFetch } from "../api";
-import { readErrorMessage } from "../apiError";
-import { normalizeImageForUpload } from "../imageUpload";
+import { apiFetch } from "../api/api";
+import { readErrorMessage } from "../api/apiError";
+import { normalizeImageForUpload } from "../lib/imageUpload";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -20,14 +20,14 @@ import {
   parseFrontmatter,
   stripBlockIds,
   stripVaultNoteLinks,
-} from "../markdown";
-import { extractMarkdownHeadings, slugifyHeading } from "../noteHeadings";
+} from "../lib/markdown";
+import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
   setActiveSearchHit as setActiveSearchHitClass,
-} from "../noteSearch";
-import { isNoteEqual, isNoteLinksEqual } from "../stateCompare";
+} from "../lib/noteSearch";
+import { isNoteEqual, isNoteLinksEqual } from "../lib/stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerNote,
@@ -39,8 +39,8 @@ import {
   describeWriteOutcome,
   updateNote,
   uploadAttachment,
-} from "../writeApi";
-import { clearNoteDraft, loadNoteDraft, saveNoteDraft } from "../writeDrafts";
+} from "../api/writeApi";
+import { clearNoteDraft, loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";

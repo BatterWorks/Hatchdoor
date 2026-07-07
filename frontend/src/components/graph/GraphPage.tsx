@@ -1,45 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiFetch } from "../api";
-import { readErrorMessage } from "../apiError";
+import { type Simulation } from "d3-force";
+
+import { apiFetch } from "../../api/api";
+import { readErrorMessage } from "../../api/apiError";
+import type { GraphData, GraphNode } from "../../types";
+import { StateBlock } from "../ui";
 import {
-  forceSimulation,
-  forceLink,
-  forceManyBody,
-  forceCenter,
-  forceCollide,
-  type Simulation,
-  type SimulationNodeDatum,
-  type SimulationLinkDatum,
-} from "d3-force";
-
-import type { GraphData, GraphNode } from "../types";
-import { StateBlock } from "./ui";
-
-// ── simulation types ─────────────────────────────────────────────────────────
-
-interface SimNode extends SimulationNodeDatum {
-  slug: string;
-  title: string;
-  primary_tag: string | null;
-  backlink_count: number;
-  x: number;
-  y: number;
-}
-
-interface SimLink extends SimulationLinkDatum<SimNode> {
-  source: SimNode;
-  target: SimNode;
-}
+  buildSimulationGraph,
+  createGraphSimulation,
+  hitTest as hitTestNodes,
+  nodeRadius,
+  type SimLink,
+  type SimNode,
+} from "./graphSimulation";
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-
-const BASE_RADIUS = 4;
-const SCALE_FACTOR = 2.8;
-
-function nodeRadius(backlinks: number): number {
-  return BASE_RADIUS + Math.log(backlinks + 1) * SCALE_FACTOR;
-}
 
 function tagHue(tag: string): number {
   let hash = 0;
@@ -178,22 +154,11 @@ export function GraphPage() {
 
   // ── hit test ────────────────────────────────────────────────────────────────
 
-  const hitTest = useCallback((cx: number, cy: number): SimNode | null => {
-    const { x, y, k } = transformRef.current;
-    const wx = (cx - x) / k;
-    const wy = (cy - y) / k;
-    let best: SimNode | null = null;
-    let bestDist = Infinity;
-    for (const node of simNodesRef.current) {
-      const r = nodeRadius(node.backlink_count);
-      const d = Math.hypot(node.x - wx, node.y - wy);
-      if (d <= r + 2 && d < bestDist) {
-        best = node;
-        bestDist = d;
-      }
-    }
-    return best;
-  }, []);
+  const hitTest = useCallback(
+    (cx: number, cy: number): SimNode | null =>
+      hitTestNodes(simNodesRef.current, transformRef.current, cx, cy),
+    [],
+  );
 
   // ── canvas rendering ────────────────────────────────────────────────────────
 
@@ -576,23 +541,7 @@ export function GraphPage() {
     // Nodes live in world space centred at (0,0). The canvas transform maps
     // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
     // using them caused a double-shift that put every node off-screen.
-    const spread = 500;
-    const nodes: SimNode[] = graphData.nodes.map((n) => ({
-      ...n,
-      x: (Math.random() - 0.5) * spread,
-      y: (Math.random() - 0.5) * spread,
-    })) as SimNode[];
-
-    const nodeBySlug = new Map<string, SimNode>(nodes.map((n) => [n.slug, n]));
-
-    const links: SimLink[] = graphData.edges
-      .map((e) => {
-        const source = nodeBySlug.get(e.source);
-        const target = nodeBySlug.get(e.target);
-        if (!source || !target) return null;
-        return { source, target } as SimLink;
-      })
-      .filter((l): l is SimLink => l !== null);
+    const { nodes, links } = buildSimulationGraph(graphData);
 
     simNodesRef.current = nodes;
     simLinksRef.current = links;
@@ -605,21 +554,7 @@ export function GraphPage() {
     transformRef.current = { x: W / 2, y: H / 2, k: 0.9 };
 
     simRef.current?.stop();
-    const sim = forceSimulation<SimNode>(nodes)
-      .force(
-        "link",
-        forceLink<SimNode, SimLink>(links)
-          .id((d) => d.slug)
-          .distance(60)
-          .strength(0.4),
-      )
-      .force("charge", forceManyBody<SimNode>().strength(-180).distanceMax(400))
-      .force("center", forceCenter<SimNode>(0, 0))
-      .force(
-        "collide",
-        forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4),
-      )
-      .alphaDecay(0.02);
+    const sim = createGraphSimulation(nodes, links);
 
     simRef.current = sim;
     requestRender();

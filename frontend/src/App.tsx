@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -24,55 +23,31 @@ import {
 import { ExplorerPane } from "./app/ExplorerPane";
 import {
   clampSidebarWidth,
-  getStoredExpandedFolders,
   getStoredNumber,
   getStoredRecentNotes,
   getStoredString,
+  getStoredExpandedFolders,
   isEditableTarget,
-} from "./app/storage";
-import { useIsMobile } from "./app/useIsMobile";
-import { useTheme } from "./app/useTheme";
-import { apiFetch, onUnauthorized, setToken, withAccessToken } from "./api";
-import { readErrorMessage } from "./apiError";
-import { copyText } from "./clipboard";
-import {
-  NoteActionsDialog,
-  type NoteActionDialogKind,
-} from "./components/NoteActionsDialog";
+} from "./lib/storage";
+import { useIsMobile } from "./hooks/useIsMobile";
+import { useTheme } from "./hooks/useTheme";
+import { onUnauthorized, setToken, withAccessToken } from "./api/api";
+import { copyText } from "./lib/clipboard";
+import { NoteActionsDialog } from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
 import { SearchDialog } from "./components/SearchDialog";
 import { TokenPrompt } from "./components/TokenPrompt";
-import { GraphPage } from "./components/GraphPage";
+import { GraphPage } from "./components/graph/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
-import { isExplorerTreeEqual } from "./stateCompare";
-import {
-  archiveNote,
-  createNote,
-  deleteNote,
-  describeWriteOutcome,
-  getWriteCapabilities,
-  moveNote,
-  renameNote,
-} from "./writeApi";
-import { validateNotePath } from "./writePaths";
-import { clearCreateDraft, pruneNoteDrafts } from "./writeDrafts";
-import { collectFolderPaths } from "./app/folderPaths";
-import { flattenNoteCandidates } from "./app/noteCandidates";
-import type {
-  ActiveNoteMeta,
-  ExplorerFolder,
-  ModifiedNote,
-  RecentlyModifiedResponse,
-  RecentNote,
-  SearchResponse,
-  SearchResult,
-} from "./types";
+import { useNoteActions } from "./hooks/useNoteActions";
+import { useSearch } from "./hooks/useSearch";
+import { useVaultTree } from "./hooks/useVaultTree";
+import { useWriteMode } from "./hooks/useWriteMode";
+import { pruneNoteDrafts } from "./lib/writeDrafts";
+import type { ActiveNoteMeta, RecentNote } from "./types";
 
 function App() {
-  const [tree, setTree] = useState<ExplorerFolder | null>(null);
-  const [loadingTree, setLoadingTree] = useState(true);
-  const [treeError, setTreeError] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
     return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
   });
@@ -84,167 +59,80 @@ function App() {
   const [recentNotes, setRecentNotes] = useState<RecentNote[]>(() =>
     getStoredRecentNotes(),
   );
-  const [modifiedNotes, setModifiedNotes] = useState<ModifiedNote[]>([]);
   const [expandedFolders, setExpandedFolders] = useState<
     Record<string, boolean>
   >(() => getStoredExpandedFolders());
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchIncludeContent, setSearchIncludeContent] = useState(false);
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
   );
-  const [vaultRevision, setVaultRevision] = useState(0);
   const [authRequired, setAuthRequired] = useState(false);
-  const [writeEnabled, setWriteEnabled] = useState(false);
-  const [writeWarnings, setWriteWarnings] = useState<string[]>([]);
-  const [writeNotice, setWriteNotice] = useState<string | null>(null);
   const [editRequestId, setEditRequestId] = useState(0);
-  const [noteActionDialog, setNoteActionDialog] =
-    useState<NoteActionDialogKind | null>(null);
-  const [noteActionError, setNoteActionError] = useState<string | null>(null);
-  const [noteActionInitialFolder, setNoteActionInitialFolder] = useState("");
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
+
+  const {
+    tree,
+    loadingTree,
+    treeError,
+    treeIsStale,
+    modifiedNotes,
+    vaultRevision,
+    folderPaths,
+    noteCandidates,
+    loadTree,
+    loadModifiedNotes,
+    refreshVault,
+  } = useVaultTree();
+  const { writeEnabled, writeWarnings, setWriteWarnings, writeNotice, setWriteNotice } =
+    useWriteMode();
+  const {
+    searchOpen,
+    setSearchOpen,
+    searchQuery,
+    setSearchQuery,
+    searchIncludeContent,
+    setSearchIncludeContent,
+    searchResults,
+    searchLoading,
+    searchError,
+    searchInputRef,
+    openSearchForTag,
+  } = useSearch();
+  const {
+    noteActionDialog,
+    noteActionError,
+    noteActionInitialFolder,
+    openCreateDialog,
+    openActionDialog,
+    closeNoteActionDialog,
+    handleCreateNote,
+    handleRenameNote,
+    handleMoveNote,
+    handleArchiveNote,
+    handleDeleteNote,
+  } = useNoteActions({ activeNote, refreshVault, setWriteNotice });
+
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
   );
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const topbarRef = useRef<HTMLElement | null>(null);
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
-  const prevFocusRef = useRef<Element | null>(null);
-
-  const loadTree = useCallback(async () => {
-    setTreeError(null);
-    try {
-      const res = await apiFetch("/api/tree");
-      if (!res.ok) {
-        throw new Error(await readErrorMessage(res, "Failed loading tree"));
-      }
-      const nextTree = (await res.json()) as ExplorerFolder;
-      setTree((prev) =>
-        isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
-      );
-    } catch (err) {
-      setTreeError(
-        err instanceof Error ? err.message : "Unknown tree loading error",
-      );
-    }
-  }, []);
-
-  const loadModifiedNotes = useCallback(async () => {
-    try {
-      const params = new URLSearchParams({ limit: "5" });
-      const res = await apiFetch(`/api/recently-modified?${params.toString()}`);
-      if (!res.ok) {
-        throw new Error(
-          await readErrorMessage(res, "Failed loading modified notes"),
-        );
-      }
-      const json = (await res.json()) as RecentlyModifiedResponse;
-      setModifiedNotes(json.notes.slice(0, 5));
-    } catch {
-      setModifiedNotes([]);
-    }
-  }, []);
 
   useEffect(() => {
     onUnauthorized(() => setAuthRequired(true));
     return () => onUnauthorized(null);
   }, []);
 
-  const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
-  const noteCandidates = useMemo(() => flattenNoteCandidates(tree), [tree]);
-
-  const openCreateDialog = useCallback((folder: string) => {
-    setNoteActionError(null);
-    setNoteActionInitialFolder(folder);
-    setNoteActionDialog("create");
-  }, []);
-
   useEffect(() => {
     // Drafts only bridge an interrupted edit; drop ones older than a week.
     pruneNoteDrafts(7 * 24 * 60 * 60 * 1000);
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void (async () => {
-      try {
-        const capabilities = await getWriteCapabilities();
-        if (!cancelled) {
-          setWriteEnabled(Boolean(capabilities.enabled));
-          setWriteWarnings(
-            Array.isArray(capabilities.warnings) ? capabilities.warnings : [],
-          );
-        }
-      } catch {
-        if (!cancelled) {
-          setWriteEnabled(false);
-          setWriteWarnings([]);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    void (async () => {
-      setLoadingTree(true);
-      await loadTree();
-      await loadModifiedNotes();
-      setLoadingTree(false);
-    })();
-  }, [loadModifiedNotes, loadTree]);
-
-  useEffect(() => {
-    if (!("EventSource" in window)) {
-      return;
-    }
-
-    const events = new EventSource(withAccessToken("/api/vault-events"));
-    const onVaultRevision = (event: MessageEvent<string>) => {
-      try {
-        const payload = JSON.parse(event.data) as { revision?: unknown };
-        if (typeof payload.revision === "number") {
-          const revision = payload.revision;
-          setVaultRevision((current) =>
-            revision > current ? revision : current,
-          );
-        }
-      } catch {
-        // Ignore malformed event payloads; the next valid revision will resync.
-      }
-    };
-    events.addEventListener("vault-revision", onVaultRevision);
-
-    return () => {
-      events.removeEventListener("vault-revision", onVaultRevision);
-      events.close();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (vaultRevision === 0) {
-      return;
-    }
-
-    void loadTree();
-    void loadModifiedNotes();
-  }, [loadModifiedNotes, loadTree, vaultRevision]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -281,7 +169,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    // Reset transient shell UI on navigation — an accepted effect→setState
+    // pattern (the state is not derivable from render inputs alone).
     if (isMobile) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDrawerOpen(false);
     }
     setActionsMenuOpen(false);
@@ -312,6 +203,7 @@ function App() {
 
   useLayoutEffect(() => {
     if (!isMobile) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMobileDrawerTop(0);
       return;
     }
@@ -343,6 +235,7 @@ function App() {
 
   useEffect(() => {
     if (location.pathname === "/") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveNote(null);
     }
   }, [location.pathname]);
@@ -352,6 +245,7 @@ function App() {
       return;
     }
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRecentNotes((prev) => {
       const withoutCurrent = prev.filter(
         (item) => item.slug !== activeNote.slug,
@@ -384,19 +278,6 @@ function App() {
   }, [location.pathname, navigate]);
 
   useEffect(() => {
-    if (searchOpen) {
-      prevFocusRef.current = document.activeElement;
-      const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
-      return () => window.clearTimeout(id);
-    } else {
-      if (prevFocusRef.current instanceof HTMLElement) {
-        prevFocusRef.current.focus();
-      }
-      prevFocusRef.current = null;
-    }
-  }, [searchOpen]);
-
-  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
@@ -425,62 +306,7 @@ function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openCreateDialog, writeEnabled]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (!searchOpen) {
-      return;
-    }
-
-    const query = searchQuery.trim();
-    if (query.length < 2) {
-      setSearchResults([]);
-      setSearchLoading(false);
-      setSearchError(null);
-      return;
-    }
-
-    const id = window.setTimeout(() => {
-      void (async () => {
-        setSearchLoading(true);
-        setSearchError(null);
-        try {
-          const params = new URLSearchParams({
-            q: query,
-            mode: searchIncludeContent ? "keyword" : "semantic",
-            limit: "30",
-            per_note_cap: "2",
-          });
-          const res = await apiFetch(`/api/search?${params.toString()}`);
-          if (!res.ok) {
-            throw new Error(await readErrorMessage(res, "Search failed"));
-          }
-          const json = (await res.json()) as SearchResponse;
-          if (!cancelled) {
-            setSearchResults(json.results);
-          }
-        } catch (error) {
-          if (!cancelled) {
-            setSearchResults([]);
-            setSearchError(
-              error instanceof Error ? error.message : "Unknown search error",
-            );
-          }
-        } finally {
-          if (!cancelled) {
-            setSearchLoading(false);
-          }
-        }
-      })();
-    }, 150);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(id);
-    };
-  }, [searchIncludeContent, searchOpen, searchQuery]);
+  }, [openCreateDialog, setSearchOpen, writeEnabled]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -520,21 +346,6 @@ function App() {
     restoredExplorerScrollRef.current = true;
   }, [tree]);
 
-  const treeIsStale = Boolean(tree && treeError);
-  const openSearchForTag = useCallback((tag: string) => {
-    setSearchQuery(tag);
-    setSearchIncludeContent(true);
-    setSearchOpen(true);
-  }, []);
-  const refreshVault = useCallback(async () => {
-    try {
-      await apiFetch("/api/refresh", { method: "POST" });
-    } catch {
-      // Fall back to tree refresh even if force refresh endpoint fails.
-    }
-    await loadTree();
-    await loadModifiedNotes();
-  }, [loadModifiedNotes, loadTree]);
   const copyNoteLink = useCallback(async () => {
     if (!activeNote) {
       return;
@@ -562,134 +373,6 @@ function App() {
     anchor.click();
     anchor.remove();
   }, [activeNote]);
-
-  const closeNoteActionDialog = useCallback(() => {
-    setNoteActionDialog(null);
-    setNoteActionError(null);
-    setNoteActionInitialFolder("");
-  }, []);
-
-  const requireActiveNoteHash = useCallback(() => {
-    if (!activeNote?.slug || !activeNote.contentHash) {
-      throw new Error("Current note is not ready for write actions");
-    }
-    return { slug: activeNote.slug, contentHash: activeNote.contentHash };
-  }, [activeNote]);
-
-  const handleCreateNote = useCallback(
-    async (relativePath: string, content: string) => {
-      setNoteActionError(null);
-      const pathError = validateNotePath(relativePath, { label: "Note path" });
-      if (pathError) {
-        setNoteActionError(pathError);
-        return;
-      }
-      try {
-        const outcome = await createNote(relativePath, content);
-        clearCreateDraft();
-        setNoteActionDialog(null);
-        setWriteNotice(describeWriteOutcome(outcome));
-        await refreshVault();
-        if (outcome.slug) {
-          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
-        }
-      } catch (error) {
-        setNoteActionError(
-          error instanceof Error ? error.message : "Create failed",
-        );
-      }
-    },
-    [navigate, refreshVault],
-  );
-
-  const handleRenameNote = useCallback(
-    async (newTitle: string) => {
-      setNoteActionError(null);
-      const trimmed = newTitle.trim();
-      if (!trimmed) {
-        setNoteActionError("New title is required.");
-        return;
-      }
-      try {
-        const { slug, contentHash } = requireActiveNoteHash();
-        const outcome = await renameNote(slug, trimmed, contentHash);
-        setNoteActionDialog(null);
-        setWriteNotice(describeWriteOutcome(outcome));
-        await refreshVault();
-        if (outcome.slug) {
-          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
-        }
-      } catch (error) {
-        setNoteActionError(
-          error instanceof Error ? error.message : "Rename failed",
-        );
-      }
-    },
-    [navigate, refreshVault, requireActiveNoteHash],
-  );
-
-  const handleMoveNote = useCallback(
-    async (targetFolder: string) => {
-      setNoteActionError(null);
-      const pathError = validateNotePath(targetFolder, {
-        allowEmpty: true,
-        label: "Target folder",
-      });
-      if (pathError) {
-        setNoteActionError(pathError);
-        return;
-      }
-      try {
-        const { slug, contentHash } = requireActiveNoteHash();
-        const outcome = await moveNote(slug, targetFolder, contentHash);
-        setNoteActionDialog(null);
-        setWriteNotice(describeWriteOutcome(outcome));
-        await refreshVault();
-        if (outcome.slug) {
-          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
-        }
-      } catch (error) {
-        setNoteActionError(
-          error instanceof Error ? error.message : "Move failed",
-        );
-      }
-    },
-    [navigate, refreshVault, requireActiveNoteHash],
-  );
-
-  const handleArchiveNote = useCallback(async () => {
-    setNoteActionError(null);
-    try {
-      const { slug, contentHash } = requireActiveNoteHash();
-      const outcome = await archiveNote(slug, contentHash);
-      setNoteActionDialog(null);
-      setWriteNotice(describeWriteOutcome(outcome));
-      await refreshVault();
-      if (outcome.slug) {
-        navigate(`/n/${encodeURIComponent(outcome.slug)}`);
-      }
-    } catch (error) {
-      setNoteActionError(
-        error instanceof Error ? error.message : "Archive failed",
-      );
-    }
-  }, [navigate, refreshVault, requireActiveNoteHash]);
-
-  const handleDeleteNote = useCallback(async () => {
-    setNoteActionError(null);
-    try {
-      const { slug, contentHash } = requireActiveNoteHash();
-      const outcome = await deleteNote(slug, contentHash);
-      setNoteActionDialog(null);
-      setWriteNotice(describeWriteOutcome(outcome));
-      await refreshVault();
-      navigate("/");
-    } catch (error) {
-      setNoteActionError(
-        error instanceof Error ? error.message : "Delete failed",
-      );
-    }
-  }, [navigate, refreshVault, requireActiveNoteHash]);
 
   return (
     <div
@@ -729,22 +412,10 @@ function App() {
         onDownloadMarkdown={() => downloadMarkdown()}
         onEditNote={() => setEditRequestId((prev) => prev + 1)}
         onNewNote={() => openCreateDialog("")}
-        onRenameNote={() => {
-          setNoteActionError(null);
-          setNoteActionDialog("rename");
-        }}
-        onMoveNote={() => {
-          setNoteActionError(null);
-          setNoteActionDialog("move");
-        }}
-        onArchiveNote={() => {
-          setNoteActionError(null);
-          setNoteActionDialog("archive");
-        }}
-        onDeleteNote={() => {
-          setNoteActionError(null);
-          setNoteActionDialog("delete");
-        }}
+        onRenameNote={() => openActionDialog("rename")}
+        onMoveNote={() => openActionDialog("move")}
+        onArchiveNote={() => openActionDialog("archive")}
+        onDeleteNote={() => openActionDialog("delete")}
         onCycleTheme={cycleTheme}
       />
 

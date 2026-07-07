@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { apiFetch } from "../api";
-import { readErrorMessage } from "../apiError";
+import { apiFetch } from "../api/api";
+import { readErrorMessage } from "../api/apiError";
 
 import { StateBlock } from "./ui";
 import type {
