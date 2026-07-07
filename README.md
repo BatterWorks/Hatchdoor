@@ -5,6 +5,11 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="https://hatchdoor.battercloud.cc"><img alt="Live demo" src="https://img.shields.io/badge/live_demo-hatchdoor.battercloud.cc-e4572e"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
+</p>
+
 # Hatchdoor
 
 Hatchdoor is a self-hosted web app for browsing, searching, and editing an
@@ -16,6 +21,40 @@ search, graph data, and metadata. If the cache is deleted, Hatchdoor rebuilds it
 from the vault.
 
 Hatchdoor was fully vibecoded with help from Claude Code and Codex.
+
+<p align="center">
+  <a href="https://hatchdoor.battercloud.cc">
+    <img src="assets/screenshots/hero-light.png" width="900"
+      alt="Hatchdoor browsing a note: vault explorer on the left, rendered Markdown with wikilinks in the centre, and an on-this-page outline on the right">
+  </a>
+</p>
+
+<p align="center">
+  <b><a href="https://hatchdoor.battercloud.cc">&#9654;&nbsp; Try the live demo</a></b> — a read-only public vault.
+</p>
+
+<details>
+<summary><b>Contents</b></summary>
+
+- [What You Get](#what-you-get)
+- [Screenshots](#screenshots)
+- [Who It Is For](#who-it-is-for)
+- [Quick Start With Docker](#quick-start-with-docker)
+- [Data And Safety Model](#data-and-safety-model)
+- [Permissions](#permissions)
+- [Configuration](#configuration)
+- [Using Hatchdoor](#using-hatchdoor)
+- [MCP Agent Access](#mcp-agent-access)
+- [Git Sync](#git-sync)
+- [Running Without Docker](#running-without-docker)
+- [Troubleshooting](#troubleshooting)
+- [API Reference](#api-reference)
+- [Security Notes](#security-notes)
+- [Development](#development)
+- [Project Docs](#project-docs)
+- [License](#license)
+
+</details>
 
 ## What You Get
 
@@ -32,6 +71,31 @@ Hatchdoor was fully vibecoded with help from Claude Code and Codex.
 - Optional MCP endpoint for agent access.
 - Optional automatic git commits and pushes for Hatchdoor writes.
 - PWA assets and service worker caching for common read paths.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/graph-light.png" width="100%" alt="Interactive knowledge graph of notes, links, and tags">
+      <p align="center"><sub><b>Knowledge graph</b> — notes, links, and tags</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/search-light.png" width="100%" alt="Search results with snippets for a natural-language query">
+      <p align="center"><sub><b>Semantic + keyword search</b></sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="assets/screenshots/hero-dark.png" width="100%" alt="Note view rendered in dark mode">
+      <p align="center"><sub><b>Dark mode</b></sub></p>
+    </td>
+    <td width="50%" valign="top" align="center">
+      <img src="assets/screenshots/mobile-light.png" width="260" alt="Responsive mobile layout on a phone">
+      <p align="center"><sub><b>Responsive &amp; installable (PWA)</b></sub></p>
+    </td>
+  </tr>
+</table>
 
 ## Who It Is For
 
