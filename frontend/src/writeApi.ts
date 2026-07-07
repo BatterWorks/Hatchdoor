@@ -5,6 +5,14 @@ import type {
   WriteOutcome,
 } from "./types";
 
+/** Uploads can carry files up to the server's 10 MB cap; on a slow uplink that
+ * legitimately takes minutes, so they must not inherit the short read timeout. */
+export const UPLOAD_FETCH_TIMEOUT_MS = 300_000;
+/** Mutations rebuild the vault index server-side under the write lock, which on
+ * a large vault can exceed the read timeout. Aborting early is worse than
+ * waiting: the server still applies the write, so a retry hits a conflict. */
+export const MUTATION_FETCH_TIMEOUT_MS = 60_000;
+
 /**
  * Build a human-readable summary of the side effects reported by a write so
  * they can be surfaced to the user. Returns null when a write completed
@@ -92,6 +100,7 @@ function makeWriteError(message: string, status: number): Error {
 async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const res = await apiFetch(url, {
     ...init,
+    timeoutMs: MUTATION_FETCH_TIMEOUT_MS,
     headers: {
       "content-type": "application/json",
       ...((init.headers as Record<string, string>) ?? {}),
@@ -131,6 +140,7 @@ export async function uploadAttachment(
   const res = await apiFetch("/api/attachment", {
     method: "POST",
     body: form,
+    timeoutMs: UPLOAD_FETCH_TIMEOUT_MS,
   });
   if (!res.ok) {
     throw makeWriteError(await parseError(res), res.status);

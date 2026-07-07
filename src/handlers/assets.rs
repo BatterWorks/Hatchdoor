@@ -33,6 +33,13 @@ pub async fn vault_asset_handler(
 
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    // Cacheable in the browser (assets re-render on every note view) but never
+    // in shared caches: authenticated deployments carry ?access_token= in the
+    // asset URL, which must not be stored by a proxy.
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=3600"),
+    );
     if content_type == "image/svg+xml" {
         // SVGs can carry scripts that execute on direct navigation. Sandbox the
         // document and force a download on navigation; <img> embedding (which

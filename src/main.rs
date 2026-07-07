@@ -1175,6 +1175,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_assets_are_served_with_private_cache_control() {
+        // Assets must be browser-cacheable (they re-render on every note view)
+        // but never shared-cacheable: authenticated deployments put
+        // ?access_token= in asset URLs.
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        std::fs::write(state.vault_path.join("diagram.png"), b"png-bytes").expect("write asset");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/vault-assets/diagram.png")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .and_then(|value| value.to_str().ok()),
+            Some("private, max-age=3600")
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn demo_mode_rejects_refresh_endpoint() {
+        // A full reindex re-embeds the whole vault; on an unauthenticated public
+        // demo that is a request-loop CPU DoS, so demo mode must refuse it.
+        let (app, _tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let revision_before = state
+            .vault_revision
+            .load(std::sync::atomic::Ordering::SeqCst);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/refresh")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            state
+                .vault_revision
+                .load(std::sync::atomic::Ordering::SeqCst),
+            revision_before,
+            "demo refresh must not run a reindex"
+        );
+    }
+
+    #[tokio::test]
     async fn write_api_delete_rejects_stale_hash() {
         let (app, _tmp) = app_for_tests();
 

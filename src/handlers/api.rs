@@ -16,7 +16,7 @@ use crate::api_types::{
     ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, VaultEventResponse,
 };
 
-use crate::app_state::{AppState, refresh_if_needed, run_blocking, sqlite_cache};
+use crate::app_state::{AppState, refresh_coalescing, run_blocking, sqlite_cache};
 
 /// Upper bound on targets accepted by `/api/resolve-batch` (DoS guard).
 const MAX_RESOLVE_BATCH: usize = 200;
@@ -144,7 +144,12 @@ pub async fn resolve_batch_handler(
 }
 
 pub async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match refresh_if_needed(&state).await {
+    // A refresh re-embeds the whole vault; on an unauthenticated public demo
+    // that would be a request-loop CPU DoS. The watcher keeps the demo fresh.
+    if let Some(response) = crate::handlers::write_api::reject_demo_mode_write(&state) {
+        return response;
+    }
+    match refresh_coalescing(&state).await {
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
     }
