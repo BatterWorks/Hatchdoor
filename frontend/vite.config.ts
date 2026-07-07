@@ -54,6 +54,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:42824",
       "/health": "http://127.0.0.1:42824",
+      "/vault-assets": "http://127.0.0.1:42824",
     },
   },
   test: {
