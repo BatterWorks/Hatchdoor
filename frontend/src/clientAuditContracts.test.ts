@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import appCss from "./App.css?raw";
 import noteActionsSource from "./components/NoteActionsDialog.tsx?raw";
-import graphPageSource from "./components/GraphPage.tsx?raw";
+import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
 import noteEditorSource from "./components/NoteEditor.tsx?raw";
 import wikilinksSource from "./components/note-page/wikilinks.ts?raw";

@@ -9,7 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
-import { escapeMarkdownLabel } from "./markdown";
+import { escapeMarkdownLabel } from "./lib/markdown";
 
 afterEach(() => {
   cleanup();

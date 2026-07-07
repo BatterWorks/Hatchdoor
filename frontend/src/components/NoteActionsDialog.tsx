@@ -5,7 +5,7 @@ import {
   clearCreateDraft,
   loadCreateDraft,
   saveCreateDraft,
-} from "../writeDrafts";
+} from "../lib/writeDrafts";
 
 export type NoteActionDialogKind =
   | "create"

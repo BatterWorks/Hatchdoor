@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 
-import { escapeMarkdownLabel, parseWikilinkTarget } from "../../markdown";
-import { slugifyHeading } from "../../noteHeadings";
-import { apiFetch, withAccessToken } from "../../api";
+import { escapeMarkdownLabel, parseWikilinkTarget } from "../../lib/markdown";
+import { slugifyHeading } from "../../lib/noteHeadings";
+import { apiFetch, withAccessToken } from "../../api/api";
 import type { ResolveBatchResponse } from "../../types";
 
 export function useResolvedWikilinks(
