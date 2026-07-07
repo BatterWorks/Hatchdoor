@@ -1,5 +1,3 @@
-use std::env;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -8,81 +6,11 @@ use axum::Json;
 use axum::http::StatusCode;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info};
-use tracing_subscriber::EnvFilter;
 
 use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::vault::{VaultIndex, seed_empty_vault};
-
-#[derive(Debug, Clone)]
-pub struct AppConfig {
-    pub vault_path: PathBuf,
-    pub cache_db_path: PathBuf,
-    pub host: String,
-    pub port: u16,
-    /// When set, every `/api/*`, asset, and download request must present this
-    /// token (Bearer header or `access_token` query parameter).
-    pub web_bearer_token: Option<String>,
-    /// Public demo mode: allows unauthenticated public browsing while disabling
-    /// every app-level write surface.
-    pub demo_mode: bool,
-    /// Folder prefix (with trailing slash) treated as archived in resolve results.
-    pub archive_prefix: String,
-}
-
-impl AppConfig {
-    pub fn from_env() -> Result<Self, String> {
-        let vault_path = env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
-        let cache_db_path = env::var("HATCHDOOR_CACHE_DB")
-            .unwrap_or_else(|_| "./data/cache/hatchdoor-cache.sqlite3".to_string());
-        let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
-        let port_raw = env::var("PORT").unwrap_or_else(|_| "42824".to_string());
-        let web_bearer_token = env::var("HATCHDOOR_WEB_BEARER_TOKEN")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let demo_mode = env::var("HATCHDOOR_DEMO_MODE")
-            .map(|value| is_truthy(&value))
-            .unwrap_or(false);
-        let archive_prefix = env::var("HATCHDOOR_ARCHIVE_PREFIX")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "90-archive/".to_string());
-
-        let port = parse_port(&port_raw)?;
-
-        Ok(Self {
-            vault_path: PathBuf::from(vault_path),
-            cache_db_path: PathBuf::from(cache_db_path),
-            host,
-            port,
-            web_bearer_token,
-            demo_mode,
-            archive_prefix,
-        })
-    }
-
-    pub fn socket_addr(&self) -> Result<SocketAddr, String> {
-        format!("{}:{}", self.host, self.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| format!("invalid bind address: {e}"))
-    }
-}
-
-pub fn parse_port(input: &str) -> Result<u16, String> {
-    input
-        .parse::<u16>()
-        .map_err(|e| format!("invalid PORT '{input}': {e}"))
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -118,17 +46,6 @@ impl AppState {
 
 pub struct VaultCache {
     pub sqlite: Arc<SqliteCache>,
-}
-
-pub fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("hatchdoor=info,tower_http=info,axum::rejection=warn"));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .init();
 }
 
 pub fn build_cache(vault_path: &PathBuf, embedder: &dyn Embedder) -> Result<VaultCache, String> {
@@ -243,33 +160,6 @@ pub fn test_embedder() -> Arc<dyn Embedder> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
-
-    #[test]
-    fn parse_port_accepts_valid_u16() {
-        assert_eq!(parse_port("42824").expect("valid port"), 42824);
-    }
-
-    #[test]
-    fn parse_port_rejects_invalid_values() {
-        assert!(parse_port("70000").is_err());
-        assert!(parse_port("abc").is_err());
-    }
-
-    #[test]
-    fn socket_addr_builds_expected_address() {
-        let cfg = AppConfig {
-            vault_path: PathBuf::from("./vault"),
-            cache_db_path: PathBuf::from("./data/cache/hatchdoor-cache.sqlite3"),
-            host: "0.0.0.0".to_string(),
-            port: 42824,
-            web_bearer_token: None,
-            demo_mode: true,
-            archive_prefix: "90-archive/".to_string(),
-        };
-
-        let addr = cfg.socket_addr().expect("valid addr");
-        assert_eq!(addr.to_string(), "0.0.0.0:42824");
-    }
 
     #[test]
     fn build_cache_seeds_fresh_vault_before_indexing() {

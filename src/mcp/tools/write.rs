@@ -1,412 +1,27 @@
+//! Mutating MCP tools: note and attachment writes, plus the write-side
+//! helpers (index building, git-sync bookkeeping, result shaping). Gated by
+//! `HATCHDOOR_MCP_WRITE_ENABLED` at the dispatch layer in `mod.rs`.
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::api_types::RefreshResponse;
-use crate::app_state::{AppState, refresh_now, sqlite_cache};
-use crate::search::SearchRequest;
+use crate::app_state::{AppState, refresh_now};
 use crate::vault::VaultIndex;
 use crate::vault::{
-    AttachmentOutcome, SectionMode, WriteError, WriteOutcome, allowed_attachment_extensions,
-    append_note, archive_note, create_note, delete_attachment, delete_note, edit_note,
-    import_attachment, list_note_attachments, move_attachment, move_or_rename_note,
-    rename_attachment, replace_section, update_note,
+    AttachmentOutcome, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
+    create_note, delete_attachment, delete_note, edit_note, import_attachment,
+    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
+    replace_section, update_note,
 };
 
-use super::config::McpConfig;
-use super::protocol::{JsonRpcFailure, tool_error, tool_success};
+use super::super::config::McpConfig;
+use super::super::protocol::{JsonRpcFailure, tool_success};
+use super::{SlugArgs, non_empty_argument, read_only_tool_annotations, write_tool_annotations};
 
-pub async fn handle_tools_call(
+pub(super) async fn create_note_tool(
     state: AppState,
-    params: Option<Value>,
-    config: &McpConfig,
+    arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let params =
-        params.ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool call params"))?;
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool name"))?;
-    let arguments = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-
-    let outcome = match name {
-        "search_notes" => search_notes_tool(state, arguments).await,
-        "get_note" => get_note_tool(state, arguments).await,
-        "get_note_links" => get_note_links_tool(state, arguments).await,
-        "resolve_wikilink" => resolve_wikilink_tool(state, arguments).await,
-        "get_tree" => get_tree_tool(state, arguments).await,
-        "refresh_index" => refresh_index_tool(state, arguments).await,
-        "get_git_sync_status" => get_git_sync_status_tool(state).await,
-        "get_attachment_import_config" if config.write_enabled => {
-            get_attachment_import_config_tool(config)
-        }
-        "get_attachment_import_config" => Ok(tool_success(json!({
-            "enabled": false,
-            "staging_path": null,
-            "staging_path_kind": "hidden",
-            "host_staging_path": null,
-            "host_staging_path_kind": "hidden",
-            "allowed_extensions": allowed_attachment_extensions(),
-            "max_bytes": config.max_attachment_bytes,
-            "usage": "Enable HATCHDOOR_MCP_WRITE_ENABLED to use staged attachment imports."
-        }))),
-        "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
-        | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
-            if config.write_enabled =>
-        {
-            // Hold the vault write lock for the whole tool call so a concurrent
-            // git-sync merge/reset cannot race a filesystem write.
-            let _guard = state.vault_write_lock.clone().lock_owned().await;
-            match name {
-                "create_note" => create_note_tool(state, arguments).await,
-                "update_note" => update_note_tool(state, arguments).await,
-                "append_to_note" => append_to_note_tool(state, arguments).await,
-                "edit_note" => edit_note_tool(state, arguments).await,
-                "replace_section" => replace_section_tool(state, arguments).await,
-                "rename_note" => rename_note_tool(state, arguments).await,
-                "move_note" => move_note_tool(state, arguments).await,
-                "move_rename_note" => move_rename_note_tool(state, arguments).await,
-                "archive_note" => archive_note_tool(state, arguments).await,
-                "delete_note" => delete_note_tool(state, arguments).await,
-                "import_attachment" => import_attachment_tool(state, arguments, config).await,
-                "move_attachment" => move_attachment_tool(state, arguments).await,
-                "rename_attachment" => rename_attachment_tool(state, arguments).await,
-                "delete_attachment" => delete_attachment_tool(state, arguments).await,
-                _ => unreachable!(),
-            }
-        }
-        "list_note_attachments" if config.write_enabled => {
-            list_note_attachments_tool(state, arguments).await
-        }
-        "create_note"
-        | "update_note"
-        | "append_to_note"
-        | "edit_note"
-        | "replace_section"
-        | "rename_note"
-        | "move_note"
-        | "move_rename_note"
-        | "archive_note"
-        | "delete_note"
-        | "import_attachment"
-        | "move_attachment"
-        | "rename_attachment"
-        | "delete_attachment"
-        | "list_note_attachments" => Err(JsonRpcFailure::invalid_params(
-            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
-        )),
-        other => Err(JsonRpcFailure::invalid_params(format!(
-            "Unknown MCP tool: {other}"
-        ))),
-    };
-
-    // Tool-level failures (e.g. "note not found") are rendered as an isError
-    // tool result so read and write tools report the same conditions the same
-    // way; genuine protocol errors stay JSON-RPC errors.
-    match outcome {
-        Err(failure) if failure.tool_level => Ok(tool_error(failure.message)),
-        other => other,
-    }
-}
-
-pub fn tools_list(config: &McpConfig) -> Vec<Value> {
-    let mut tools = vec![
-        json!({
-            "name": "search_notes",
-            "description": "Semantic-first chunk search across the vault. Returns ranked chunks with parent note metadata and the parent note's outbound wikilinks. The default semantic mode uses vector similarity — phrase queries as natural language descriptions of what you're looking for, not keyword lists (e.g. \"how should I structure my backup strategy\" beats \"backup strategy\"). Use mode=\"keyword\" when the exact term or phrasing matters (tags, proper names, code symbols). Use get_note for full note content of a returned slug.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Search query."
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["semantic", "keyword"],
-                        "default": "semantic",
-                        "description": "Retrieval mode. semantic = vector similarity (default). keyword = FTS5 BM25 over chunk content."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 50,
-                        "default": 10
-                    },
-                    "per_note_cap": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10,
-                        "default": 2,
-                        "description": "Maximum number of chunks returned from any single note."
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_note",
-            "description": "Fetch full Markdown content for one known slug. Use only after search_notes or resolve_wikilink identifies the slug; avoid fetching many full notes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Hatchdoor note slug."
-                    }
-                },
-                "required": ["slug"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_note_links",
-            "description": "Fetch outgoing links and backlinks for one known slug. Use when note relationships help answer the user.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Hatchdoor note slug."
-                    }
-                },
-                "required": ["slug"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "resolve_wikilink",
-            "description": "Resolve an Obsidian wikilink target to a Hatchdoor slug before fetching a note.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Wikilink target without surrounding [[ ]]."
-                    }
-                },
-                "required": ["target"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_tree",
-            "description": "Return the full explorer tree. Use only for vault structure, folders, or navigation questions; do not use for normal search or Q&A.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "refresh_index",
-            "description": "Refresh Hatchdoor's SQLite view of the vault. Only needed for changes made outside this MCP session (e.g. the user edited a note directly). All write tools already trigger a synchronous reindex before returning, so do not call this after create_note, update_note, append_to_note, or any other write tool.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": refresh_tool_annotations()
-        }),
-        json!({
-            "name": "get_attachment_import_config",
-            "description": "Return MCP attachment staging configuration, allowed extensions, max size, and usage guidance. Use before importing attachments.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_git_sync_status",
-            "description": "Report the status of automatic git sync: whether it is enabled, the last sync time, whether the last attempt succeeded, the last error (if any), and how many writes are pending. Use to check whether your changes have been committed and pushed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-    ];
-    if config.write_enabled {
-        tools.extend(write_tools_list());
-    }
-    tools
-}
-
-async fn search_notes_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    let args: SearchNotesArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid search_notes arguments: {error}"))
-    })?;
-    let query = args.query.trim().to_string();
-    if query.is_empty() {
-        return Err(JsonRpcFailure::invalid_params(
-            "search_notes query cannot be empty",
-        ));
-    }
-
-    let limit = args.limit.unwrap_or(10).clamp(1, 50);
-    let per_note_cap = args.per_note_cap.unwrap_or(2).clamp(1, 10);
-    let mode = args.mode.unwrap_or_default();
-
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let embedder = state.embedder.as_ref();
-
-    let req = SearchRequest {
-        query,
-        mode,
-        limit,
-        per_note_cap,
-    };
-    let response =
-        crate::search::run(cache.as_ref(), embedder, req).map_err(JsonRpcFailure::internal)?;
-
-    Ok(tool_success(serde_json::to_value(&response).map_err(
-        |e| JsonRpcFailure::internal(format!("serialize search response: {e}")),
-    )?))
-}
-
-async fn get_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_note arguments: {error}"))
-    })?;
-    let slug = non_empty_argument("slug", args.slug)?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let note = cache
-        .read_note_by_slug(&slug)
-        .map_err(JsonRpcFailure::internal)?;
-
-    match note {
-        Some(note) => Ok(tool_success(json!({ "note": note }))),
-        None => Ok(tool_error(format!("Note not found: {slug}"))),
-    }
-}
-
-async fn get_note_links_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_note_links arguments: {error}"))
-    })?;
-    let slug = non_empty_argument("slug", args.slug)?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    match cache.note_links(&slug).map_err(JsonRpcFailure::internal)? {
-        Some(links) => Ok(tool_success(json!({ "links": links }))),
-        None => Ok(tool_error(format!("Note not found: {slug}"))),
-    }
-}
-
-async fn resolve_wikilink_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    let args: ResolveWikilinkArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid resolve_wikilink arguments: {error}"))
-    })?;
-    let target = non_empty_argument("target", args.target)?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    let slug = cache
-        .resolve_wikilink(&target)
-        .map_err(JsonRpcFailure::internal)?;
-    Ok(tool_success(json!({ "slug": slug })))
-}
-
-async fn get_tree_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    reject_non_empty_arguments("get_tree", &arguments)?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let tree = cache.explorer_tree().map_err(JsonRpcFailure::internal)?;
-
-    Ok(tool_success(json!({ "tree": tree })))
-}
-
-async fn refresh_index_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
-    reject_non_empty_arguments("refresh_index", &arguments)?;
-    refresh_now(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    Ok(tool_success(json!(RefreshResponse { refreshed: true })))
-}
-
-async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailure> {
-    let status = match &state.git_sync {
-        Some(handle) => {
-            let guard = handle.status();
-            let snapshot = guard.read().await;
-            serde_json::to_value(&*snapshot)
-                .map_err(|e| JsonRpcFailure::internal(format!("serialize git status: {e}")))?
-        }
-        None => json!({
-            "enabled": false,
-            "last_sync_at": null,
-            "last_ok": false,
-            "last_error": null,
-            "last_error_kind": null,
-            "pending": 0,
-            "unpushed": 0
-        }),
-    };
-    Ok(tool_success(status))
-}
-
-/// Returns the last sync error message when the most recent sync failed.
-async fn git_sync_warning(state: &AppState) -> Option<String> {
-    let handle = state.git_sync.as_ref()?;
-    let guard = handle.status();
-    let snapshot = guard.read().await;
-    if snapshot.last_ok {
-        None
-    } else {
-        snapshot
-            .last_error
-            .clone()
-            .map(|e| format!("git sync has not succeeded since: {e}"))
-    }
-}
-
-fn get_attachment_import_config_tool(config: &McpConfig) -> Result<Value, JsonRpcFailure> {
-    let host_staging_path = if config.advertise_host_paths {
-        config.host_attachment_staging_path.clone()
-    } else {
-        None
-    };
-    Ok(tool_success(json!({
-        "enabled": config.write_enabled && config.attachment_staging_path.is_some(),
-        "staging_path": config
-            .attachment_staging_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        "staging_path_kind": "container",
-        "host_staging_path": host_staging_path,
-        "host_staging_path_kind": if config.advertise_host_paths { "host_hint" } else { "hidden" },
-        "allowed_extensions": allowed_attachment_extensions(),
-        "max_bytes": config.max_attachment_bytes,
-        "usage": "Place files in the advertised staging folder, then call import_attachment with staged_filename and target_relative_path."
-    })))
-}
-
-async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
     let args: CreateNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid create_note arguments: {error}"))
     })?;
@@ -417,7 +32,10 @@ async fn create_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     finalize_note_write(&state, "create", outcome, args.commit_summary).await
 }
 
-async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn update_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: UpdateNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid update_note arguments: {error}"))
     })?;
@@ -428,7 +46,10 @@ async fn update_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     finalize_note_write(&state, "update", outcome, args.commit_summary).await
 }
 
-async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn append_to_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: AppendNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid append_to_note arguments: {error}"))
     })?;
@@ -440,7 +61,10 @@ async fn append_to_note_tool(state: AppState, arguments: Value) -> Result<Value,
     finalize_note_write(&state, "append", outcome, args.commit_summary).await
 }
 
-async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn edit_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: EditNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid edit_note arguments: {error}"))
     })?;
@@ -457,7 +81,10 @@ async fn edit_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     finalize_note_write(&state, "edit", outcome, args.commit_summary).await
 }
 
-async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn replace_section_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: ReplaceSectionArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid replace_section arguments: {error}"))
     })?;
@@ -485,7 +112,10 @@ async fn replace_section_tool(state: AppState, arguments: Value) -> Result<Value
     finalize_note_write(&state, "replace_section", outcome, args.commit_summary).await
 }
 
-async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn rename_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: RenameNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid rename_note arguments: {error}"))
     })?;
@@ -509,7 +139,10 @@ async fn rename_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     finalize_note_write(&state, "rename", outcome, args.commit_summary).await
 }
 
-async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn move_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: MoveNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid move_note arguments: {error}"))
     })?;
@@ -537,7 +170,10 @@ async fn move_note_tool(state: AppState, arguments: Value) -> Result<Value, Json
     finalize_note_write(&state, "move", outcome, args.commit_summary).await
 }
 
-async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn move_rename_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: MoveRenameNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid move_rename_note arguments: {error}"))
     })?;
@@ -556,7 +192,10 @@ async fn move_rename_note_tool(state: AppState, arguments: Value) -> Result<Valu
     finalize_note_write(&state, "move_rename", outcome, args.commit_summary).await
 }
 
-async fn archive_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn archive_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: ArchiveNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid archive_note arguments: {error}"))
     })?;
@@ -573,7 +212,10 @@ async fn archive_note_tool(state: AppState, arguments: Value) -> Result<Value, J
     finalize_note_write(&state, "archive", outcome, args.commit_summary).await
 }
 
-async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn delete_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: DeleteNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid delete_note arguments: {error}"))
     })?;
@@ -589,7 +231,7 @@ async fn delete_note_tool(state: AppState, arguments: Value) -> Result<Value, Js
     finalize_note_write(&state, "delete", outcome, args.commit_summary).await
 }
 
-async fn import_attachment_tool(
+pub(super) async fn import_attachment_tool(
     state: AppState,
     arguments: Value,
     config: &McpConfig,
@@ -618,7 +260,10 @@ async fn import_attachment_tool(
     Ok(attachment_success(outcome, warning))
 }
 
-async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value, JsonRpcFailure> {
+pub(super) async fn move_attachment_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
     let args: MoveAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid move_attachment arguments: {error}"))
     })?;
@@ -640,7 +285,7 @@ async fn move_attachment_tool(state: AppState, arguments: Value) -> Result<Value
     Ok(attachment_success(outcome, warning))
 }
 
-async fn rename_attachment_tool(
+pub(super) async fn rename_attachment_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
@@ -664,7 +309,7 @@ async fn rename_attachment_tool(
     Ok(attachment_success(outcome, warning))
 }
 
-async fn delete_attachment_tool(
+pub(super) async fn delete_attachment_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
@@ -682,7 +327,7 @@ async fn delete_attachment_tool(
     Ok(attachment_success(outcome, warning))
 }
 
-async fn list_note_attachments_tool(
+pub(super) async fn list_note_attachments_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
@@ -763,6 +408,21 @@ fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<Str
         .map(|entry| entry.slug)
 }
 
+/// Returns the last sync error message when the most recent sync failed.
+async fn git_sync_warning(state: &AppState) -> Option<String> {
+    let handle = state.git_sync.as_ref()?;
+    let guard = handle.status();
+    let snapshot = guard.read().await;
+    if snapshot.last_ok {
+        None
+    } else {
+        snapshot
+            .last_error
+            .clone()
+            .map(|e| format!("git sync has not succeeded since: {e}"))
+    }
+}
+
 fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     match error {
         WriteError::InvalidInput(message) => JsonRpcFailure::invalid_params(message),
@@ -839,58 +499,7 @@ fn replace_filename(relative_path: &str, new_title: &str) -> String {
     }
 }
 
-fn reject_non_empty_arguments(tool_name: &str, arguments: &Value) -> Result<(), JsonRpcFailure> {
-    if arguments
-        .as_object()
-        .map(|object| object.is_empty())
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-
-    Err(JsonRpcFailure::invalid_params(format!(
-        "{tool_name} does not accept arguments"
-    )))
-}
-
-fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
-    let value = value.trim().to_string();
-    if value.is_empty() {
-        return Err(JsonRpcFailure::invalid_params(format!(
-            "{name} cannot be empty"
-        )));
-    }
-    Ok(value)
-}
-
-fn read_only_tool_annotations() -> Value {
-    json!({
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-    })
-}
-
-fn refresh_tool_annotations() -> Value {
-    json!({
-        "readOnlyHint": false,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-    })
-}
-
-fn write_tool_annotations(destructive: bool, idempotent: bool) -> Value {
-    json!({
-        "readOnlyHint": false,
-        "destructiveHint": destructive,
-        "idempotentHint": idempotent,
-        "openWorldHint": false,
-    })
-}
-
-fn write_tools_list() -> Vec<Value> {
+pub(super) fn write_tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "create_note",
@@ -1128,30 +737,6 @@ fn write_tools_list() -> Vec<Value> {
             "annotations": read_only_tool_annotations()
         }),
     ]
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchNotesArgs {
-    query: String,
-    #[serde(default)]
-    mode: Option<crate::search::SearchMode>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    per_note_cap: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SlugArgs {
-    slug: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResolveWikilinkArgs {
-    target: String,
 }
 
 #[derive(Debug, Deserialize)]
