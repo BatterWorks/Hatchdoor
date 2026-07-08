@@ -13,15 +13,15 @@
 # Hatchdoor
 
 Hatchdoor is a self-hosted, **agent-native** web app for your Obsidian-style
-Markdown vault. Browse, search, and edit your notes in a fast web UI — and give
+Markdown vault. Browse, search, and edit your notes in a fast web UI, and give
 AI agents first-class access to the very same vault over the Model Context
 Protocol (MCP).
 
-Point an MCP client like Claude, Claude Code, or Cursor at Hatchdoor and your
-agent can read, search (keyword and semantic), create, edit, move, and link
-notes — through the same safe, atomic vault operations the UI uses, with optional
-automatic git commit-and-push. The web UI and your agents are two front doors to
-one vault.
+Point an MCP client like Claude, Claude Code, Codex, Cursor, or Hermes at
+Hatchdoor and your agent can read, search (keyword and semantic), create, edit,
+move, and link notes. Every action goes through the same safe, atomic vault
+operations the UI uses, with optional automatic git commit-and-push. The web UI
+and your agents are two front doors to one vault.
 
 Your Markdown files stay the source of truth. Hatchdoor builds a disposable
 SQLite read model for fast browsing, links, backlinks, keyword search, semantic
@@ -38,7 +38,7 @@ Hatchdoor was fully vibecoded with help from Claude Code and Codex.
 </p>
 
 <p align="center">
-  <b><a href="https://hatchdoor.battercloud.cc">&#9654;&nbsp; Try the live demo</a></b> — a read-only public vault.
+  <b><a href="https://hatchdoor.battercloud.cc">&#9654;&nbsp; Try the live demo</a></b>, a read-only public vault.
 </p>
 
 <details>
@@ -87,7 +87,7 @@ Hatchdoor was fully vibecoded with help from Claude Code and Codex.
   <tr>
     <td width="50%" valign="top">
       <img src="assets/screenshots/graph-light.png" width="100%" alt="Interactive knowledge graph of notes, links, and tags">
-      <p align="center"><sub><b>Knowledge graph</b> — notes, links, and tags</sub></p>
+      <p align="center"><sub><b>Knowledge graph</b>: notes, links, and tags</sub></p>
     </td>
     <td width="50%" valign="top">
       <img src="assets/screenshots/search-light.png" width="100%" alt="Search results with snippets for a natural-language query">
