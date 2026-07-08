@@ -12,8 +12,16 @@
 
 # Hatchdoor
 
-Hatchdoor is a self-hosted web app for browsing, searching, and editing an
-Obsidian-style Markdown vault.
+Hatchdoor is a self-hosted, **agent-native** web app for your Obsidian-style
+Markdown vault. Browse, search, and edit your notes in a fast web UI — and give
+AI agents first-class access to the very same vault over the Model Context
+Protocol (MCP).
+
+Point an MCP client like Claude, Claude Code, or Cursor at Hatchdoor and your
+agent can read, search (keyword and semantic), create, edit, move, and link
+notes — through the same safe, atomic vault operations the UI uses, with optional
+automatic git commit-and-push. The web UI and your agents are two front doors to
+one vault.
 
 Your Markdown files stay the source of truth. Hatchdoor builds a disposable
 SQLite read model for fast browsing, links, backlinks, keyword search, semantic
@@ -68,7 +76,8 @@ Hatchdoor was fully vibecoded with help from Claude Code and Codex.
 - Recent notes, backlinks, outbound links, stats, and graph views.
 - Browser write support when the vault mount is writable.
 - Attachment uploads and local asset serving.
-- Optional MCP endpoint for agent access.
+- A first-class MCP server so AI agents can read, search, create, edit, and link
+  notes with the same safety as the UI.
 - Optional automatic git commits and pushes for Hatchdoor writes.
 - PWA assets and service worker caching for common read paths.
 
