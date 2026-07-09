@@ -153,7 +153,7 @@ mod tests {
                 ("beta.md", "# Beta\n\nanother body of text"),
                 (
                     "gamma.md",
-                    "# Gamma\n\nmergerfs pool layout on batterprox storage",
+                    "# Gamma\n\nstorage pool layout for the archive server",
                 ),
             ],
         );
@@ -167,7 +167,7 @@ mod tests {
 
         let queries = vec![Query {
             id: "Q1".to_string(),
-            query: "mergerfs pool layout batterprox".to_string(),
+            query: "storage pool layout archive server".to_string(),
             expected_notes: vec!["gamma".to_string()],
             expected_heading_path: None,
             anti_expected: vec![],

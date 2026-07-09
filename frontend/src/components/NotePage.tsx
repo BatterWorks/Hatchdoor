@@ -9,8 +9,9 @@ import {
 
 import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
-import { apiFetch } from "../api";
-import { normalizeImageForUpload } from "../imageUpload";
+import { apiFetch } from "../api/api";
+import { readErrorMessage } from "../api/apiError";
+import { normalizeImageForUpload } from "../lib/imageUpload";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -19,14 +20,14 @@ import {
   parseFrontmatter,
   stripBlockIds,
   stripVaultNoteLinks,
-} from "../markdown";
-import { extractMarkdownHeadings, slugifyHeading } from "../noteHeadings";
+} from "../lib/markdown";
+import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
   setActiveSearchHit as setActiveSearchHitClass,
-} from "../noteSearch";
-import { isNoteEqual, isNoteLinksEqual } from "../stateCompare";
+} from "../lib/noteSearch";
+import { isNoteEqual, isNoteLinksEqual } from "../lib/stateCompare";
 import type {
   ActiveNoteMeta,
   ExplorerNote,
@@ -38,8 +39,8 @@ import {
   describeWriteOutcome,
   updateNote,
   uploadAttachment,
-} from "../writeApi";
-import { clearNoteDraft, loadNoteDraft, saveNoteDraft } from "../writeDrafts";
+} from "../api/writeApi";
+import { clearNoteDraft, loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
@@ -114,7 +115,7 @@ export function NotePage({
       try {
         const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
         if (!res.ok) {
-          throw new Error(`Failed loading note: ${res.status}`);
+          throw new Error(await readErrorMessage(res, "Failed loading note"));
         }
         const json = (await res.json()) as { note: Note };
         if (slug !== currentSlugRef.current) return;
@@ -133,7 +134,9 @@ export function NotePage({
     try {
       const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}/links`);
       if (!res.ok) {
-        throw new Error(`Failed loading note links: ${res.status}`);
+        throw new Error(
+          await readErrorMessage(res, "Failed loading note links"),
+        );
       }
       const json = (await res.json()) as NoteLinksResponse;
       if (slug !== currentSlugRef.current) return;
@@ -330,7 +333,8 @@ export function NotePage({
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
     } else if (matchHeading) {
-      const lastSegment = matchHeading.split(" > ").at(-1) ?? matchHeading;
+      const parts = matchHeading.split(" > ");
+      const lastSegment = parts[parts.length - 1] ?? matchHeading;
       jumpToHeading(slugifyHeading(lastSegment));
     }
 
@@ -403,7 +407,7 @@ export function NotePage({
     try {
       const res = await apiFetch(`/api/note/${encodeURIComponent(note.slug)}`);
       if (!res.ok) {
-        throw new Error(`Failed loading note: ${res.status}`);
+        throw new Error(await readErrorMessage(res, "Failed loading note"));
       }
       const json = (await res.json()) as { note: Note };
       setNote(json.note);
@@ -610,7 +614,7 @@ export function NotePage({
             )}
           />
         ) : (
-          <div ref={noteBodyRef} className="note-body">
+          <div ref={noteBodyRef} className="note-body" dir="auto">
             <ReactMarkdown
               remarkPlugins={[remarkGfm, remarkMath]}
               rehypePlugins={rehypePlugins}

@@ -2,6 +2,7 @@ use rusqlite::OptionalExtension;
 use tracing::warn;
 
 use super::SqliteCache;
+use crate::embed::Embedder;
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
@@ -14,11 +15,11 @@ impl SqliteCache {
             .map_err(|error| format!("failed to enable SQLite foreign keys: {error}"))?;
 
         match existing_schema_version(&conn)? {
-            Some(version) if version == SCHEMA_VERSION => {
+            SchemaState::Current => {
                 create_schema(&conn, embedding_dim)?;
                 Ok(())
             }
-            Some(version) => {
+            SchemaState::VersionMismatch(version) => {
                 warn!(
                     old = %version,
                     new = SCHEMA_VERSION,
@@ -28,15 +29,61 @@ impl SqliteCache {
                 create_schema(&conn, embedding_dim)?;
                 Ok(())
             }
-            None => {
+            SchemaState::Corrupt(reason) => {
+                warn!(
+                    reason = %reason,
+                    "SQLite cache is half-initialised (likely an interrupted first build); \
+                     wiping and rebuilding from Markdown"
+                );
+                wipe_schema(&conn)?;
+                create_schema(&conn, embedding_dim)?;
+                Ok(())
+            }
+            SchemaState::Fresh => {
                 create_schema(&conn, embedding_dim)?;
                 Ok(())
             }
         }
     }
+
+    /// If the cache already carries a *different* embedder identity than the one
+    /// about to build it, wipe and recreate the schema so no vectors from the
+    /// previous model survive into the new one's index (mixing embedding spaces
+    /// silently ruins semantic search). A cache with no stored identity yet
+    /// (fresh, or built by a version that never stamped it) is left alone — the
+    /// build stamps the current identity and there is no old model to conflict.
+    pub fn reset_if_embedder_changed(&self, embedder: &dyn Embedder) -> Result<(), String> {
+        let current = embedder.identity();
+        if let Some(stored) = self.get_metadata("embedder_id")?
+            && stored != current
+        {
+            warn!(
+                old = %stored,
+                new = %current,
+                "embedder identity changed; rebuilding the SQLite cache from scratch"
+            );
+            let conn = self.connection()?;
+            wipe_schema(&conn)?;
+            create_schema(&conn, embedder.embedding_dim())?;
+        }
+        Ok(())
+    }
 }
 
-fn existing_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>, String> {
+/// The state of an existing cache database, as read at startup.
+enum SchemaState {
+    /// No cache objects yet — a first-time build.
+    Fresh,
+    /// Fully initialised and on the current schema version.
+    Current,
+    /// Fully initialised but on an older/newer schema version → rebuild.
+    VersionMismatch(String),
+    /// Half-initialised (objects but no metadata, or metadata but no
+    /// schema_version) — typically an interrupted first build → rebuild.
+    Corrupt(String),
+}
+
+fn existing_schema_version(conn: &rusqlite::Connection) -> Result<SchemaState, String> {
     let metadata_exists: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metadata')",
@@ -54,12 +101,13 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>
             )
             .map_err(|error| format!("failed checking SQLite cache objects: {error}"))?;
         if object_count == 0 {
-            return Ok(None);
+            return Ok(SchemaState::Fresh);
         }
-        return Err(
-            "SQLite cache contains objects but no schema metadata. Delete the cache DB and restart Hatchdoor to rebuild it from Markdown."
-                .to_string(),
-        );
+        // Objects but no metadata table: the cache was rebuildable from Markdown
+        // anyway, so recover by wiping rather than bricking startup.
+        return Ok(SchemaState::Corrupt(
+            "cache objects exist but the metadata table is missing".to_string(),
+        ));
     }
 
     let version = conn
@@ -72,11 +120,11 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<Option<String>
         .map_err(|error| format!("failed reading SQLite cache schema version: {error}"))?;
 
     match version {
-        Some(version) => Ok(Some(version)),
-        None => Err(
-            "SQLite cache metadata exists but schema_version is missing. Delete the cache DB and restart Hatchdoor to rebuild it from Markdown."
-                .to_string(),
-        ),
+        Some(version) if version == SCHEMA_VERSION => Ok(SchemaState::Current),
+        Some(version) => Ok(SchemaState::VersionMismatch(version)),
+        None => Ok(SchemaState::Corrupt(
+            "metadata table exists but schema_version row is missing".to_string(),
+        )),
     }
 }
 
@@ -104,6 +152,11 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
     let sql = format!(
         r#"
         PRAGMA foreign_keys = ON;
+
+        -- Wrap schema creation in a transaction so it is all-or-nothing: an
+        -- interrupted build rolls back to an empty database (a clean "fresh"
+        -- state next startup) instead of a half-created one.
+        BEGIN;
 
         CREATE TABLE IF NOT EXISTS metadata (
             key TEXT PRIMARY KEY,
@@ -209,6 +262,8 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         INSERT INTO metadata(key, value)
         VALUES ('schema_version', '{version}')
         ON CONFLICT(key) DO NOTHING;
+
+        COMMIT;
         "#,
         dim = embedding_dim,
         version = SCHEMA_VERSION
@@ -221,6 +276,27 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
 #[cfg(test)]
 mod tests {
     use crate::cache::SqliteCache;
+
+    #[test]
+    fn interrupted_schema_init_rebuilds_instead_of_bricking_startup() {
+        // Simulate a crash during first-time init: the metadata table exists but
+        // the final schema_version INSERT never committed. On restart this must
+        // wipe-and-rebuild, not fail startup forever (which needed a human to
+        // delete the cache DB).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("cache.sqlite3");
+        {
+            let cache = SqliteCache::open(&path, 384).expect("initial open");
+            let conn = cache.connection().expect("conn");
+            conn.execute("DELETE FROM metadata WHERE key = 'schema_version'", [])
+                .expect("drop schema_version to mimic interrupted init");
+        }
+
+        let cache = SqliteCache::open(&path, 384)
+            .expect("reopen must rebuild the half-initialised cache, not brick startup");
+        let version: Option<String> = cache.get_metadata("schema_version").expect("get");
+        assert_eq!(version.as_deref(), Some(super::SCHEMA_VERSION));
+    }
 
     #[test]
     fn fresh_cache_creates_chunks_and_chunk_vectors_tables() {

@@ -36,7 +36,9 @@
   gap: 0.5rem;
   padding: 0.5rem 0.6rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 92, "wght" 600;
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -174,11 +176,18 @@
   color: var(--ink);
 }
 
-.note-toc-link[data-level="2"] { padding-left: 0.6rem; }
-.note-toc-link[data-level="3"] { padding-left: 1rem; color: var(--muted); }
+.note-toc-link[data-level="2"] {
+  padding-left: 0.6rem;
+}
+.note-toc-link[data-level="3"] {
+  padding-left: 1rem;
+  color: var(--muted);
+}
 .note-toc-link[data-level="4"],
 .note-toc-link[data-level="5"],
-.note-toc-link[data-level="6"] { padding-left: 1.3rem; }
+.note-toc-link[data-level="6"] {
+  padding-left: 1.3rem;
+}
 
 .note-toc-desktop {
   position: sticky;
@@ -204,7 +213,9 @@
   gap: 0.6rem;
   padding: 0.5rem 0.6rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 92, "wght" 600;
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
   font-size: 0.82rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;

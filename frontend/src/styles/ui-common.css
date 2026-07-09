@@ -6,7 +6,9 @@
   justify-content: center;
   gap: 0.4rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 92, "wght" 600;
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
   font-size: 0.74rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -16,15 +18,20 @@
   color: var(--ink);
   cursor: pointer;
   text-decoration: none;
-  transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
   border-radius: 0;
 }
 
-.ui-button:hover,
-.close-note:hover {
-  background: var(--paper-2);
-  color: var(--ink);
-  border-color: var(--rule-strong);
+@media (hover: hover) {
+  .ui-button:hover,
+  .close-note:hover {
+    background: var(--paper-2);
+    color: var(--ink);
+    border-color: var(--rule-strong);
+  }
 }
 
 .ui-button:active,
@@ -60,13 +67,17 @@
   padding: 0.36rem 0.85rem;
   border-color: var(--rule-strong);
   color: var(--muted);
-  font-variation-settings: "wdth" 96, "wght" 500;
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 500;
 }
 
-.topbar-search-trigger.ui-button:hover {
-  background: var(--ink);
-  color: var(--bg);
-  border-color: var(--ink);
+@media (hover: hover) {
+  .topbar-search-trigger.ui-button:hover {
+    background: var(--ink);
+    color: var(--bg);
+    border-color: var(--ink);
+  }
 }
 
 /* Panel wrapper */
@@ -87,7 +98,9 @@
 .state-block h2 {
   margin: 0 0 0.4rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 88, "wght" 700;
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
   font-size: 1.05rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -109,14 +122,23 @@
 
 .skeleton-line {
   height: 0.85rem;
-  background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2));
+  background: linear-gradient(
+    90deg,
+    var(--paper-2),
+    var(--paper),
+    var(--paper-2)
+  );
   background-size: 200% 100%;
   animation: shimmer 1.2s linear infinite;
 }
 
 @keyframes shimmer {
-  0% { background-position: 0 0; }
-  100% { background-position: 200% 0; }
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 
 /* Error / broken link */

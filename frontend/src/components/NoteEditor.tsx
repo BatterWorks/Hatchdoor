@@ -194,11 +194,22 @@ export function NoteEditor({
   const firstImageFile = (files: FileList | File[]) =>
     Array.from(files).find((file) => file.type.startsWith("image/"));
 
+  const firstClipboardImageFile = (clipboardData: DataTransfer) => {
+    const file = firstImageFile(clipboardData.files);
+    if (file) {
+      return file;
+    }
+    return Array.from(clipboardData.items)
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .find((item): item is File => item !== null);
+  };
+
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     if (!onUploadAttachment) {
       return;
     }
-    const file = firstImageFile(event.clipboardData.files);
+    const file = firstClipboardImageFile(event.clipboardData);
     if (!file) {
       return;
     }
@@ -333,6 +344,7 @@ export function NoteEditor({
             id={textareaId}
             ref={textareaRef}
             className="note-editor-textarea"
+            dir="auto"
             value={editorBody}
             disabled={saving}
             aria-expanded={showAutocomplete}

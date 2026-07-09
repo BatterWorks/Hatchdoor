@@ -11,6 +11,15 @@ pub trait Embedder: Send + Sync {
     /// Embedding dimensionality. Must be constant for the lifetime of the embedder.
     fn embedding_dim(&self) -> usize;
 
+    /// Stable identity of this embedding model (name + dimension). Persisted with
+    /// the cache so a model swap can be detected: reusing vectors produced by a
+    /// different model would silently mix incompatible embedding spaces in one
+    /// vector index. The default is deliberately opaque; real embedders override
+    /// it with their model id.
+    fn identity(&self) -> String {
+        format!("unknown-{}", self.embedding_dim())
+    }
+
     /// The exact tokenizer the embedder uses internally, so the chunker can
     /// pre-compute token counts that match the embedder's accounting.
     fn tokenizer(&self) -> Arc<Tokenizer>;
@@ -63,6 +72,10 @@ impl Embedder for StubEmbedder {
 
     fn embedding_dim(&self) -> usize {
         self.dim
+    }
+
+    fn identity(&self) -> String {
+        format!("stub-{}", self.dim)
     }
 
     fn tokenizer(&self) -> Arc<Tokenizer> {

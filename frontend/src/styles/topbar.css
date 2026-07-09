@@ -264,6 +264,8 @@
   cursor: pointer;
 }
 
-.topbar-mobile-path:hover {
-  background: var(--paper-2);
+@media (hover: hover) {
+  .topbar-mobile-path:hover {
+    background: var(--paper-2);
+  }
 }

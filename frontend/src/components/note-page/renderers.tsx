@@ -1,6 +1,6 @@
 import { Children, createElement, isValidElement, type ReactNode } from "react";
 
-import { assignHeadingId } from "../../noteHeadings";
+import { assignHeadingId } from "../../lib/noteHeadings";
 import {
   CalloutOrQuote,
   CodeBlock,

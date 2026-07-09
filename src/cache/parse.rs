@@ -208,8 +208,8 @@ mod tests {
         let headings = extract_headings("# One\ntext\n### Three");
         assert_eq!(headings.len(), 2);
         assert_eq!(headings[0].anchor, "one");
-        let tags = extract_tags("hello #topic/homelab #dns/network, ## no");
-        assert!(tags.contains("topic/homelab"));
+        let tags = extract_tags("hello #topic/network #dns/network, ## no");
+        assert!(tags.contains("topic/network"));
         assert!(tags.contains("dns/network"));
         assert_eq!(
             build_fts_query("réseau dns"),

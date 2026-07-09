@@ -28,7 +28,9 @@
 .search-header h2 {
   margin: 0;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 88, "wght" 700;
+  font-variation-settings:
+    "wdth" 88,
+    "wght" 700;
   font-size: 1rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -91,7 +93,8 @@
   text-align: left;
   background: var(--bg);
   cursor: pointer;
-  transition: border-color var(--dur) var(--ease),
+  transition:
+    border-color var(--dur) var(--ease),
     background var(--dur) var(--ease);
   border-radius: 0;
   border: none;
@@ -108,9 +111,11 @@
   overflow: hidden;
 }
 
-.search-result--primary:hover {
-  border-color: var(--hot);
-  background: var(--paper);
+@media (hover: hover) {
+  .search-result--primary:hover {
+    border-color: var(--hot);
+    background: var(--paper);
+  }
 }
 
 .search-result--primary:focus-visible {
@@ -129,9 +134,11 @@
   overflow: hidden;
 }
 
-.search-result--chunk:hover {
-  border-left-color: var(--hot);
-  background: var(--paper-2);
+@media (hover: hover) {
+  .search-result--chunk:hover {
+    border-left-color: var(--hot);
+    background: var(--paper-2);
+  }
 }
 
 .search-result--chunk:focus-visible {
@@ -156,8 +163,10 @@
   transition: color var(--dur) var(--ease);
 }
 
-.search-group-toggle:hover {
-  color: var(--hot);
+@media (hover: hover) {
+  .search-group-toggle:hover {
+    color: var(--hot);
+  }
 }
 
 .search-group-toggle:focus-visible {
@@ -169,7 +178,9 @@
 
 .result-title {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 100, "wght" 600;
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 600;
   font-size: 0.95rem;
   color: var(--ink);
 }

@@ -40,7 +40,9 @@
 
 .graph-title {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 85, "wght" 700;
+  font-variation-settings:
+    "wdth" 85,
+    "wght" 700;
   font-size: clamp(1.6rem, 3vw, 2.2rem);
   text-transform: uppercase;
   letter-spacing: -0.02em;
@@ -63,7 +65,9 @@
 
 .graph-meta-num {
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 80, "wght" 700;
+  font-variation-settings:
+    "wdth" 80,
+    "wght" 700;
   font-size: 1.1rem;
   letter-spacing: -0.03em;
   color: var(--ink);
@@ -151,6 +155,8 @@
   width: 100%;
   height: 100%;
   cursor: grab;
+  touch-action: none;
+  overscroll-behavior: contain;
 }
 
 .graph-canvas:active {
@@ -193,8 +199,15 @@
 }
 
 @keyframes graph-pulse {
-  0%, 100% { transform: scale(0.6); opacity: 0.15; }
-  50% { transform: scale(1.2); opacity: 0.35; }
+  0%,
+  100% {
+    transform: scale(0.6);
+    opacity: 0.15;
+  }
+  50% {
+    transform: scale(1.2);
+    opacity: 0.35;
+  }
 }
 
 .graph-loading-label {

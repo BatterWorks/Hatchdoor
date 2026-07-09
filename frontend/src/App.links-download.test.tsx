@@ -9,7 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
-import { escapeMarkdownLabel } from "./markdown";
+import { escapeMarkdownLabel } from "./lib/markdown";
 
 afterEach(() => {
   cleanup();
@@ -449,6 +449,80 @@ describe("App links/download", () => {
 
     await waitFor(() => {
       expect(clipboardWrite).toHaveBeenCalledWith("# Home\n\nClean body");
+    });
+  });
+
+  it("copies the note link through the fallback helper when clipboard API is unavailable", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+    const execCommandMock = vi.fn((command: string) => command === "copy");
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommandMock,
+    });
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/recently-modified")) {
+          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        }
+
+        if (url.includes("/api/write-capabilities")) {
+          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
+            status: 200,
+          });
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Notes/Home",
+                content: "# Home",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Copy note link" }),
+    );
+
+    await waitFor(() => {
+      expect(execCommandMock).toHaveBeenCalledWith("copy");
     });
   });
 

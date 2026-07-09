@@ -226,6 +226,56 @@ describe("App navigation/search", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("leaves transient vault event errors to EventSource reconnect logic", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/recently-modified")) {
+          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        }
+
+        if (url.includes("/api/write-capabilities")) {
+          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
+            status: 200,
+          });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Notes Explorer" }),
+    ).toBeInTheDocument();
+
+    act(() => {
+      window.__hatchdoorEventSources[0].emit("error", "");
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Access token required" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("does not install the old vault polling interval", async () => {
     const setIntervalSpy = vi.spyOn(window, "setInterval");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -498,9 +548,7 @@ describe("App navigation/search", () => {
     );
 
     fireEvent.click(await screen.findByRole("button", { name: "Search" }));
-    const input = await screen.findByPlaceholderText(
-      "Search notes…",
-    );
+    const input = await screen.findByPlaceholderText("Search notes…");
     fireEvent.change(input, { target: { value: "plan" } });
 
     expect(

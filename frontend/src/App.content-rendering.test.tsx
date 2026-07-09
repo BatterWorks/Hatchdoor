@@ -286,9 +286,7 @@ Body`,
       await screen.findByRole("button", { name: "#type/reference" }),
     );
 
-    const input = await screen.findByPlaceholderText(
-      "Search notes…",
-    );
+    const input = await screen.findByPlaceholderText("Search notes…");
     expect(input).toHaveValue("type/reference");
     const includeContent = screen.getByRole("checkbox");
     expect(includeContent).toBeChecked();

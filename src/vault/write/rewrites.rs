@@ -165,15 +165,32 @@ pub(super) fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
     if len >= 3 { Some((marker, len)) } else { None }
 }
 
+/// Apply a batch of note rewrites all-or-nothing. Each target's current content
+/// is captured before it is overwritten; if any later write fails, every file
+/// already written in this batch is restored to its captured content, so callers
+/// never observe a partially-applied rewrite (which would leave dangling or
+/// duplicated backlinks/asset references across the vault).
 pub(super) fn apply_rewrites(
     rewrites: Vec<TextRewrite>,
 ) -> Result<Vec<std::path::PathBuf>, WriteError> {
-    let mut written = Vec::with_capacity(rewrites.len());
-    for rewrite in rewrites {
-        atomic_write(&rewrite.path, &rewrite.content)?;
-        written.push(rewrite.path);
+    let mut written: Vec<(std::path::PathBuf, Option<String>)> = Vec::with_capacity(rewrites.len());
+    for rewrite in &rewrites {
+        // Capture the pre-write content so a later failure can restore it.
+        // Rewrite targets are existing tracked notes, so a read normally
+        // succeeds; None means the file was absent and there is nothing to
+        // restore it to.
+        let original = fs::read_to_string(&rewrite.path).ok();
+        if let Err(error) = atomic_write(&rewrite.path, &rewrite.content) {
+            for (path, prior) in written.iter().rev() {
+                if let Some(prior) = prior {
+                    let _ = atomic_write(path, prior);
+                }
+            }
+            return Err(error);
+        }
+        written.push((rewrite.path.clone(), original));
     }
-    Ok(written)
+    Ok(written.into_iter().map(|(path, _)| path).collect())
 }
 
 pub(super) fn rollback_rewrites(
@@ -214,4 +231,45 @@ pub(super) fn rewrite_content_or_read(
         .find(|rewrite| rewrite.path == path)
         .map(|rewrite| Ok(rewrite.content.clone()))
         .unwrap_or_else(|| fs::read_to_string(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn apply_rewrites_rolls_back_written_files_when_a_later_write_fails() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        // A real note that will be rewritten first (and must be restored), and a
+        // second rewrite whose path is under a non-existent directory so its
+        // atomic_write fails deterministically after the first already landed.
+        let a = root.join("A.md");
+        fs::write(&a, "orig A\n").unwrap();
+        let b = root.join("missing_dir").join("B.md");
+
+        let rewrites = vec![
+            TextRewrite {
+                path: a.clone(),
+                content: "new A\n".to_string(),
+            },
+            TextRewrite {
+                path: b.clone(),
+                content: "new B\n".to_string(),
+            },
+        ];
+
+        let err = apply_rewrites(rewrites).expect_err("second rewrite must fail");
+        assert!(matches!(err, WriteError::Io(_)));
+
+        // The first file must be rolled back to its original content, not left
+        // half-applied.
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            "orig A\n",
+            "A.md should be restored after the batch failed"
+        );
+    }
 }

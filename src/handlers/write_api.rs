@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
@@ -90,27 +90,68 @@ struct AttachmentOutcomeResponse {
 }
 
 pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let warnings = if state.web_auth_enabled {
-        Vec::new()
-    } else {
-        vec![
+    if state.demo_mode {
+        return (
+            StatusCode::OK,
+            Json(WriteCapabilitiesResponse {
+                enabled: false,
+                warnings: vec![
+                    "Hatchdoor demo mode is read-only; browser write features are disabled."
+                        .to_string(),
+                ],
+            }),
+        )
+            .into_response();
+    }
+
+    let vault_writable = vault_path_is_writable(&state.vault_path);
+    let mut warnings = Vec::new();
+    if vault_writable && !state.web_auth_enabled {
+        warnings.push(
             "Frontend writes are enabled without requiring Hatchdoor web authentication; this is unauthenticated and should not be exposed to untrusted networks.".to_string(),
-        ]
-    };
+        );
+    }
+    if !vault_writable {
+        warnings
+            .push("Vault path is not writable; browser write features are disabled.".to_string());
+    }
     (
         StatusCode::OK,
         Json(WriteCapabilitiesResponse {
-            enabled: true,
+            enabled: vault_writable,
             warnings,
         }),
     )
         .into_response()
 }
 
+fn vault_path_is_writable(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| !metadata.permissions().readonly())
+        .unwrap_or(false)
+}
+
+pub(crate) fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
+    state.demo_mode.then(|| {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Hatchdoor demo mode is read-only; write operations are disabled."
+                    .to_string(),
+            }),
+        )
+            .into_response()
+    })
+}
+
 pub async fn upload_attachment_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let mut target_relative_path: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
 
@@ -179,13 +220,19 @@ pub async fn upload_attachment_handler(
     };
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
-    let outcome = match import_attachment_bytes(
-        &state.vault_path,
-        &target_relative_path,
-        &file_bytes,
-        state.mcp_config.max_attachment_bytes,
-        false,
-    ) {
+    let vault_path = state.vault_path.clone();
+    let max_attachment_bytes = state.mcp_config.max_attachment_bytes;
+    let outcome = match run_write_op(move || {
+        import_attachment_bytes(
+            &vault_path,
+            &target_relative_path,
+            &file_bytes,
+            max_attachment_bytes,
+            false,
+        )
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -200,6 +247,10 @@ pub async fn create_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<CreateNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -210,7 +261,12 @@ pub async fn create_note_handler(
     };
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
-    let outcome = match create_note(&state.vault_path, &relative_path, &payload.content, false) {
+    let vault_path = state.vault_path.clone();
+    let outcome = match run_write_op(move || {
+        create_note(&vault_path, &relative_path, &payload.content, false)
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -226,6 +282,10 @@ pub async fn update_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<UpdateNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -239,7 +299,11 @@ pub async fn update_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let outcome = match update_note(&entry, &payload.content, &payload.expected_content_hash) {
+    let outcome = match run_write_op(move || {
+        update_note(&entry, &payload.content, &payload.expected_content_hash)
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -255,6 +319,10 @@ pub async fn rename_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<RenameNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -283,13 +351,18 @@ pub async fn rename_note_handler(
         Err(err) => return err.into_response(),
     };
     let target_relative_path = replace_filename(&entry.relative_path, &new_title);
-    let outcome = match move_or_rename_note(
-        &state.vault_path,
-        &index,
-        &entry,
-        &target_relative_path,
-        &payload.expected_content_hash,
-    ) {
+    let vault_path = state.vault_path.clone();
+    let outcome = match run_write_op(move || {
+        move_or_rename_note(
+            &vault_path,
+            &index,
+            &entry,
+            &target_relative_path,
+            &payload.expected_content_hash,
+        )
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -305,6 +378,10 @@ pub async fn move_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<MoveNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -329,13 +406,19 @@ pub async fn move_note_handler(
     } else {
         format!("{target_folder}/{file_name}")
     };
-    let outcome = match move_or_rename_note(
-        &state.vault_path,
-        &index,
-        &entry,
-        &target_relative_path,
-        &payload.expected_content_hash,
-    ) {
+    let vault_path = state.vault_path.clone();
+    let expected_content_hash = payload.expected_content_hash;
+    let outcome = match run_write_op(move || {
+        move_or_rename_note(
+            &vault_path,
+            &index,
+            &entry,
+            &target_relative_path,
+            &expected_content_hash,
+        )
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -351,6 +434,10 @@ pub async fn move_rename_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<MoveRenameNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -370,13 +457,18 @@ pub async fn move_rename_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let outcome = match move_or_rename_note(
-        &state.vault_path,
-        &index,
-        &entry,
-        &target_relative_path,
-        &payload.expected_content_hash,
-    ) {
+    let vault_path = state.vault_path.clone();
+    let outcome = match run_write_op(move || {
+        move_or_rename_note(
+            &vault_path,
+            &index,
+            &entry,
+            &target_relative_path,
+            &payload.expected_content_hash,
+        )
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -392,6 +484,10 @@ pub async fn archive_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<ArchiveNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -406,13 +502,19 @@ pub async fn archive_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let outcome = match archive_note(
-        &state.vault_path,
-        &index,
-        &entry,
-        &state.archive_prefix,
-        &payload.expected_content_hash,
-    ) {
+    let vault_path = state.vault_path.clone();
+    let archive_prefix = state.archive_prefix.clone();
+    let outcome = match run_write_op(move || {
+        archive_note(
+            &vault_path,
+            &index,
+            &entry,
+            &archive_prefix,
+            &payload.expected_content_hash,
+        )
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -428,6 +530,10 @@ pub async fn delete_note_handler(
     State(state): State<AppState>,
     payload: Result<Json<DeleteNoteRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    if let Some(response) = reject_demo_mode_write(&state) {
+        return response;
+    }
+
     let payload = match write_payload(payload) {
         Ok(payload) => payload,
         Err(err) => return err.into_response(),
@@ -441,12 +547,12 @@ pub async fn delete_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let outcome = match delete_note(
-        &state.vault_path,
-        &index,
-        &entry,
-        &payload.expected_content_hash,
-    ) {
+    let vault_path = state.vault_path.clone();
+    let outcome = match run_write_op(move || {
+        delete_note(&vault_path, &index, &entry, &payload.expected_content_hash)
+    })
+    .await
+    {
         Ok(outcome) => outcome,
         Err(err) => return write_error_response(err),
     };
@@ -455,6 +561,22 @@ pub async fn delete_note_handler(
         Ok(response) => response.into_response(),
         Err(err) => err.into_response(),
     }
+}
+
+/// Run a synchronous vault write op on the blocking pool. Moves/deletes rewrite
+/// every backlinking note, which must not stall a tokio worker; a panic maps to
+/// a `WriteError` instead of unwinding the handler.
+async fn run_write_op<T>(
+    op: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
+) -> Result<T, WriteError>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(op)
+        .await
+        .unwrap_or_else(|join_error| {
+            Err(WriteError::Io(format!("write task panicked: {join_error}")))
+        })
 }
 
 async fn current_index(state: &AppState) -> Result<VaultIndex, (StatusCode, Json<ErrorResponse>)> {
@@ -618,8 +740,11 @@ fn write_payload<T>(
 ) -> Result<T, (StatusCode, Json<ErrorResponse>)> {
     match payload {
         Ok(Json(payload)) => Ok(payload),
+        // Preserve the rejection's real status (e.g. 413 for a body over the
+        // length limit, 415 for a bad content-type) instead of flattening every
+        // JSON rejection to 400; the {error} body is unchanged.
         Err(rejection) => Err((
-            StatusCode::BAD_REQUEST,
+            rejection.status(),
             Json(ErrorResponse {
                 error: rejection.body_text(),
             }),
@@ -648,5 +773,29 @@ fn replace_filename(relative_path: &str, new_title: &str) -> String {
     match directory {
         Some(dir) if !dir.is_empty() => format!("{dir}/{new_title}.md"),
         _ => format!("{new_title}.md"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_write_op_passes_through_the_ops_result() {
+        let ok: Result<u32, WriteError> = run_write_op(|| Ok(7)).await;
+        assert_eq!(ok, Ok(7));
+
+        let conflict: Result<u32, WriteError> =
+            run_write_op(|| Err(WriteError::Conflict("taken".to_string()))).await;
+        assert_eq!(conflict, Err(WriteError::Conflict("taken".to_string())));
+    }
+
+    #[tokio::test]
+    async fn run_write_op_maps_a_panicking_op_to_an_io_write_error() {
+        let result: Result<(), WriteError> = run_write_op(|| panic!("boom")).await;
+        match result {
+            Err(WriteError::Io(message)) => assert!(message.contains("panicked")),
+            other => panic!("expected Io error, got {other:?}"),
+        }
     }
 }

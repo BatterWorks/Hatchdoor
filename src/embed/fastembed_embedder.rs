@@ -81,6 +81,10 @@ impl Embedder for FastembedEmbedder {
         self.dim
     }
 
+    fn identity(&self) -> String {
+        format!("{}-{}", self.id, self.dim)
+    }
+
     fn tokenizer(&self) -> Arc<Tokenizer> {
         self.tokenizer.clone()
     }

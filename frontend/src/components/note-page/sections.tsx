@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 
-import { normalizeTags, type FrontmatterValue } from "../../markdown";
-import type { NoteHeading } from "../../noteHeadings";
+import { normalizeTags, type FrontmatterValue } from "../../lib/markdown";
+import type { NoteHeading } from "../../lib/noteHeadings";
 import type { NoteLinks } from "../../types";
 import { UiButton } from "../ui";
 import { jumpToHeading } from "./dom";

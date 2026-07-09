@@ -10,7 +10,7 @@ export default defineConfig({
       manifest: {
         name: "Hatchdoor",
         short_name: "Hatchdoor",
-        description: "Read-only Obsidian vault web frontend",
+        description: "Self-hosted Markdown vault web app",
         start_url: "/",
         display: "standalone",
         background_color: "#f4f1e8",
@@ -41,7 +41,11 @@ export default defineConfig({
         // anchor click becomes a navigation; without this denylist the service
         // worker serves the cached index.html, so a `.md` download arrives as
         // an HTML file. Let these requests reach the network instead.
-        navigateFallbackDenylist: [/^\/api\//, /^\/vault-assets\//, /^\/health/],
+        navigateFallbackDenylist: [
+          /^\/api\//,
+          /^\/vault-assets\//,
+          /^\/health/,
+        ],
       },
     }),
   ],
@@ -50,6 +54,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://127.0.0.1:42824",
       "/health": "http://127.0.0.1:42824",
+      "/vault-assets": "http://127.0.0.1:42824",
     },
   },
   test: {

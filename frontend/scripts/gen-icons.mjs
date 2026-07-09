@@ -46,16 +46,10 @@ writeFileSync(resolve(publicDir, "apple-touch-icon.png"), renderPng(180));
 console.log("  apple-touch-icon.png");
 
 // android-chrome
-writeFileSync(
-  resolve(publicDir, "android-chrome-192x192.png"),
-  renderPng(192)
-);
+writeFileSync(resolve(publicDir, "android-chrome-192x192.png"), renderPng(192));
 console.log("  android-chrome-192x192.png");
 
-writeFileSync(
-  resolve(publicDir, "android-chrome-512x512.png"),
-  renderPng(512)
-);
+writeFileSync(resolve(publicDir, "android-chrome-512x512.png"), renderPng(512));
 console.log("  android-chrome-512x512.png");
 
 // /public/icons/*
