@@ -28,7 +28,9 @@
 .explorer-header p {
   margin: 0;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 84, "wght" 700;
+  font-variation-settings:
+    "wdth" 84,
+    "wght" 700;
   font-size: 0.78rem;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -66,7 +68,9 @@
   gap: 0.55rem;
   padding: 0.22rem 0.45rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 100, "wght" 400;
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 400;
   font-size: 0.9rem;
   color: var(--ink-soft);
   text-decoration: none;
@@ -75,9 +79,11 @@
   width: 100%;
 }
 
-.note-link:hover {
-  color: var(--ink);
-  background: var(--paper-2);
+@media (hover: hover) {
+  .note-link:hover {
+    color: var(--ink);
+    background: var(--paper-2);
+  }
 }
 
 .note-link:focus-visible {
@@ -87,7 +93,9 @@
 
 .note-link.active-note {
   color: var(--ink);
-  font-variation-settings: "wdth" 100, "wght" 600;
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 600;
   background: var(--hot-soft);
   box-shadow: inset 3px 0 0 var(--hot);
 }
@@ -125,7 +133,9 @@
   gap: 0.55rem;
   padding: 0.28rem 0.4rem;
   font-family: var(--font-display);
-  font-variation-settings: "wdth" 98, "wght" 500;
+  font-variation-settings:
+    "wdth" 98,
+    "wght" 500;
   font-size: 0.92rem;
   color: var(--ink-soft);
   cursor: pointer;
@@ -161,9 +171,11 @@
   background: var(--hot);
 }
 
-.folder-item summary:hover {
-  color: var(--ink);
-  background: var(--paper-2);
+@media (hover: hover) {
+  .folder-item summary:hover {
+    color: var(--ink);
+    background: var(--paper-2);
+  }
 }
 
 .folder-label {
@@ -200,8 +212,10 @@
   background: var(--rule);
 }
 
-.sidebar-resizer:hover::before {
-  background: var(--rule-strong);
+@media (hover: hover) {
+  .sidebar-resizer:hover::before {
+    background: var(--rule-strong);
+  }
 }
 
 .sidebar-resizer:focus-visible {

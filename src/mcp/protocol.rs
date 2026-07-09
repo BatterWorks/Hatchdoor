@@ -16,6 +16,10 @@ pub struct JsonRpcRequest {
 pub struct JsonRpcFailure {
     pub code: i64,
     pub message: String,
+    /// When true, the dispatcher renders this as an `isError` tool result rather
+    /// than a JSON-RPC protocol error — used for conditions like "note not found"
+    /// that read tools already surface as tool errors, so both stay consistent.
+    pub tool_level: bool,
 }
 
 impl JsonRpcFailure {
@@ -23,6 +27,7 @@ impl JsonRpcFailure {
         Self {
             code: -32602,
             message: message.into(),
+            tool_level: false,
         }
     }
 
@@ -30,6 +35,7 @@ impl JsonRpcFailure {
         Self {
             code: -32601,
             message: message.into(),
+            tool_level: false,
         }
     }
 
@@ -37,6 +43,17 @@ impl JsonRpcFailure {
         Self {
             code: -32603,
             message: message.into(),
+            tool_level: false,
+        }
+    }
+
+    /// A "not found" failure that read and write tools both surface as an
+    /// `isError` tool result (not a protocol error).
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+            tool_level: true,
         }
     }
 }

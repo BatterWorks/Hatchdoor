@@ -107,7 +107,7 @@ fn register_sqlite_vec() {
             *const (),
             unsafe extern "C" fn(
                 *mut rusqlite::ffi::sqlite3,
-                *mut *mut i8,
+                *mut *mut std::os::raw::c_char,
                 *const rusqlite::ffi::sqlite3_api_routines,
             ) -> i32,
         >(
@@ -162,9 +162,15 @@ impl SqliteCache {
     }
 
     pub fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
-        self.conn
+        // A panic while the lock was held poisons the Mutex, but the SQLite
+        // connection itself stays consistent: a rusqlite Transaction rolls back
+        // on unwind (RAII), so the worst a panic leaves behind is a rolled-back
+        // write. Recover the guard rather than erroring, or a single panic would
+        // permanently wedge every future reindex and cache write.
+        Ok(self
+            .conn
             .lock()
-            .map_err(|_| "SQLite cache connection lock poisoned".to_string())
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
 
     /// Check out a connection for read-only queries. File-backed caches draw
@@ -184,7 +190,7 @@ impl SqliteCache {
                     let mut pool = self
                         .read_pool
                         .lock()
-                        .map_err(|_| "SQLite read pool lock poisoned".to_string())?;
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
                     pool.pop()
                 };
                 let conn = match pooled {
@@ -263,6 +269,31 @@ mod metadata_tests {
         assert_eq!(
             cache.get_metadata("k").expect("get").as_deref(),
             Some("second")
+        );
+    }
+
+    #[test]
+    fn writer_lock_recovers_after_a_panicking_holder() {
+        use std::sync::Arc;
+
+        // A panic while the writer lock is held poisons the Mutex. That must not
+        // permanently wedge the cache: every later reindex/write would otherwise
+        // fail for the rest of the process lifetime.
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open"));
+        let poisoner = cache.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.connection().expect("lock");
+            panic!("boom while holding the writer lock");
+        })
+        .join();
+
+        // The connection is still usable despite the poison.
+        cache
+            .set_metadata("after_poison", "ok")
+            .expect("cache must recover from a poisoned writer lock");
+        assert_eq!(
+            cache.get_metadata("after_poison").expect("get").as_deref(),
+            Some("ok")
         );
     }
 }

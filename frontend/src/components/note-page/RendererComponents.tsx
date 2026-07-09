@@ -9,7 +9,7 @@ import {
 } from "react";
 
 import type { MermaidApi } from "../../types";
-import { copyText } from "../../clipboard";
+import { copyText } from "../../lib/clipboard";
 import { UiButton } from "../ui";
 import { flattenText } from "./text";
 

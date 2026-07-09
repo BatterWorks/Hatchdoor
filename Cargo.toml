@@ -3,6 +3,12 @@ name = "hatchdoor"
 version = "2.2.0"
 edition = "2024"
 default-run = "hatchdoor"
+license = "AGPL-3.0-only"
+description = "Self-hosted Obsidian-style Markdown vault browser with optional web and MCP write access"
+repository = "https://github.com/battermanz/hatchdoor"
+readme = "README.md"
+keywords = ["markdown", "obsidian", "mcp", "search", "self-hosted"]
+categories = ["command-line-utilities", "web-programming::http-server"]
 
 [dependencies]
 ahash = "0.8"

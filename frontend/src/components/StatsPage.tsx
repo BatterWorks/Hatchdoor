@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { apiFetch } from "../api";
+import { apiFetch } from "../api/api";
+import { readErrorMessage } from "../api/apiError";
 
 import { StateBlock } from "./ui";
 import type {
@@ -72,7 +73,9 @@ function RankedList({ notes }: { notes: LinkedNoteRef[] }) {
           <Link className="stats-ranked-title" to={`/n/${n.slug}`}>
             {n.title}
           </Link>
-          <span className="stats-ranked-meta">{n.backlink_count} backlinks</span>
+          <span className="stats-ranked-meta">
+            {n.backlink_count} backlinks
+          </span>
         </div>
       ))}
     </div>
@@ -208,7 +211,8 @@ export function StatsPage() {
       setError(null);
       try {
         const res = await apiFetch("/api/stats");
-        if (!res.ok) throw new Error(`Stats failed: ${res.status}`);
+        if (!res.ok)
+          throw new Error(await readErrorMessage(res, "Stats failed"));
         const data = (await res.json()) as VaultStats;
         if (!cancelled) setStats(data);
       } catch (err) {
@@ -246,7 +250,9 @@ export function StatsPage() {
     <div className="stats-page">
       {/* Header */}
       <div className="stats-page-header">
-        <p className="stats-eyebrow">Vault · {new Date().toISOString().slice(0, 10)}</p>
+        <p className="stats-eyebrow">
+          Vault · {new Date().toISOString().slice(0, 10)}
+        </p>
         <h1 className="stats-title">Stats</h1>
         <p className="stats-subtitle">
           A complete overview of your vault — notes, links, tags, and writing

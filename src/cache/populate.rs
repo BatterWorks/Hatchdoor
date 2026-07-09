@@ -17,7 +17,14 @@ use super::parse::{
 };
 
 pub enum UpsertOutcome {
-    Wrote { slug: String },
+    /// The note row was written; `content` is the file text already read (and
+    /// hashed) during the upsert, threaded on so chunking reuses it instead of
+    /// reading the file a second time (which could see a mid-reindex edit and
+    /// chunk content that disagrees with the stored content_hash).
+    Wrote {
+        slug: String,
+        content: String,
+    },
     Unchanged,
 }
 
@@ -27,6 +34,10 @@ impl SqliteCache {
         index: &VaultIndex,
         embedder: &dyn Embedder,
     ) -> Result<(), String> {
+        // If the embedding model changed since the last build, rebuild from
+        // scratch so no vectors from the old model are reused (mixed-model vector
+        // spaces make cosine/L2 distances meaningless).
+        self.reset_if_embedder_changed(embedder)?;
         let entries = index.ordered_entries();
         let current_paths = entries
             .iter()
@@ -54,15 +65,23 @@ impl SqliteCache {
         let mut per_note_failures: usize = 0;
 
         for entry in &entries {
-            if let UpsertOutcome::Wrote { slug } = upsert_note_if_changed(&tx, entry, now)? {
-                match chunk_and_embed_note(&tx, &slug, entry, embedder) {
+            if let UpsertOutcome::Wrote { slug, content } = upsert_note_if_changed(&tx, entry, now)?
+            {
+                match chunk_and_embed_note(&tx, &slug, &content, embedder) {
                     Ok(stats) => {
                         chunks_embedded += stats.embedded;
                         chunks_reused += stats.reused;
                     }
                     Err(e) => {
                         per_note_failures += 1;
-                        tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; skipped");
+                        tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; marking note for re-embed on next reindex");
+                        // The notes row was just written with the new content_hash,
+                        // but chunk/vector tables are now stale (or empty for a new
+                        // note). Change-detection keys off content_hash, so without
+                        // this the note would look Unchanged forever and never be
+                        // re-chunked. Invalidate the stored hash so the next reindex
+                        // re-processes the note once the embedder recovers.
+                        invalidate_note_content_hash(&tx, &slug)?;
                     }
                 }
             }
@@ -85,6 +104,14 @@ impl SqliteCache {
 
         tx.commit()
             .map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
+
+        // Release the writer lock before set_metadata re-acquires it, otherwise
+        // this self-deadlocks (the guard `conn` still holds the same Mutex).
+        drop(conn);
+
+        // Record which model produced these vectors so a future build with a
+        // different model triggers reset_if_embedder_changed above.
+        self.set_metadata("embedder_id", &embedder.identity())?;
         Ok(())
     }
 
@@ -148,6 +175,20 @@ fn cached_note_state(
     .map_err(|error| format!("failed reading cached state for '{relative_path}': {error}"))
 }
 
+/// Force a note to be re-processed on the next reindex by clearing its stored
+/// content hash. Used when chunking/embedding failed for the note after its
+/// `notes` row was already written, so the cache does not silently keep a note
+/// whose chunks/vectors disagree with its content. The empty string can never
+/// equal a real content hash, so change-detection will always re-fire.
+fn invalidate_note_content_hash(tx: &Transaction<'_>, slug: &str) -> Result<(), String> {
+    tx.execute(
+        "UPDATE notes SET content_hash = '' WHERE slug = ?1",
+        params![slug],
+    )
+    .map_err(|error| format!("failed invalidating content hash for '{slug}': {error}"))?;
+    Ok(())
+}
+
 fn delete_note_by_relative_path(tx: &Transaction<'_>, relative_path: &str) -> Result<(), String> {
     let rowid = tx
         .query_row(
@@ -209,6 +250,7 @@ fn upsert_note_if_changed(
     upsert_note_content(tx, entry, &content, &hash, snapshot, indexed_at)?;
     Ok(UpsertOutcome::Wrote {
         slug: entry.slug.clone(),
+        content,
     })
 }
 
@@ -453,17 +495,11 @@ pub struct ChunkStats {
 fn chunk_and_embed_note(
     tx: &Transaction<'_>,
     slug: &str,
-    entry: &NoteEntry,
+    content: &str,
     embedder: &dyn Embedder,
 ) -> Result<ChunkStats, String> {
-    let content = fs::read_to_string(&entry.path).map_err(|e| {
-        format!(
-            "failed reading note for chunking '{}': {e}",
-            entry.path.display()
-        )
-    })?;
     let tokenizer = embedder.tokenizer();
-    let chunking = chunk_note(&content, tokenizer, ChunkOptions::default());
+    let chunking = chunk_note(content, tokenizer, ChunkOptions::default());
     if chunking.chunks.is_empty() {
         replace_chunks_for_note(tx, slug, &[], None, None)?;
         return Ok(ChunkStats {
@@ -656,6 +692,141 @@ mod chunk_integration_tests {
             std::fs::write(dir.path().join(name), body).expect("write");
         }
         dir
+    }
+
+    /// Embedder whose `embed` always fails, to simulate a transient embedding
+    /// error (OOM, model timeout, read race) for a note during reindex.
+    struct FailingEmbedder {
+        inner: StubEmbedder,
+    }
+    impl Embedder for FailingEmbedder {
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Err("simulated embed failure".to_string())
+        }
+        fn embedding_dim(&self) -> usize {
+            self.inner.embedding_dim()
+        }
+        fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
+            self.inner.tokenizer()
+        }
+    }
+
+    fn note_chunk_count(cache: &SqliteCache, slug: &str) -> i64 {
+        cache
+            .connection()
+            .expect("conn")
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE note_slug = ?1",
+                [slug],
+                |r| r.get(0),
+            )
+            .expect("count")
+    }
+
+    #[test]
+    fn per_note_embed_failure_self_heals_on_next_reindex() {
+        let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        // First reindex: embedding fails. The failure is swallowed (the build
+        // still completes) and the note is left with NO chunks.
+        let failing = Arc::new(FailingEmbedder {
+            inner: StubEmbedder::new(384),
+        });
+        cache
+            .replace_from_index_with_embedder(&index, failing.as_ref())
+            .expect("first populate completes despite per-note failure");
+        assert_eq!(
+            note_chunk_count(&cache, "a"),
+            0,
+            "embed failed, so the note has no chunks yet"
+        );
+
+        // Second reindex with a working embedder must RE-CHUNK the note rather
+        // than treating it as Unchanged (change-detection keys off content_hash,
+        // which the failed first pass must have invalidated).
+        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        cache
+            .replace_from_index_with_embedder(&index, working.as_ref())
+            .expect("second populate");
+        assert!(
+            note_chunk_count(&cache, "a") > 0,
+            "note must be re-chunked once the embedder recovers, not stuck Unchanged"
+        );
+    }
+
+    /// Wraps a StubEmbedder with a caller-chosen identity and a call counter, so
+    /// tests can simulate swapping the embedding model.
+    struct IdentifiedEmbedder {
+        inner: StubEmbedder,
+        id: String,
+        embed_calls: std::sync::atomic::AtomicUsize,
+    }
+    impl IdentifiedEmbedder {
+        fn new(id: &str) -> Self {
+            Self {
+                inner: StubEmbedder::new(384),
+                id: id.to_string(),
+                embed_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+    impl Embedder for IdentifiedEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.embed_calls
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::SeqCst);
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            self.inner.embedding_dim()
+        }
+        fn identity(&self) -> String {
+            self.id.clone()
+        }
+        fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
+            self.inner.tokenizer()
+        }
+    }
+
+    #[test]
+    fn swapping_the_embedder_model_rebuilds_the_vector_index() {
+        // Two models with the same dimension but different identities. Reusing
+        // the first model's vectors for unchanged notes under the second model
+        // would mix two incompatible embedding spaces in one vec0 index.
+        let dir = make_vault(&[("a.md", "# A\n\nbody A")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        let model_a = IdentifiedEmbedder::new("model-a");
+        cache
+            .replace_from_index_with_embedder(&index, &model_a)
+            .expect("first build");
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("model-a")
+        );
+
+        // Same vault content, different model. The note is byte-identical, so
+        // content-hash change-detection would treat it as Unchanged and reuse
+        // model-a's vectors — unless the identity change forces a rebuild.
+        let model_b = IdentifiedEmbedder::new("model-b");
+        cache
+            .replace_from_index_with_embedder(&index, &model_b)
+            .expect("second build");
+
+        assert!(
+            model_b
+                .embed_calls
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0,
+            "a model swap must re-embed the vault, not reuse the old model's vectors"
+        );
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("model-b"),
+            "the new model's identity must be stamped"
+        );
     }
 
     #[test]

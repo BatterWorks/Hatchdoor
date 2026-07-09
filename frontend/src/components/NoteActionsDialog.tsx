@@ -1,6 +1,11 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { UiButton } from "./ui";
+import {
+  clearCreateDraft,
+  loadCreateDraft,
+  saveCreateDraft,
+} from "../lib/writeDrafts";
 
 export type NoteActionDialogKind =
   | "create"
@@ -132,19 +137,24 @@ export function NoteActionsDialog({
   );
 }
 
-function FolderDatalist({
-  id,
+function FolderSuggestions({
   folderPaths,
+  onSelect,
 }: {
-  id: string;
   folderPaths: string[];
+  onSelect: (path: string) => void;
 }) {
+  if (folderPaths.length === 0) {
+    return null;
+  }
   return (
-    <datalist id={id}>
+    <div className="folder-suggestions" aria-label="Folder suggestions">
       {folderPaths.map((path) => (
-        <option key={path} value={path} />
+        <button key={path} type="button" onClick={() => onSelect(path)}>
+          {path}
+        </button>
       ))}
-    </datalist>
+    </div>
   );
 }
 
@@ -161,16 +171,31 @@ function CreateForm({
   onClose: () => void;
   onCreate: (relativePath: string, content: string) => void;
 }) {
-  const listId = "create-folder-options";
+  // Restore any draft persisted from a previous session (e.g. an in-progress
+  // note wiped by a service-worker autoUpdate reload). Fall back to props.
+  const [draft] = useState(() => loadCreateDraft());
+  const [folder, setFolder] = useState(draft?.folder ?? initialFolder);
+  const [name, setName] = useState(draft?.name ?? "");
+  const [content, setContent] = useState(draft?.content ?? "");
+
+  const persist = (next: { folder: string; name: string; content: string }) => {
+    if (!next.folder && !next.name && !next.content) {
+      clearCreateDraft();
+      return;
+    }
+    saveCreateDraft({ ...next, savedAt: Date.now() });
+  };
+
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        const folder = String(data.get("folder") ?? "").trim();
-        const name = String(data.get("name") ?? "").trim();
-        const relativePath = folder ? `${folder}/${name}` : name;
-        onCreate(relativePath, String(data.get("content") ?? ""));
+        const trimmedFolder = folder.trim();
+        const trimmedName = name.trim();
+        const relativePath = trimmedFolder
+          ? `${trimmedFolder}/${trimmedName}`
+          : trimmedName;
+        onCreate(relativePath, content);
       }}
     >
       <h2>Create note</h2>
@@ -179,19 +204,46 @@ function CreateForm({
         <input
           name="folder"
           aria-label="Folder"
-          list={listId}
-          defaultValue={initialFolder}
+          value={folder}
+          onChange={(event) => {
+            setFolder(event.target.value);
+            persist({ folder: event.target.value, name, content });
+          }}
           placeholder="Vault root"
         />
       </label>
-      <FolderDatalist id={listId} folderPaths={folderPaths} />
+      <FolderSuggestions
+        folderPaths={folderPaths}
+        onSelect={(path) => {
+          setFolder(path);
+          persist({ folder: path, name, content });
+        }}
+      />
       <label>
         Note name
-        <input name="name" aria-label="Note name" placeholder="My Note" />
+        <input
+          name="name"
+          aria-label="Note name"
+          value={name}
+          onChange={(event) => {
+            setName(event.target.value);
+            persist({ folder, name: event.target.value, content });
+          }}
+          placeholder="My Note"
+        />
       </label>
       <label>
         Markdown content
-        <textarea name="content" aria-label="Markdown content" />
+        <textarea
+          name="content"
+          aria-label="Markdown content"
+          dir="auto"
+          value={content}
+          onChange={(event) => {
+            setContent(event.target.value);
+            persist({ folder, name, content: event.target.value });
+          }}
+        />
       </label>
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
@@ -248,13 +300,12 @@ function MoveForm({
   onClose: () => void;
   onMove: (targetFolder: string) => void;
 }) {
-  const listId = "move-folder-options";
+  const [targetFolder, setTargetFolder] = useState("");
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
-        const data = new FormData(event.currentTarget);
-        onMove(String(data.get("targetFolder") ?? ""));
+        onMove(targetFolder);
       }}
     >
       <h2>Move note</h2>
@@ -263,11 +314,12 @@ function MoveForm({
         <input
           name="targetFolder"
           aria-label="Target folder"
-          list={listId}
+          value={targetFolder}
+          onChange={(event) => setTargetFolder(event.target.value)}
           placeholder="Vault root"
         />
       </label>
-      <FolderDatalist id={listId} folderPaths={folderPaths} />
+      <FolderSuggestions folderPaths={folderPaths} onSelect={setTargetFolder} />
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
         <UiButton type="submit">Move</UiButton>

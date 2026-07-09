@@ -10,7 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
-import { noteDraftKey } from "./writeDrafts";
+import { noteDraftKey } from "./lib/writeDrafts";
 
 afterEach(() => {
   cleanup();

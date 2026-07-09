@@ -464,7 +464,9 @@ pub fn delete_note(
         true,
         &backlink_rewrites,
     )?;
-    let moved_assets = move_assets(&asset_moves)?;
+    // Trash the note FIRST, then move its assets (mirroring move_or_rename_note).
+    // Doing assets first meant a failed note rename left a live note pointing at
+    // attachments that had already been relocated into trash, with no rollback.
     fs::rename(&entry.path, &trash_path).map_err(|error| {
         WriteError::Io(format!(
             "failed to move note '{}' to trash '{}': {error}",
@@ -472,6 +474,15 @@ pub fn delete_note(
             trash_path.display()
         ))
     })?;
+    let moved_assets = match move_assets(&asset_moves) {
+        Ok(count) => count,
+        Err(error) => {
+            // move_assets is all-or-nothing, so no asset is stranded. Restore the
+            // note out of trash so the whole delete is a no-op on failure.
+            let _ = fs::rename(&trash_path, &entry.path);
+            return Err(error);
+        }
+    };
     let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
     let rewritten_notes = rewritten.len();
 

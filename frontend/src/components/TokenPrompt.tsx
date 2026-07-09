@@ -43,7 +43,11 @@ const button: CSSProperties = {
 };
 
 /** Shown when the API returns 401, prompting for the web bearer token. */
-export function TokenPrompt({ onSubmit }: { onSubmit: (token: string) => void }) {
+export function TokenPrompt({
+  onSubmit,
+}: {
+  onSubmit: (token: string) => void;
+}) {
   const [value, setValue] = useState("");
 
   return (

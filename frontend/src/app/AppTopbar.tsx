@@ -2,7 +2,7 @@ import { useEffect, useRef, type Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
 import type { ActiveNoteMeta } from "../types";
-import type { Theme } from "./useTheme";
+import type { Theme } from "../hooks/useTheme";
 
 const THEME_ICON: Record<Theme, string> = { auto: "◑", light: "○", dark: "●" };
 const THEME_LABEL: Record<Theme, string> = {

@@ -5,7 +5,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
-import { parseFrontmatter, stripBlockIds } from "../../markdown";
+import { parseFrontmatter, stripBlockIds } from "../../lib/markdown";
 import { NoteProperties } from "./sections";
 import { createNoteMarkdownComponents } from "./renderers";
 import { useResolvedWikilinks } from "./wikilinks";
@@ -27,7 +27,10 @@ export function NotePreview({
   relativePath: string;
 }) {
   const parsed = useMemo(() => parseFrontmatter(content), [content]);
-  const markdown = useResolvedWikilinks(stripBlockIds(parsed.body), relativePath);
+  const markdown = useResolvedWikilinks(
+    stripBlockIds(parsed.body),
+    relativePath,
+  );
   const components = useMemo(
     () => createNoteMarkdownComponents(relativePath, new Map<string, number>()),
     [relativePath],

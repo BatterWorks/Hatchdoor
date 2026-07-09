@@ -180,7 +180,10 @@ export function SearchDialog({
 
         {loading ? <p>Searching…</p> : null}
         {error ? <p className="error">{error}</p> : null}
-        {!loading && !error && trimmedQuery.length >= 2 && results.length === 0 ? (
+        {!loading &&
+        !error &&
+        trimmedQuery.length >= 2 &&
+        results.length === 0 ? (
           <p>No matching notes.</p>
         ) : null}
 
@@ -234,10 +237,15 @@ export function SearchDialog({
                     {highlightMatches(`${group.note_path}.md`, trimmedQuery)}
                   </div>
                   {first.heading_path ? (
-                    <div className="result-breadcrumb">{first.heading_path}</div>
+                    <div className="result-breadcrumb">
+                      {first.heading_path}
+                    </div>
                   ) : null}
                   <p className="result-snippet">
-                    {highlightMatches(stripSnippet(first.content), trimmedQuery)}
+                    {highlightMatches(
+                      stripSnippet(first.content),
+                      trimmedQuery,
+                    )}
                   </p>
                 </button>
 

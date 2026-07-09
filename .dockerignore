@@ -12,4 +12,8 @@ frontend/dist
 
 README.md
 docs
+!docs/
+docs/*
+!docs/starter-vault/
+!docs/starter-vault/**
 AGENTS.md

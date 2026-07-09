@@ -16,7 +16,7 @@ use crate::api_types::{
     ResolveQuery, ResolveResponse, ResolveTargetResult, SearchQuery, VaultEventResponse,
 };
 
-use crate::app_state::{AppState, refresh_if_needed, run_blocking, sqlite_cache};
+use crate::app_state::{AppState, refresh_coalescing, run_blocking, sqlite_cache};
 
 /// Upper bound on targets accepted by `/api/resolve-batch` (DoS guard).
 const MAX_RESOLVE_BATCH: usize = 200;
@@ -144,7 +144,12 @@ pub async fn resolve_batch_handler(
 }
 
 pub async fn refresh_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match refresh_if_needed(&state).await {
+    // A refresh re-embeds the whole vault; on an unauthenticated public demo
+    // that would be a request-loop CPU DoS. The watcher keeps the demo fresh.
+    if let Some(response) = crate::handlers::write_api::reject_demo_mode_write(&state) {
+        return response;
+    }
+    match refresh_coalescing(&state).await {
         Ok(()) => (StatusCode::OK, Json(RefreshResponse { refreshed: true })).into_response(),
         Err(err) => err.into_response(),
     }
@@ -208,6 +213,15 @@ pub async fn search_handler(
     let limit = query.limit.unwrap_or(10).clamp(1, 50);
     let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
     let mode = query.mode.unwrap_or_default();
+    if query.q.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "query cannot be empty".to_string(),
+            }),
+        )
+            .into_response();
+    }
     let q_len = query.q.len();
     debug!(
         query_len = q_len,

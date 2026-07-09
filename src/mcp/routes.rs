@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 
 use crate::app_state::AppState;
 
-use super::config::{McpConfig, PROTOCOL_VERSION, SERVER_INSTRUCTIONS, validate_mcp_request};
+use super::auth::validate_mcp_request;
+use super::config::{McpConfig, SERVER_INSTRUCTIONS, negotiate_protocol_version};
 use super::protocol::{
     JsonRpcFailure, JsonRpcRequest, jsonrpc_error_response, jsonrpc_success_response,
 };
@@ -86,7 +87,7 @@ async fn handle_mcp_post(
     };
 
     let result = match request.method.as_str() {
-        "initialize" => Ok(handle_initialize()),
+        "initialize" => Ok(handle_initialize(request.params.as_ref())),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tools_list(config) })),
         "tools/call" => handle_tools_call(state, request.params, config).await,
@@ -101,9 +102,13 @@ async fn handle_mcp_post(
     }
 }
 
-fn handle_initialize() -> Value {
+fn handle_initialize(params: Option<&Value>) -> Value {
+    let requested = params
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str);
+    let protocol_version = negotiate_protocol_version(requested);
     json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
                 "listChanged": false
@@ -135,7 +140,8 @@ mod tests {
             host_attachment_staging_path: None,
             advertise_host_paths: false,
             max_attachment_bytes: 10 * 1024 * 1024,
-            bearer_token: None,
+            // MCP now requires a token whenever enabled, even read-only.
+            bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![
                 "http://127.0.0.1".to_string(),
                 "http://localhost".to_string(),
@@ -176,6 +182,7 @@ mod tests {
             vault_events,
             embedder,
             web_auth_enabled: false,
+            demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: None,
             mcp_config: Arc::new(McpConfig::disabled()),
@@ -193,13 +200,15 @@ mod tests {
     }
 
     async fn post_json(state: AppState, payload: Value, config: McpConfig) -> Response {
-        handle_mcp_post(
-            state,
-            &HeaderMap::new(),
-            Bytes::from(payload.to_string()),
-            &config,
-        )
-        .await
+        // Read-only MCP is authenticated now, so attach the standard test token.
+        // Tests that assert token rejection override config.bearer_token to a
+        // different value, which no longer matches this header.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        handle_mcp_post(state, &headers, Bytes::from(payload.to_string()), &config).await
     }
 
     async fn post_json_with_auth(state: AppState, payload: Value, config: McpConfig) -> Response {
@@ -235,7 +244,12 @@ mod tests {
 
     #[tokio::test]
     async fn get_mcp_returns_method_not_allowed_when_sse_is_not_available() {
-        let response = handle_mcp_get(&HeaderMap::new(), &enabled_config()).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let response = handle_mcp_get(&headers, &enabled_config()).await;
 
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(
@@ -250,7 +264,11 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             "MCP-Protocol-Version",
-            HeaderValue::from_static("2025-06-18"),
+            HeaderValue::from_static("2019-01-01"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
         );
         let response = handle_mcp_post(
             state,
@@ -263,6 +281,54 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], -32002);
+    }
+
+    #[tokio::test]
+    async fn supported_alternate_protocol_version_header_is_accepted() {
+        // A client negotiated to a known-compatible earlier revision must not be
+        // hard-rejected on follow-up requests just because it isn't the newest.
+        let (state, _tmp) = test_state();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "MCP-Protocol-Version",
+            HeaderValue::from_static("2025-06-18"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let response = handle_mcp_post(
+            state,
+            &headers,
+            Bytes::from(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string()),
+            &enabled_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["result"]["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn initialize_echoes_supported_client_protocol_version() {
+        let (state, _tmp) = test_state();
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"initialize",
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(
+            body["result"]["protocolVersion"], "2025-06-18",
+            "server should echo the client's requested supported version"
+        );
     }
 
     #[tokio::test]
@@ -809,6 +875,44 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::OK);
         let missing_body = response_json(missing).await;
         assert_eq!(missing_body["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn write_tool_missing_note_is_a_tool_error_not_a_protocol_error() {
+        // Reads surface a missing note as an isError tool result; write tools
+        // must do the same, not a JSON-RPC -32602 protocol error, so clients
+        // (and the model's retry logic) handle "not found" consistently.
+        let (state, _tmp) = test_state();
+        let response = post_json_with_auth(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":30,
+                "method":"tools/call",
+                "params": {
+                    "name":"edit_note",
+                    "arguments":{
+                        "slug":"does-not-exist",
+                        "old_string":"a",
+                        "new_string":"b",
+                        "expected_content_hash":"deadbeef"
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["result"]["isError"], true,
+            "missing note on a write tool should be an isError tool result"
+        );
+        assert!(
+            body.get("error").is_none(),
+            "missing note must not be a JSON-RPC protocol error"
+        );
     }
 
     #[tokio::test]
