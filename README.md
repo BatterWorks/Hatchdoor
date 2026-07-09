@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc"><img alt="Live demo" src="https://img.shields.io/badge/live_demo-hatchdoor.battercloud.cc-e4572e"></a>
+  <a href="https://hub.docker.com/r/battermanz/hatchdoor"><img alt="Rootless and distroless image" src="https://img.shields.io/badge/image-rootless_%26_distroless-2ea44f"></a>
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
@@ -125,8 +126,7 @@ vault you control.
 
 You need:
 
-- Docker
-- Docker Compose
+- Docker and Docker Compose (Podman and `podman compose` also work)
 - A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
   starter vault
 
@@ -170,13 +170,20 @@ http://localhost:42824
 
 Enter the web bearer token when prompted.
 
-### 4. Container Paths
+### 4. Container Image And Paths
 
-The Docker image is:
+The image is published on Docker Hub:
 
 ```text
-battermanz/hatchdoor:latest
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.2.0
+battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
+
+The runtime image is **distroless and rootless** — it is built on
+`gcr.io/distroless/cc-debian13:nonroot`, ships no shell or package manager, and
+runs as an unprivileged `nonroot` user. Hatchdoor also runs unchanged under
+Podman (rootless included); swap `docker` / `docker compose` for `podman` /
+`podman compose`.
 
 Docker Compose mounts:
 
