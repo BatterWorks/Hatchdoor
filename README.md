@@ -7,7 +7,8 @@
 
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc"><img alt="Live demo" src="https://img.shields.io/badge/live_demo-hatchdoor.battercloud.cc-e4572e"></a>
-  <a href="https://hub.docker.com/r/battermanz/hatchdoor"><img alt="Rootless and distroless image" src="https://img.shields.io/badge/image-rootless_%26_distroless-2ea44f"></a>
+  <a href="https://hub.docker.com/r/battermanz/hatchdoor"><img alt="Docker Hub" src="https://img.shields.io/docker/v/battermanz/hatchdoor?sort=semver&label=docker%20hub&color=2496ed"></a>
+  <a href="https://github.com/BattermanZ/Hatchdoor/blob/main/Dockerfile"><img alt="Rootless and distroless image" src="https://img.shields.io/badge/image-rootless_%26_distroless-2ea44f"></a>
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
 </p>
 
@@ -81,6 +82,8 @@ Hatchdoor was fully vibecoded with help from Claude Code and Codex.
   notes with the same safety as the UI.
 - Optional automatic git commits and pushes for Hatchdoor writes.
 - PWA assets and service worker caching for common read paths.
+- Distroless, rootless container image (no shell, runs as `nonroot`) that
+  deploys with either Docker or Podman.
 
 ## Screenshots
 
@@ -172,7 +175,7 @@ Enter the web bearer token when prompted.
 
 ### 4. Container Image And Paths
 
-The image is published on Docker Hub:
+The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
 battermanz/hatchdoor:latest          # also version tags, e.g. 2.2.0
