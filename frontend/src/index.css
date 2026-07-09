@@ -6,11 +6,6 @@
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
-  /* Paint the root element so iOS Safari fills the area behind its bottom
-     toolbar (the browser samples the ROOT element's background for the
-     overscroll/chrome region, not the body's). Without this the strip behind
-     the address bar falls back to Safari's default grey. */
-  background-color: var(--bg);
 }
 
 * {
