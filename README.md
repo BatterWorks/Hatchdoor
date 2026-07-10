@@ -30,7 +30,8 @@ SQLite read model for fast browsing, links, backlinks, keyword search, semantic
 search, graph data, and metadata. If the cache is deleted, Hatchdoor rebuilds it
 from the vault.
 
-Hatchdoor was fully vibecoded with help from Claude Code and Codex.
+Hatchdoor was built with AI coding agents, primarily Claude Code and Codex,
+under close human review, with tests and a documented safety model.
 
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc">
@@ -182,7 +183,7 @@ battermanz/hatchdoor:latest          # also version tags, e.g. 2.2.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
-The runtime image is **distroless and rootless** — it is built on
+The runtime image is **distroless and rootless**. It is built on
 `gcr.io/distroless/cc-debian13:nonroot`, ships no shell or package manager, and
 runs as an unprivileged `nonroot` user. Hatchdoor also runs unchanged under
 Podman (rootless included); swap `docker` / `docker compose` for `podman` /
@@ -214,7 +215,28 @@ truth.
 
 If `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
 vault before the first index build. Existing vaults are not seeded or modified
-by this startup step.
+by this startup step (the `.hatchdoor-trash` folder is ignored when deciding
+whether a vault is empty).
+
+The starter vault lays out a lightweight PARA-style structure with index notes
+and onboarding references:
+
+```text
+README.md
+10-topics/Topics Index.md
+20-projects/Projects Index.md
+30-areas/Areas Index.md
+40-reference/Hatchdoor — Getting Started.md
+40-reference/Hatchdoor — Agent Guide.md
+40-reference/Hatchdoor — Agent Skill.md
+40-reference/Hatchdoor — Markdown Feature Showcase.md
+40-reference/Hatchdoor — Starter Vault Organisation.md
+```
+
+These are ordinary notes you can edit, move, or delete like any other. The
+reference notes double as onboarding docs, including a ready-to-use **agent
+skill** template (see [MCP Agent Access](#mcp-agent-access)) for wiring an AI
+agent to the vault through MCP.
 
 ## Permissions
 
@@ -381,6 +403,18 @@ Send:
 Authorization: Bearer <token>
 ```
 
+### Agent Skill
+
+Hatchdoor ships with a ready-to-use **agent skill** for driving the vault
+through MCP. When Hatchdoor seeds a starter vault it writes the template to
+`40-reference/Hatchdoor — Agent Skill.md`; the source also lives at
+[`docs/starter-vault/40-reference/Hatchdoor — Agent Skill.md`](docs/starter-vault/40-reference/Hatchdoor%20%E2%80%94%20Agent%20Skill.md).
+
+Copy its `hatchdoor-vault` skill block into your agent's skills directory to
+teach the agent Hatchdoor's conventions: search before editing, pass the
+returned content hash on writes, prefer small edits, and let Hatchdoor manage
+backlinks, moves, and git sync.
+
 ### MCP Attachment Import
 
 Attachment import uses a staging folder outside the vault:
@@ -492,7 +526,13 @@ docker compose restart hatchdoor
 ### The app starts with a starter vault
 
 Hatchdoor seeds starter notes only when `VAULT_PATH` contains no Markdown files.
-If you expected an existing vault, check `HOST_VAULT_PATH` in `.env`.
+If you expected an existing vault, this almost always means the container
+mounted an empty directory, so double-check that `HOST_VAULT_PATH` in `.env`
+resolves to your actual vault and isn't a typo or a stale Docker volume
+shadowing the mount.
+
+For the full list of notes Hatchdoor creates, see
+[Data And Safety Model](#data-and-safety-model).
 
 ### MCP returns `401` or `403`
 
