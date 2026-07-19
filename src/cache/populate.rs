@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +11,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::cache::chunk_ops::{
     ChunkRow, delete_orphan_vectors, existing_chunk_hashes, replace_chunks_for_note,
 };
-use crate::chunk::{ChunkOptions, chunk_note};
+use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::vault::{NoteEntry, VaultIndex, normalize_title};
 
@@ -78,45 +78,80 @@ impl SqliteCache {
         let mut notes_changed: usize = 0;
         let mut notes_unchanged: usize = 0;
         let mut metrics = IndexingMetrics::default();
-        let (progress, stop_heartbeat, heartbeat) =
-            start_indexing_heartbeat(total_notes, started_at);
+        let mut prepared_notes = Vec::new();
 
-        let indexing_result = (|| -> Result<(), String> {
-            for (position, entry) in entries.iter().enumerate() {
-                let note_sync_started = Instant::now();
-                let upsert_outcome = upsert_note_if_changed(&tx, entry, now)?;
-                metrics.note_sync += note_sync_started.elapsed();
-                match upsert_outcome {
-                    UpsertOutcome::Wrote { slug, content } => {
-                        match chunk_and_embed_note(&tx, &slug, &content, embedder) {
-                            Ok(stats) => {
-                                notes_changed += 1;
-                                chunks_embedded += stats.embedded;
-                                chunks_reused += stats.reused;
-                                metrics.record_chunk_stats(&stats);
-                            }
-                            Err(e) => {
-                                per_note_failures += 1;
-                                progress
-                                    .failures
-                                    .store(per_note_failures, Ordering::Relaxed);
-                                tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; marking note for re-embed on next reindex");
-                                // The notes row was just written with the new content_hash,
-                                // but chunk/vector tables are now stale (or empty for a new
-                                // note). Change-detection keys off content_hash, so without
-                                // this the note would look Unchanged forever and never be
-                                // re-chunked. Invalidate the stored hash so the next reindex
-                                // re-processes the note once the embedder recovers.
-                                invalidate_note_content_hash(&tx, &slug)?;
-                            }
+        // Chunk and measure changed notes up front. Chunking was less than 0.5%
+        // of the measured full-vault runtime, and retaining these results gives
+        // the heartbeat an exact embedding-work denominator without chunking
+        // notes twice.
+        for entry in &entries {
+            let note_sync_started = Instant::now();
+            let upsert_outcome = upsert_note_if_changed(&tx, entry, now)?;
+            metrics.note_sync += note_sync_started.elapsed();
+            match upsert_outcome {
+                UpsertOutcome::Wrote { slug, content } => {
+                    match prepare_note_for_embedding(&tx, slug, content, embedder) {
+                        Ok(prepared) => prepared_notes.push(prepared),
+                        Err(error) => {
+                            per_note_failures += 1;
+                            tracing::warn!(slug = %entry.slug, error = %error, "Per-note embedding preparation failed; marking note for re-embed on next reindex");
+                            invalidate_note_content_hash(&tx, &entry.slug)?;
                         }
                     }
-                    UpsertOutcome::Unchanged => notes_unchanged += 1,
                 }
+                UpsertOutcome::Unchanged => notes_unchanged += 1,
+            }
+        }
 
-                progress
-                    .notes_processed
-                    .store(position + 1, Ordering::Relaxed);
+        let total_chunks_to_embed: usize = prepared_notes
+            .iter()
+            .map(|note| note.texts_to_embed.len())
+            .sum();
+        let total_tokens_to_embed: usize = prepared_notes
+            .iter()
+            .flat_map(|note| note.embedding_input_token_lengths.iter())
+            .sum();
+        tracing::debug!(
+            changed_notes = prepared_notes.len(),
+            total_chunks_to_embed,
+            total_tokens_to_embed,
+            "Prepared indexing workload"
+        );
+
+        let embedding_started_at = Instant::now();
+        let (progress, stop_heartbeat, heartbeat) = start_indexing_heartbeat(
+            total_notes,
+            total_chunks_to_embed,
+            total_tokens_to_embed,
+            embedding_started_at,
+        );
+        progress
+            .notes_processed
+            .store(notes_unchanged + per_note_failures, Ordering::Relaxed);
+        progress
+            .failures
+            .store(per_note_failures, Ordering::Relaxed);
+
+        let indexing_result = (|| -> Result<(), String> {
+            for prepared in prepared_notes {
+                let slug = prepared.slug.clone();
+                match embed_prepared_note(&tx, prepared, embedder, progress.as_ref()) {
+                    Ok(stats) => {
+                        notes_changed += 1;
+                        chunks_embedded += stats.embedded;
+                        chunks_reused += stats.reused;
+                        metrics.record_chunk_stats(&stats);
+                    }
+                    Err(error) => {
+                        per_note_failures += 1;
+                        progress
+                            .failures
+                            .store(per_note_failures, Ordering::Relaxed);
+                        tracing::warn!(slug = %slug, error = %error, "Per-note embedding failed; marking note for re-embed on next reindex");
+                        invalidate_note_content_hash(&tx, &slug)?;
+                    }
+                }
+                progress.notes_processed.fetch_add(1, Ordering::Relaxed);
             }
             Ok(())
         })();
@@ -425,11 +460,15 @@ fn duration_ms(duration: Duration) -> f64 {
 #[derive(Default)]
 struct IndexingProgress {
     notes_processed: AtomicUsize,
+    chunks_processed: AtomicUsize,
+    tokens_processed: AtomicUsize,
     failures: AtomicUsize,
 }
 
 fn start_indexing_heartbeat(
     total_notes: usize,
+    total_chunks: usize,
+    total_tokens: usize,
     started_at: Instant,
 ) -> (
     Arc<IndexingProgress>,
@@ -447,6 +486,10 @@ fn start_indexing_heartbeat(
                     log_indexing_progress(
                         heartbeat_progress.notes_processed.load(Ordering::Relaxed),
                         total_notes,
+                        heartbeat_progress.chunks_processed.load(Ordering::Relaxed),
+                        total_chunks,
+                        heartbeat_progress.tokens_processed.load(Ordering::Relaxed),
+                        total_tokens,
                         started_at.elapsed(),
                         heartbeat_progress.failures.load(Ordering::Relaxed),
                     );
@@ -469,25 +512,55 @@ fn progress_log_delay(has_logged: bool) -> Duration {
 
 fn estimated_remaining(
     elapsed: Duration,
-    notes_processed: usize,
-    total_notes: usize,
+    tokens_processed: usize,
+    total_tokens: usize,
 ) -> Option<Duration> {
-    if notes_processed == 0 || notes_processed >= total_notes {
+    if tokens_processed == 0 || tokens_processed >= total_tokens {
         return None;
     }
-    let notes_remaining = total_notes - notes_processed;
-    Some(elapsed.mul_f64(notes_remaining as f64 / notes_processed as f64))
+    let tokens_remaining = total_tokens - tokens_processed;
+    Some(elapsed.mul_f64(tokens_remaining as f64 / tokens_processed as f64))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_indexing_progress(
     notes_processed: usize,
     total_notes: usize,
+    chunks_processed: usize,
+    total_chunks: usize,
+    tokens_processed: usize,
+    total_tokens: usize,
     elapsed: Duration,
     failures: usize,
 ) {
-    let notes_remaining = total_notes.saturating_sub(notes_processed);
-    let percent = notes_processed.saturating_mul(100) / total_notes.max(1);
-    let eta = estimated_remaining(elapsed, notes_processed, total_notes)
+    tracing::info!(
+        "{}",
+        indexing_progress_message(
+            notes_processed,
+            total_notes,
+            chunks_processed,
+            total_chunks,
+            tokens_processed,
+            total_tokens,
+            elapsed,
+            failures,
+        )
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn indexing_progress_message(
+    notes_processed: usize,
+    total_notes: usize,
+    chunks_processed: usize,
+    total_chunks: usize,
+    tokens_processed: usize,
+    total_tokens: usize,
+    elapsed: Duration,
+    failures: usize,
+) -> String {
+    let percent = tokens_processed.saturating_mul(100) / total_tokens.max(1);
+    let eta = estimated_remaining(elapsed, tokens_processed, total_tokens)
         .map(format_eta)
         .unwrap_or_else(|| "estimating time remaining…".to_string());
     let failure_summary = if failures == 0 {
@@ -496,15 +569,16 @@ fn log_indexing_progress(
         format!(" — {} failed", format_count(failures))
     };
 
-    tracing::info!(
-        "Indexing notes: {} of {} ({}%) — {} left — {}{}",
+    format!(
+        "Indexing: {} of {} notes — {} of {} chunks — {}% of embedding work — {}{}",
         format_count(notes_processed),
         format_count(total_notes),
+        format_count(chunks_processed),
+        format_count(total_chunks),
         percent,
-        format_count(notes_remaining),
         eta,
         failure_summary,
-    );
+    )
 }
 
 fn format_count(value: usize) -> String {
@@ -949,41 +1023,33 @@ struct ChunkMeasurement {
     input_tokens: usize,
 }
 
-fn chunk_and_embed_note(
+struct PreparedNote {
+    slug: String,
+    chunking: NoteChunking,
+    preserved: HashMap<String, Vec<f32>>,
+    texts_to_embed: Vec<String>,
+    indices_needing_embed: Vec<usize>,
+    embedding_input_bytes: usize,
+    embedding_input_token_lengths: Vec<usize>,
+    chunk_measurements: Vec<ChunkMeasurement>,
+    chunking_elapsed: Duration,
+    vector_reuse_elapsed: Duration,
+}
+
+fn prepare_note_for_embedding(
     tx: &Transaction<'_>,
-    slug: &str,
-    content: &str,
+    slug: String,
+    content: String,
     embedder: &dyn Embedder,
-) -> Result<ChunkStats, String> {
-    let pipeline_started = Instant::now();
+) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
     let tokenizer = embedder.tokenizer();
-    let chunking = chunk_note(content, tokenizer.clone(), ChunkOptions::default());
+    let chunking = chunk_note(&content, tokenizer.clone(), ChunkOptions::default());
     let chunking_elapsed = chunking_started.elapsed();
-    if chunking.chunks.is_empty() {
-        let sqlite_started = Instant::now();
-        replace_chunks_for_note(tx, slug, &[], None, None)?;
-        return Ok(ChunkStats {
-            embedded: 0,
-            reused: 0,
-            embedder_calls: 0,
-            embedding_input_bytes: 0,
-            embedding_input_tokens: 0,
-            embedding_padded_tokens: 0,
-            embedding_input_token_lengths: Vec::new(),
-            embedding_call_durations: Vec::new(),
-            chunk_measurements: Vec::new(),
-            pipeline: pipeline_started.elapsed(),
-            chunking: chunking_elapsed,
-            vector_reuse: Duration::ZERO,
-            embedding: Duration::ZERO,
-            sqlite_write: sqlite_started.elapsed(),
-        });
-    }
 
     let reuse_started = Instant::now();
-    let existing = existing_chunk_hashes(tx, slug)?;
-    let preserved = preserve_existing_vectors(tx, slug, &chunking.chunks, &existing)?;
+    let existing = existing_chunk_hashes(tx, &slug)?;
+    let preserved = preserve_existing_vectors(tx, &slug, &chunking.chunks, &existing)?;
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let doc_prefix = embedder.doc_prefix();
@@ -1031,6 +1097,61 @@ fn chunk_and_embed_note(
         .iter()
         .map(|index| chunk_measurements[*index].clone())
         .collect();
+
+    Ok(PreparedNote {
+        slug,
+        chunking,
+        preserved,
+        texts_to_embed,
+        indices_needing_embed,
+        embedding_input_bytes,
+        embedding_input_token_lengths,
+        chunk_measurements: embedded_chunk_measurements,
+        chunking_elapsed,
+        vector_reuse_elapsed,
+    })
+}
+
+fn embed_prepared_note(
+    tx: &Transaction<'_>,
+    prepared: PreparedNote,
+    embedder: &dyn Embedder,
+    progress: &IndexingProgress,
+) -> Result<ChunkStats, String> {
+    let pipeline_started = Instant::now();
+    let PreparedNote {
+        slug,
+        chunking,
+        preserved,
+        texts_to_embed,
+        indices_needing_embed,
+        embedding_input_bytes,
+        embedding_input_token_lengths,
+        chunk_measurements,
+        chunking_elapsed,
+        vector_reuse_elapsed,
+    } = prepared;
+    if chunking.chunks.is_empty() {
+        let sqlite_started = Instant::now();
+        replace_chunks_for_note(tx, &slug, &[], None, None)?;
+        return Ok(ChunkStats {
+            embedded: 0,
+            reused: 0,
+            embedder_calls: 0,
+            embedding_input_bytes: 0,
+            embedding_input_tokens: 0,
+            embedding_padded_tokens: 0,
+            embedding_input_token_lengths: Vec::new(),
+            embedding_call_durations: Vec::new(),
+            chunk_measurements: Vec::new(),
+            pipeline: pipeline_started.elapsed() + chunking_elapsed + vector_reuse_elapsed,
+            chunking: chunking_elapsed,
+            vector_reuse: vector_reuse_elapsed,
+            embedding: Duration::ZERO,
+            sqlite_write: sqlite_started.elapsed(),
+        });
+    }
+
     let embedding_input_tokens: usize = embedding_input_token_lengths.iter().sum();
     // Each chunk is embedded in its own call. This avoids BatchLongest padding
     // short chunks to the longest sibling chunk in the same note.
@@ -1038,7 +1159,10 @@ fn chunk_and_embed_note(
     let embedding_started = Instant::now();
     let mut new_vectors = Vec::with_capacity(texts_to_embed.len());
     let mut embedding_call_durations = Vec::with_capacity(texts_to_embed.len());
-    for text in &texts_to_embed {
+    for (text, input_tokens) in texts_to_embed
+        .iter()
+        .zip(embedding_input_token_lengths.iter().copied())
+    {
         let call_started = Instant::now();
         let mut vectors = embedder.embed(std::slice::from_ref(text))?;
         embedding_call_durations.push(call_started.elapsed());
@@ -1049,6 +1173,10 @@ fn chunk_and_embed_note(
             ));
         }
         new_vectors.push(vectors.remove(0));
+        progress.chunks_processed.fetch_add(1, Ordering::Relaxed);
+        progress
+            .tokens_processed
+            .fetch_add(input_tokens, Ordering::Relaxed);
     }
     let embedding_elapsed = embedding_started.elapsed();
     if !texts_to_embed.is_empty() {
@@ -1110,7 +1238,7 @@ fn chunk_and_embed_note(
     let sqlite_started = Instant::now();
     replace_chunks_for_note(
         tx,
-        slug,
+        &slug,
         &rows,
         tags_json.as_deref(),
         aliases_json.as_deref(),
@@ -1124,8 +1252,8 @@ fn chunk_and_embed_note(
         embedding_padded_tokens,
         embedding_input_token_lengths,
         embedding_call_durations,
-        chunk_measurements: embedded_chunk_measurements,
-        pipeline: pipeline_started.elapsed(),
+        chunk_measurements,
+        pipeline: pipeline_started.elapsed() + chunking_elapsed + vector_reuse_elapsed,
         chunking: chunking_elapsed,
         vector_reuse: vector_reuse_elapsed,
         embedding: embedding_elapsed,
@@ -1287,7 +1415,7 @@ mod chunk_integration_tests {
 
     use super::{
         estimated_remaining, format_count, format_elapsed, format_eta, format_note_count,
-        progress_log_delay,
+        indexing_progress_message, progress_log_delay,
     };
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
@@ -1603,13 +1731,36 @@ mod chunk_integration_tests {
     }
 
     #[test]
-    fn remaining_time_is_extrapolated_from_processed_notes() {
+    fn remaining_time_is_extrapolated_from_processed_tokens() {
         assert_eq!(
-            estimated_remaining(Duration::from_secs(30), 25, 100),
+            estimated_remaining(Duration::from_secs(30), 25_000, 100_000),
             Some(Duration::from_secs(90))
         );
-        assert_eq!(estimated_remaining(Duration::from_secs(30), 0, 100), None);
-        assert_eq!(estimated_remaining(Duration::from_secs(30), 100, 100), None);
+        assert_eq!(
+            estimated_remaining(Duration::from_secs(30), 0, 100_000),
+            None
+        );
+        assert_eq!(
+            estimated_remaining(Duration::from_secs(30), 100_000, 100_000),
+            None
+        );
+    }
+
+    #[test]
+    fn progress_message_keeps_note_counts_but_percent_and_eta_follow_tokens() {
+        assert_eq!(
+            indexing_progress_message(
+                45,
+                309,
+                80,
+                573,
+                50_000,
+                247_202,
+                Duration::from_secs(60),
+                0,
+            ),
+            "Indexing: 45 of 309 notes — 80 of 573 chunks — 20% of embedding work — about 4 minutes remaining"
+        );
     }
 
     #[test]
