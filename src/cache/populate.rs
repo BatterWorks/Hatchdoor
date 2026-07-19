@@ -10,7 +10,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use crate::cache::chunk_ops::{
     ChunkRow, delete_orphan_vectors, existing_chunk_hashes, replace_chunks_for_note,
 };
-use crate::chunk::{Chunk, ChunkOptions, chunk_note};
+use crate::chunk::{ChunkOptions, chunk_note};
 use crate::embed::Embedder;
 use crate::vault::{NoteEntry, VaultIndex, normalize_title};
 
@@ -34,7 +34,6 @@ pub enum UpsertOutcome {
 
 const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
-const EMBEDDING_BATCH_SIZE: usize = 32;
 
 impl SqliteCache {
     pub fn replace_from_index_with_embedder(
@@ -76,78 +75,46 @@ impl SqliteCache {
         let mut per_note_failures: usize = 0;
         let mut notes_changed: usize = 0;
         let mut notes_unchanged: usize = 0;
-        let mut notes_completed: usize = 0;
         let mut metrics = IndexingMetrics::default();
-        let mut prepared_notes = Vec::new();
-        let mut pending_embeddings = 0usize;
         let (progress, stop_heartbeat, heartbeat) =
             start_indexing_heartbeat(total_notes, started_at);
 
         let indexing_result = (|| -> Result<(), String> {
-            for entry in &entries {
+            for (position, entry) in entries.iter().enumerate() {
                 let note_sync_started = Instant::now();
                 let upsert_outcome = upsert_note_if_changed(&tx, entry, now)?;
                 metrics.note_sync += note_sync_started.elapsed();
                 match upsert_outcome {
                     UpsertOutcome::Wrote { slug, content } => {
-                        match prepare_note_for_embedding(&tx, &slug, &content, embedder) {
-                            Ok(prepared) => {
-                                metrics.record_prepared_note(&prepared);
-                                pending_embeddings += prepared.missing.len();
-                                prepared_notes.push(prepared);
-
-                                if pending_embeddings >= EMBEDDING_BATCH_SIZE {
-                                    let queued_notes = prepared_notes.len();
-                                    let outcome = flush_prepared_notes(
-                                        &tx,
-                                        &mut prepared_notes,
-                                        embedder,
-                                        &mut metrics,
-                                    )?;
-                                    notes_completed += queued_notes;
-                                    notes_changed += outcome.notes_succeeded;
-                                    per_note_failures += outcome.notes_failed;
-                                    chunks_embedded += outcome.chunks_embedded;
-                                    chunks_reused += outcome.chunks_reused;
-                                    pending_embeddings = 0;
-                                }
+                        match chunk_and_embed_note(&tx, &slug, &content, embedder) {
+                            Ok(stats) => {
+                                notes_changed += 1;
+                                chunks_embedded += stats.embedded;
+                                chunks_reused += stats.reused;
+                                metrics.record_chunk_stats(&stats);
                             }
                             Err(e) => {
                                 per_note_failures += 1;
-                                notes_completed += 1;
-                                mark_note_for_retry(&tx, &slug, &e)?;
+                                progress
+                                    .failures
+                                    .store(per_note_failures, Ordering::Relaxed);
+                                tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; marking note for re-embed on next reindex");
+                                // The notes row was just written with the new content_hash,
+                                // but chunk/vector tables are now stale (or empty for a new
+                                // note). Change-detection keys off content_hash, so without
+                                // this the note would look Unchanged forever and never be
+                                // re-chunked. Invalidate the stored hash so the next reindex
+                                // re-processes the note once the embedder recovers.
+                                invalidate_note_content_hash(&tx, &slug)?;
                             }
                         }
                     }
-                    UpsertOutcome::Unchanged => {
-                        notes_unchanged += 1;
-                        notes_completed += 1;
-                    }
+                    UpsertOutcome::Unchanged => notes_unchanged += 1,
                 }
 
                 progress
-                    .failures
-                    .store(per_note_failures, Ordering::Relaxed);
-                progress
                     .notes_processed
-                    .store(notes_completed, Ordering::Relaxed);
-            }
-
-            if !prepared_notes.is_empty() {
-                let queued_notes = prepared_notes.len();
-                let outcome =
-                    flush_prepared_notes(&tx, &mut prepared_notes, embedder, &mut metrics)?;
-                notes_completed += queued_notes;
-                notes_changed += outcome.notes_succeeded;
-                per_note_failures += outcome.notes_failed;
-                chunks_embedded += outcome.chunks_embedded;
-                chunks_reused += outcome.chunks_reused;
-                progress
-                    .failures
-                    .store(per_note_failures, Ordering::Relaxed);
-                progress
-                    .notes_processed
-                    .store(notes_completed, Ordering::Relaxed);
+                    .store(position + 1, Ordering::Relaxed);
             }
             Ok(())
         })();
@@ -237,11 +204,15 @@ struct IndexingMetrics {
 }
 
 impl IndexingMetrics {
-    fn record_prepared_note(&mut self, note: &PreparedNote) {
-        self.chunking += note.chunking;
-        self.chunk_pipeline += note.preparation;
-        self.vector_reuse += note.vector_reuse;
-        self.chunks_total += note.chunks.len();
+    fn record_chunk_stats(&mut self, stats: &ChunkStats) {
+        self.chunking += stats.chunking;
+        self.chunk_pipeline += stats.pipeline;
+        self.vector_reuse += stats.vector_reuse;
+        self.embedding += stats.embedding;
+        self.sqlite_chunk_write += stats.sqlite_write;
+        self.chunks_total += stats.embedded + stats.reused;
+        self.embedder_calls += stats.embedder_calls;
+        self.embedding_input_bytes += stats.embedding_input_bytes;
     }
 }
 
@@ -789,43 +760,46 @@ fn rebuild_links(
     Ok(())
 }
 
-struct MissingEmbedding {
-    chunk_index: usize,
-    text: String,
+pub struct ChunkStats {
+    #[allow(dead_code)]
+    pub embedded: usize,
+    #[allow(dead_code)]
+    pub reused: usize,
+    pub embedder_calls: usize,
+    pub embedding_input_bytes: usize,
+    pub pipeline: Duration,
+    pub chunking: Duration,
+    pub vector_reuse: Duration,
+    pub embedding: Duration,
+    pub sqlite_write: Duration,
 }
 
-struct PreparedNote {
-    slug: String,
-    chunks: Vec<Chunk>,
-    tags_json: Option<String>,
-    aliases_json: Option<String>,
-    vectors: Vec<Option<Vec<f32>>>,
-    missing: Vec<MissingEmbedding>,
-    failure: Option<String>,
-    preparation: Duration,
-    chunking: Duration,
-    vector_reuse: Duration,
-}
-
-#[derive(Default)]
-struct FlushOutcome {
-    notes_succeeded: usize,
-    notes_failed: usize,
-    chunks_embedded: usize,
-    chunks_reused: usize,
-}
-
-fn prepare_note_for_embedding(
+fn chunk_and_embed_note(
     tx: &Transaction<'_>,
     slug: &str,
     content: &str,
     embedder: &dyn Embedder,
-) -> Result<PreparedNote, String> {
-    let preparation_started = Instant::now();
+) -> Result<ChunkStats, String> {
+    let pipeline_started = Instant::now();
     let chunking_started = Instant::now();
     let tokenizer = embedder.tokenizer();
     let chunking = chunk_note(content, tokenizer, ChunkOptions::default());
     let chunking_elapsed = chunking_started.elapsed();
+    if chunking.chunks.is_empty() {
+        let sqlite_started = Instant::now();
+        replace_chunks_for_note(tx, slug, &[], None, None)?;
+        return Ok(ChunkStats {
+            embedded: 0,
+            reused: 0,
+            embedder_calls: 0,
+            embedding_input_bytes: 0,
+            pipeline: pipeline_started.elapsed(),
+            chunking: chunking_elapsed,
+            vector_reuse: Duration::ZERO,
+            embedding: Duration::ZERO,
+            sqlite_write: sqlite_started.elapsed(),
+        });
+    }
 
     let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, slug)?;
@@ -833,208 +807,78 @@ fn prepare_note_for_embedding(
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let doc_prefix = embedder.doc_prefix();
-    let mut vectors = Vec::with_capacity(chunking.chunks.len());
-    let mut missing = Vec::new();
+    let mut texts_to_embed: Vec<String> = Vec::new();
+    let mut indices_needing_embed: Vec<usize> = Vec::new();
     for (idx, chunk) in chunking.chunks.iter().enumerate() {
-        if let Some(vector) = preserved.get(&chunk.content_hash) {
-            vectors.push(Some(vector.clone()));
+        if !preserved.contains_key(&chunk.content_hash) {
+            texts_to_embed.push(format!("{doc_prefix}{}", chunk.content));
+            indices_needing_embed.push(idx);
+        }
+    }
+
+    if !texts_to_embed.is_empty() {
+        tracing::debug!(
+            slug,
+            new = texts_to_embed.len(),
+            reused = chunking.chunks.len() - texts_to_embed.len(),
+            "Embedding chunks for note"
+        );
+    }
+
+    let embedding_input_bytes = texts_to_embed.iter().map(String::len).sum();
+    let embedding_started = Instant::now();
+    let new_vectors = if texts_to_embed.is_empty() {
+        Vec::new()
+    } else {
+        embedder.embed(&texts_to_embed)?
+    };
+    let embedding_elapsed = embedding_started.elapsed();
+
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunking.chunks.len());
+    let mut need_new: std::collections::HashSet<usize> =
+        indices_needing_embed.iter().copied().collect();
+    let mut new_iter = new_vectors.into_iter();
+    for (idx, chunk) in chunking.chunks.iter().enumerate() {
+        if need_new.remove(&idx) {
+            vectors.push(new_iter.next().ok_or("embedder returned too few vectors")?);
         } else {
-            vectors.push(None);
-            missing.push(MissingEmbedding {
-                chunk_index: idx,
-                text: format!("{doc_prefix}{}", chunk.content),
-            });
+            vectors.push(
+                preserved
+                    .get(&chunk.content_hash)
+                    .cloned()
+                    .ok_or("preserved vector missing for unchanged chunk")?,
+            );
         }
     }
 
     let tags_json = serde_json::to_string(&chunking.tags).ok();
     let aliases_json = serde_json::to_string(&chunking.aliases).ok();
-
-    Ok(PreparedNote {
-        slug: slug.to_string(),
-        chunks: chunking.chunks,
-        tags_json,
-        aliases_json,
-        vectors,
-        missing,
-        failure: None,
-        preparation: preparation_started.elapsed(),
-        chunking: chunking_elapsed,
-        vector_reuse: vector_reuse_elapsed,
-    })
-}
-
-fn flush_prepared_notes(
-    tx: &Transaction<'_>,
-    notes: &mut Vec<PreparedNote>,
-    embedder: &dyn Embedder,
-    metrics: &mut IndexingMetrics,
-) -> Result<FlushOutcome, String> {
-    let flush_started = Instant::now();
-    let work: Vec<(usize, usize)> = notes
-        .iter()
-        .enumerate()
-        .flat_map(|(note_index, note)| {
-            (0..note.missing.len()).map(move |missing_index| (note_index, missing_index))
-        })
-        .collect();
-
-    if !work.is_empty() {
-        tracing::debug!(
-            notes = notes.len(),
-            chunks = work.len(),
-            batch_size = EMBEDDING_BATCH_SIZE,
-            "Embedding prepared note batch"
-        );
-    }
-
-    let mut batch_error = None;
-    for batch in work.chunks(EMBEDDING_BATCH_SIZE) {
-        let texts: Vec<String> = batch
-            .iter()
-            .map(|(note_index, missing_index)| {
-                notes[*note_index].missing[*missing_index].text.clone()
-            })
-            .collect();
-        metrics.embedder_calls += 1;
-        metrics.embedding_input_bytes += texts.iter().map(String::len).sum::<usize>();
-        let embedding_started = Instant::now();
-        let result = embedder.embed(&texts);
-        metrics.embedding += embedding_started.elapsed();
-
-        match result {
-            Ok(vectors) if vectors.len() == batch.len() => {
-                for ((note_index, missing_index), vector) in batch.iter().copied().zip(vectors) {
-                    let chunk_index = notes[note_index].missing[missing_index].chunk_index;
-                    notes[note_index].vectors[chunk_index] = Some(vector);
-                }
-            }
-            Ok(vectors) => {
-                batch_error = Some(format!(
-                    "embedder returned {} vectors for {} inputs",
-                    vectors.len(),
-                    batch.len()
-                ));
-                break;
-            }
-            Err(error) => {
-                batch_error = Some(error);
-                break;
-            }
-        }
-    }
-
-    if let Some(error) = batch_error {
-        tracing::warn!(
-            error = %error,
-            "Cross-note embedding batch failed; retrying affected notes individually"
-        );
-        retry_incomplete_notes(notes, embedder, metrics);
-    }
-
-    let mut outcome = FlushOutcome::default();
-    for mut note in notes.drain(..) {
-        let embedded = note.missing.len();
-        let reused = note.chunks.len().saturating_sub(embedded);
-        let result = if let Some(error) = note.failure.take() {
-            Err(error)
-        } else {
-            write_prepared_note(tx, &mut note, metrics)
-        };
-
-        match result {
-            Ok(()) => {
-                outcome.notes_succeeded += 1;
-                outcome.chunks_embedded += embedded;
-                outcome.chunks_reused += reused;
-            }
-            Err(error) => {
-                outcome.notes_failed += 1;
-                mark_note_for_retry(tx, &note.slug, &error)?;
-            }
-        }
-    }
-    metrics.chunk_pipeline += flush_started.elapsed();
-    Ok(outcome)
-}
-
-fn retry_incomplete_notes(
-    notes: &mut [PreparedNote],
-    embedder: &dyn Embedder,
-    metrics: &mut IndexingMetrics,
-) {
-    for note in notes {
-        if note
-            .missing
-            .iter()
-            .all(|missing| note.vectors[missing.chunk_index].is_some())
-        {
-            continue;
-        }
-
-        let texts: Vec<String> = note
-            .missing
-            .iter()
-            .map(|missing| missing.text.clone())
-            .collect();
-        metrics.embedder_calls += 1;
-        metrics.embedding_input_bytes += texts.iter().map(String::len).sum::<usize>();
-        let embedding_started = Instant::now();
-        let result = embedder.embed(&texts);
-        metrics.embedding += embedding_started.elapsed();
-
-        match result {
-            Ok(vectors) if vectors.len() == note.missing.len() => {
-                for (missing, vector) in note.missing.iter().zip(vectors) {
-                    note.vectors[missing.chunk_index] = Some(vector);
-                }
-            }
-            Ok(vectors) => {
-                note.failure = Some(format!(
-                    "embedder returned {} vectors for {} inputs",
-                    vectors.len(),
-                    note.missing.len()
-                ));
-            }
-            Err(error) => note.failure = Some(error),
-        }
-    }
-}
-
-fn write_prepared_note(
-    tx: &Transaction<'_>,
-    note: &mut PreparedNote,
-    metrics: &mut IndexingMetrics,
-) -> Result<(), String> {
-    let vectors = note
-        .vectors
-        .drain(..)
-        .map(|vector| vector.ok_or_else(|| "embedding vector missing after batch".to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let rows: Vec<ChunkRow<'_>> = note
+    let rows: Vec<ChunkRow<'_>> = chunking
         .chunks
         .iter()
         .zip(vectors.iter())
         .map(|(chunk, vector)| ChunkRow { chunk, vector })
         .collect();
-    let sqlite_started = Instant::now();
-    let result = replace_chunks_for_note(
-        tx,
-        &note.slug,
-        &rows,
-        note.tags_json.as_deref(),
-        note.aliases_json.as_deref(),
-    );
-    metrics.sqlite_chunk_write += sqlite_started.elapsed();
-    result
-}
 
-fn mark_note_for_retry(tx: &Transaction<'_>, slug: &str, error: &str) -> Result<(), String> {
-    tracing::warn!(slug = %slug, error = %error, "Per-note embedding failed; marking note for re-embed on next reindex");
-    // The note row now carries the new content hash while its chunks are stale or
-    // absent. Clear the hash so the next refresh retries it instead of treating it
-    // as unchanged forever.
-    invalidate_note_content_hash(tx, slug)
+    let sqlite_started = Instant::now();
+    replace_chunks_for_note(
+        tx,
+        slug,
+        &rows,
+        tags_json.as_deref(),
+        aliases_json.as_deref(),
+    )?;
+    Ok(ChunkStats {
+        embedded: indices_needing_embed.len(),
+        reused: chunking.chunks.len() - indices_needing_embed.len(),
+        embedder_calls: usize::from(!texts_to_embed.is_empty()),
+        embedding_input_bytes,
+        pipeline: pipeline_started.elapsed(),
+        chunking: chunking_elapsed,
+        vector_reuse: vector_reuse_elapsed,
+        embedding: embedding_elapsed,
+        sqlite_write: sqlite_started.elapsed(),
+    })
 }
 
 fn preserve_existing_vectors(
@@ -1146,8 +990,8 @@ mod chunk_integration_tests {
     use tempfile::TempDir;
 
     use super::{
-        EMBEDDING_BATCH_SIZE, estimated_remaining, format_count, format_elapsed, format_eta,
-        format_note_count, progress_log_delay,
+        estimated_remaining, format_count, format_elapsed, format_eta, format_note_count,
+        progress_log_delay,
     };
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
@@ -1320,55 +1164,6 @@ mod chunk_integration_tests {
             .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
             .expect("count");
         assert_eq!(vector_count, chunk_count);
-    }
-
-    #[test]
-    fn changed_notes_are_embedded_in_cross_note_batches_of_32() {
-        struct BatchRecordingEmbedder {
-            inner: StubEmbedder,
-            batch_sizes: std::sync::Mutex<Vec<usize>>,
-        }
-        impl Embedder for BatchRecordingEmbedder {
-            fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-                self.batch_sizes
-                    .lock()
-                    .expect("batch sizes lock")
-                    .push(texts.len());
-                self.inner.embed(texts)
-            }
-            fn embedding_dim(&self) -> usize {
-                self.inner.embedding_dim()
-            }
-            fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
-                self.inner.tokenizer()
-            }
-        }
-
-        let dir = TempDir::new().expect("tempdir");
-        for index in 0..40 {
-            std::fs::write(
-                dir.path().join(format!("note-{index:02}.md")),
-                format!("# Note {index}\n\nA short body."),
-            )
-            .expect("write note");
-        }
-        let cache = SqliteCache::in_memory(384).expect("open");
-        let embedder = BatchRecordingEmbedder {
-            inner: StubEmbedder::new(384),
-            batch_sizes: std::sync::Mutex::new(Vec::new()),
-        };
-        let index = VaultIndex::build(dir.path()).expect("build");
-
-        cache
-            .replace_from_index_with_embedder(&index, &embedder)
-            .expect("replace");
-
-        assert_eq!(EMBEDDING_BATCH_SIZE, 32);
-        assert_eq!(
-            *embedder.batch_sizes.lock().expect("batch sizes lock"),
-            vec![32, 8],
-            "40 single-chunk notes should require one full batch and one final partial batch"
-        );
     }
 
     #[test]
