@@ -12,8 +12,8 @@ pub use paths::strip_md_extension;
 pub use paths::{content_snippet, normalize_link_target, normalize_title, slugify};
 pub use seed::seed_empty_vault;
 pub use types::{
-    ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit,
-    VaultIndex,
+    ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
+    NoteSummary, SearchHit, VaultIndex,
 };
 pub use write::{
     AttachmentInfo, AttachmentOutcome, SectionMode, WriteError, WriteOutcome,

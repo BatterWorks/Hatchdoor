@@ -19,7 +19,7 @@ use crate::vault::{NoteEntry, VaultIndex, normalize_title};
 use super::SqliteCache;
 use super::parse::{
     FileSnapshot, content_hash, current_unix_timestamp, extract_headings, extract_tags,
-    file_snapshot,
+    file_snapshot, parse_frontmatter_metadata,
 };
 
 pub enum UpsertOutcome {
@@ -526,23 +526,20 @@ fn start_indexing_heartbeat(
     let (stop_tx, stop_rx) = mpsc::channel();
     let heartbeat = thread::spawn(move || {
         let mut has_logged = false;
-        loop {
-            match stop_rx.recv_timeout(progress_log_delay(has_logged)) {
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    log_indexing_progress(
-                        heartbeat_progress.notes_processed.load(Ordering::Relaxed),
-                        total_notes,
-                        heartbeat_progress.chunks_processed.load(Ordering::Relaxed),
-                        total_chunks,
-                        heartbeat_progress.tokens_processed.load(Ordering::Relaxed),
-                        total_tokens,
-                        started_at.elapsed(),
-                        heartbeat_progress.failures.load(Ordering::Relaxed),
-                    );
-                    has_logged = true;
-                }
-                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
+        while let Err(mpsc::RecvTimeoutError::Timeout) =
+            stop_rx.recv_timeout(progress_log_delay(has_logged))
+        {
+            log_indexing_progress(
+                heartbeat_progress.notes_processed.load(Ordering::Relaxed),
+                total_notes,
+                heartbeat_progress.chunks_processed.load(Ordering::Relaxed),
+                total_chunks,
+                heartbeat_progress.tokens_processed.load(Ordering::Relaxed),
+                total_tokens,
+                started_at.elapsed(),
+                heartbeat_progress.failures.load(Ordering::Relaxed),
+            );
+            has_logged = true;
         }
     });
     (progress, stop_tx, heartbeat)
@@ -631,7 +628,7 @@ fn format_count(value: usize) -> String {
     let digits = value.to_string();
     let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
     for (position, character) in digits.chars().enumerate() {
-        if position > 0 && (digits.len() - position) % 3 == 0 {
+        if position > 0 && (digits.len() - position).is_multiple_of(3) {
             formatted.push(',');
         }
         formatted.push(character);
@@ -896,6 +893,18 @@ fn upsert_note_content(
     let absolute_path = entry.path.to_string_lossy().to_string();
     let normalized_title = normalize_title(&entry.title);
     let normalized_relative_path = normalize_title(&entry.relative_path);
+    let frontmatter = parse_frontmatter_metadata(content).unwrap_or_else(|error| {
+        tracing::warn!(slug = %entry.slug, error = %error, "Ignoring malformed YAML frontmatter");
+        Default::default()
+    });
+    let aliases_json = serde_json::to_string(&frontmatter.aliases)
+        .map_err(|error| format!("failed serializing aliases for '{}': {error}", entry.slug))?;
+    let frontmatter_json = serde_json::to_string(&frontmatter.properties).map_err(|error| {
+        format!(
+            "failed serializing frontmatter properties for '{}': {error}",
+            entry.slug
+        )
+    })?;
 
     tx.execute(
         r#"
@@ -908,11 +917,13 @@ fn upsert_note_content(
             absolute_path,
             content,
             content_hash,
+            aliases_json,
+            frontmatter_json,
             mtime_ns,
             size_bytes,
             indexed_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ON CONFLICT(relative_path) DO UPDATE SET
             slug = excluded.slug,
             title = excluded.title,
@@ -921,6 +932,8 @@ fn upsert_note_content(
             absolute_path = excluded.absolute_path,
             content = excluded.content,
             content_hash = excluded.content_hash,
+            aliases_json = excluded.aliases_json,
+            frontmatter_json = excluded.frontmatter_json,
             mtime_ns = excluded.mtime_ns,
             size_bytes = excluded.size_bytes,
             indexed_at = excluded.indexed_at
@@ -934,6 +947,8 @@ fn upsert_note_content(
             &absolute_path,
             content,
             hash,
+            &aliases_json,
+            &frontmatter_json,
             snapshot.mtime_ns,
             snapshot.size_bytes,
             indexed_at,

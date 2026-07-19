@@ -215,6 +215,78 @@ impl SqliteCache {
         Ok(hits)
     }
 
+    pub fn semantic_search_filtered(
+        &self,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        eligible_slugs: &HashSet<String>,
+    ) -> Result<Vec<SemanticHit>, String> {
+        if k == 0 || eligible_slugs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let prefixed_query = format!("{}{}", embedder.query_prefix(), query);
+        let query_vector = embedder
+            .embed(&[prefixed_query])?
+            .into_iter()
+            .next()
+            .ok_or("embedder returned no vectors")?;
+        let conn = self.read()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.embedding
+                FROM chunk_vectors v
+                JOIN chunks c ON c.id = v.chunk_id
+                "#,
+            )
+            .map_err(|error| format!("prepare filtered semantic search: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Vec<u8>>(4)?,
+                ))
+            })
+            .map_err(|error| format!("query filtered semantic search: {error}"))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (chunk_id, note_slug, heading_path, content, bytes) =
+                row.map_err(|error| format!("read filtered semantic row: {error}"))?;
+            if !eligible_slugs.contains(&note_slug) {
+                continue;
+            }
+            if bytes.len() != query_vector.len() * std::mem::size_of::<f32>() {
+                return Err(format!(
+                    "cached embedding dimension mismatch for chunk {chunk_id}"
+                ));
+            }
+            let distance = bytes
+                .chunks_exact(4)
+                .zip(&query_vector)
+                .map(|(bytes, query_value)| {
+                    let value = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                    let difference = value - query_value;
+                    difference * difference
+                })
+                .sum::<f32>()
+                .sqrt();
+            hits.push(SemanticHit {
+                chunk_id,
+                note_slug,
+                heading_path,
+                content,
+                distance,
+            });
+        }
+        hits.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
     /// Note-level FTS5 lookup ordered by BM25. Returns slugs in rank order.
     /// Used by the hybrid-retrieval eval. Returns an empty list if the query
     /// produces no usable FTS tokens.
@@ -288,6 +360,54 @@ impl SqliteCache {
         let mut hits = Vec::new();
         for row in rows {
             hits.push(row.map_err(|e| format!("read fts_search_chunks row: {e}"))?);
+        }
+        Ok(hits)
+    }
+
+    pub fn fts_search_chunks_filtered(
+        &self,
+        query: &str,
+        k: usize,
+        eligible_slugs: &HashSet<String>,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
+        if k == 0 || eligible_slugs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(fts_q) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.read()?;
+        let mut stmt = conn
+            .prepare(
+                r#"
+                SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)
+                FROM chunk_fts
+                JOIN chunks c ON c.id = chunk_fts.rowid
+                WHERE chunk_fts MATCH ?1
+                ORDER BY bm25(chunk_fts)
+                "#,
+            )
+            .map_err(|error| format!("prepare filtered FTS search: {error}"))?;
+        let rows = stmt
+            .query_map(params![fts_q], |row| {
+                Ok(ChunkFtsHit {
+                    chunk_id: row.get(0)?,
+                    note_slug: row.get(1)?,
+                    heading_path: row.get(2)?,
+                    content: row.get(3)?,
+                    bm25: row.get::<_, f64>(4)? as f32,
+                })
+            })
+            .map_err(|error| format!("query filtered FTS search: {error}"))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let hit = row.map_err(|error| format!("read filtered FTS row: {error}"))?;
+            if eligible_slugs.contains(&hit.note_slug) {
+                hits.push(hit);
+                if hits.len() >= k {
+                    break;
+                }
+            }
         }
         Ok(hits)
     }

@@ -33,6 +33,7 @@ pub async fn handle_tools_call(
 
     let outcome = match name {
         "search_notes" => read::search_notes_tool(state, arguments).await,
+        "query_notes" => read::query_notes_tool(state, arguments).await,
         "get_note" => read::get_note_tool(state, arguments).await,
         "get_note_links" => read::get_note_links_tool(state, arguments).await,
         "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,

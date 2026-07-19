@@ -20,6 +20,7 @@ pub(super) async fn search_notes_tool(
     let args: SearchNotesArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid search_notes arguments: {error}"))
     })?;
+    validate_metadata_query(&args.filters, &args.include_properties)?;
     let query = args.query.trim().to_string();
     if query.is_empty() {
         return Err(JsonRpcFailure::invalid_params(
@@ -41,6 +42,8 @@ pub(super) async fn search_notes_tool(
         mode,
         limit,
         per_note_cap,
+        filters: args.filters,
+        include_properties: args.include_properties,
     };
     let response =
         crate::search::run(cache.as_ref(), embedder, req).map_err(JsonRpcFailure::internal)?;
@@ -48,6 +51,32 @@ pub(super) async fn search_notes_tool(
     Ok(tool_success(serde_json::to_value(&response).map_err(
         |e| JsonRpcFailure::internal(format!("serialize search response: {e}")),
     )?))
+}
+
+pub(super) async fn query_notes_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: QueryNotesArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid query_notes arguments: {error}"))
+    })?;
+    validate_metadata_query(&args.filters, &args.include_properties)?;
+    if args.filters.is_empty() {
+        return Err(JsonRpcFailure::invalid_params(
+            "query_notes requires at least one metadata filter",
+        ));
+    }
+    let cache = sqlite_cache(&state)
+        .await
+        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
+    let notes = crate::search::query_notes(
+        cache.as_ref(),
+        &args.filters,
+        &args.include_properties,
+        args.limit.unwrap_or(50).clamp(1, 200),
+    )
+    .map_err(JsonRpcFailure::internal)?;
+    Ok(tool_success(json!({ "notes": notes })))
 }
 
 pub(super) async fn get_note_tool(
@@ -194,7 +223,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "search_notes",
-            "description": "Semantic-first chunk search across the vault. Returns ranked chunks with parent note metadata and the parent note's outbound wikilinks. The default semantic mode uses vector similarity — phrase queries as natural language descriptions of what you're looking for, not keyword lists (e.g. \"how should I structure my backup strategy\" beats \"backup strategy\"). Use mode=\"keyword\" when the exact term or phrasing matters (tags, proper names, code symbols). Use get_note for full note content of a returned slug.",
+            "description": "Semantic-first chunk search across the vault. Optional metadata filters restrict eligible notes before results are returned. Results always include normalized tags and aliases; include_properties selects frontmatter fields to return. Use query_notes instead when metadata alone defines the request.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -221,9 +250,42 @@ pub(super) fn read_tools_list() -> Vec<Value> {
                         "maximum": 10,
                         "default": 2,
                         "description": "Maximum number of chunks returned from any single note."
+                    },
+                    "filters": note_filters_schema(),
+                    "include_properties": {
+                        "type": "array",
+                        "items": {"type":"string"},
+                        "maxItems": 50,
+                        "default": [],
+                        "description": "Frontmatter property names to include in each result."
                     }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            },
+            "annotations": read_only_tool_annotations()
+        }),
+        json!({
+            "name": "query_notes",
+            "description": "List notes using exact metadata filters without semantic or keyword retrieval. Use for requests such as all notes with a tag, property, status, or path prefix.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filters": note_filters_schema(),
+                    "include_properties": {
+                        "type": "array",
+                        "items": {"type":"string"},
+                        "maxItems": 50,
+                        "default": []
+                    },
+                    "limit": {
+                        "type":"integer",
+                        "minimum":1,
+                        "maximum":200,
+                        "default":50
+                    }
+                },
+                "required": ["filters"],
                 "additionalProperties": false
             },
             "annotations": read_only_tool_annotations()
@@ -332,6 +394,91 @@ struct SearchNotesArgs {
     limit: Option<usize>,
     #[serde(default)]
     per_note_cap: Option<usize>,
+    #[serde(default)]
+    filters: crate::search::NoteFilters,
+    #[serde(default)]
+    include_properties: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QueryNotesArgs {
+    filters: crate::search::NoteFilters,
+    #[serde(default)]
+    include_properties: Vec<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn note_filters_schema() -> Value {
+    json!({
+        "type":"object",
+        "properties": {
+            "tags": {
+                "type":"array",
+                "items":{"type":"string"},
+                "maxItems":50,
+                "default":[],
+                "description":"All listed tags must be present; matching is case-insensitive and ignores a leading #."
+            },
+            "path_prefix": {
+                "type":"string",
+                "description":"Case-insensitive vault-relative path prefix."
+            },
+            "property_exists": {
+                "type":"array",
+                "items":{"type":"string"},
+                "maxItems":50,
+                "default":[]
+            },
+            "property_equals": {
+                "type":"object",
+                "additionalProperties": true,
+                "description":"Exact typed frontmatter property matches."
+            }
+        },
+        "additionalProperties":false
+    })
+}
+
+fn validate_metadata_query(
+    filters: &crate::search::NoteFilters,
+    include_properties: &[String],
+) -> Result<(), JsonRpcFailure> {
+    const MAX_METADATA_TERMS: usize = 50;
+    for (name, count) in [
+        ("tags", filters.tags.len()),
+        ("property_exists", filters.property_exists.len()),
+        ("property_equals", filters.property_equals.len()),
+        ("include_properties", include_properties.len()),
+    ] {
+        if count > MAX_METADATA_TERMS {
+            return Err(JsonRpcFailure::invalid_params(format!(
+                "{name} accepts at most {MAX_METADATA_TERMS} entries"
+            )));
+        }
+    }
+    let names = filters
+        .tags
+        .iter()
+        .chain(filters.property_exists.iter())
+        .chain(filters.property_equals.keys())
+        .chain(include_properties.iter());
+    if names.into_iter().any(|value| value.trim().is_empty()) {
+        return Err(JsonRpcFailure::invalid_params(
+            "metadata filter names cannot be empty",
+        ));
+    }
+    if filters
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix.len() > 4_096)
+    {
+        return Err(JsonRpcFailure::invalid_params(
+            "path_prefix cannot exceed 4096 bytes",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
