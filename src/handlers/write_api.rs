@@ -651,7 +651,7 @@ async fn refresh_after_write(state: &AppState) -> Result<(), (StatusCode, Json<E
 }
 
 async fn git_sync_warning(state: &AppState) -> Option<String> {
-    let handle = state.git_sync.as_ref()?;
+    let handle = state.git_sync.get()?;
     let guard = handle.status();
     let snapshot = guard.read().await;
     if snapshot.last_ok {

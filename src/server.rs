@@ -2,17 +2,21 @@
 //! checks, and the `serve` run loop. Kept in the library (rather than the binary
 //! root) so the HTTP surface is reachable from integration tests.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
+use axum::{Json, Router};
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
-use crate::app_state::{AppState, build_cache_with_sqlite};
+use crate::app_state::{AppState, VaultCache, build_cache_with_sqlite_and_progress};
 use crate::auth::{WebToken, require_web_token};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
@@ -27,6 +31,7 @@ use crate::handlers::{
     vault_events_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
+use crate::startup::StartupTracker;
 use crate::vault_watcher::spawn_vault_watcher;
 
 /// Hosts that only accept connections from the local machine. Binding to any
@@ -94,8 +99,8 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
         .min(usize::MAX as u64) as usize;
 
-    // Routes that expose vault data. When a web token is configured they sit
-    // behind the auth layer; the SPA shell, /health, and /mcp stay open.
+    // Routes that expose vault data sit behind startup readiness and, when
+    // configured, web authentication. The SPA shell and status routes stay open.
     let protected = Router::new()
         .route("/api/tree", get(tree_handler))
         .route("/api/vault-events", get(vault_events_handler))
@@ -136,10 +141,22 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )),
         None => protected,
     };
+    let protected = protected.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_vault_ready,
+    ));
+    let mcp = Router::new()
+        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            require_vault_ready,
+        ));
 
     Router::new()
         .route("/health", get(health_handler))
-        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+        .route("/ready", get(readiness_handler))
+        .route("/api/startup-status", get(startup_status_handler))
+        .merge(mcp)
         .merge(protected)
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
@@ -179,6 +196,40 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
         .with_state(state)
+}
+
+async fn startup_status_handler(State(state): State<AppState>) -> Response {
+    let mut response = Json(state.startup.status()).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn readiness_handler(State(state): State<AppState>) -> Response {
+    if state.startup.is_ready() {
+        (StatusCode::OK, "ready").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
+    }
+}
+
+async fn require_vault_ready(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.startup.is_ready() {
+        return next.run(request).await;
+    }
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": "Vault is still being indexed",
+            "code": "vault_indexing"
+        })),
+    )
+        .into_response()
 }
 
 pub async fn run_server() {
@@ -231,66 +282,36 @@ pub async fn run_server() {
             std::process::exit(1);
         }));
 
-    let cache = build_cache_with_sqlite(&config.vault_path, sqlite, embedder.as_ref())
-        .unwrap_or_else(|e| {
-            error!(
-                "Failed to index vault at {} into SQLite cache {}: {e}",
-                config.vault_path.display(),
-                config.cache_db_path.display()
-            );
-            std::process::exit(1);
-        });
-
     let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
-
-    let git_sync = match git_sync_config {
-        None => None,
-        Some(git_config) => {
-            if let Err(e) = git::validate_repo(&git_config) {
-                error!("Git sync configuration invalid: {e}");
-                std::process::exit(1);
-            }
-            // The background task flushes any commits stranded by an earlier
-            // outage immediately on startup (see spawn_sync_task).
-            let handle = git::spawn_sync_task(
-                git_config.clone(),
-                vault_write_lock.clone(),
-                git::SyncOps {
-                    commit: Box::new(git::commit_local),
-                    fetch: Box::new(git::fetch_remote),
-                    integrate: Box::new(git::integrate_fetched),
-                    push: Box::new(git::push_branch),
-                },
-            );
-            info!("Git sync enabled");
-            Some(handle)
-        }
-    };
+    if let Some(git_config) = &git_sync_config
+        && let Err(e) = git::validate_repo(git_config)
+    {
+        error!("Git sync configuration invalid: {e}");
+        std::process::exit(1);
+    }
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
+    let startup = StartupTracker::scanning();
     let state = AppState {
         vault_path: config.vault_path.clone(),
-        cache: Arc::new(RwLock::new(cache)),
+        cache: Arc::new(RwLock::new(VaultCache {
+            sqlite: sqlite.clone(),
+        })),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
         embedder,
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
         vault_write_lock,
-        git_sync,
+        git_sync: Arc::new(OnceLock::new()),
         mcp_config,
         archive_prefix: Arc::from(config.archive_prefix.as_str()),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        startup,
     };
 
-    spawn_vault_watcher(
-        state.clone(),
-        config.vault_path.clone(),
-        config.cache_db_path.clone(),
-    );
-
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
-    let app = build_router(state, web_bearer_token);
+    let app = build_router(state.clone(), web_bearer_token);
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
         error!("Address error: {e}");
@@ -311,6 +332,63 @@ pub async fn run_server() {
             error!("Failed to bind: {e}");
             std::process::exit(1);
         });
+
+    let indexing_state = state.clone();
+    let vault_path = config.vault_path.clone();
+    let cache_db_path = config.cache_db_path.clone();
+    let indexing_sqlite = sqlite.clone();
+    let indexing_embedder = state.embedder.clone();
+    tokio::spawn(async move {
+        let tracker = indexing_state.startup.clone();
+        let progress_tracker = tracker.clone();
+        let on_progress = Arc::new(move |progress| {
+            progress_tracker.set_indexing(progress);
+        });
+        let indexing_vault_path = vault_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            build_cache_with_sqlite_and_progress(
+                &indexing_vault_path,
+                indexing_sqlite,
+                indexing_embedder.as_ref(),
+                Some(on_progress),
+            )
+        })
+        .await;
+
+        match result {
+            Ok(Ok(_)) => {
+                tracker.set_ready();
+                if let Some(git_config) = git_sync_config {
+                    // Start sync only after the first consistent index is committed.
+                    let handle = git::spawn_sync_task(
+                        git_config,
+                        indexing_state.vault_write_lock.clone(),
+                        git::SyncOps {
+                            commit: Box::new(git::commit_local),
+                            fetch: Box::new(git::fetch_remote),
+                            integrate: Box::new(git::integrate_fetched),
+                            push: Box::new(git::push_branch),
+                        },
+                    );
+                    let _ = indexing_state.git_sync.set(handle);
+                    info!("Git sync enabled");
+                }
+                spawn_vault_watcher(indexing_state, vault_path, cache_db_path);
+            }
+            Ok(Err(e)) => {
+                tracker.set_failed();
+                error!(
+                    "Failed to index vault at {} into SQLite cache {}: {e}",
+                    vault_path.display(),
+                    cache_db_path.display()
+                );
+            }
+            Err(e) => {
+                tracker.set_failed();
+                error!("Vault indexing task failed: {e}");
+            }
+        }
+    });
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         error!("Server error: {e}");
@@ -397,10 +475,11 @@ mod tests {
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: None,
+            git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: StartupTracker::ready(),
         };
 
         (build_router(state.clone(), web_bearer_token), tmp, state)
@@ -429,6 +508,135 @@ mod tests {
             .await
             .expect("body");
         assert_eq!(&body[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn indexing_startup_keeps_shell_live_but_blocks_vault_surfaces() {
+        let (_ready_app, _tmp, state) = app_for_tests_with_state();
+        state
+            .startup
+            .set_indexing(crate::startup::IndexingProgressSnapshot {
+                notes_completed: 12,
+                notes_total: 40,
+                chunks_completed: 18,
+                chunks_total: 70,
+                tokens_completed: 4_000,
+                tokens_total: 20_000,
+                elapsed_seconds: 20,
+            });
+        let app = build_router(state, None);
+
+        for path in ["/health", "/api/startup-status"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+
+        let readiness = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        for path in ["/api/tree", "/mcp"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(payload["code"], "vault_indexing");
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_status_exposes_human_progress_and_eta() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state
+            .startup
+            .set_indexing(crate::startup::IndexingProgressSnapshot {
+                notes_completed: 12,
+                notes_total: 40,
+                chunks_completed: 18,
+                chunks_total: 70,
+                tokens_completed: 4_000,
+                tokens_total: 20_000,
+                elapsed_seconds: 20,
+            });
+        let response = build_router(state, None)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/startup-status")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(payload["state"], "indexing");
+        assert_eq!(payload["notes_completed"], 12);
+        assert_eq!(payload["notes_total"], 40);
+        assert_eq!(payload["percent"], 20);
+        assert_eq!(payload["eta_seconds"], 80);
+    }
+
+    #[tokio::test]
+    async fn ready_endpoint_changes_only_after_startup_completes() {
+        let (_app, _tmp, state) = app_for_tests_with_state();
+        state.startup.set_scanning();
+        let app = build_router(state.clone(), None);
+        let before = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(before.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        state.startup.set_ready();
+        let after = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(after.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -510,10 +718,11 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: None,
+            git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: StartupTracker::ready(),
         };
         let app = build_router(state, None);
 

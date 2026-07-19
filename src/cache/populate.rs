@@ -13,6 +13,7 @@ use crate::cache::chunk_ops::{
 };
 use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
+use crate::startup::IndexingProgressSnapshot;
 use crate::vault::{NoteEntry, VaultIndex, normalize_title};
 
 use super::SqliteCache;
@@ -41,6 +42,15 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
+    ) -> Result<(), String> {
+        self.replace_from_index_with_embedder_and_progress(index, embedder, None)
+    }
+
+    pub fn replace_from_index_with_embedder_and_progress(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     ) -> Result<(), String> {
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
@@ -131,11 +141,20 @@ impl SqliteCache {
         progress
             .failures
             .store(per_note_failures, Ordering::Relaxed);
+        let progress_reporter = ProgressReporter {
+            progress: progress.as_ref(),
+            on_progress: on_progress.as_ref(),
+            notes_total: total_notes,
+            chunks_total: total_chunks_to_embed,
+            tokens_total: total_tokens_to_embed,
+            started_at: embedding_started_at,
+        };
+        progress_reporter.notify();
 
         let indexing_result = (|| -> Result<(), String> {
             for prepared in prepared_notes {
                 let slug = prepared.slug.clone();
-                match embed_prepared_note(&tx, prepared, embedder, progress.as_ref()) {
+                match embed_prepared_note(&tx, prepared, embedder, &progress_reporter) {
                     Ok(stats) => {
                         notes_changed += 1;
                         chunks_embedded += stats.embedded;
@@ -152,6 +171,7 @@ impl SqliteCache {
                     }
                 }
                 progress.notes_processed.fetch_add(1, Ordering::Relaxed);
+                progress_reporter.notify();
             }
             Ok(())
         })();
@@ -463,6 +483,32 @@ struct IndexingProgress {
     chunks_processed: AtomicUsize,
     tokens_processed: AtomicUsize,
     failures: AtomicUsize,
+}
+
+struct ProgressReporter<'a> {
+    progress: &'a IndexingProgress,
+    on_progress: Option<&'a Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+    notes_total: usize,
+    chunks_total: usize,
+    tokens_total: usize,
+    started_at: Instant,
+}
+
+impl ProgressReporter<'_> {
+    fn notify(&self) {
+        let Some(on_progress) = self.on_progress else {
+            return;
+        };
+        on_progress(IndexingProgressSnapshot {
+            notes_completed: self.progress.notes_processed.load(Ordering::Relaxed),
+            notes_total: self.notes_total,
+            chunks_completed: self.progress.chunks_processed.load(Ordering::Relaxed),
+            chunks_total: self.chunks_total,
+            tokens_completed: self.progress.tokens_processed.load(Ordering::Relaxed),
+            tokens_total: self.tokens_total,
+            elapsed_seconds: self.started_at.elapsed().as_secs(),
+        });
+    }
 }
 
 fn start_indexing_heartbeat(
@@ -1116,8 +1162,9 @@ fn embed_prepared_note(
     tx: &Transaction<'_>,
     prepared: PreparedNote,
     embedder: &dyn Embedder,
-    progress: &IndexingProgress,
+    progress_reporter: &ProgressReporter<'_>,
 ) -> Result<ChunkStats, String> {
+    let progress = progress_reporter.progress;
     let pipeline_started = Instant::now();
     let PreparedNote {
         slug,
@@ -1177,6 +1224,7 @@ fn embed_prepared_note(
         progress
             .tokens_processed
             .fetch_add(input_tokens, Ordering::Relaxed);
+        progress_reporter.notify();
     }
     let embedding_elapsed = embedding_started.elapsed();
     if !texts_to_embed.is_empty() {
@@ -1327,6 +1375,42 @@ mod tests {
         assert_eq!(metrics.duplicate_chunks, 1);
         assert_eq!(metrics.duplicate_input_bytes, 100);
         assert_eq!(metrics.duplicate_input_tokens, 25);
+    }
+
+    #[test]
+    fn progress_observer_receives_exact_workload_and_completion() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(
+            dir.path().join("Long note.md"),
+            format!("# Long note\n\n{}", "measured indexing work ".repeat(900)),
+        )
+        .expect("write note");
+        let index = VaultIndex::build(dir.path()).expect("index");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let snapshots = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = snapshots.clone();
+        let observer = Arc::new(move |snapshot| {
+            observed.lock().expect("snapshots lock").push(snapshot);
+        });
+
+        cache
+            .replace_from_index_with_embedder_and_progress(
+                &index,
+                &StubEmbedder::new(384),
+                Some(observer),
+            )
+            .expect("populate cache");
+
+        let snapshots = snapshots.lock().expect("snapshots lock");
+        let first = snapshots.first().expect("initial snapshot");
+        let last = snapshots.last().expect("final snapshot");
+        assert_eq!(first.notes_total, 1);
+        assert!(first.chunks_total > 1);
+        assert!(first.tokens_total > 0);
+        assert_eq!(first.tokens_completed, 0);
+        assert_eq!(last.notes_completed, last.notes_total);
+        assert_eq!(last.chunks_completed, last.chunks_total);
+        assert_eq!(last.tokens_completed, last.tokens_total);
     }
 
     #[test]

@@ -184,10 +184,11 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: None,
+            git_sync: Arc::new(std::sync::OnceLock::new()),
             mcp_config: Arc::new(McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: crate::startup::StartupTracker::ready(),
         };
         (state, tmp)
     }
