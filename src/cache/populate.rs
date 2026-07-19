@@ -240,12 +240,14 @@ impl IndexingMetrics {
         self.embedding_input_token_lengths
             .extend(stats.embedding_input_token_lengths.iter().copied());
         if stats.embedder_calls > 0 {
-            self.embedding_call_input_counts.push(stats.embedded);
+            self.embedding_call_input_counts
+                .extend(std::iter::repeat_n(1, stats.embedder_calls));
             self.embedding_call_token_counts
-                .push(stats.embedding_input_tokens);
+                .extend(stats.embedding_input_token_lengths.iter().copied());
             self.embedding_call_padded_token_counts
-                .push(stats.embedding_padded_tokens);
-            self.embedding_call_durations.push(stats.embedding);
+                .extend(stats.embedding_input_token_lengths.iter().copied());
+            self.embedding_call_durations
+                .extend(stats.embedding_call_durations.iter().copied());
         }
         for chunk in &stats.chunk_measurements {
             self.record_chunk_measurement(chunk);
@@ -931,6 +933,7 @@ pub struct ChunkStats {
     pub embedding_input_tokens: usize,
     pub embedding_padded_tokens: usize,
     pub embedding_input_token_lengths: Vec<usize>,
+    embedding_call_durations: Vec<Duration>,
     chunk_measurements: Vec<ChunkMeasurement>,
     pub pipeline: Duration,
     pub chunking: Duration,
@@ -968,6 +971,7 @@ fn chunk_and_embed_note(
             embedding_input_tokens: 0,
             embedding_padded_tokens: 0,
             embedding_input_token_lengths: Vec::new(),
+            embedding_call_durations: Vec::new(),
             chunk_measurements: Vec::new(),
             pipeline: pipeline_started.elapsed(),
             chunking: chunking_elapsed,
@@ -1027,19 +1031,25 @@ fn chunk_and_embed_note(
         .iter()
         .map(|index| chunk_measurements[*index].clone())
         .collect();
-    let embedding_input_tokens = embedding_input_token_lengths.iter().sum();
-    let embedding_padded_tokens = embedding_input_token_lengths
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(0)
-        * embedding_input_token_lengths.len();
+    let embedding_input_tokens: usize = embedding_input_token_lengths.iter().sum();
+    // Each chunk is embedded in its own call. This avoids BatchLongest padding
+    // short chunks to the longest sibling chunk in the same note.
+    let embedding_padded_tokens = embedding_input_tokens;
     let embedding_started = Instant::now();
-    let new_vectors = if texts_to_embed.is_empty() {
-        Vec::new()
-    } else {
-        embedder.embed(&texts_to_embed)?
-    };
+    let mut new_vectors = Vec::with_capacity(texts_to_embed.len());
+    let mut embedding_call_durations = Vec::with_capacity(texts_to_embed.len());
+    for text in &texts_to_embed {
+        let call_started = Instant::now();
+        let mut vectors = embedder.embed(std::slice::from_ref(text))?;
+        embedding_call_durations.push(call_started.elapsed());
+        if vectors.len() != 1 {
+            return Err(format!(
+                "embedder returned {} vectors for one input",
+                vectors.len()
+            ));
+        }
+        new_vectors.push(vectors.remove(0));
+    }
     let embedding_elapsed = embedding_started.elapsed();
     if !texts_to_embed.is_empty() {
         let tokens_per_second = if embedding_elapsed.is_zero() {
@@ -1066,7 +1076,8 @@ fn chunk_and_embed_note(
                 .unwrap_or(0),
             elapsed_ms = duration_ms(embedding_elapsed),
             tokens_per_second,
-            "Embedding call performance"
+            calls = texts_to_embed.len(),
+            "Embedding note performance"
         );
     }
 
@@ -1107,11 +1118,12 @@ fn chunk_and_embed_note(
     Ok(ChunkStats {
         embedded: indices_needing_embed.len(),
         reused: chunking.chunks.len() - indices_needing_embed.len(),
-        embedder_calls: usize::from(!texts_to_embed.is_empty()),
+        embedder_calls: texts_to_embed.len(),
         embedding_input_bytes,
         embedding_input_tokens,
         embedding_padded_tokens,
         embedding_input_token_lengths,
+        embedding_call_durations,
         chunk_measurements: embedded_chunk_measurements,
         pipeline: pipeline_started.elapsed(),
         chunking: chunking_elapsed,
@@ -1491,6 +1503,58 @@ mod chunk_integration_tests {
         assert_eq!(
             second_calls, first_calls,
             "unchanged note must not re-embed"
+        );
+    }
+
+    #[test]
+    fn new_chunks_are_embedded_one_per_call() {
+        struct BatchRecordingEmbedder {
+            inner: StubEmbedder,
+            calls: std::sync::atomic::AtomicUsize,
+            largest_batch: std::sync::atomic::AtomicUsize,
+        }
+        impl Embedder for BatchRecordingEmbedder {
+            fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.largest_batch
+                    .fetch_max(texts.len(), std::sync::atomic::Ordering::SeqCst);
+                self.inner.embed(texts)
+            }
+            fn embedding_dim(&self) -> usize {
+                self.inner.embedding_dim()
+            }
+            fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
+                self.inner.tokenizer()
+            }
+        }
+
+        let body = (0..1_700)
+            .map(|index| format!("word{index}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let dir = make_vault(&[("long.md", &body)]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder = BatchRecordingEmbedder {
+            inner: StubEmbedder::new(384),
+            calls: 0.into(),
+            largest_batch: 0.into(),
+        };
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+
+        assert!(
+            embedder.calls.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "fixture must produce multiple chunks"
+        );
+        assert_eq!(
+            embedder
+                .largest_batch
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "indexing must avoid cross-chunk padding"
         );
     }
 
