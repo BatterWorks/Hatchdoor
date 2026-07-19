@@ -123,15 +123,14 @@ pub fn validate_repo(config: &GitConfig) -> Result<(), GitError> {
     if !head.is_branch() {
         return Err(GitError::Validation("HEAD is detached".to_string()));
     }
-    match head.shorthand() {
-        Some(name) if name == config.branch => {}
-        other => {
-            return Err(GitError::Validation(format!(
-                "HEAD is on '{}', expected configured branch '{}'",
-                other.unwrap_or("<unknown>"),
-                config.branch
-            )));
-        }
+    let head_name = head.shorthand().map_err(|e| {
+        GitError::Validation(format!("cannot read HEAD branch name: {}", e.message()))
+    })?;
+    if head_name != config.branch {
+        return Err(GitError::Validation(format!(
+            "HEAD is on '{}', expected configured branch '{}'",
+            head_name, config.branch
+        )));
     }
 
     repo.find_remote(&config.remote).map_err(|e| {

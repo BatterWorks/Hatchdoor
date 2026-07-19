@@ -11,6 +11,7 @@
 ### Changed
 - Chunks are embedded individually to avoid batch-longest padding and reduce peak memory pressure.
 - The cache schema is upgraded to version 6 for note-level frontmatter metadata. The first 2.3.0 startup automatically rebuilds the generated SQLite cache from the Markdown vault.
+- Rust and frontend dependencies are refreshed within their current compatibility lines, including git2 0.21, resolving the current RustSec and npm audit findings.
 
 ## v2.1.1 - 2026-06-13
 
