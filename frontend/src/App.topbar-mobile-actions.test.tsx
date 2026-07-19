@@ -8,7 +8,7 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import { VaultApp as App } from "./App";
 
 const originalOnLine = navigator.onLine;
 const originalClipboard = navigator.clipboard;

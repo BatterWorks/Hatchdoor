@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "hatchdoor"
-version = "2.2.0"
+version = "2.2.1"
 dependencies = [
  "ahash",
  "axum",
@@ -1054,6 +1054,7 @@ dependencies = [
  "dotenvy",
  "fastembed",
  "git2",
+ "libc",
  "notify",
  "rusqlite",
  "serde",

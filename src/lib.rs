@@ -12,5 +12,6 @@ pub mod mcp;
 pub mod rerank;
 pub mod search;
 pub mod server;
+pub mod startup;
 pub mod vault;
 pub mod vault_watcher;
