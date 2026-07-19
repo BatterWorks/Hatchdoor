@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -65,6 +66,7 @@ impl SqliteCache {
         }
 
         let started_at = Instant::now();
+        let process_cpu_started = process_cpu_time();
         let total_notes = entries.len();
         tracing::info!(
             "Preparing search index for {}…",
@@ -169,7 +171,16 @@ impl SqliteCache {
             failure_summary,
             format_elapsed(elapsed),
         );
-        log_indexing_performance(&metrics, total_notes, notes_changed, elapsed);
+        let process_cpu_elapsed = process_cpu_started
+            .zip(process_cpu_time())
+            .and_then(|(start, end)| end.checked_sub(start));
+        log_indexing_performance(
+            &metrics,
+            total_notes,
+            notes_changed,
+            elapsed,
+            process_cpu_elapsed,
+        );
         Ok(())
     }
 
@@ -201,6 +212,17 @@ struct IndexingMetrics {
     chunks_total: usize,
     embedder_calls: usize,
     embedding_input_bytes: usize,
+    embedding_input_tokens: usize,
+    embedding_padded_tokens: usize,
+    embedding_input_token_lengths: Vec<usize>,
+    embedding_call_input_counts: Vec<usize>,
+    embedding_call_token_counts: Vec<usize>,
+    embedding_call_padded_token_counts: Vec<usize>,
+    embedding_call_durations: Vec<Duration>,
+    unique_chunk_hashes: HashSet<String>,
+    duplicate_chunks: usize,
+    duplicate_input_bytes: usize,
+    duplicate_input_tokens: usize,
 }
 
 impl IndexingMetrics {
@@ -213,6 +235,29 @@ impl IndexingMetrics {
         self.chunks_total += stats.embedded + stats.reused;
         self.embedder_calls += stats.embedder_calls;
         self.embedding_input_bytes += stats.embedding_input_bytes;
+        self.embedding_input_tokens += stats.embedding_input_tokens;
+        self.embedding_padded_tokens += stats.embedding_padded_tokens;
+        self.embedding_input_token_lengths
+            .extend(stats.embedding_input_token_lengths.iter().copied());
+        if stats.embedder_calls > 0 {
+            self.embedding_call_input_counts.push(stats.embedded);
+            self.embedding_call_token_counts
+                .push(stats.embedding_input_tokens);
+            self.embedding_call_padded_token_counts
+                .push(stats.embedding_padded_tokens);
+            self.embedding_call_durations.push(stats.embedding);
+        }
+        for chunk in &stats.chunk_measurements {
+            self.record_chunk_measurement(chunk);
+        }
+    }
+
+    fn record_chunk_measurement(&mut self, chunk: &ChunkMeasurement) {
+        if !self.unique_chunk_hashes.insert(chunk.content_hash.clone()) {
+            self.duplicate_chunks += 1;
+            self.duplicate_input_bytes += chunk.input_bytes;
+            self.duplicate_input_tokens += chunk.input_tokens;
+        }
     }
 }
 
@@ -221,6 +266,7 @@ fn log_indexing_performance(
     notes_total: usize,
     notes_changed: usize,
     elapsed: Duration,
+    process_cpu_elapsed: Option<Duration>,
 ) {
     let elapsed_seconds = elapsed.as_secs_f64();
     let embedding_share_percent = if elapsed_seconds > 0.0 {
@@ -233,6 +279,24 @@ fn log_indexing_performance(
     } else {
         0.0
     };
+    let process_cpu_ms = process_cpu_elapsed.map(duration_ms).unwrap_or(-1.0);
+    let process_cpu_utilization_percent = process_cpu_elapsed
+        .filter(|_| elapsed_seconds > 0.0)
+        .map(|cpu| cpu.as_secs_f64() / elapsed_seconds * 100.0)
+        .unwrap_or(-1.0);
+    let duplicate_token_share_percent = if metrics.embedding_input_tokens > 0 {
+        metrics.duplicate_input_tokens as f64 / metrics.embedding_input_tokens as f64 * 100.0
+    } else {
+        0.0
+    };
+    let padding_tokens = metrics
+        .embedding_padded_tokens
+        .saturating_sub(metrics.embedding_input_tokens);
+    let padding_token_share_percent = if metrics.embedding_padded_tokens > 0 {
+        padding_tokens as f64 / metrics.embedding_padded_tokens as f64 * 100.0
+    } else {
+        0.0
+    };
 
     tracing::debug!(
         notes_total,
@@ -240,6 +304,62 @@ fn log_indexing_performance(
         chunks_total = metrics.chunks_total,
         embedder_calls = metrics.embedder_calls,
         embedding_input_bytes = metrics.embedding_input_bytes,
+        embedding_input_tokens = metrics.embedding_input_tokens,
+        embedding_padded_tokens = metrics.embedding_padded_tokens,
+        padding_tokens,
+        padding_token_share_percent,
+        input_tokens_p50 = percentile_usize(&metrics.embedding_input_token_lengths, 50),
+        input_tokens_p95 = percentile_usize(&metrics.embedding_input_token_lengths, 95),
+        input_tokens_p99 = percentile_usize(&metrics.embedding_input_token_lengths, 99),
+        input_tokens_max = metrics
+            .embedding_input_token_lengths
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0),
+        inputs_at_512_token_limit = metrics
+            .embedding_input_token_lengths
+            .iter()
+            .filter(|tokens| **tokens == 512)
+            .count(),
+        call_inputs_p50 = percentile_usize(&metrics.embedding_call_input_counts, 50),
+        call_inputs_p95 = percentile_usize(&metrics.embedding_call_input_counts, 95),
+        call_inputs_max = metrics
+            .embedding_call_input_counts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0),
+        call_tokens_p50 = percentile_usize(&metrics.embedding_call_token_counts, 50),
+        call_tokens_p95 = percentile_usize(&metrics.embedding_call_token_counts, 95),
+        call_tokens_max = metrics
+            .embedding_call_token_counts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0),
+        call_padded_tokens_p50 = percentile_usize(&metrics.embedding_call_padded_token_counts, 50),
+        call_padded_tokens_p95 = percentile_usize(&metrics.embedding_call_padded_token_counts, 95),
+        call_padded_tokens_max = metrics
+            .embedding_call_padded_token_counts
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0),
+        call_duration_ms_p50 = percentile_duration_ms(&metrics.embedding_call_durations, 50),
+        call_duration_ms_p95 = percentile_duration_ms(&metrics.embedding_call_durations, 95),
+        call_duration_ms_max = metrics
+            .embedding_call_durations
+            .iter()
+            .copied()
+            .max()
+            .map(duration_ms)
+            .unwrap_or(0.0),
+        unique_chunk_hashes = metrics.unique_chunk_hashes.len(),
+        duplicate_chunks = metrics.duplicate_chunks,
+        duplicate_input_bytes = metrics.duplicate_input_bytes,
+        duplicate_input_tokens = metrics.duplicate_input_tokens,
+        duplicate_token_share_percent,
         note_sync_ms = duration_ms(metrics.note_sync),
         chunking_ms = duration_ms(metrics.chunking),
         chunk_pipeline_ms = duration_ms(metrics.chunk_pipeline),
@@ -251,8 +371,49 @@ fn log_indexing_performance(
         total_ms = duration_ms(elapsed),
         embedding_share_percent,
         chunks_per_second,
+        process_cpu_ms,
+        process_cpu_utilization_percent,
         "Indexing performance summary"
     );
+}
+
+fn percentile_usize(values: &[usize], percentile: usize) -> usize {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = percentile_index(sorted.len(), percentile);
+    sorted[index]
+}
+
+fn percentile_duration_ms(values: &[Duration], percentile: usize) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let index = percentile_index(sorted.len(), percentile);
+    duration_ms(sorted[index])
+}
+
+fn percentile_index(len: usize, percentile: usize) -> usize {
+    let rank = len.saturating_mul(percentile.min(100)).div_ceil(100);
+    rank.saturating_sub(1).min(len - 1)
+}
+
+fn process_cpu_time() -> Option<Duration> {
+    let mut usage = MaybeUninit::<libc::rusage>::uninit();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    timeval_duration(usage.ru_utime).checked_add(timeval_duration(usage.ru_stime))
+}
+
+fn timeval_duration(value: libc::timeval) -> Duration {
+    Duration::from_secs(value.tv_sec.max(0) as u64)
+        + Duration::from_micros(value.tv_usec.max(0) as u64)
 }
 
 fn duration_ms(duration: Duration) -> f64 {
@@ -767,11 +928,22 @@ pub struct ChunkStats {
     pub reused: usize,
     pub embedder_calls: usize,
     pub embedding_input_bytes: usize,
+    pub embedding_input_tokens: usize,
+    pub embedding_padded_tokens: usize,
+    pub embedding_input_token_lengths: Vec<usize>,
+    chunk_measurements: Vec<ChunkMeasurement>,
     pub pipeline: Duration,
     pub chunking: Duration,
     pub vector_reuse: Duration,
     pub embedding: Duration,
     pub sqlite_write: Duration,
+}
+
+#[derive(Clone)]
+struct ChunkMeasurement {
+    content_hash: String,
+    input_bytes: usize,
+    input_tokens: usize,
 }
 
 fn chunk_and_embed_note(
@@ -783,7 +955,7 @@ fn chunk_and_embed_note(
     let pipeline_started = Instant::now();
     let chunking_started = Instant::now();
     let tokenizer = embedder.tokenizer();
-    let chunking = chunk_note(content, tokenizer, ChunkOptions::default());
+    let chunking = chunk_note(content, tokenizer.clone(), ChunkOptions::default());
     let chunking_elapsed = chunking_started.elapsed();
     if chunking.chunks.is_empty() {
         let sqlite_started = Instant::now();
@@ -793,6 +965,10 @@ fn chunk_and_embed_note(
             reused: 0,
             embedder_calls: 0,
             embedding_input_bytes: 0,
+            embedding_input_tokens: 0,
+            embedding_padded_tokens: 0,
+            embedding_input_token_lengths: Vec::new(),
+            chunk_measurements: Vec::new(),
             pipeline: pipeline_started.elapsed(),
             chunking: chunking_elapsed,
             vector_reuse: Duration::ZERO,
@@ -807,6 +983,23 @@ fn chunk_and_embed_note(
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let doc_prefix = embedder.doc_prefix();
+    let chunk_measurements = chunking
+        .chunks
+        .iter()
+        .map(|chunk| {
+            let input = format!("{doc_prefix}{}", chunk.content);
+            let input_tokens = tokenizer
+                .encode(input.as_str(), true)
+                .map_err(|error| format!("failed measuring tokens for '{slug}': {error}"))?
+                .get_ids()
+                .len();
+            Ok(ChunkMeasurement {
+                content_hash: chunk.content_hash.clone(),
+                input_bytes: input.len(),
+                input_tokens,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let mut texts_to_embed: Vec<String> = Vec::new();
     let mut indices_needing_embed: Vec<usize> = Vec::new();
     for (idx, chunk) in chunking.chunks.iter().enumerate() {
@@ -826,6 +1019,21 @@ fn chunk_and_embed_note(
     }
 
     let embedding_input_bytes = texts_to_embed.iter().map(String::len).sum();
+    let embedding_input_token_lengths: Vec<usize> = indices_needing_embed
+        .iter()
+        .map(|index| chunk_measurements[*index].input_tokens)
+        .collect();
+    let embedded_chunk_measurements: Vec<ChunkMeasurement> = indices_needing_embed
+        .iter()
+        .map(|index| chunk_measurements[*index].clone())
+        .collect();
+    let embedding_input_tokens = embedding_input_token_lengths.iter().sum();
+    let embedding_padded_tokens = embedding_input_token_lengths
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        * embedding_input_token_lengths.len();
     let embedding_started = Instant::now();
     let new_vectors = if texts_to_embed.is_empty() {
         Vec::new()
@@ -833,6 +1041,34 @@ fn chunk_and_embed_note(
         embedder.embed(&texts_to_embed)?
     };
     let embedding_elapsed = embedding_started.elapsed();
+    if !texts_to_embed.is_empty() {
+        let tokens_per_second = if embedding_elapsed.is_zero() {
+            0.0
+        } else {
+            embedding_input_tokens as f64 / embedding_elapsed.as_secs_f64()
+        };
+        tracing::debug!(
+            slug,
+            inputs = texts_to_embed.len(),
+            input_bytes = embedding_input_bytes,
+            input_tokens = embedding_input_tokens,
+            padded_tokens = embedding_padded_tokens,
+            padding_tokens = embedding_padded_tokens.saturating_sub(embedding_input_tokens),
+            min_input_tokens = embedding_input_token_lengths
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0),
+            max_input_tokens = embedding_input_token_lengths
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0),
+            elapsed_ms = duration_ms(embedding_elapsed),
+            tokens_per_second,
+            "Embedding call performance"
+        );
+    }
 
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunking.chunks.len());
     let mut need_new: std::collections::HashSet<usize> =
@@ -873,6 +1109,10 @@ fn chunk_and_embed_note(
         reused: chunking.chunks.len() - indices_needing_embed.len(),
         embedder_calls: usize::from(!texts_to_embed.is_empty()),
         embedding_input_bytes,
+        embedding_input_tokens,
+        embedding_padded_tokens,
+        embedding_input_token_lengths,
+        chunk_measurements: embedded_chunk_measurements,
         pipeline: pipeline_started.elapsed(),
         chunking: chunking_elapsed,
         vector_reuse: vector_reuse_elapsed,
@@ -911,6 +1151,50 @@ mod tests {
     use crate::vault::VaultIndex;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn performance_percentiles_use_nearest_rank() {
+        let values = [10, 20, 30, 40, 50];
+        assert_eq!(percentile_usize(&values, 50), 30);
+        assert_eq!(percentile_usize(&values, 95), 50);
+        assert_eq!(percentile_usize(&[], 95), 0);
+    }
+
+    #[test]
+    fn duplicate_measurements_count_only_repeated_embedding_inputs() {
+        let first = ChunkMeasurement {
+            content_hash: "same".to_string(),
+            input_bytes: 100,
+            input_tokens: 25,
+        };
+        let repeated = ChunkMeasurement {
+            content_hash: "same".to_string(),
+            input_bytes: 100,
+            input_tokens: 25,
+        };
+        let unique = ChunkMeasurement {
+            content_hash: "different".to_string(),
+            input_bytes: 80,
+            input_tokens: 20,
+        };
+        let mut metrics = IndexingMetrics::default();
+
+        metrics.record_chunk_measurement(&first);
+        metrics.record_chunk_measurement(&repeated);
+        metrics.record_chunk_measurement(&unique);
+
+        assert_eq!(metrics.unique_chunk_hashes.len(), 2);
+        assert_eq!(metrics.duplicate_chunks, 1);
+        assert_eq!(metrics.duplicate_input_bytes, 100);
+        assert_eq!(metrics.duplicate_input_tokens, 25);
+    }
+
+    #[test]
+    fn process_cpu_measurement_is_available_and_monotonic() {
+        let before = process_cpu_time().expect("process CPU time");
+        let after = process_cpu_time().expect("process CPU time");
+        assert!(after >= before);
+    }
 
     #[test]
     fn replace_from_index_stamps_embedder_id_and_build_duration() {

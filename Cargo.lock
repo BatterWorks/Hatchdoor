@@ -1054,6 +1054,7 @@ dependencies = [
  "dotenvy",
  "fastembed",
  "git2",
+ "libc",
  "notify",
  "rusqlite",
  "serde",
