@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -65,7 +66,14 @@ pub fn build_cache_with_sqlite(
             "Seeded fresh vault with Hatchdoor starter notes"
         );
     }
+    info!("Scanning vault for notes…");
+    let scan_started = Instant::now();
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
+    debug!(
+        notes = index.ordered_slugs.len(),
+        elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
+        "Vault scan performance"
+    );
     sqlite.replace_from_index_with_embedder(&index, embedder)?;
 
     Ok(VaultCache { sqlite })
@@ -136,12 +144,19 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     // pooled connections keep serving the prior snapshot until it commits, so we
     // no longer hold the cache write lock for the whole rebuild (F-03).
     run_blocking(move || {
+        info!("Scanning vault for notes…");
+        let scan_started = Instant::now();
         let index = VaultIndex::build(&vault_path).map_err(|e| e.to_string())?;
+        debug!(
+            notes = index.ordered_slugs.len(),
+            elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
+            "Vault scan performance"
+        );
         sqlite.replace_from_index_with_embedder(&index, embedder.as_ref())
     })
     .await?;
 
-    info!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
+    debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
     broadcast_vault_revision(state);
     Ok(())
 }

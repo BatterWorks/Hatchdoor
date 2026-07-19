@@ -1,5 +1,9 @@
 use std::collections::HashSet;
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -28,6 +32,9 @@ pub enum UpsertOutcome {
     Unchanged,
 }
 
+const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
 impl SqliteCache {
     pub fn replace_from_index_with_embedder(
         &self,
@@ -49,61 +56,88 @@ impl SqliteCache {
             .transaction()
             .map_err(|e| format!("failed to start SQLite cache refresh: {e}"))?;
 
-        for cached_path in cached_relative_paths(&tx)? {
+        let cached_paths = cached_relative_paths(&tx)?;
+        let is_incremental_refresh = !cached_paths.is_empty();
+        for cached_path in cached_paths {
             if !current_paths.contains(&cached_path) {
                 delete_note_by_relative_path(&tx, &cached_path)?;
             }
         }
 
-        let started_at = std::time::Instant::now();
+        let started_at = Instant::now();
+        let total_notes = entries.len();
         tracing::info!(
-            notes = entries.len(),
-            "Indexing vault: chunking and embedding"
+            "Preparing search index for {}…",
+            format_note_count(total_notes)
         );
         let mut chunks_embedded: usize = 0;
         let mut chunks_reused: usize = 0;
         let mut per_note_failures: usize = 0;
+        let mut notes_changed: usize = 0;
+        let mut notes_unchanged: usize = 0;
+        let mut metrics = IndexingMetrics::default();
+        let (progress, stop_heartbeat, heartbeat) =
+            start_indexing_heartbeat(total_notes, started_at);
 
-        for entry in &entries {
-            if let UpsertOutcome::Wrote { slug, content } = upsert_note_if_changed(&tx, entry, now)?
-            {
-                match chunk_and_embed_note(&tx, &slug, &content, embedder) {
-                    Ok(stats) => {
-                        chunks_embedded += stats.embedded;
-                        chunks_reused += stats.reused;
+        let indexing_result = (|| -> Result<(), String> {
+            for (position, entry) in entries.iter().enumerate() {
+                let note_sync_started = Instant::now();
+                let upsert_outcome = upsert_note_if_changed(&tx, entry, now)?;
+                metrics.note_sync += note_sync_started.elapsed();
+                match upsert_outcome {
+                    UpsertOutcome::Wrote { slug, content } => {
+                        match chunk_and_embed_note(&tx, &slug, &content, embedder) {
+                            Ok(stats) => {
+                                notes_changed += 1;
+                                chunks_embedded += stats.embedded;
+                                chunks_reused += stats.reused;
+                                metrics.record_chunk_stats(&stats);
+                            }
+                            Err(e) => {
+                                per_note_failures += 1;
+                                progress
+                                    .failures
+                                    .store(per_note_failures, Ordering::Relaxed);
+                                tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; marking note for re-embed on next reindex");
+                                // The notes row was just written with the new content_hash,
+                                // but chunk/vector tables are now stale (or empty for a new
+                                // note). Change-detection keys off content_hash, so without
+                                // this the note would look Unchanged forever and never be
+                                // re-chunked. Invalidate the stored hash so the next reindex
+                                // re-processes the note once the embedder recovers.
+                                invalidate_note_content_hash(&tx, &slug)?;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        per_note_failures += 1;
-                        tracing::warn!(slug = %slug, error = %e, "Per-note embedding failed; marking note for re-embed on next reindex");
-                        // The notes row was just written with the new content_hash,
-                        // but chunk/vector tables are now stale (or empty for a new
-                        // note). Change-detection keys off content_hash, so without
-                        // this the note would look Unchanged forever and never be
-                        // re-chunked. Invalidate the stored hash so the next reindex
-                        // re-processes the note once the embedder recovers.
-                        invalidate_note_content_hash(&tx, &slug)?;
-                    }
+                    UpsertOutcome::Unchanged => notes_unchanged += 1,
                 }
+
+                progress
+                    .notes_processed
+                    .store(position + 1, Ordering::Relaxed);
             }
+            Ok(())
+        })();
+
+        let _ = stop_heartbeat.send(());
+        if heartbeat.join().is_err() {
+            tracing::warn!("Indexing progress heartbeat stopped unexpectedly");
         }
+        indexing_result?;
 
-        tracing::info!(
-            notes = entries.len(),
-            chunks_embedded,
-            chunks_reused,
-            per_note_failures,
-            elapsed_ms = started_at.elapsed().as_millis(),
-            "Indexing complete"
-        );
-
+        tracing::info!("Updating links between notes…");
+        let links_started = Instant::now();
         rebuild_links(&tx, index, &entries)?;
+        metrics.link_rebuild = links_started.elapsed();
         let removed = delete_orphan_vectors(&tx)?;
         if removed > 0 {
             tracing::debug!(removed, "Swept orphan chunk vectors");
         }
 
+        let commit_started = Instant::now();
         tx.commit()
             .map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
+        metrics.commit = commit_started.elapsed();
 
         // Release the writer lock before set_metadata re-acquires it, otherwise
         // this self-deadlocks (the guard `conn` still holds the same Mutex).
@@ -112,6 +146,30 @@ impl SqliteCache {
         // Record which model produced these vectors so a future build with a
         // different model triggers reset_if_embedder_changed above.
         self.set_metadata("embedder_id", &embedder.identity())?;
+
+        let elapsed = started_at.elapsed();
+        let failure_summary = if per_note_failures == 0 {
+            String::new()
+        } else {
+            format!(", {} failed", format_count(per_note_failures))
+        };
+        let changed_action = if is_incremental_refresh {
+            "updated"
+        } else {
+            "indexed"
+        };
+        tracing::info!(
+            chunks_embedded,
+            chunks_reused,
+            "Search index ready: {} checked, {} {}, {} unchanged{} in {}",
+            format_note_count(total_notes),
+            format_count(notes_changed),
+            changed_action,
+            format_count(notes_unchanged),
+            failure_summary,
+            format_elapsed(elapsed),
+        );
+        log_indexing_performance(&metrics, total_notes, notes_changed, elapsed);
         Ok(())
     }
 
@@ -127,6 +185,223 @@ impl SqliteCache {
         self.set_metadata("embedder_id", embedder_id)?;
         self.set_metadata("build_duration_secs", &format!("{secs:.3}"))?;
         Ok(())
+    }
+}
+
+#[derive(Default)]
+struct IndexingMetrics {
+    note_sync: Duration,
+    chunking: Duration,
+    chunk_pipeline: Duration,
+    vector_reuse: Duration,
+    embedding: Duration,
+    sqlite_chunk_write: Duration,
+    link_rebuild: Duration,
+    commit: Duration,
+    chunks_total: usize,
+    embedder_calls: usize,
+    embedding_input_bytes: usize,
+}
+
+impl IndexingMetrics {
+    fn record_chunk_stats(&mut self, stats: &ChunkStats) {
+        self.chunking += stats.chunking;
+        self.chunk_pipeline += stats.pipeline;
+        self.vector_reuse += stats.vector_reuse;
+        self.embedding += stats.embedding;
+        self.sqlite_chunk_write += stats.sqlite_write;
+        self.chunks_total += stats.embedded + stats.reused;
+        self.embedder_calls += stats.embedder_calls;
+        self.embedding_input_bytes += stats.embedding_input_bytes;
+    }
+}
+
+fn log_indexing_performance(
+    metrics: &IndexingMetrics,
+    notes_total: usize,
+    notes_changed: usize,
+    elapsed: Duration,
+) {
+    let elapsed_seconds = elapsed.as_secs_f64();
+    let embedding_share_percent = if elapsed_seconds > 0.0 {
+        metrics.embedding.as_secs_f64() / elapsed_seconds * 100.0
+    } else {
+        0.0
+    };
+    let chunks_per_second = if elapsed_seconds > 0.0 {
+        metrics.chunks_total as f64 / elapsed_seconds
+    } else {
+        0.0
+    };
+
+    tracing::debug!(
+        notes_total,
+        notes_changed,
+        chunks_total = metrics.chunks_total,
+        embedder_calls = metrics.embedder_calls,
+        embedding_input_bytes = metrics.embedding_input_bytes,
+        note_sync_ms = duration_ms(metrics.note_sync),
+        chunking_ms = duration_ms(metrics.chunking),
+        chunk_pipeline_ms = duration_ms(metrics.chunk_pipeline),
+        vector_reuse_ms = duration_ms(metrics.vector_reuse),
+        embedding_ms = duration_ms(metrics.embedding),
+        sqlite_chunk_write_ms = duration_ms(metrics.sqlite_chunk_write),
+        link_rebuild_ms = duration_ms(metrics.link_rebuild),
+        commit_ms = duration_ms(metrics.commit),
+        total_ms = duration_ms(elapsed),
+        embedding_share_percent,
+        chunks_per_second,
+        "Indexing performance summary"
+    );
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+#[derive(Default)]
+struct IndexingProgress {
+    notes_processed: AtomicUsize,
+    failures: AtomicUsize,
+}
+
+fn start_indexing_heartbeat(
+    total_notes: usize,
+    started_at: Instant,
+) -> (
+    Arc<IndexingProgress>,
+    mpsc::Sender<()>,
+    thread::JoinHandle<()>,
+) {
+    let progress = Arc::new(IndexingProgress::default());
+    let heartbeat_progress = progress.clone();
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let heartbeat = thread::spawn(move || {
+        let mut has_logged = false;
+        loop {
+            match stop_rx.recv_timeout(progress_log_delay(has_logged)) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    log_indexing_progress(
+                        heartbeat_progress.notes_processed.load(Ordering::Relaxed),
+                        total_notes,
+                        started_at.elapsed(),
+                        heartbeat_progress.failures.load(Ordering::Relaxed),
+                    );
+                    has_logged = true;
+                }
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+    (progress, stop_tx, heartbeat)
+}
+
+fn progress_log_delay(has_logged: bool) -> Duration {
+    if has_logged {
+        PROGRESS_LOG_INTERVAL
+    } else {
+        FIRST_PROGRESS_LOG_AFTER
+    }
+}
+
+fn estimated_remaining(
+    elapsed: Duration,
+    notes_processed: usize,
+    total_notes: usize,
+) -> Option<Duration> {
+    if notes_processed == 0 || notes_processed >= total_notes {
+        return None;
+    }
+    let notes_remaining = total_notes - notes_processed;
+    Some(elapsed.mul_f64(notes_remaining as f64 / notes_processed as f64))
+}
+
+fn log_indexing_progress(
+    notes_processed: usize,
+    total_notes: usize,
+    elapsed: Duration,
+    failures: usize,
+) {
+    let notes_remaining = total_notes.saturating_sub(notes_processed);
+    let percent = notes_processed.saturating_mul(100) / total_notes.max(1);
+    let eta = estimated_remaining(elapsed, notes_processed, total_notes)
+        .map(format_eta)
+        .unwrap_or_else(|| "estimating time remaining…".to_string());
+    let failure_summary = if failures == 0 {
+        String::new()
+    } else {
+        format!(" — {} failed", format_count(failures))
+    };
+
+    tracing::info!(
+        "Indexing notes: {} of {} ({}%) — {} left — {}{}",
+        format_count(notes_processed),
+        format_count(total_notes),
+        percent,
+        format_count(notes_remaining),
+        eta,
+        failure_summary,
+    );
+}
+
+fn format_count(value: usize) -> String {
+    let digits = value.to_string();
+    let mut formatted = String::with_capacity(digits.len() + digits.len() / 3);
+    for (position, character) in digits.chars().enumerate() {
+        if position > 0 && (digits.len() - position) % 3 == 0 {
+            formatted.push(',');
+        }
+        formatted.push(character);
+    }
+    formatted
+}
+
+fn format_note_count(value: usize) -> String {
+    format!(
+        "{} {}",
+        format_count(value),
+        if value == 1 { "note" } else { "notes" }
+    )
+}
+
+fn format_eta(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 10 {
+        "less than 10 seconds remaining".to_string()
+    } else if seconds < 60 {
+        format!("about {seconds} seconds remaining")
+    } else if seconds < 3_600 {
+        let minutes = seconds.div_ceil(60);
+        format!("about {minutes} {} remaining", pluralize(minutes, "minute"))
+    } else {
+        let hours = seconds / 3_600;
+        let minutes = (seconds % 3_600) / 60;
+        if minutes == 0 {
+            format!("about {hours} {} remaining", pluralize(hours, "hour"))
+        } else {
+            format!("about {hours}h {minutes}m remaining")
+        }
+    }
+}
+
+fn format_elapsed(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds == 0 {
+        "less than 1s".to_string()
+    } else if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{}h {}m", seconds / 3_600, (seconds % 3_600) / 60)
+    }
+}
+
+fn pluralize(value: u64, singular: &str) -> String {
+    if value == 1 {
+        singular.to_string()
+    } else {
+        format!("{singular}s")
     }
 }
 
@@ -490,6 +765,13 @@ pub struct ChunkStats {
     pub embedded: usize,
     #[allow(dead_code)]
     pub reused: usize,
+    pub embedder_calls: usize,
+    pub embedding_input_bytes: usize,
+    pub pipeline: Duration,
+    pub chunking: Duration,
+    pub vector_reuse: Duration,
+    pub embedding: Duration,
+    pub sqlite_write: Duration,
 }
 
 fn chunk_and_embed_note(
@@ -498,18 +780,31 @@ fn chunk_and_embed_note(
     content: &str,
     embedder: &dyn Embedder,
 ) -> Result<ChunkStats, String> {
+    let pipeline_started = Instant::now();
+    let chunking_started = Instant::now();
     let tokenizer = embedder.tokenizer();
     let chunking = chunk_note(content, tokenizer, ChunkOptions::default());
+    let chunking_elapsed = chunking_started.elapsed();
     if chunking.chunks.is_empty() {
+        let sqlite_started = Instant::now();
         replace_chunks_for_note(tx, slug, &[], None, None)?;
         return Ok(ChunkStats {
             embedded: 0,
             reused: 0,
+            embedder_calls: 0,
+            embedding_input_bytes: 0,
+            pipeline: pipeline_started.elapsed(),
+            chunking: chunking_elapsed,
+            vector_reuse: Duration::ZERO,
+            embedding: Duration::ZERO,
+            sqlite_write: sqlite_started.elapsed(),
         });
     }
 
+    let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, slug)?;
     let preserved = preserve_existing_vectors(tx, slug, &chunking.chunks, &existing)?;
+    let vector_reuse_elapsed = reuse_started.elapsed();
 
     let doc_prefix = embedder.doc_prefix();
     let mut texts_to_embed: Vec<String> = Vec::new();
@@ -530,11 +825,14 @@ fn chunk_and_embed_note(
         );
     }
 
+    let embedding_input_bytes = texts_to_embed.iter().map(String::len).sum();
+    let embedding_started = Instant::now();
     let new_vectors = if texts_to_embed.is_empty() {
         Vec::new()
     } else {
         embedder.embed(&texts_to_embed)?
     };
+    let embedding_elapsed = embedding_started.elapsed();
 
     let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(chunking.chunks.len());
     let mut need_new: std::collections::HashSet<usize> =
@@ -562,6 +860,7 @@ fn chunk_and_embed_note(
         .map(|(chunk, vector)| ChunkRow { chunk, vector })
         .collect();
 
+    let sqlite_started = Instant::now();
     replace_chunks_for_note(
         tx,
         slug,
@@ -572,6 +871,13 @@ fn chunk_and_embed_note(
     Ok(ChunkStats {
         embedded: indices_needing_embed.len(),
         reused: chunking.chunks.len() - indices_needing_embed.len(),
+        embedder_calls: usize::from(!texts_to_embed.is_empty()),
+        embedding_input_bytes,
+        pipeline: pipeline_started.elapsed(),
+        chunking: chunking_elapsed,
+        vector_reuse: vector_reuse_elapsed,
+        embedding: embedding_elapsed,
+        sqlite_write: sqlite_started.elapsed(),
     })
 }
 
@@ -679,9 +985,14 @@ mod tests {
 #[cfg(test)]
 mod chunk_integration_tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use tempfile::TempDir;
 
+    use super::{
+        estimated_remaining, format_count, format_elapsed, format_eta, format_note_count,
+        progress_log_delay,
+    };
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
@@ -935,5 +1246,37 @@ mod chunk_integration_tests {
             total_vectors, total_chunks,
             "no orphan vectors after delete"
         );
+    }
+
+    #[test]
+    fn progress_logging_starts_after_ten_seconds_then_repeats_each_minute() {
+        assert_eq!(progress_log_delay(false), Duration::from_secs(10));
+        assert_eq!(progress_log_delay(true), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn remaining_time_is_extrapolated_from_processed_notes() {
+        assert_eq!(
+            estimated_remaining(Duration::from_secs(30), 25, 100),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(estimated_remaining(Duration::from_secs(30), 0, 100), None);
+        assert_eq!(estimated_remaining(Duration::from_secs(30), 100, 100), None);
+    }
+
+    #[test]
+    fn progress_values_are_formatted_for_people() {
+        assert_eq!(format_count(12_481), "12,481");
+        assert_eq!(format_note_count(1), "1 note");
+        assert_eq!(format_note_count(12_481), "12,481 notes");
+        assert_eq!(
+            format_eta(Duration::from_secs(8)),
+            "less than 10 seconds remaining"
+        );
+        assert_eq!(
+            format_eta(Duration::from_secs(125)),
+            "about 3 minutes remaining"
+        );
+        assert_eq!(format_elapsed(Duration::from_secs(166)), "2m 46s");
     }
 }
