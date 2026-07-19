@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.2.1 - 2026-07-19
+## v2.3.0 - 2026-07-19
 
 ### Added
 - The UI is now available during initial indexing and shows live token-weighted progress, note/chunk counts, and a measured ETA while vault and MCP data remain unavailable until the index commits.
@@ -10,7 +10,7 @@
 
 ### Changed
 - Chunks are embedded individually to avoid batch-longest padding and reduce peak memory pressure.
-- The cache schema is upgraded to version 6 for note-level frontmatter metadata. The first 2.2.1 startup automatically rebuilds the generated SQLite cache from the Markdown vault.
+- The cache schema is upgraded to version 6 for note-level frontmatter metadata. The first 2.3.0 startup automatically rebuilds the generated SQLite cache from the Markdown vault.
 
 ## v2.1.1 - 2026-06-13
 

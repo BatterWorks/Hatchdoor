@@ -179,7 +179,7 @@ Enter the web bearer token when prompted.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.2.1
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.3.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -419,7 +419,7 @@ object for a single note.
 
 Date values are currently exposed as frontmatter values and support exact
 matching. Date ranges and a broader Dataview-style query language are not part
-of the 2.2.1 metadata filter contract.
+of the 2.3.0 metadata filter contract.
 
 ### Agent Skill
 
@@ -640,8 +640,8 @@ Build and publish the Docker image:
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
-docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.2.1
-docker push battermanz/hatchdoor:2.2.1
+docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.3.0
+docker push battermanz/hatchdoor:2.3.0
 docker push battermanz/hatchdoor:latest
 ```
 
