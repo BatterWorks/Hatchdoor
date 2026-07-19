@@ -7,6 +7,7 @@
 @import "./styles/responsive.css";
 @import "./styles/stats.css";
 @import "./styles/graph.css";
+@import "./styles/startup.css";
 
 .write-notice {
   display: flex;

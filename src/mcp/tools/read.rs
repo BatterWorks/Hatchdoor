@@ -133,7 +133,7 @@ pub(super) async fn refresh_index_tool(
 }
 
 pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailure> {
-    let status = match &state.git_sync {
+    let status = match state.git_sync.get() {
         Some(handle) => {
             let guard = handle.status();
             let snapshot = guard.read().await;
