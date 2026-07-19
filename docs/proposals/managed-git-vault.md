@@ -196,8 +196,13 @@ Recommended semantics:
 - In local mode, `VAULT_PATH` behaves exactly as it does today.
 - In Git mode, Hatchdoor derives the runtime vault path from the checkout path
   and optional vault subdirectory; `VAULT_PATH` is not a second source of truth.
+- The repository root and vault root remain distinct runtime paths. A configured
+  vault subdirectory is canonicalized, validated to remain inside the checkout,
+  and used as the containment boundary for every vault operation.
 - If the branch is omitted, the remote default branch is selected and the
   resolved branch is retained in status.
+- `HATCHDOOR_BOOTSTRAP_EMPTY_REPOSITORY=true` is valid only in bidirectional
+  mode. Combining it with pull-only mode is a configuration error.
 - Credentials are optional for public repositories.
 - Credentials must not be embedded in the URL, logged, returned through status,
   or stored in repository configuration.
@@ -420,10 +425,15 @@ Recommended policy:
 
 - A nonempty repository with no Markdown produces an empty vault, or a clear
   validation error if a stricter policy is selected.
-- A truly empty/unborn remote may be bootstrapped only when an explicit option
-  such as `HATCHDOOR_BOOTSTRAP_EMPTY_REPOSITORY=true` is set.
-- Bootstrap creates starter notes, an initial commit, and—when bidirectional
-  mode is configured—pushes the initial branch.
+- A truly empty/unborn remote may be bootstrapped only in bidirectional mode and
+  only when an explicit option such as
+  `HATCHDOOR_BOOTSTRAP_EMPTY_REPOSITORY=true` is set.
+- Bootstrap creates starter notes, an initial commit, and pushes the initial
+  branch. It is a repository write, not a pull-only ingestion operation.
+- Pull-only mode rejects the bootstrap option during configuration validation.
+  When its remote is empty or unborn, Hatchdoor creates no local commit and
+  reports an actionable readiness error explaining that the remote must be
+  initialized externally or the source must use bidirectional bootstrap.
 - The `.git` directory and Hatchdoor management metadata must be excluded from
   vault indexing and empty-vault detection.
 
@@ -558,6 +568,15 @@ The first release should be additive:
 - An interrupted clone never occupies the final path.
 - Restart reuses a matching checkout.
 - Wrong origin, branch, subdirectory, and unknown destination fail safely.
+- Vault-subdirectory traversal, absolute paths, and symlink escapes are rejected;
+  repository files outside the validated vault root are never exposed to vault
+  operations.
+- Bidirectional bootstrap of an empty/unborn remote creates and pushes the
+  starter vault as its initial branch.
+- Pull-only mode rejects `HATCHDOOR_BOOTSTRAP_EMPTY_REPOSITORY=true` during
+  configuration validation.
+- Pull-only mode with an empty/unborn remote creates no local commit and reports
+  the documented readiness error.
 - Equal repositories are no-ops.
 - Behind-only repositories fast-forward without a merge commit.
 - Ahead-only repositories push only in bidirectional mode.
@@ -604,6 +623,10 @@ matrix does not depend on an external Git provider.
 13. Run pull-only mode; all mutation endpoints and tools are unavailable.
 14. Use a vault subdirectory; Markdown outside it and `.git` metadata are not
     indexed.
+15. Attempt pull-only bootstrap of an empty/unborn remote; configuration is
+    rejected before a local commit is created.
+16. Bootstrap an empty/unborn remote in bidirectional mode; starter notes are
+    committed, pushed, indexed, and available through the API.
 
 ### Container Verification
 
@@ -651,8 +674,6 @@ implementation.
   in addition to web/MCP authentication settings?
 - Should readiness stay successful when a persisted checkout is usable but the
   remote is temporarily unavailable?
-- Is vault-subdirectory support required in the first release or appropriate for
-  a follow-up?
 
 ## Decision Requested
 
