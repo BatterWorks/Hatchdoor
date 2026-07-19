@@ -1,5 +1,7 @@
-# Semantic Search Strategy
+# ADR-05 — Semantic Search Strategy
 
+> Part of the [architecture decision records](./README.md).
+>
 > Status: accepted decision record. Hatchdoor ships pure semantic retrieval by default. Cross-encoder reranking and hybrid keyword/vector fusion remain offline evaluation tools only.
 
 ## TL;DR
