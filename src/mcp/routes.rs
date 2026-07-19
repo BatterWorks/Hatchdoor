@@ -422,6 +422,7 @@ mod tests {
             names,
             vec![
                 "search_notes",
+                "query_notes",
                 "get_note",
                 "get_note_links",
                 "resolve_wikilink",
@@ -827,6 +828,85 @@ mod tests {
         assert!(result.get("chunk_id").is_some());
         assert!(result.get("content").is_some());
         assert!(result.get("score").is_some());
+    }
+
+    #[tokio::test]
+    async fn query_notes_lists_notes_by_metadata_without_a_search_query() {
+        let (state, _tmp) = test_state();
+        std::fs::create_dir_all(state.vault_path.join("Devices")).expect("devices dir");
+        std::fs::write(
+            state.vault_path.join("Devices/Router.md"),
+            "---\ntags: [type/device, action/review]\nstatus: active\nreview-date: 2026-08-01\nprivate: hidden\n---\n# Router",
+        )
+        .expect("write router");
+        crate::app_state::refresh_now(&state)
+            .await
+            .expect("refresh metadata note");
+
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":61,
+                "method":"tools/call",
+                "params": {
+                    "name":"query_notes",
+                    "arguments": {
+                        "filters": {
+                            "tags":["type/device"],
+                            "property_equals":{"status":"active"}
+                        },
+                        "include_properties":["status", "review-date"]
+                    }
+                }
+            }),
+            enabled_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let notes = body["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes array");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0]["slug"], "router");
+        assert_eq!(
+            notes[0]["metadata"]["properties"],
+            json!({"status":"active", "review-date":"2026-08-01"})
+        );
+        assert!(notes[0]["metadata"]["properties"].get("private").is_none());
+    }
+
+    #[tokio::test]
+    async fn metadata_query_limits_are_enforced_server_side() {
+        let (state, _tmp) = test_state();
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":62,
+                "method":"tools/call",
+                "params": {
+                    "name":"query_notes",
+                    "arguments": {
+                        "filters": {"tags": (0..51).map(|index| format!("tag/{index}")).collect::<Vec<_>>()}
+                    }
+                }
+            }),
+            enabled_config(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("50")
+        );
     }
 
     #[tokio::test]

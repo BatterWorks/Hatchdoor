@@ -236,6 +236,8 @@ pub async fn search_handler(
         mode,
         limit,
         per_note_cap,
+        filters: Default::default(),
+        include_properties: Vec::new(),
     };
     // Query embedding + SQLite work runs off the async runtime.
     let result = run_blocking(move || {
