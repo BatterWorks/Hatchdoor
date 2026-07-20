@@ -287,12 +287,12 @@ Body`,
     );
 
     const input = await screen.findByPlaceholderText("Search notes…");
-    expect(input).toHaveValue("type/reference");
+    expect(input).toHaveValue("#type/reference");
     const includeContent = screen.getByRole("checkbox");
     expect(includeContent).toBeChecked();
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
-        String(call[0]).includes("/api/search?q=type%2Freference&mode=keyword"),
+        String(call[0]).includes("/api/search?q=%23type%2Freference&mode=keyword"),
       );
       expect(called).toBe(true);
     });

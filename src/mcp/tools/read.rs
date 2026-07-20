@@ -421,6 +421,13 @@ fn note_filters_schema() -> Value {
                 "default":[],
                 "description":"All listed tags must be present; matching is case-insensitive and ignores a leading #."
             },
+            "tag_prefixes": {
+                "type":"array",
+                "items":{"type":"string"},
+                "maxItems":50,
+                "default":[],
+                "description":"All listed tag paths must match exactly or as ancestors of a note tag; matching is case-insensitive and ignores a leading #."
+            },
             "path_prefix": {
                 "type":"string",
                 "description":"Case-insensitive vault-relative path prefix."
@@ -448,6 +455,7 @@ fn validate_metadata_query(
     const MAX_METADATA_TERMS: usize = 50;
     for (name, count) in [
         ("tags", filters.tags.len()),
+        ("tag_prefixes", filters.tag_prefixes.len()),
         ("property_exists", filters.property_exists.len()),
         ("property_equals", filters.property_equals.len()),
         ("include_properties", include_properties.len()),
@@ -461,6 +469,7 @@ fn validate_metadata_query(
     let names = filters
         .tags
         .iter()
+        .chain(filters.tag_prefixes.iter())
         .chain(filters.property_exists.iter())
         .chain(filters.property_equals.keys())
         .chain(include_properties.iter());
