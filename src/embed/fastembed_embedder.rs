@@ -9,6 +9,7 @@ pub struct FastembedEmbedder {
     model: TextEmbedding,
     tokenizer: Arc<Tokenizer>,
     dim: usize,
+    max_length: usize,
     id: &'static str,
     doc_prefix: &'static str,
     query_prefix: &'static str,
@@ -18,18 +19,23 @@ impl FastembedEmbedder {
     fn load(
         model: EmbeddingModel,
         dim: usize,
+        max_length: usize,
         id: &'static str,
         doc_prefix: &'static str,
         query_prefix: &'static str,
     ) -> Result<Self, String> {
-        let model =
-            TextEmbedding::try_new(InitOptions::new(model).with_show_download_progress(false))
-                .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
+        let model = TextEmbedding::try_new(
+            InitOptions::new(model)
+                .with_max_length(max_length)
+                .with_show_download_progress(false),
+        )
+        .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
         let tokenizer = Arc::new(model.tokenizer.clone());
         Ok(Self {
             model,
             tokenizer,
             dim,
+            max_length,
             id,
             doc_prefix,
             query_prefix,
@@ -41,7 +47,14 @@ impl FastembedEmbedder {
     }
 
     pub fn bge_small() -> Result<Self, String> {
-        Self::load(EmbeddingModel::BGESmallENV15, 384, "BGESmallENV15", "", "")
+        Self::load(
+            EmbeddingModel::BGESmallENV15,
+            384,
+            512,
+            "BGESmallENV15",
+            "",
+            "",
+        )
     }
 
     pub fn nomic_v1_5() -> Result<Self, String> {
@@ -50,6 +63,7 @@ impl FastembedEmbedder {
         Self::load(
             EmbeddingModel::NomicEmbedTextV15,
             768,
+            1024,
             "NomicEmbedTextV15",
             "search_document: ",
             "search_query: ",
@@ -60,6 +74,7 @@ impl FastembedEmbedder {
         Self::load(
             EmbeddingModel::MxbaiEmbedLargeV1,
             1024,
+            512,
             "MxbaiEmbedLargeV1",
             "",
             "",
@@ -82,7 +97,9 @@ impl Embedder for FastembedEmbedder {
     }
 
     fn identity(&self) -> String {
-        format!("{}-{}", self.id, self.dim)
+        // Sequence length affects embeddings when inputs exceed the old limit,
+        // so it is part of the persisted cache identity.
+        format!("{}-{}-max{}", self.id, self.dim, self.max_length)
     }
 
     fn tokenizer(&self) -> Arc<Tokenizer> {

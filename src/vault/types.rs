@@ -18,6 +18,22 @@ pub struct Note {
     pub relative_path: String,
     pub content: String,
     pub content_hash: String,
+    pub metadata: NoteMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct NoteMetadata {
+    pub tags: Vec<String>,
+    pub aliases: Vec<String>,
+    pub properties: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NoteSummary {
+    pub title: String,
+    pub slug: String,
+    pub relative_path: String,
+    pub metadata: NoteMetadata,
 }
 
 #[derive(Debug, Clone)]

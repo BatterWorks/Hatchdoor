@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use rusqlite::{OptionalExtension, params};
 
 use crate::cache::SqliteCache;
-use crate::vault::{NoteLink, NoteLinks, normalize_link_target, normalize_title, slugify};
+use crate::vault::{
+    NoteLink, NoteLinks, NoteMetadata, normalize_link_target, normalize_title, slugify,
+};
 
 #[derive(Debug, Clone)]
 pub struct OutboundLinkRow {
@@ -18,6 +20,7 @@ pub struct NoteWithLinks {
     pub slug: String,
     pub title: String,
     pub relative_path: String,
+    pub metadata: NoteMetadata,
     pub outbound_links: Vec<OutboundLinkRow>,
 }
 
@@ -163,8 +166,10 @@ impl SqliteCache {
         let mut map: HashMap<String, NoteWithLinks> = HashMap::new();
 
         // Note metadata
-        let sql_a =
-            format!("SELECT slug, title, relative_path FROM notes WHERE slug IN ({placeholders})");
+        let sql_a = format!(
+            "SELECT slug, title, relative_path, aliases_json, frontmatter_json \
+             FROM notes WHERE slug IN ({placeholders})"
+        );
         let mut stmt_a = conn
             .prepare(&sql_a)
             .map_err(|e| format!("prepare notes batch: {e}"))?;
@@ -174,22 +179,51 @@ impl SqliteCache {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
                 ))
             })
             .map_err(|e| format!("query notes batch: {e}"))?;
         for row in rows_a {
-            let (slug, title, relative_path) =
+            let (slug, title, relative_path, aliases_json, properties_json) =
                 row.map_err(|e| format!("read notes batch row: {e}"))?;
             map.insert(
                 slug.clone(),
                 NoteWithLinks {
-                    slug,
+                    slug: slug.clone(),
                     title,
                     relative_path,
+                    metadata: NoteMetadata {
+                        tags: Vec::new(),
+                        aliases: serde_json::from_str(&aliases_json)
+                            .map_err(|e| format!("invalid cached aliases for '{slug}': {e}"))?,
+                        properties: serde_json::from_str(&properties_json)
+                            .map_err(|e| format!("invalid cached frontmatter for '{slug}': {e}"))?,
+                    },
                     outbound_links: Vec::new(),
                 },
             );
         }
+
+        let sql_tags = format!(
+            "SELECT note_slug, tag FROM tags WHERE note_slug IN ({placeholders}) \
+             ORDER BY note_slug, tag"
+        );
+        let mut tags_stmt = conn
+            .prepare(&sql_tags)
+            .map_err(|e| format!("prepare tags batch: {e}"))?;
+        let tag_rows = tags_stmt
+            .query_map(rusqlite::params_from_iter(slugs.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("query tags batch: {e}"))?;
+        for row in tag_rows {
+            let (slug, tag) = row.map_err(|e| format!("read tags batch row: {e}"))?;
+            if let Some(entry) = map.get_mut(&slug) {
+                entry.metadata.tags.push(tag);
+            }
+        }
+        drop(tags_stmt);
 
         // Outbound links (only resolved targets — JOIN drops danglers)
         let sql_b = format!(

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -10,6 +11,7 @@ use tracing::{debug, error, info};
 use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
+use crate::startup::{IndexingProgressSnapshot, StartupTracker};
 use crate::vault::{VaultIndex, seed_empty_vault};
 
 #[derive(Clone)]
@@ -26,19 +28,20 @@ pub struct AppState {
     /// Serializes vault file mutations against git sync tree operations.
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Present only when git sync is enabled.
-    pub git_sync: Option<crate::git::GitSyncHandle>,
+    pub git_sync: Arc<OnceLock<crate::git::GitSyncHandle>>,
     /// Validated MCP configuration, parsed once at startup.
     pub mcp_config: Arc<crate::mcp::McpConfig>,
     /// Folder prefix treated as archived in resolve results.
     pub archive_prefix: Arc<str>,
     /// Held while a reindex runs so concurrent refreshes coalesce into one.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    pub startup: StartupTracker,
 }
 
 impl AppState {
     /// Record a vault write for git sync. No-op when sync is disabled.
     pub fn record_vault_write(&self, record: crate::git::WriteRecord) {
-        if let Some(handle) = &self.git_sync {
+        if let Some(handle) = self.git_sync.get() {
             handle.record(record);
         }
     }
@@ -58,6 +61,15 @@ pub fn build_cache_with_sqlite(
     sqlite: Arc<SqliteCache>,
     embedder: &dyn Embedder,
 ) -> Result<VaultCache, String> {
+    build_cache_with_sqlite_and_progress(vault_path, sqlite, embedder, None)
+}
+
+pub fn build_cache_with_sqlite_and_progress(
+    vault_path: &PathBuf,
+    sqlite: Arc<SqliteCache>,
+    embedder: &dyn Embedder,
+    on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+) -> Result<VaultCache, String> {
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     if seed_empty_vault(vault_path).map_err(|e| e.to_string())? {
         info!(
@@ -65,8 +77,15 @@ pub fn build_cache_with_sqlite(
             "Seeded fresh vault with Hatchdoor starter notes"
         );
     }
+    info!("Scanning vault for notes…");
+    let scan_started = Instant::now();
     let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
-    sqlite.replace_from_index_with_embedder(&index, embedder)?;
+    debug!(
+        notes = index.ordered_slugs.len(),
+        elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
+        "Vault scan performance"
+    );
+    sqlite.replace_from_index_with_embedder_and_progress(&index, embedder, on_progress)?;
 
     Ok(VaultCache { sqlite })
 }
@@ -136,12 +155,19 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     // pooled connections keep serving the prior snapshot until it commits, so we
     // no longer hold the cache write lock for the whole rebuild (F-03).
     run_blocking(move || {
+        info!("Scanning vault for notes…");
+        let scan_started = Instant::now();
         let index = VaultIndex::build(&vault_path).map_err(|e| e.to_string())?;
+        debug!(
+            notes = index.ordered_slugs.len(),
+            elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
+            "Vault scan performance"
+        );
         sqlite.replace_from_index_with_embedder(&index, embedder.as_ref())
     })
     .await?;
 
-    info!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
+    debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
     broadcast_vault_revision(state);
     Ok(())
 }
@@ -192,10 +218,11 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: None,
+            git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: StartupTracker::ready(),
         }
     }
 

@@ -23,6 +23,9 @@ The short version: search first, read before editing, make the smallest useful c
 
 Start with `search_notes` for most questions.
 
+Use `query_notes` instead when the request is defined entirely by tags, a path
+prefix, or frontmatter properties. Request only the property names you need.
+
 Use semantic search when the user describes an idea, topic, project, or relationship in natural language. Phrase the query as a sentence that explains what you are trying to find.
 
 Use keyword search when exact matching matters:

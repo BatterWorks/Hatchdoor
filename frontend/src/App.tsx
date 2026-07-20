@@ -46,8 +46,9 @@ import { useVaultTree } from "./hooks/useVaultTree";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import type { ActiveNoteMeta, RecentNote } from "./types";
+import { StartupGate } from "./startup/StartupGate";
 
-function App() {
+export function VaultApp() {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
     return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
   });
@@ -87,8 +88,13 @@ function App() {
     loadModifiedNotes,
     refreshVault,
   } = useVaultTree();
-  const { writeEnabled, writeWarnings, setWriteWarnings, writeNotice, setWriteNotice } =
-    useWriteMode();
+  const {
+    writeEnabled,
+    writeWarnings,
+    setWriteWarnings,
+    writeNotice,
+    setWriteNotice,
+  } = useWriteMode();
   const {
     searchOpen,
     setSearchOpen,
@@ -582,6 +588,14 @@ function App() {
         />
       ) : null}
     </div>
+  );
+}
+
+function App() {
+  return (
+    <StartupGate>
+      <VaultApp />
+    </StartupGate>
   );
 }
 

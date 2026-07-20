@@ -19,6 +19,13 @@ pub struct FileSnapshot {
     pub size_bytes: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FrontmatterMetadata {
+    pub tags: Vec<String>,
+    pub aliases: Vec<String>,
+    pub properties: serde_json::Map<String, serde_json::Value>,
+}
+
 pub fn current_unix_timestamp() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -90,9 +97,65 @@ pub fn extract_headings(content: &str) -> Vec<HeadingRow> {
 pub fn extract_tags(content: &str) -> HashSet<String> {
     let mut tags = HashSet::new();
     let (frontmatter, body) = split_frontmatter(content);
-    extract_frontmatter_tags(frontmatter, &mut tags);
+    match parse_frontmatter_metadata(content) {
+        Ok(metadata) => tags.extend(metadata.tags),
+        Err(_) => extract_frontmatter_tags(frontmatter, &mut tags),
+    }
     extract_inline_tags(body, &mut tags);
     tags
+}
+
+pub fn parse_frontmatter_metadata(content: &str) -> Result<FrontmatterMetadata, String> {
+    let (frontmatter, _) = split_frontmatter(content);
+    if frontmatter.trim().is_empty() {
+        return Ok(FrontmatterMetadata::default());
+    }
+
+    let value: serde_json::Value = serde_yaml::from_str(frontmatter)
+        .map_err(|error| format!("invalid YAML frontmatter: {error}"))?;
+    let mut properties = match value {
+        serde_json::Value::Null => serde_json::Map::new(),
+        serde_json::Value::Object(properties) => properties,
+        _ => return Err("YAML frontmatter must be a mapping".to_string()),
+    };
+    let tags = properties
+        .remove("tags")
+        .map(normalized_tags)
+        .unwrap_or_default();
+    let aliases = properties
+        .remove("aliases")
+        .map(string_values)
+        .unwrap_or_default();
+
+    Ok(FrontmatterMetadata {
+        tags,
+        aliases,
+        properties,
+    })
+}
+
+fn normalized_tags(value: serde_json::Value) -> Vec<String> {
+    let mut tags = string_values(value)
+        .into_iter()
+        .filter_map(|tag| {
+            let normalized = tag.trim().trim_start_matches('#').to_lowercase();
+            (!normalized.is_empty()).then_some(normalized)
+        })
+        .collect::<Vec<_>>();
+    tags.sort();
+    tags.dedup();
+    tags
+}
+
+fn string_values(value: serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::String(value) => vec![value],
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 fn split_frontmatter(content: &str) -> (&str, &str) {
@@ -236,6 +299,12 @@ mod tests {
     }
 
     #[test]
+    fn extracts_single_scalar_frontmatter_tag() {
+        let tags = extract_tags("---\ntags: Space/Hobby/SelfHosting\n---\nBody");
+        assert_eq!(tags, HashSet::from(["space/hobby/selfhosting".to_string()]));
+    }
+
+    #[test]
     fn inline_hashtags_require_namespace() {
         let content = "---\ntags: [existing]\n---\n\nSome text with #area/health here but not #freeform or #1 or #0599.";
         let tags = extract_tags(content);
@@ -247,6 +316,40 @@ mod tests {
         assert!(!tags.contains("freeform"), "free-form inline tag rejected");
         assert!(!tags.contains("1"), "numeric inline tag rejected");
         assert!(!tags.contains("0599"), "numeric inline tag rejected");
+    }
+
+    #[test]
+    fn parses_typed_frontmatter_properties_without_the_markdown_body() {
+        let content = "---\ntags: [Space/Hobby, selfhosting]\naliases:\n  - Home Lab\nstatus: active\nreview-date: 2026-08-01\npriority: 2\npublished: true\nnested:\n  owner: me\n---\n\n# Body\nsecret body text";
+        let metadata = parse_frontmatter_metadata(content).expect("valid frontmatter");
+
+        assert_eq!(metadata.tags, vec!["selfhosting", "space/hobby"]);
+        assert_eq!(metadata.aliases, vec!["Home Lab"]);
+        assert_eq!(metadata.properties["status"], serde_json::json!("active"));
+        assert_eq!(
+            metadata.properties["review-date"],
+            serde_json::json!("2026-08-01")
+        );
+        assert_eq!(metadata.properties["priority"], serde_json::json!(2));
+        assert_eq!(metadata.properties["published"], serde_json::json!(true));
+        assert_eq!(
+            metadata.properties["nested"],
+            serde_json::json!({"owner": "me"})
+        );
+        assert!(
+            !serde_json::to_string(&metadata.properties)
+                .expect("serialize properties")
+                .contains("secret body text")
+        );
+    }
+
+    #[test]
+    fn missing_frontmatter_is_empty_and_malformed_yaml_is_an_error() {
+        assert_eq!(
+            parse_frontmatter_metadata("# Body").expect("no frontmatter"),
+            FrontmatterMetadata::default()
+        );
+        assert!(parse_frontmatter_metadata("---\ntags: [broken\n---\nbody").is_err());
     }
 
     #[test]

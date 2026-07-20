@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, params};
 
 use crate::cache::SqliteCache;
-use crate::vault::{ExplorerFolder, ExplorerNote, ModifiedNote, Note};
+use crate::vault::{ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteMetadata, NoteSummary};
 
 impl SqliteCache {
     /// Lightweight liveness probe used by `/health`: confirms the cache database
@@ -19,25 +19,122 @@ impl SqliteCache {
 
     pub fn read_note_by_slug(&self, slug: &str) -> Result<Option<Note>, String> {
         let conn = self.read()?;
-        conn.query_row(
-            r#"
-            SELECT title, slug, relative_path, content, content_hash
+        let row = conn
+            .query_row(
+                r#"
+            SELECT title, slug, relative_path, content, content_hash,
+                   aliases_json, frontmatter_json
             FROM notes
             WHERE slug = ?1
             "#,
-            params![slug],
-            |row| {
-                Ok(Note {
-                    title: row.get(0)?,
-                    slug: row.get(1)?,
-                    relative_path: row.get(2)?,
-                    content: row.get(3)?,
-                    content_hash: row.get(4)?,
-                })
+                params![slug],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| format!("failed to read note '{slug}' from SQLite cache: {error}"))?;
+        let Some((
+            title,
+            slug,
+            relative_path,
+            content,
+            content_hash,
+            aliases_json,
+            properties_json,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let mut tags_stmt = conn
+            .prepare("SELECT tag FROM tags WHERE note_slug = ?1 ORDER BY tag")
+            .map_err(|error| format!("failed preparing tags for '{slug}': {error}"))?;
+        let tags = tags_stmt
+            .query_map(params![&slug], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("failed querying tags for '{slug}': {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("failed reading tags for '{slug}': {error}"))?;
+        let aliases = serde_json::from_str(&aliases_json)
+            .map_err(|error| format!("invalid cached aliases for '{slug}': {error}"))?;
+        let properties = serde_json::from_str(&properties_json)
+            .map_err(|error| format!("invalid cached frontmatter for '{slug}': {error}"))?;
+
+        Ok(Some(Note {
+            title,
+            slug,
+            relative_path,
+            content,
+            content_hash,
+            metadata: NoteMetadata {
+                tags,
+                aliases,
+                properties,
             },
-        )
-        .optional()
-        .map_err(|error| format!("failed to read note '{slug}' from SQLite cache: {error}"))
+        }))
+    }
+
+    pub fn note_summaries(&self) -> Result<Vec<NoteSummary>, String> {
+        let conn = self.read()?;
+        let mut tags_by_slug: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut tags_stmt = conn
+            .prepare("SELECT note_slug, tag FROM tags ORDER BY note_slug, tag")
+            .map_err(|error| format!("failed preparing note tags: {error}"))?;
+        let tag_rows = tags_stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("failed querying note tags: {error}"))?;
+        for row in tag_rows {
+            let (slug, tag) = row.map_err(|error| format!("failed reading note tag: {error}"))?;
+            tags_by_slug.entry(slug).or_default().push(tag);
+        }
+        drop(tags_stmt);
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT title, slug, relative_path, aliases_json, frontmatter_json \
+                 FROM notes ORDER BY relative_path",
+            )
+            .map_err(|error| format!("failed preparing note metadata query: {error}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|error| format!("failed querying note metadata: {error}"))?;
+        let mut notes = Vec::new();
+        for row in rows {
+            let (title, slug, relative_path, aliases_json, properties_json) =
+                row.map_err(|error| format!("failed reading note metadata: {error}"))?;
+            notes.push(NoteSummary {
+                title,
+                metadata: NoteMetadata {
+                    tags: tags_by_slug.remove(&slug).unwrap_or_default(),
+                    aliases: serde_json::from_str(&aliases_json)
+                        .map_err(|error| format!("invalid cached aliases for '{slug}': {error}"))?,
+                    properties: serde_json::from_str(&properties_json).map_err(|error| {
+                        format!("invalid cached frontmatter for '{slug}': {error}")
+                    })?,
+                },
+                slug,
+                relative_path,
+            });
+        }
+        Ok(notes)
     }
 
     pub fn explorer_tree(&self) -> Result<ExplorerFolder, String> {
@@ -498,6 +595,36 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn read_note_exposes_normalized_frontmatter_metadata() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(
+            dir.path().join("Device.md"),
+            "---\ntags: [Type/Device, action/review]\naliases: [Router, Gateway]\nstatus: active\nreview-date: 2026-08-01\n---\n# Device\n\n#area/network",
+        )
+        .expect("write note");
+        let cache = SqliteCache::in_memory(384).expect("sqlite cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate cache");
+
+        let note = cache
+            .read_note_by_slug("device")
+            .expect("read note")
+            .expect("device note");
+        assert_eq!(
+            note.metadata.tags,
+            vec!["action/review", "area/network", "type/device"]
+        );
+        assert_eq!(note.metadata.aliases, vec!["Router", "Gateway"]);
+        assert_eq!(
+            note.metadata.properties,
+            serde_json::json!({"status":"active", "review-date":"2026-08-01"})
+        );
+    }
 
     #[test]
     fn recently_modified_notes_returns_newest_source_files_first() {

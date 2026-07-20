@@ -20,7 +20,7 @@ export function useSearch() {
   const prevFocusRef = useRef<Element | null>(null);
 
   const openSearchForTag = useCallback((tag: string) => {
-    setSearchQuery(tag);
+    setSearchQuery(`#${tag}`);
     setSearchIncludeContent(true);
     setSearchOpen(true);
   }, []);

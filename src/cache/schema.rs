@@ -6,7 +6,7 @@ use crate::embed::Embedder;
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -173,6 +173,8 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             absolute_path TEXT NOT NULL,
             content TEXT NOT NULL,
             content_hash TEXT NOT NULL,
+            aliases_json TEXT NOT NULL DEFAULT '[]',
+            frontmatter_json TEXT NOT NULL DEFAULT '{{}}',
             mtime_ns INTEGER NOT NULL,
             size_bytes INTEGER NOT NULL,
             indexed_at INTEGER NOT NULL
@@ -333,7 +335,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("query");
-        assert_eq!(version, "5");
+        assert_eq!(version, "6");
     }
 
     #[test]

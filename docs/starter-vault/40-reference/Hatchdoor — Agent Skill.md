@@ -32,6 +32,9 @@ Use Hatchdoor MCP as the operational layer for this Markdown vault. Prefer Hatch
 
 Use `search_notes` first for most questions.
 
+Use `query_notes` when exact tags, paths, or frontmatter properties define the
+request without a content query. Request only the properties needed for the task.
+
 Use semantic search for ideas, topics, decisions, projects, and natural-language retrieval.
 
 Use keyword search for exact tags, filenames, paths, commands, hostnames, IDs, code symbols, quoted text, and wording-sensitive checks.

@@ -10,7 +10,7 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import App from "./App";
+import { VaultApp as App } from "./App";
 
 afterEach(() => {
   cleanup();
