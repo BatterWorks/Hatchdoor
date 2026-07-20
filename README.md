@@ -179,7 +179,7 @@ Enter the web bearer token when prompted.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.2.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.3.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -403,6 +403,25 @@ Send:
 Authorization: Bearer <token>
 ```
 
+### MCP Metadata Queries
+
+`search_notes` accepts optional exact metadata filters alongside semantic or
+keyword retrieval. Filters support all-of exact tag matching, hierarchical tag
+prefixes (a `topic/selfhosting` prefix also matches `topic/selfhosting/immich`),
+a vault-relative path prefix, required property names, and typed property equality. Search results
+always include normalized tags and aliases; use `include_properties` to return
+only the frontmatter fields the agent needs.
+
+Use `query_notes` when metadata completely defines the request and there is no
+meaningful content query—for example, listing every note tagged `type/device`
+with `status: active`. It requires at least one filter and returns note summaries
+rather than repeated chunks. `get_note` returns the complete normalized metadata
+object for a single note.
+
+Date values are currently exposed as frontmatter values and support exact
+matching. Date ranges and a broader Dataview-style query language are not part
+of the 2.3.0 metadata filter contract.
+
 ### Agent Skill
 
 Hatchdoor ships with a ready-to-use **agent skill** for driving the vault
@@ -622,8 +641,8 @@ Build and publish the Docker image:
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
-docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.2.0
-docker push battermanz/hatchdoor:2.2.0
+docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.3.0
+docker push battermanz/hatchdoor:2.3.0
 docker push battermanz/hatchdoor:latest
 ```
 

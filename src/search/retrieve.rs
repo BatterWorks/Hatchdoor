@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 
-use super::{SearchMode, SearchRequest};
+use super::{SearchMode, SearchRequest, matching_note_slugs};
 
 const RAW_K_CEILING: usize = 200;
 
@@ -28,9 +28,10 @@ pub fn retrieve(
         return Ok(Vec::new());
     }
 
+    let eligible = matching_note_slugs(cache, &req.filters)?;
     let raw_hits: Vec<ChunkHit> = match req.mode {
-        SearchMode::Semantic => semantic(cache, embedder, &req.query, raw_k)?,
-        SearchMode::Keyword => keyword(cache, &req.query, raw_k)?,
+        SearchMode::Semantic => semantic(cache, embedder, &req.query, raw_k, eligible.as_ref())?,
+        SearchMode::Keyword => keyword(cache, &req.query, raw_k, eligible.as_ref())?,
     };
 
     Ok(apply_per_note_cap(raw_hits, req.per_note_cap, req.limit))
@@ -41,8 +42,12 @@ fn semantic(
     embedder: &dyn Embedder,
     query: &str,
     k: usize,
+    eligible_slugs: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<ChunkHit>, String> {
-    let hits = cache.semantic_search(embedder, query, k)?;
+    let hits = match eligible_slugs {
+        Some(slugs) => cache.semantic_search_filtered(embedder, query, k, slugs)?,
+        None => cache.semantic_search(embedder, query, k)?,
+    };
     Ok(hits
         .into_iter()
         .map(|h| ChunkHit {
@@ -55,8 +60,16 @@ fn semantic(
         .collect())
 }
 
-fn keyword(cache: &SqliteCache, query: &str, k: usize) -> Result<Vec<ChunkHit>, String> {
-    let hits = cache.fts_search_chunks(query, k)?;
+fn keyword(
+    cache: &SqliteCache,
+    query: &str,
+    k: usize,
+    eligible_slugs: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<ChunkHit>, String> {
+    let hits = match eligible_slugs {
+        Some(slugs) => cache.fts_search_chunks_filtered(query, k, slugs)?,
+        None => cache.fts_search_chunks(query, k)?,
+    };
     if hits.is_empty() {
         return Ok(Vec::new());
     }
@@ -140,6 +153,8 @@ mod tests {
             mode: SearchMode::Semantic,
             limit: 10,
             per_note_cap: 2,
+            filters: Default::default(),
+            include_properties: Vec::new(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(!hits.is_empty());
@@ -164,6 +179,8 @@ mod tests {
             mode: SearchMode::Semantic,
             limit: 10,
             per_note_cap: 2,
+            filters: Default::default(),
+            include_properties: Vec::new(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(hits.is_empty());
@@ -181,6 +198,8 @@ mod tests {
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 2,
+            filters: Default::default(),
+            include_properties: Vec::new(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(!hits.is_empty());
@@ -206,6 +225,8 @@ mod tests {
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 2,
+            filters: Default::default(),
+            include_properties: Vec::new(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(hits.is_empty());
@@ -223,6 +244,8 @@ mod tests {
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 1,
+            filters: Default::default(),
+            include_properties: Vec::new(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert_eq!(hits.len(), 3);
@@ -253,6 +276,8 @@ mod tests {
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 2,
+            filters: Default::default(),
+            include_properties: Vec::new(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert_eq!(hits.len(), 1);

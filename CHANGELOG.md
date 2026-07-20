@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.3.0 - 2026-07-19
+
+### Added
+- The UI is now available during initial indexing and shows live token-weighted progress, note/chunk counts, and a measured ETA while vault and MCP data remain unavailable until the index commits.
+- Indexing logs a human-readable heartbeat every minute and detailed performance diagnostics at debug level.
+- MCP `search_notes` now supports exact tag, path-prefix, property-existence, and typed property-equality filters with explicit property projection.
+- Added the metadata-only `query_notes` MCP tool and structured tags, aliases, and frontmatter properties to `get_note`.
+
+### Changed
+- Chunks are embedded individually to avoid batch-longest padding and reduce peak memory pressure.
+- The cache schema is upgraded to version 6 for note-level frontmatter metadata. The first 2.3.0 startup automatically rebuilds the generated SQLite cache from the Markdown vault.
+- Rust and frontend dependencies are refreshed within their current compatibility lines, including git2 0.21, resolving the current RustSec and npm audit findings.
+
 ## v2.1.1 - 2026-06-13
 
 Security, performance, and operational hardening from the 2026-06-11 codebase audit, plus an iOS PWA download fix.

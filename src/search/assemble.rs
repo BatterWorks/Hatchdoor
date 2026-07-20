@@ -2,9 +2,13 @@
 
 use crate::cache::SqliteCache;
 
-use super::{ChunkHit, OutboundLink, SearchResult};
+use super::{ChunkHit, OutboundLink, SearchResult, project_metadata};
 
-pub fn assemble(cache: &SqliteCache, hits: Vec<ChunkHit>) -> Result<Vec<SearchResult>, String> {
+pub fn assemble(
+    cache: &SqliteCache,
+    hits: Vec<ChunkHit>,
+    include_properties: &[String],
+) -> Result<Vec<SearchResult>, String> {
     if hits.is_empty() {
         return Ok(Vec::new());
     }
@@ -45,6 +49,7 @@ pub fn assemble(cache: &SqliteCache, hits: Vec<ChunkHit>) -> Result<Vec<SearchRe
                     title: l.title.clone(),
                 })
                 .collect(),
+            metadata: project_metadata(&note.metadata, include_properties),
         });
     }
     Ok(out)
@@ -99,7 +104,7 @@ mod tests {
                 score: 0.8,
             },
         ];
-        let out = assemble(&cache, hits).expect("assemble");
+        let out = assemble(&cache, hits, &[]).expect("assemble");
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].note_slug, "bravo");
         assert_eq!(out[1].note_slug, "alpha");
@@ -124,7 +129,7 @@ mod tests {
                 score: 0.8,
             },
         ];
-        let out = assemble(&cache, hits).expect("assemble");
+        let out = assemble(&cache, hits, &[]).expect("assemble");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].note_slug, "alpha");
     }
@@ -142,7 +147,7 @@ mod tests {
             content: "a body".to_string(),
             score: 0.9,
         }];
-        let out = assemble(&cache, hits).expect("assemble");
+        let out = assemble(&cache, hits, &[]).expect("assemble");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].outbound_links.len(), 1);
         assert_eq!(out[0].outbound_links[0].slug, "bravo");

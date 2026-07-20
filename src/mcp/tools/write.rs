@@ -410,7 +410,7 @@ fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<Str
 
 /// Returns the last sync error message when the most recent sync failed.
 async fn git_sync_warning(state: &AppState) -> Option<String> {
-    let handle = state.git_sync.as_ref()?;
+    let handle = state.git_sync.get()?;
     let guard = handle.status();
     let snapshot = guard.read().await;
     if snapshot.last_ok {

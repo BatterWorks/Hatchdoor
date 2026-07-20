@@ -1,6 +1,6 @@
 [package]
 name = "hatchdoor"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2024"
 default-run = "hatchdoor"
 license = "AGPL-3.0-only"
@@ -18,11 +18,13 @@ bytemuck = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
 fastembed = "4"
-git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
+libc = "0.2"
 notify = "8"
 rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sqlite-vec = "0.1"
 text-splitter = { version = "0.27", features = ["markdown", "tokenizers"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

@@ -15,6 +15,13 @@ export type Note = {
   relative_path: string;
   content: string;
   content_hash: string;
+  metadata?: NoteMetadata;
+};
+
+export type NoteMetadata = {
+  tags: string[];
+  aliases: string[];
+  properties: Record<string, unknown>;
 };
 
 export type NoteLink = {
@@ -115,6 +122,7 @@ export interface SearchResult {
   content: string;
   score: number;
   outbound_links: OutboundLink[];
+  metadata?: NoteMetadata;
 }
 
 export type SearchSelection = {
