@@ -406,8 +406,9 @@ Authorization: Bearer <token>
 ### MCP Metadata Queries
 
 `search_notes` accepts optional exact metadata filters alongside semantic or
-keyword retrieval. Filters support all-of tag matching, a vault-relative path
-prefix, required property names, and typed property equality. Search results
+keyword retrieval. Filters support all-of exact tag matching, hierarchical tag
+prefixes (a `topic/selfhosting` prefix also matches `topic/selfhosting/immich`),
+a vault-relative path prefix, required property names, and typed property equality. Search results
 always include normalized tags and aliases; use `include_properties` to return
 only the frontmatter fields the agent needs.
 
