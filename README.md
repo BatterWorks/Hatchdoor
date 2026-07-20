@@ -648,6 +648,9 @@ docker push battermanz/hatchdoor:latest
 
 ## Project Docs
 
+- [Product roadmap](docs/product-roadmap.md): draft product direction for an
+  always-available, product-configured, Git-enabled, multi-vault knowledge
+  workspace.
 - [Design system](docs/design-system.html): visual tokens, component patterns,
   layout rules, and interaction states used by the frontend.
 - [Semantic search strategy](docs/adr/semantic-search-strategy.md): decision
