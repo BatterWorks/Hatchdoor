@@ -52,11 +52,12 @@ quietly: propose a new ADR amending it (the file explains how).
 Do not open a public issue for a vulnerability. Follow the process in
 [`SECURITY.md`](SECURITY.md).
 
-## The tracked `vault/` fixtures
+## The local `vault/` directory
 
-`vault/Home.md` and `vault/Second Note.md` are intentionally committed: they are
-the minimal dev fixtures that let the app boot against a real vault out of the
-box (`VAULT_PATH` defaults to `./vault`). Keep this directory tiny and generic —
-it is a fixture, not a place for real notes. Everything else vault-shaped is
-gitignored: `demo-vault/` (read-only demo content), `data/` (generated cache),
-and `.fastembed_cache/` (downloaded model weights).
+`vault/` is the default vault path (`VAULT_PATH` defaults to `./vault`) and is
+gitignored — it is not committed. You do not need to create it: on first boot
+the app runs `seed_empty_vault`, which creates the directory and, if it has no
+Markdown yet, populates it with the starter vault from `docs/starter-vault/`.
+Everything else vault-shaped is gitignored too: `demo-vault/` (read-only demo
+content), `data/` (generated cache), and `.fastembed_cache/` (downloaded model
+weights).
