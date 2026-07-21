@@ -680,6 +680,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_attachment_accepts_line_wrapped_base64() {
+        let (state, _tmp) = test_state();
+        // Some encoders wrap base64 at a fixed column; the tool must tolerate the
+        // embedded newlines rather than treating them as invalid input.
+        let wrapped = format!("{}\n{}", &b64(b"png-bytes")[..4], &b64(b"png-bytes")[4..]);
+        let response = import_attachment_call(
+            state.clone(),
+            write_config(),
+            &wrapped,
+            "Assets/w.png",
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(state.vault_path.join("Assets/w.png")).expect("read attachment"),
+            b"png-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_attachment_rejects_decoded_size_past_the_predecode_guard() {
+        // A payload can slip past the pre-decode length guard (which rounds up)
+        // yet still decode to more than the cap. The authoritative decoded-length
+        // check in import_attachment_bytes must reject it.
+        let (state, _tmp) = test_state();
+        let mut config = write_config();
+        config.max_base64_bytes = 8;
+        // 9 decoded bytes: encodes to 12 base64 chars, under the guard's ceiling
+        // for an 8-byte cap (ceil(8*4/3)+4 = 15), so it reaches the decoded check.
+        let response = import_attachment_call(
+            state.clone(),
+            config,
+            &b64(b"nine byte"),
+            "Assets/diagram.png",
+            false,
+        )
+        .await;
+
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+    }
+
+    #[tokio::test]
     async fn import_attachment_rejects_disallowed_extension() {
         let (state, _tmp) = test_state();
         let response = import_attachment_call(

@@ -383,7 +383,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "get_attachment_import_config",
-            "description": "Return MCP attachment staging configuration, allowed extensions, max size, and usage guidance. Use before importing attachments.",
+            "description": "Return the available attachment upload methods (base64 MCP tool and HTTP endpoint), their size limits, allowed extensions, and which to use. Call before uploading attachments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
