@@ -1104,8 +1104,7 @@ fn prepare_note_for_embedding(
     embedder: &dyn Embedder,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
-    let tokenizer = embedder.tokenizer();
-    let chunking = chunk_note(&content, tokenizer.clone(), ChunkOptions::default());
+    let chunking = chunk_note(&content, embedder, ChunkOptions::default());
     let chunking_elapsed = chunking_started.elapsed();
 
     let reuse_started = Instant::now();
@@ -1119,11 +1118,9 @@ fn prepare_note_for_embedding(
         .iter()
         .map(|chunk| {
             let input = format!("{doc_prefix}{}", chunk.content);
-            let input_tokens = tokenizer
-                .encode(input.as_str(), true)
-                .map_err(|error| format!("failed measuring tokens for '{slug}': {error}"))?
-                .get_ids()
-                .len();
+            let input_tokens = embedder
+                .token_count(input.as_str(), true)
+                .map_err(|error| format!("failed measuring tokens for '{slug}': {error}"))?;
             Ok(ChunkMeasurement {
                 content_hash: chunk.content_hash.clone(),
                 input_bytes: input.len(),
@@ -1540,8 +1537,8 @@ mod chunk_integration_tests {
         fn embedding_dim(&self) -> usize {
             self.inner.embedding_dim()
         }
-        fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
-            self.inner.tokenizer()
+        fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add_special_tokens)
         }
     }
 
@@ -1618,8 +1615,8 @@ mod chunk_integration_tests {
         fn identity(&self) -> String {
             self.id.clone()
         }
-        fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
-            self.inner.tokenizer()
+        fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add_special_tokens)
         }
     }
 
@@ -1704,8 +1701,8 @@ mod chunk_integration_tests {
             fn embedding_dim(&self) -> usize {
                 self.inner.embedding_dim()
             }
-            fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
-                self.inner.tokenizer()
+            fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+                self.inner.token_count(text, add_special_tokens)
             }
         }
 
@@ -1750,8 +1747,8 @@ mod chunk_integration_tests {
             fn embedding_dim(&self) -> usize {
                 self.inner.embedding_dim()
             }
-            fn tokenizer(&self) -> std::sync::Arc<tokenizers::Tokenizer> {
-                self.inner.tokenizer()
+            fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+                self.inner.token_count(text, add_special_tokens)
             }
         }
 

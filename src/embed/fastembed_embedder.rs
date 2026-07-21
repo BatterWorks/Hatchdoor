@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use tokenizers::Tokenizer;
 
 use super::Embedder;
 
 pub struct FastembedEmbedder {
     model: TextEmbedding,
-    tokenizer: Arc<Tokenizer>,
     dim: usize,
     max_length: usize,
     id: &'static str,
@@ -30,10 +26,8 @@ impl FastembedEmbedder {
                 .with_show_download_progress(false),
         )
         .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
-        let tokenizer = Arc::new(model.tokenizer.clone());
         Ok(Self {
             model,
-            tokenizer,
             dim,
             max_length,
             id,
@@ -97,13 +91,22 @@ impl Embedder for FastembedEmbedder {
     }
 
     fn identity(&self) -> String {
-        // Sequence length affects embeddings when inputs exceed the old limit,
-        // so it is part of the persisted cache identity.
-        format!("{}-{}-max{}", self.id, self.dim, self.max_length)
+        // Sequence length and the FastEmbed/ONNX Runtime generation affect
+        // embeddings, so both are part of the persisted cache identity.
+        // Bumping FastEmbed must never leave vectors from the prior runtime in
+        // the same SQLite index.
+        format!(
+            "{}-{}-max{}-fastembed-v4",
+            self.id, self.dim, self.max_length
+        )
     }
 
-    fn tokenizer(&self) -> Arc<Tokenizer> {
-        self.tokenizer.clone()
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.model
+            .tokenizer
+            .encode(text, add_special_tokens)
+            .map(|encoding| encoding.get_ids().len())
+            .map_err(|error| format!("failed tokenizing text: {error}"))
     }
 
     fn doc_prefix(&self) -> &'static str {

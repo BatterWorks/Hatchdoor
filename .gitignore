@@ -5,6 +5,7 @@ frontend/node_modules
 frontend/dist
 /tmp
 /data
+/vault
 /demo-vault
 /.fastembed_cache
 .claude/

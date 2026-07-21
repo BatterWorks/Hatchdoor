@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "web-programming::http-server"]
 [dependencies]
 ahash = "0.8"
 axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
 blake3 = "1"
 bytemuck = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -21,20 +22,24 @@ fastembed = "4"
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 libc = "0.2"
 notify = "8"
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sqlite-vec = "0.1"
-text-splitter = { version = "0.27", features = ["markdown", "tokenizers"] }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+text-splitter = { version = "0.32", features = ["markdown", "tokenizers"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+# FastEmbed 4 currently exposes its tokenizer through tokenizers 0.21. Keep
+# this alias for the read-only index microbenchmark, which inspects that model
+# tokenizer directly. Application chunking uses the model through Embedder.
+tokenizers-v21 = { package = "tokenizers", version = "0.21", default-features = false, features = ["onig"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.7", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 walkdir = "2"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [features]
 default = []

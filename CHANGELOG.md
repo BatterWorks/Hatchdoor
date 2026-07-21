@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### ⚠️ Breaking changes — action required on upgrade
+- **The MCP attachment staging folder is removed.** Agents no longer import
+  attachments by dropping a file into a shared, mounted inbox and calling
+  `import_attachment` with a `staged_filename`. Instead, `import_attachment` now
+  takes the file bytes directly as base64 (`content` + `target_relative_path`),
+  and larger files use the existing multipart `POST /api/attachment`.
+  **Action:** remove the `HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH`,
+  `HOST_ATTACHMENT_STAGING_PATH`, and `HATCHDOOR_MCP_ADVERTISE_HOST_PATHS`
+  variables from your `.env`, and delete the attachments-inbox volume mount from
+  your Docker Compose file. Any agent workflow that placed files in the inbox
+  must switch to sending base64 via `import_attachment` (call
+  `get_attachment_import_config` to see the methods and limits).
+- **`HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES` is renamed to
+  `HATCHDOOR_MAX_ATTACHMENT_BYTES`** (it caps the web UI and HTTP uploads, not
+  just MCP). **Action:** rename it in your `.env` if you set it; otherwise the
+  old name is ignored and the default (10 MiB) applies.
+
+### Added
+- Direct attachment upload for agents: the `import_attachment` MCP tool accepts
+  base64 file bytes inline (universal fallback for any MCP client), capped by the
+  new `HATCHDOOR_MCP_MAX_BASE64_BYTES` (default 5 MiB, measured on the decoded
+  file). `get_attachment_import_config` now enumerates both upload methods, their
+  size limits, and which to use.
+
+### Changed
+- The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
+  legitimately sized upload is not rejected before the tool's own size check.
+
 ## v2.3.0 - 2026-07-19
 
 ### Added
