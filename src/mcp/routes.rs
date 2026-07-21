@@ -608,6 +608,22 @@ mod tests {
             .expect("http method");
         assert_eq!(http["path"], "/api/attachment");
         assert_eq!(http["max_bytes"], 5678);
+        // The path is relative; tell the agent it resolves against this same
+        // MCP origin so it does not have to guess the host/port.
+        assert!(
+            http["path_note"]
+                .as_str()
+                .expect("path_note")
+                .contains("same"),
+            "path_note should explain the path is same-origin as the MCP endpoint"
+        );
+        // The HTTP endpoint uses the web bearer token, a DISTINCT credential from
+        // the MCP token; make that explicit so an agent does not assume its MCP
+        // token works here.
+        assert!(
+            http["auth"].as_str().expect("auth").contains("separate"),
+            "auth should state the web token is separate from the MCP token"
+        );
 
         assert!(
             config["allowed_extensions"]
