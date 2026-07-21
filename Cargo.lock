@@ -1033,6 +1033,7 @@ version = "2.3.0"
 dependencies = [
  "ahash",
  "axum",
+ "base64 0.22.1",
  "blake3",
  "bytemuck",
  "chrono",
