@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
-use tokenizers::Tokenizer;
-
 use super::normalize::{extract_frontmatter_metadata, strip_code_fences, strip_frontmatter};
+use crate::embed::Embedder;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -39,12 +36,18 @@ pub struct NoteChunking {
 }
 
 #[allow(dead_code)]
-pub fn chunk_note(
-    raw_content: &str,
-    tokenizer: Arc<Tokenizer>,
-    opts: ChunkOptions,
-) -> NoteChunking {
-    use text_splitter::{ChunkConfig, MarkdownSplitter};
+pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions) -> NoteChunking {
+    use text_splitter::{ChunkConfig, ChunkSizer, MarkdownSplitter};
+
+    struct EmbedderSizer<'a>(&'a dyn Embedder);
+
+    impl ChunkSizer for EmbedderSizer<'_> {
+        fn size(&self, chunk: &str) -> usize {
+            self.0
+                .token_count(chunk, false)
+                .expect("embedder tokenizer must be able to count chunk tokens")
+        }
+    }
 
     let metadata = extract_frontmatter_metadata(raw_content);
     let body = strip_frontmatter(raw_content);
@@ -59,7 +62,7 @@ pub fn chunk_note(
     }
 
     let config = ChunkConfig::new(opts.max_tokens)
-        .with_sizer((*tokenizer).clone())
+        .with_sizer(EmbedderSizer(embedder))
         .with_overlap(opts.overlap_tokens)
         .expect("overlap must be < max_tokens");
     let splitter = MarkdownSplitter::new(config);
@@ -142,20 +145,21 @@ mod tests {
     use super::*;
     use crate::embed::{Embedder, StubEmbedder};
 
-    fn stub_tokenizer() -> Arc<Tokenizer> {
-        StubEmbedder::new(384).tokenizer()
+    fn chunk(content: &str, opts: ChunkOptions) -> NoteChunking {
+        let embedder = StubEmbedder::new(384);
+        chunk_note(content, &embedder, opts)
     }
 
     #[test]
     fn empty_input_produces_no_chunks() {
-        let result = chunk_note("", stub_tokenizer(), ChunkOptions::default());
+        let result = chunk("", ChunkOptions::default());
         assert!(result.chunks.is_empty());
     }
 
     #[test]
     fn small_single_section_produces_one_chunk() {
         let content = "# Heading\n\nA short paragraph.";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         assert_eq!(result.chunks.len(), 1);
         assert_eq!(result.chunks[0].ordinal, 0);
         assert!(result.chunks[0].content.contains("short paragraph"));
@@ -164,8 +168,8 @@ mod tests {
     #[test]
     fn chunks_have_deterministic_blake3_hashes() {
         let content = "# A\n\nbody";
-        let a = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
-        let b = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let a = chunk(content, ChunkOptions::default());
+        let b = chunk(content, ChunkOptions::default());
         assert_eq!(a.chunks, b.chunks);
         assert_eq!(a.chunks[0].content_hash.len(), 64);
     }
@@ -173,9 +177,8 @@ mod tests {
     #[test]
     fn ordinals_are_sequential_from_zero() {
         let content = "# A\nfirst\n\n# B\nsecond\n\n# C\nthird";
-        let result = chunk_note(
+        let result = chunk(
             content,
-            stub_tokenizer(),
             ChunkOptions {
                 max_tokens: 5,
                 overlap_tokens: 0,
@@ -190,7 +193,7 @@ mod tests {
     #[test]
     fn heading_path_reflects_nested_headings() {
         let content = "# Top\n\n## Sub\n\ndeep body";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         let last = result.chunks.last().expect("chunk");
         let path = last.heading_path.as_deref().unwrap_or("");
         assert!(path.contains("Top") || path.contains("Sub"));
@@ -199,7 +202,7 @@ mod tests {
     #[test]
     fn frontmatter_is_stripped_before_chunking() {
         let content = "---\ntags: [x, y]\n---\n\n# A\n\nbody";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         assert!(
             result
                 .chunks
@@ -212,7 +215,7 @@ mod tests {
     #[test]
     fn code_fences_are_stripped_but_code_contents_remain() {
         let content = "# A\n\n```rust\nfn foo() {}\n```\n";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         let joined: String = result.chunks.iter().map(|c| c.content.clone()).collect();
         assert!(joined.contains("fn foo()"));
         assert!(!joined.contains("```"));
@@ -221,7 +224,7 @@ mod tests {
     #[test]
     fn wikilinks_are_preserved_literally() {
         let content = "# A\n\nsee [[Other Note]] for context";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         let joined: String = result.chunks.iter().map(|c| c.content.clone()).collect();
         assert!(joined.contains("[[Other Note]]"));
     }
@@ -234,13 +237,15 @@ mod tests {
             max_tokens: 50,
             overlap_tokens: 5,
         };
-        let result = chunk_note(&content, stub_tokenizer(), opts);
-        let tokenizer = stub_tokenizer();
+        let embedder = StubEmbedder::new(384);
+        let result = chunk_note(&content, &embedder, opts);
         for chunk in &result.chunks {
-            let encoding = tokenizer
-                .encode(chunk.content.as_str(), false)
-                .expect("encode");
-            assert!(encoding.get_ids().len() <= opts.max_tokens + opts.overlap_tokens);
+            assert!(
+                embedder
+                    .token_count(chunk.content.as_str(), false)
+                    .expect("encode")
+                    <= opts.max_tokens + opts.overlap_tokens
+            );
         }
     }
 }

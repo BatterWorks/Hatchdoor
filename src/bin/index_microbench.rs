@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use rusqlite::{Connection, OpenFlags};
-use tokenizers::Tokenizer;
+use tokenizers_v21::Tokenizer;
 
 const DOC_PREFIX: &str = "search_document: ";
 const DEFAULT_CACHE: &str = "data/cache/hatchdoor-cache.sqlite3";
@@ -35,7 +35,7 @@ fn main() -> Result<(), String> {
     println!("Index microbenchmark (read-only; cache will not be modified)");
     println!("cache={cache_path} chunks={}", rows.len());
 
-    let model_512 = load_model(512)?;
+    let mut model_512 = load_model(512)?;
     let raw_tokenizer = untruncated_tokenizer(&model_512.tokenizer)?;
     let chunks = measure_raw_tokens(rows, &raw_tokenizer)?;
     print_truncation_report(&chunks);
@@ -50,15 +50,15 @@ fn main() -> Result<(), String> {
         sample_raw_tokens
     );
 
-    warm_up(&model_512)?;
-    let current = bench_per_note(&model_512, &sample)?;
-    let no_padding_512 = bench_individual(&model_512, &sample)?;
+    warm_up(&mut model_512)?;
+    let current = bench_per_note(&mut model_512, &sample)?;
+    let no_padding_512 = bench_individual(&mut model_512, &sample)?;
     drop(model_512);
 
-    let model_1024 = load_model(1024)?;
-    warm_up(&model_1024)?;
-    let expanded = bench_per_note(&model_1024, &sample)?;
-    let no_padding_1024 = bench_individual(&model_1024, &sample)?;
+    let mut model_1024 = load_model(1024)?;
+    warm_up(&mut model_1024)?;
+    let expanded = bench_per_note(&mut model_1024, &sample)?;
+    let no_padding_1024 = bench_individual(&mut model_1024, &sample)?;
 
     println!();
     println!("Paired inference timings on the same sample:");
@@ -222,7 +222,7 @@ fn select_note_sample(chunks: &[CachedChunk], target_notes: usize) -> Vec<Vec<Ca
         .collect()
 }
 
-fn warm_up(model: &TextEmbedding) -> Result<(), String> {
+fn warm_up(model: &mut TextEmbedding) -> Result<(), String> {
     model
         .embed(vec![format!("{DOC_PREFIX}warm up")], None)
         .map(|_| ())
@@ -230,7 +230,7 @@ fn warm_up(model: &TextEmbedding) -> Result<(), String> {
 }
 
 fn bench_per_note(
-    model: &TextEmbedding,
+    model: &mut TextEmbedding,
     notes: &[Vec<CachedChunk>],
 ) -> Result<BenchResult, String> {
     let started = Instant::now();
@@ -253,7 +253,7 @@ fn bench_per_note(
 }
 
 fn bench_individual(
-    model: &TextEmbedding,
+    model: &mut TextEmbedding,
     notes: &[Vec<CachedChunk>],
 ) -> Result<BenchResult, String> {
     let started = Instant::now();
