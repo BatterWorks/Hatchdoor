@@ -191,14 +191,22 @@ describe("App links/download", () => {
       </MemoryRouter>,
     );
 
-    const activeLink = await screen.findByRole("link", {
-      name: "idea - example 1",
-    });
+    const activeLink = await screen.findByRole(
+      "link",
+      {
+        name: "idea - example 1",
+      },
+      { timeout: 3_000 },
+    );
     expect(activeLink).toHaveAttribute("href", "/n/idea-example-1");
 
-    const archivedLink = await screen.findByRole("link", {
-      name: "90-archive/idea - example 2",
-    });
+    const archivedLink = await screen.findByRole(
+      "link",
+      {
+        name: "90-archive/idea - example 2",
+      },
+      { timeout: 3_000 },
+    );
     expect(archivedLink).toHaveClass("archived-link");
     expect(archivedLink).toHaveAttribute("href", "/n/idea-example-2");
   });

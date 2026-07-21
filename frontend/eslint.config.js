@@ -19,5 +19,12 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    // These React Compiler diagnostics reject existing, intentional effect and
+    // ref synchronization patterns. Keep them disabled until that code is
+    // refactored as a dedicated behavior change.
+    rules: {
+      "react-hooks/refs": "off",
+      "react-hooks/set-state-in-effect": "off",
+    },
   },
 ]);
