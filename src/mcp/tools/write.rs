@@ -9,7 +9,7 @@ use crate::app_state::{AppState, refresh_now};
 use crate::vault::VaultIndex;
 use crate::vault::{
     AttachmentOutcome, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
-    create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
+    create_note, delete_attachment, delete_note, edit_note, import_attachment,
     list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
     replace_section, update_note,
 };
@@ -236,49 +236,22 @@ pub(super) async fn import_attachment_tool(
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
-    use base64::Engine as _;
-
     let args: ImportAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid import_attachment arguments: {error}"))
     })?;
+    let staging_path = config.attachment_staging_path.as_ref().ok_or_else(|| {
+        JsonRpcFailure::invalid_params("HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH is not configured")
+    })?;
+    let staged_filename = non_empty_argument("staged_filename", args.staged_filename)?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
-
-    // Whitespace-tolerant so line-wrapped base64 still decodes.
-    let content: String = args
-        .content
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
-
-    // Guard the encoded payload before decoding: base64 inflates bytes by ~4/3,
-    // so anything longer than that for the cap cannot decode to an allowed size.
-    // Rejecting up front avoids decoding a deliberately oversized payload; the
-    // authoritative check on the decoded length runs in import_attachment_bytes.
-    let max_encoded = config
-        .max_base64_bytes
-        .saturating_mul(4)
-        .div_ceil(3)
-        .saturating_add(4);
-    if content.len() as u64 > max_encoded {
-        return Err(JsonRpcFailure::invalid_params(format!(
-            "attachment exceeds max size: base64 content is larger than the {}-byte base64 limit allows",
-            config.max_base64_bytes
-        )));
-    }
-
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(content.as_bytes())
-        .map_err(|error| {
-            JsonRpcFailure::invalid_params(format!("content is not valid base64: {error}"))
-        })?;
-
-    let outcome = import_attachment_bytes(
+    let outcome = import_attachment(
         &state.vault_path,
+        staging_path,
+        &staged_filename,
         &target_relative_path,
-        &bytes,
-        config.max_base64_bytes,
+        config.max_attachment_bytes,
         overwrite,
     )
     .map_err(write_error_to_jsonrpc)?;
@@ -692,16 +665,16 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "import_attachment",
-            "description": "Upload an attachment into the vault by sending its bytes base64-encoded. This is the universal fallback that works with any MCP client; it is size-limited (see get_attachment_import_config for the limit). For larger files, use the HTTP upload endpoint instead. Returns compact metadata for the imported file.",
+            "description": "Import an attachment from the configured staging folder into the vault. staged_filename must be a filename only. Returns compact metadata for the imported file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "content": {"type": "string", "minLength": 1, "description": "Base64-encoded file bytes."},
-                    "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png."},
+                    "staged_filename": {"type": "string", "minLength": 1},
+                    "target_relative_path": {"type": "string", "minLength": 1},
                     "overwrite": {"type": "boolean", "default": false},
                     "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
-                "required": ["content", "target_relative_path"],
+                "required": ["staged_filename", "target_relative_path"],
                 "additionalProperties": false
             },
             "annotations": write_tool_annotations(true, false)
@@ -873,7 +846,7 @@ struct DeleteNoteArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportAttachmentArgs {
-    content: String,
+    staged_filename: String,
     target_relative_path: String,
     #[serde(default)]
     overwrite: Option<bool>,

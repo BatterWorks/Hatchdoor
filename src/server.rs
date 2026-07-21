@@ -98,17 +98,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .max_attachment_bytes
         .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
         .min(usize::MAX as u64) as usize;
-    // The base64 import_attachment tool carries file bytes inside the JSON-RPC
-    // body, which base64 inflates by ~4/3. Size the /mcp body limit from the
-    // base64 cap plus that inflation so a legitimately-sized upload is not
-    // rejected before the tool's own decoded-size check runs.
-    let mcp_body_limit = state
-        .mcp_config
-        .max_base64_bytes
-        .saturating_mul(4)
-        .div_ceil(3)
-        .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
-        .min(usize::MAX as u64) as usize;
 
     // Routes that expose vault data sit behind startup readiness and, when
     // configured, web authentication. The SPA shell and status routes stay open.
@@ -158,7 +147,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     ));
     let mcp = Router::new()
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
-        .layer(DefaultBodyLimit::max(mcp_body_limit))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_vault_ready,
@@ -499,29 +487,6 @@ mod tests {
 
     fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         app_for_tests_with_web_auth(None)
-    }
-
-    #[tokio::test]
-    async fn mcp_route_accepts_body_above_axum_default_limit() {
-        // axum's default request-body limit is 2 MiB. A base64-encoded attachment
-        // can legitimately exceed that, so the /mcp route must raise its limit to
-        // fit the base64 cap; otherwise the framework rejects the upload with 413
-        // before the handler runs.
-        let (app, _tmp) = app_for_tests();
-        let body = "a".repeat(3 * 1024 * 1024);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/mcp")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

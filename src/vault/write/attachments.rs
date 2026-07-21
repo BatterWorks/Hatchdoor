@@ -5,11 +5,13 @@ use std::path::Path;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
+use super::fs_ops::import_attachment_file;
 use super::paths::{
     create_parent_dir_inside_root, ensure_allowed_attachment_path,
     ensure_existing_path_inside_root, normalize_attachment_relative_path,
     normalize_staged_filename, resolve_existing_attachment_path, resolve_new_attachment_path,
-    unique_trash_attachment_relative_path, vault_relative_file_path,
+    resolve_staged_attachment_path, unique_trash_attachment_relative_path,
+    vault_relative_file_path,
 };
 use super::rewrites::{apply_rewrites, rollback_rewrites};
 use super::types::{AttachmentInfo, AttachmentOutcome, WriteError};
@@ -41,6 +43,50 @@ pub fn list_note_attachments(
         }
     }
     Ok(attachments)
+}
+
+pub fn import_attachment(
+    vault_root: &Path,
+    staging_root: &Path,
+    staged_filename: &str,
+    target_relative_path: &str,
+    max_bytes: u64,
+    overwrite: bool,
+) -> Result<AttachmentOutcome, WriteError> {
+    let source_path = resolve_staged_attachment_path(staging_root, staged_filename)?;
+    ensure_allowed_attachment_path(&source_path)?;
+    let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
+    ensure_allowed_attachment_path(&target_path)?;
+    create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
+
+    let metadata = fs::metadata(&source_path).map_err(|error| {
+        WriteError::Io(format!(
+            "failed to read staged attachment '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+    if metadata.len() > max_bytes {
+        return Err(WriteError::InvalidInput(format!(
+            "attachment exceeds max size: {} > {max_bytes}",
+            metadata.len()
+        )));
+    }
+    if target_path.exists() && !overwrite {
+        return Err(WriteError::Conflict(format!(
+            "Attachment already exists: {}",
+            normalize_attachment_relative_path(target_relative_path)?
+        )));
+    }
+
+    let cleanup_warning = import_attachment_file(&source_path, &target_path)?;
+
+    Ok(AttachmentOutcome {
+        attachment: attachment_info(vault_root, &target_path)?,
+        rewritten_notes: 0,
+        trashed_path: None,
+        cleanup_warning,
+        affected_paths: vec![target_path.clone()],
+    })
 }
 
 pub fn import_attachment_bytes(

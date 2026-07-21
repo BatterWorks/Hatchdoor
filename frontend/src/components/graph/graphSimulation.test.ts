@@ -43,10 +43,9 @@ describe("buildSimulationGraph", () => {
     expect(nodes.map((n) => n.slug)).toEqual(["a", "b", "c"]);
     // The a→ghost edge is dropped; a→b and b→c survive.
     expect(links).toHaveLength(2);
-    expect(links.map((l) => `${l.source.slug}->${l.target.slug}`)).toEqual([
-      "a->b",
-      "b->c",
-    ]);
+    expect(
+      links.map((l) => `${l.source.slug}->${l.target.slug}`),
+    ).toEqual(["a->b", "b->c"]);
   });
 
   it("resolves link endpoints to the same node objects as the node list", () => {

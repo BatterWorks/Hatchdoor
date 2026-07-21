@@ -292,9 +292,7 @@ Body`,
     expect(includeContent).toBeChecked();
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
-        String(call[0]).includes(
-          "/api/search?q=%23type%2Freference&mode=keyword",
-        ),
+        String(call[0]).includes("/api/search?q=%23type%2Freference&mode=keyword"),
       );
       expect(called).toBe(true);
     });

@@ -13,6 +13,7 @@ services:
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
       - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
+      - ${HOST_ATTACHMENT_STAGING_PATH:-./data/attachments-inbox}:${HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH:-/data/attachments-inbox}
     restart: unless-stopped
     healthcheck:
       # Distroless runtime has no shell/curl, so the binary probes its own

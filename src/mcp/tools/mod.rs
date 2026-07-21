@@ -10,9 +10,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app_state::AppState;
+use crate::vault::allowed_attachment_extensions;
 
 use super::config::McpConfig;
-use super::protocol::{JsonRpcFailure, tool_error};
+use super::protocol::{JsonRpcFailure, tool_error, tool_success};
 
 pub async fn handle_tools_call(
     state: AppState,
@@ -39,7 +40,19 @@ pub async fn handle_tools_call(
         "get_tree" => read::get_tree_tool(state, arguments).await,
         "refresh_index" => read::refresh_index_tool(state, arguments).await,
         "get_git_sync_status" => read::get_git_sync_status_tool(state).await,
-        "get_attachment_import_config" => read::get_attachment_import_config_tool(config),
+        "get_attachment_import_config" if config.write_enabled => {
+            read::get_attachment_import_config_tool(config)
+        }
+        "get_attachment_import_config" => Ok(tool_success(json!({
+            "enabled": false,
+            "staging_path": null,
+            "staging_path_kind": "hidden",
+            "host_staging_path": null,
+            "host_staging_path_kind": "hidden",
+            "allowed_extensions": allowed_attachment_extensions(),
+            "max_bytes": config.max_attachment_bytes,
+            "usage": "Enable HATCHDOOR_MCP_WRITE_ENABLED to use staged attachment imports."
+        }))),
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
         | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
         | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"

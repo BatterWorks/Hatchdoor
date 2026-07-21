@@ -40,11 +40,7 @@ import {
   updateNote,
   uploadAttachment,
 } from "../api/writeApi";
-import {
-  clearNoteDraft,
-  loadNoteDraft,
-  saveNoteDraft,
-} from "../lib/writeDrafts";
+import { clearNoteDraft, loadNoteDraft, saveNoteDraft } from "../lib/writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";

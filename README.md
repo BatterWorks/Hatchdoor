@@ -134,11 +134,6 @@ You need:
 - A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
   starter vault
 
-Compatibility note: Hatchdoor intentionally remains on FastEmbed 4. FastEmbed
-5 bundles an ONNX Runtime build that requires AVX on x86_64, so upgrading to it
-would exclude older CPUs. Do not upgrade FastEmbed past v4 until a non-AVX
-runtime path is available and validated.
-
 ### 2. Create Your Config
 
 Copy the example environment file:
@@ -200,6 +195,7 @@ Docker Compose mounts:
 | --- | --- |
 | `/data/vault` | Markdown vault, source of truth |
 | `/data/cache` | Generated SQLite cache |
+| `/data/attachments-inbox` | Temporary staging folder for MCP attachment import |
 
 ## Data And Safety Model
 
@@ -255,6 +251,8 @@ For browser writes, MCP writes, attachment uploads, or git sync:
 
 - The vault mount must be writable by the container runtime user.
 - The cache directory must be writable.
+- The attachment staging directory must be writable when MCP attachment import is
+  enabled.
 
 If Hatchdoor starts but write features are disabled, check the permissions on
 your vault mount and call `/api/write-capabilities` from an authenticated
@@ -436,26 +434,20 @@ teach the agent Hatchdoor's conventions: search before editing, pass the
 returned content hash on writes, prefer small edits, and let Hatchdoor manage
 backlinks, moves, and git sync.
 
-### Attachment Upload
+### MCP Attachment Import
 
-Agents and the web UI upload attachments directly — no shared staging folder to
-mount. Two paths cover the size/compatibility trade-off:
-
-- **`import_attachment` MCP tool** — send the file bytes base64-encoded inline.
-  Works with any MCP client, so it is the universal fallback, but base64 rides
-  inside the JSON-RPC message and gets unreliable as files grow. Capped by
-  `HATCHDOOR_MCP_MAX_BASE64_BYTES` (default 5 MiB), measured on the decoded file.
-- **`POST /api/attachment`** (multipart) — used by the web UI and by agents that
-  can make an HTTP request (e.g. shell out to `curl` with the bearer token). Use
-  it for larger files. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES` (default 10 MiB).
+Attachment import uses a staging folder outside the vault:
 
 ```env
-HATCHDOOR_MCP_MAX_BASE64_BYTES=5242880
-HATCHDOOR_MAX_ATTACHMENT_BYTES=10485760
+HOST_ATTACHMENT_STAGING_PATH=./data/attachments-inbox
+HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH=/data/attachments-inbox
+HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10485760
+HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=false
 ```
 
-Agents can call `get_attachment_import_config` to discover both methods, their
-size limits, and which to use.
+Set `HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=true` only for local/dev agents that
+need to see the host staging path. Keep it false for shared or remote
+deployments.
 
 ## Git Sync
 

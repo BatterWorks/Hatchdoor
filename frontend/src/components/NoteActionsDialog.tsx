@@ -8,7 +8,11 @@ import {
 } from "../lib/writeDrafts";
 
 export type NoteActionDialogKind =
-  "create" | "rename" | "move" | "archive" | "delete";
+  | "create"
+  | "rename"
+  | "move"
+  | "archive"
+  | "delete";
 
 const DIALOG_TITLE: Record<NoteActionDialogKind, string> = {
   create: "Create note",

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
 /// In-process text embedder. Loaded once at startup, shared via Arc.
@@ -18,13 +20,9 @@ pub trait Embedder: Send + Sync {
         format!("unknown-{}", self.embedding_dim())
     }
 
-    /// Count tokens using the exact tokenizer bundled with this embedder.
-    ///
-    /// Chunking calls this with `add_special_tokens` disabled; index telemetry
-    /// enables it so its measurements match model inference. Keeping this
-    /// behind the embedder avoids coupling application code to FastEmbed's
-    /// tokenizer crate version.
-    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String>;
+    /// The exact tokenizer the embedder uses internally, so the chunker can
+    /// pre-compute token counts that match the embedder's accounting.
+    fn tokenizer(&self) -> Arc<Tokenizer>;
 
     /// Task-instruction prefix prepended to documents before embedding.
     /// Empty for models that don't use prefixes; required by Nomic v1.5.
@@ -43,7 +41,7 @@ pub trait Embedder: Send + Sync {
 #[allow(dead_code)]
 pub struct StubEmbedder {
     dim: usize,
-    tokenizer: Tokenizer,
+    tokenizer: Arc<Tokenizer>,
 }
 
 impl StubEmbedder {
@@ -60,7 +58,10 @@ impl StubEmbedder {
             .expect("wordlevel model");
         let mut tokenizer = Tokenizer::new(model);
         tokenizer.with_pre_tokenizer(Some(Whitespace {}));
-        Self { dim, tokenizer }
+        Self {
+            dim,
+            tokenizer: Arc::new(tokenizer),
+        }
     }
 }
 
@@ -77,11 +78,8 @@ impl Embedder for StubEmbedder {
         format!("stub-{}", self.dim)
     }
 
-    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
-        self.tokenizer
-            .encode(text, add_special_tokens)
-            .map(|encoding| encoding.get_ids().len())
-            .map_err(|error| format!("failed tokenizing text: {error}"))
+    fn tokenizer(&self) -> Arc<Tokenizer> {
+        self.tokenizer.clone()
     }
 }
 
@@ -145,11 +143,8 @@ mod tests {
     #[test]
     fn stub_tokenizer_counts_whitespace_tokens() {
         let embedder = StubEmbedder::new(384);
-        assert_eq!(
-            embedder
-                .token_count("hello world foo", false)
-                .expect("encode"),
-            3
-        );
+        let tokenizer = embedder.tokenizer();
+        let encoding = tokenizer.encode("hello world foo", false).expect("encode");
+        assert_eq!(encoding.get_ids().len(), 3);
     }
 }

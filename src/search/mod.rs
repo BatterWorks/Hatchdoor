@@ -163,7 +163,7 @@ pub fn run(
     if let Some(tag_prefix) = tag_prefix_query(&req.query) {
         let mut filters = req.filters;
         filters.tag_prefixes.push(tag_prefix.clone());
-        let results = query_notes(cache, &filters, &req.include_properties, req.limit)?
+        let results = query_notes(&cache, &filters, &req.include_properties, req.limit)?
             .into_iter()
             .map(|note| SearchResult {
                 chunk_id: 0,
