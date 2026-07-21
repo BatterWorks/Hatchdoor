@@ -178,7 +178,6 @@ export function VaultApp() {
     // Reset transient shell UI on navigation — an accepted effect→setState
     // pattern (the state is not derivable from render inputs alone).
     if (isMobile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDrawerOpen(false);
     }
     setActionsMenuOpen(false);
@@ -209,7 +208,6 @@ export function VaultApp() {
 
   useLayoutEffect(() => {
     if (!isMobile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMobileDrawerTop(0);
       return;
     }
@@ -241,7 +239,6 @@ export function VaultApp() {
 
   useEffect(() => {
     if (location.pathname === "/") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveNote(null);
     }
   }, [location.pathname]);
@@ -251,7 +248,6 @@ export function VaultApp() {
       return;
     }
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRecentNotes((prev) => {
       const withoutCurrent = prev.filter(
         (item) => item.slug !== activeNote.slug,
