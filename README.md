@@ -134,6 +134,11 @@ You need:
 - A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
   starter vault
 
+Compatibility note: Hatchdoor intentionally remains on FastEmbed 4. FastEmbed
+5 bundles an ONNX Runtime build that requires AVX on x86_64, so upgrading to it
+would exclude older CPUs. Do not upgrade FastEmbed past v4 until a non-AVX
+runtime path is available and validated.
+
 ### 2. Create Your Config
 
 Copy the example environment file:
