@@ -182,26 +182,47 @@ pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, J
     Ok(tool_success(status))
 }
 
+/// Describe the available attachment-upload methods so an agent can pick one:
+/// the universal base64 MCP tool (the fallback) and the HTTP endpoint (for
+/// larger files, when the agent can make an out-of-band HTTP request).
 pub(super) fn get_attachment_import_config_tool(
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
-    let host_staging_path = if config.advertise_host_paths {
-        config.host_attachment_staging_path.clone()
+    let enabled = config.write_enabled;
+    let methods = if enabled {
+        json!([
+            {
+                "id": "mcp_base64",
+                "tool": "import_attachment",
+                "role": "fallback",
+                "max_bytes": config.max_base64_bytes,
+                "recommended_for": "small files; universal, works with any MCP client",
+                "usage": "Call import_attachment with base64-encoded `content` and a vault-relative `target_relative_path`."
+            },
+            {
+                "id": "http_multipart",
+                "role": "preferred_for_large_files",
+                "method": "POST",
+                "path": "/api/attachment",
+                "path_note": "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
+                "max_bytes": config.max_attachment_bytes,
+                "auth": "When web auth is enabled, send the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) as `Authorization: Bearer <token>`. This is a separate credential from the MCP bearer token — the MCP token does NOT authorize this endpoint. When web auth is disabled, no token is required.",
+                "requires": "ability to make an HTTP request outside MCP (e.g. shell/curl)",
+                "usage": "POST multipart/form-data with fields `target_relative_path` and `file`."
+            }
+        ])
     } else {
-        None
+        json!([])
     };
     Ok(tool_success(json!({
-        "enabled": config.write_enabled && config.attachment_staging_path.is_some(),
-        "staging_path": config
-            .attachment_staging_path
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        "staging_path_kind": "container",
-        "host_staging_path": host_staging_path,
-        "host_staging_path_kind": if config.advertise_host_paths { "host_hint" } else { "hidden" },
+        "enabled": enabled,
         "allowed_extensions": allowed_attachment_extensions(),
-        "max_bytes": config.max_attachment_bytes,
-        "usage": "Place files in the advertised staging folder, then call import_attachment with staged_filename and target_relative_path."
+        "methods": methods,
+        "usage": if enabled {
+            "Two upload methods are available. Prefer import_attachment (base64) for small files; use the HTTP endpoint for larger files that exceed the base64 limit."
+        } else {
+            "Attachment upload is disabled. Set HATCHDOOR_MCP_WRITE_ENABLED to enable it."
+        }
     })))
 }
 
@@ -363,7 +384,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "get_attachment_import_config",
-            "description": "Return MCP attachment staging configuration, allowed extensions, max size, and usage guidance. Use before importing attachments.",
+            "description": "Return the available attachment upload methods (base64 MCP tool and HTTP endpoint), their size limits, allowed extensions, and which to use. Call before uploading attachments.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},

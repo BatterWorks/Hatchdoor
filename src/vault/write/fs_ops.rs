@@ -94,32 +94,6 @@ pub(super) fn move_assets(moves: &[AssetMove]) -> Result<usize, WriteError> {
     Ok(moves.len())
 }
 
-pub(super) fn import_attachment_file(
-    source_path: &Path,
-    target_path: &Path,
-) -> Result<Option<String>, WriteError> {
-    match fs::rename(source_path, target_path) {
-        Ok(()) => return Ok(None),
-        Err(rename_error) => {
-            fs::copy(source_path, target_path).map_err(|copy_error| {
-                WriteError::Io(format!(
-                    "failed to import attachment '{}' to '{}': rename failed: {rename_error}; copy failed: {copy_error}",
-                    source_path.display(),
-                    target_path.display()
-                ))
-            })?;
-        }
-    }
-
-    match fs::remove_file(source_path) {
-        Ok(()) => Ok(None),
-        Err(error) => Ok(Some(format!(
-            "import succeeded but failed to remove staged attachment '{}': {error}",
-            source_path.display()
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
