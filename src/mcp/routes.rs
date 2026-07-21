@@ -136,10 +136,8 @@ mod tests {
         McpConfig {
             enabled: true,
             write_enabled: false,
-            attachment_staging_path: None,
-            host_attachment_staging_path: None,
-            advertise_host_paths: false,
             max_attachment_bytes: 10 * 1024 * 1024,
+            max_base64_bytes: 5 * 1024 * 1024,
             // MCP now requires a token whenever enabled, even read-only.
             bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![
@@ -153,10 +151,8 @@ mod tests {
         McpConfig {
             enabled: true,
             write_enabled: true,
-            attachment_staging_path: None,
-            host_attachment_staging_path: None,
-            advertise_host_paths: false,
             max_attachment_bytes: 10 * 1024 * 1024,
+            max_base64_bytes: 5 * 1024 * 1024,
             bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![
                 "http://127.0.0.1".to_string(),
@@ -230,10 +226,8 @@ mod tests {
             McpConfig {
                 enabled: false,
                 write_enabled: false,
-                attachment_staging_path: None,
-                host_attachment_staging_path: None,
-                advertise_host_paths: false,
                 max_attachment_bytes: 10 * 1024 * 1024,
+                max_base64_bytes: 5 * 1024 * 1024,
                 bearer_token: None,
                 allowed_origins: vec![],
             },
@@ -477,9 +471,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         let config = &body["result"]["structuredContent"];
+        // Read-only mode: upload is disabled and advertises no methods.
         assert_eq!(config["enabled"], false);
-        assert_eq!(config["staging_path"], Value::Null);
-        assert_eq!(config["host_staging_path"], Value::Null);
+        assert_eq!(
+            config["methods"].as_array().expect("methods array").len(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -491,10 +488,8 @@ mod tests {
             McpConfig {
                 enabled: true,
                 write_enabled: true,
-                attachment_staging_path: None,
-                host_attachment_staging_path: None,
-                advertise_host_paths: false,
                 max_attachment_bytes: 10 * 1024 * 1024,
+                max_base64_bytes: 5 * 1024 * 1024,
                 bearer_token: None,
                 allowed_origins: vec![],
             },
@@ -539,16 +534,44 @@ mod tests {
         assert!(names.contains(&"list_note_attachments"));
     }
 
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    async fn import_attachment_call(
+        state: AppState,
+        config: McpConfig,
+        content: &str,
+        target: &str,
+        overwrite: bool,
+    ) -> Response {
+        post_json_with_auth(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":54,
+                "method":"tools/call",
+                "params": {
+                    "name": "import_attachment",
+                    "arguments": {
+                        "content": content,
+                        "target_relative_path": target,
+                        "overwrite": overwrite
+                    }
+                }
+            }),
+            config,
+        )
+        .await
+    }
+
     #[tokio::test]
-    async fn attachment_config_advertises_host_path_only_when_enabled() {
-        let (state, tmp) = test_state();
-        let staging = tmp.path().join("inbox");
-        std::fs::create_dir_all(&staging).expect("staging");
+    async fn attachment_import_config_lists_base64_and_http_methods() {
+        let (state, _tmp) = test_state();
         let mut config = write_config();
-        config.attachment_staging_path = Some(staging.clone());
-        config.host_attachment_staging_path = Some("/host/inbox".to_string());
-        config.advertise_host_paths = true;
-        config.max_attachment_bytes = 42;
+        config.max_base64_bytes = 1234;
+        config.max_attachment_bytes = 5678;
 
         let response = post_json_with_auth(
             state,
@@ -569,9 +592,39 @@ mod tests {
         let body = response_json(response).await;
         let config = &body["result"]["structuredContent"];
         assert_eq!(config["enabled"], true);
-        assert_eq!(config["staging_path"], staging.display().to_string());
-        assert_eq!(config["host_staging_path"], "/host/inbox");
-        assert_eq!(config["max_bytes"], 42);
+        let methods = config["methods"].as_array().expect("methods array");
+
+        let base64 = methods
+            .iter()
+            .find(|method| method["id"] == "mcp_base64")
+            .expect("base64 method");
+        assert_eq!(base64["tool"], "import_attachment");
+        assert_eq!(base64["role"], "fallback");
+        assert_eq!(base64["max_bytes"], 1234);
+
+        let http = methods
+            .iter()
+            .find(|method| method["id"] == "http_multipart")
+            .expect("http method");
+        assert_eq!(http["path"], "/api/attachment");
+        assert_eq!(http["max_bytes"], 5678);
+        // The path is relative; tell the agent it resolves against this same
+        // MCP origin so it does not have to guess the host/port.
+        assert!(
+            http["path_note"]
+                .as_str()
+                .expect("path_note")
+                .contains("same"),
+            "path_note should explain the path is same-origin as the MCP endpoint"
+        );
+        // The HTTP endpoint uses the web bearer token, a DISTINCT credential from
+        // the MCP token; make that explicit so an agent does not assume its MCP
+        // token works here.
+        assert!(
+            http["auth"].as_str().expect("auth").contains("separate"),
+            "auth should state the web token is separate from the MCP token"
+        );
+
         assert!(
             config["allowed_extensions"]
                 .as_array()
@@ -581,29 +634,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_attachment_moves_from_staging_to_vault() {
-        let (state, tmp) = test_state();
-        let staging = tmp.path().join("inbox");
-        std::fs::create_dir_all(&staging).expect("staging");
-        std::fs::write(staging.join("diagram.png"), b"png-bytes").expect("staged file");
-        let mut config = write_config();
-        config.attachment_staging_path = Some(staging.clone());
-
-        let response = post_json_with_auth(
+    async fn import_attachment_writes_base64_content_to_vault() {
+        let (state, _tmp) = test_state();
+        let response = import_attachment_call(
             state.clone(),
-            json!({
-                "jsonrpc":"2.0",
-                "id":54,
-                "method":"tools/call",
-                "params": {
-                    "name": "import_attachment",
-                    "arguments": {
-                        "staged_filename": "diagram.png",
-                        "target_relative_path": "Assets/diagram.png"
-                    }
-                }
-            }),
-            config,
+            write_config(),
+            &b64(b"png-bytes"),
+            "Assets/diagram.png",
+            false,
         )
         .await;
 
@@ -612,8 +650,157 @@ mod tests {
         let attachment = &body["result"]["structuredContent"]["attachment"];
         assert_eq!(attachment["relative_path"], "Assets/diagram.png");
         assert_eq!(attachment["size_bytes"], 9);
-        assert!(state.vault_path.join("Assets/diagram.png").exists());
-        assert!(!staging.join("diagram.png").exists());
+        assert_eq!(
+            std::fs::read(state.vault_path.join("Assets/diagram.png")).expect("read attachment"),
+            b"png-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_attachment_rejects_invalid_base64() {
+        let (state, _tmp) = test_state();
+        let response = import_attachment_call(
+            state.clone(),
+            write_config(),
+            "this is not valid base64!!!",
+            "Assets/diagram.png",
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+    }
+
+    #[tokio::test]
+    async fn import_attachment_rejects_content_over_base64_cap() {
+        let (state, _tmp) = test_state();
+        let mut config = write_config();
+        config.max_base64_bytes = 4;
+
+        let response = import_attachment_call(
+            state.clone(),
+            config,
+            &b64(b"nine bytes"),
+            "Assets/diagram.png",
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+    }
+
+    #[tokio::test]
+    async fn import_attachment_accepts_line_wrapped_base64() {
+        let (state, _tmp) = test_state();
+        // Some encoders wrap base64 at a fixed column; the tool must tolerate the
+        // embedded newlines rather than treating them as invalid input.
+        let wrapped = format!("{}\n{}", &b64(b"png-bytes")[..4], &b64(b"png-bytes")[4..]);
+        let response = import_attachment_call(
+            state.clone(),
+            write_config(),
+            &wrapped,
+            "Assets/w.png",
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(state.vault_path.join("Assets/w.png")).expect("read attachment"),
+            b"png-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_attachment_rejects_decoded_size_past_the_predecode_guard() {
+        // A payload can slip past the pre-decode length guard (which rounds up)
+        // yet still decode to more than the cap. The authoritative decoded-length
+        // check in import_attachment_bytes must reject it.
+        let (state, _tmp) = test_state();
+        let mut config = write_config();
+        config.max_base64_bytes = 8;
+        // 9 decoded bytes: encodes to 12 base64 chars, under the guard's ceiling
+        // for an 8-byte cap (ceil(8*4/3)+4 = 15), so it reaches the decoded check.
+        let response = import_attachment_call(
+            state.clone(),
+            config,
+            &b64(b"nine byte"),
+            "Assets/diagram.png",
+            false,
+        )
+        .await;
+
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+    }
+
+    #[tokio::test]
+    async fn import_attachment_rejects_disallowed_extension() {
+        let (state, _tmp) = test_state();
+        let response = import_attachment_call(
+            state.clone(),
+            write_config(),
+            &b64(b"MZ..."),
+            "Assets/evil.exe",
+            false,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(!state.vault_path.join("Assets/evil.exe").exists());
+    }
+
+    #[tokio::test]
+    async fn import_attachment_conflict_without_overwrite_then_succeeds_with_it() {
+        let (state, _tmp) = test_state();
+        let first = import_attachment_call(
+            state.clone(),
+            write_config(),
+            &b64(b"first"),
+            "Assets/diagram.png",
+            false,
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(response_json(first).await["result"]["structuredContent"]["ok"] == true);
+
+        let conflict = import_attachment_call(
+            state.clone(),
+            write_config(),
+            &b64(b"second"),
+            "Assets/diagram.png",
+            false,
+        )
+        .await;
+        let conflict_body = response_json(conflict).await;
+        assert_eq!(conflict_body["error"]["code"], -32602);
+        assert_eq!(
+            std::fs::read(state.vault_path.join("Assets/diagram.png")).expect("read"),
+            b"first"
+        );
+
+        let overwrite = import_attachment_call(
+            state.clone(),
+            write_config(),
+            &b64(b"second"),
+            "Assets/diagram.png",
+            true,
+        )
+        .await;
+        assert_eq!(overwrite.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(state.vault_path.join("Assets/diagram.png")).expect("read"),
+            b"second"
+        );
     }
 
     #[tokio::test]
