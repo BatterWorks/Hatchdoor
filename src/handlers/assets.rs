@@ -6,13 +6,16 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, run_blocking};
+use crate::app_state::{AppState, run_blocking, vault_unavailable};
 
 pub async fn vault_asset_handler(
     Path(path): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let asset_path = match resolve_asset_path(&state.vault_path, &path) {
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
+    let asset_path = match resolve_asset_path(&vault_path, &path) {
         Ok(path) => path,
         Err(kind) => {
             return asset_error_response(kind, &path);

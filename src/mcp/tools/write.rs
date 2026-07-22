@@ -35,8 +35,13 @@ pub(super) async fn create_note_tool(
         &relative_path,
     )?;
     let overwrite = args.overwrite.unwrap_or(false);
-    let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
-        .map_err(write_error_to_jsonrpc)?;
+    let outcome = create_note(
+        &vault_path(&state).await?,
+        &relative_path,
+        &args.content,
+        overwrite,
+    )
+    .map_err(write_error_to_jsonrpc)?;
     finalize_note_write(&state, "create", outcome, args.commit_summary).await
 }
 
@@ -144,7 +149,7 @@ pub(super) async fn rename_note_tool(
         &target,
     )?;
     let outcome = move_or_rename_note(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &entry,
         &target,
@@ -182,7 +187,7 @@ pub(super) async fn move_note_tool(
         &target,
     )?;
     let outcome = move_or_rename_note(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &entry,
         &target,
@@ -211,7 +216,7 @@ pub(super) async fn move_rename_note_tool(
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = move_or_rename_note(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &entry,
         &target_relative_path,
@@ -243,7 +248,7 @@ pub(super) async fn archive_note_tool(
     let target = format!("{archive_folder}/{file_name}");
     refuse_noise_write(&scan_config.exclude, &target)?;
     let outcome = archive_note(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &entry,
         &archive_prefix,
@@ -263,7 +268,7 @@ pub(super) async fn delete_note_tool(
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = delete_note(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &entry,
         &args.expected_content_hash,
@@ -324,7 +329,7 @@ pub(super) async fn import_attachment_tool(
         })?;
 
     let outcome = import_attachment_bytes(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &target_relative_path,
         &bytes,
         config.max_base64_bytes,
@@ -358,7 +363,7 @@ pub(super) async fn move_attachment_tool(
     )?;
     let index = current_index(&state).await?;
     let outcome = move_attachment(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &source_relative_path,
         &target_relative_path,
@@ -392,7 +397,7 @@ pub(super) async fn rename_attachment_tool(
     )?;
     let index = current_index(&state).await?;
     let outcome = rename_attachment(
-        &state.vault_path,
+        &vault_path(&state).await?,
         &index,
         &source_relative_path,
         &new_filename,
@@ -414,7 +419,7 @@ pub(super) async fn delete_attachment_tool(
     let source_relative_path =
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let index = current_index(&state).await?;
-    let outcome = delete_attachment(&state.vault_path, &index, &source_relative_path)
+    let outcome = delete_attachment(&vault_path(&state).await?, &index, &source_relative_path)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
     record_attachment_write(&state, "delete_attachment", &outcome, args.commit_summary).await;
@@ -431,7 +436,7 @@ pub(super) async fn list_note_attachments_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
-    let attachments = list_note_attachments(&state.vault_path, &index.layers, &entry)
+    let attachments = list_note_attachments(&vault_path(&state).await?, &index.layers, &entry)
         .map_err(write_error_to_jsonrpc)?;
     Ok(tool_success(json!({ "attachments": attachments })))
 }
@@ -440,7 +445,8 @@ pub(super) async fn list_note_attachments_tool(
 /// index to rewrite backlinks/assets, but the O(vault) walk must not block a
 /// tokio worker.
 async fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
-    let vault_path = state.vault_path.clone();
+    let vault_path = vault_path(state).await?;
+    let vault_display = vault_path.display().to_string();
     let scan_config = state.live_scan_config().map_err(JsonRpcFailure::internal)?;
     match tokio::task::spawn_blocking(move || {
         VaultIndex::build_with_config(&vault_path, &scan_config)
@@ -450,12 +456,19 @@ async fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
         Ok(Ok(index)) => Ok(index),
         Ok(Err(error)) => Err(JsonRpcFailure::internal(format!(
             "failed to index vault at '{}': {error}",
-            state.vault_path.display()
+            vault_display
         ))),
         Err(join_error) => Err(JsonRpcFailure::internal(format!(
             "vault index build panicked: {join_error}"
         ))),
     }
+}
+
+async fn vault_path(state: &AppState) -> Result<std::path::PathBuf, JsonRpcFailure> {
+    state
+        .vault_path()
+        .await
+        .ok_or_else(|| JsonRpcFailure::internal("Vault is not ready"))
 }
 
 fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry, JsonRpcFailure> {
@@ -482,8 +495,8 @@ async fn finalize_note_write(
     commit_summary: Option<String>,
 ) -> Result<Value, JsonRpcFailure> {
     refresh_after_write(state).await?;
+    let index = current_index(state).await?;
     if outcome.slug.is_none() && outcome.relative_path.is_some() && outcome.content_hash.is_some() {
-        let index = current_index(state).await?;
         let relative_path = outcome
             .relative_path
             .as_deref()
@@ -501,15 +514,7 @@ async fn finalize_note_write(
     // sees which surface a create/move/rename/archive landed on. Read from the
     // just-refreshed cache; a delete leaves no note, so the layer is None.
     let layer = match &outcome.slug {
-        Some(slug) => state
-            .cache
-            .read()
-            .await
-            .sqlite
-            .read_note_by_slug(slug)
-            .ok()
-            .flatten()
-            .and_then(|note| note.layer),
+        Some(slug) => index.find_by_slug(slug).and_then(|note| note.layer.clone()),
         None => None,
     };
     Ok(write_success(outcome, warning, layer))

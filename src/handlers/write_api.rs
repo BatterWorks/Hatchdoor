@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, internal_error, refresh_now};
+use crate::app_state::{AppState, internal_error, refresh_now, vault_unavailable};
 use crate::git::WriteRecord;
 use crate::vault::{
     AttachmentInfo, AttachmentOutcome, VaultIndex, WriteError, WriteOutcome, archive_note,
@@ -108,9 +108,13 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
             .into_response();
     }
 
-    let vault_writable = vault_path_is_writable(&state.vault_path);
+    let lifecycle_allows_mutation = state.startup.snapshot().capabilities.mutate;
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
+    let vault_writable = vault_path_is_writable(&vault_path);
     let mut warnings = Vec::new();
-    if vault_writable && !state.web_auth_enabled {
+    if lifecycle_allows_mutation && vault_writable && !state.web_auth_enabled {
         warnings.push(
             "Frontend writes are enabled without requiring Hatchdoor web authentication; this is unauthenticated and should not be exposed to untrusted networks.".to_string(),
         );
@@ -119,10 +123,15 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
         warnings
             .push("Vault path is not writable; browser write features are disabled.".to_string());
     }
+    if !lifecycle_allows_mutation {
+        warnings.push(
+            "The vault lifecycle is read-only; browser write features are disabled.".to_string(),
+        );
+    }
     (
         StatusCode::OK,
         Json(WriteCapabilitiesResponse {
-            enabled: vault_writable,
+            enabled: lifecycle_allows_mutation && vault_writable,
             settings_enabled: true,
             warnings,
         }),
@@ -137,11 +146,23 @@ fn vault_path_is_writable(path: &std::path::Path) -> bool {
 }
 
 pub(crate) fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
-    state.demo_mode.then(|| {
+    if state.demo_mode {
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Hatchdoor demo mode is read-only; write operations are disabled."
+                        .to_string(),
+                }),
+            )
+                .into_response(),
+        );
+    }
+    (!state.startup.snapshot().capabilities.mutate).then(|| {
         (
             StatusCode::FORBIDDEN,
             Json(ErrorResponse {
-                error: "Hatchdoor demo mode is read-only; write operations are disabled."
+                error: "The vault lifecycle is read-only; write operations are disabled."
                     .to_string(),
             }),
         )
@@ -253,7 +274,9 @@ pub async fn upload_attachment_handler(
     };
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let snapshot = state.runtime_snapshot();
     let max_attachment_bytes = match AppState::runtime_mcp_config(&snapshot) {
         Ok(config) => config.max_attachment_bytes,
@@ -301,7 +324,9 @@ pub async fn create_note_handler(
     }
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let outcome = match run_write_op(move || {
         create_note(&vault_path, &relative_path, &payload.content, false)
     })
@@ -394,7 +419,9 @@ pub async fn rename_note_handler(
     if let Some(response) = reject_noise_write(&state, &target_relative_path) {
         return response;
     }
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let outcome = match run_write_op(move || {
         move_or_rename_note(
             &vault_path,
@@ -452,7 +479,9 @@ pub async fn move_note_handler(
     if let Some(response) = reject_noise_write(&state, &target_relative_path) {
         return response;
     }
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let expected_content_hash = payload.expected_content_hash;
     let outcome = match run_write_op(move || {
         move_or_rename_note(
@@ -506,7 +535,9 @@ pub async fn move_rename_note_handler(
     if let Some(response) = reject_noise_write(&state, &target_relative_path) {
         return response;
     }
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let outcome = match run_write_op(move || {
         move_or_rename_note(
             &vault_path,
@@ -566,7 +597,9 @@ pub async fn archive_note_handler(
     if let Some(response) = reject_noise_write(&state, &target_relative_path) {
         return response;
     }
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let outcome = match run_write_op(move || {
         archive_note(
             &vault_path,
@@ -610,7 +643,9 @@ pub async fn delete_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let outcome = match run_write_op(move || {
         delete_note(&vault_path, &index, &entry, &payload.expected_content_hash)
     })
@@ -643,7 +678,8 @@ where
 }
 
 async fn current_index(state: &AppState) -> Result<VaultIndex, (StatusCode, Json<ErrorResponse>)> {
-    let vault_path = state.vault_path.clone();
+    let vault_path = state.vault_path().await.ok_or_else(vault_unavailable)?;
+    let vault_display = vault_path.display().to_string();
     let scan_config = state.live_scan_config().map_err(internal_error)?;
     match tokio::task::spawn_blocking(move || {
         VaultIndex::build_with_config(&vault_path, &scan_config)
@@ -653,7 +689,7 @@ async fn current_index(state: &AppState) -> Result<VaultIndex, (StatusCode, Json
         Ok(Ok(index)) => Ok(index),
         Ok(Err(error)) => Err(internal_error(format!(
             "failed to index vault at '{}': {error}",
-            state.vault_path.display()
+            vault_display
         ))),
         Err(join_error) => Err(internal_error(format!(
             "vault index build panicked: {join_error}"

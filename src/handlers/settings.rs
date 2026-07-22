@@ -179,20 +179,21 @@ pub async fn get_index_status_handler(State(state): State<AppState>) -> Response
 /// durable desired configuration, while this reports the task that is applying
 /// it right now.
 pub async fn get_git_status_handler(State(state): State<AppState>) -> Response {
+    let vault_path = state.vault_path().await;
     let status = match state.git_sync.try_read() {
         Ok(sync) => match sync.as_ref() {
             Some(handle) => handle.status().read().await.clone(),
             None => crate::git::GitSyncStatus::disabled(),
         },
         Err(_) => {
-            let mode = crate::git::GitConfig::from_snapshot(
-                state.vault_path.clone(),
-                &state.runtime_snapshot(),
-            )
-            .ok()
-            .flatten()
-            .map(|config| config.mode.as_str().to_string())
-            .unwrap_or_else(|| "off".to_string());
+            let mode = vault_path
+                .and_then(|vault_path| {
+                    crate::git::GitConfig::from_snapshot(vault_path, &state.runtime_snapshot())
+                        .ok()
+                        .flatten()
+                })
+                .map(|config| config.mode.as_str().to_string())
+                .unwrap_or_else(|| "off".to_string());
             crate::git::GitSyncStatus {
                 enabled: mode != "off",
                 state: "stopping".to_string(),
@@ -313,15 +314,19 @@ async fn patch_settings_with_git_lifecycle(
     state: &AppState,
     request: PatchSettingsRequest,
 ) -> Response {
-    let old_git_config = match crate::git::GitConfig::from_snapshot(
-        state.vault_path.clone(),
-        &state.runtime_snapshot(),
-    ) {
-        Ok(config) => config,
-        Err(error) => {
-            return validation_response(vec![FieldError::on("HATCHDOOR_GIT_SYNC_ENABLED", error)]);
-        }
+    let Some(vault_path) = state.vault_path().await else {
+        return crate::app_state::vault_unavailable().into_response();
     };
+    let old_git_config =
+        match crate::git::GitConfig::from_snapshot(vault_path.clone(), &state.runtime_snapshot()) {
+            Ok(config) => config,
+            Err(error) => {
+                return validation_response(vec![FieldError::on(
+                    "HATCHDOOR_GIT_SYNC_ENABLED",
+                    error,
+                )]);
+            }
+        };
 
     let mut active = state.git_sync.write().await;
     if let Some(handle) = active.as_ref()
@@ -336,7 +341,7 @@ async fn patch_settings_with_git_lifecycle(
     active.take();
 
     let git_paths = GitPaths {
-        vault_path: state.vault_path.clone(),
+        vault_path,
         cache_db_path: state.cache_db_path.clone(),
         settings_file_path: state.runtime_config.settings_path().to_path_buf(),
     };

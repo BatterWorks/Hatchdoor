@@ -10,7 +10,7 @@ use tracing::warn;
 use zip::write::SimpleFileOptions;
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, sqlite_cache};
+use crate::app_state::{AppState, sqlite_cache, vault_unavailable};
 use crate::vault::Note;
 
 pub async fn note_download_handler(
@@ -25,7 +25,9 @@ pub async fn note_download_handler(
     // Reading the note and bundling its assets is filesystem + zip work; keep it
     // off the async runtime.
     let lookup_slug = slug.clone();
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return vault_unavailable().into_response();
+    };
     let demo_mode = state.demo_mode;
     let export = match crate::app_state::run_blocking(move || {
         let Some(note) = cache.read_note_by_slug(&lookup_slug)? else {

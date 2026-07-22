@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app_state::AppState;
+use crate::vault::allowed_attachment_extensions;
 
 use super::config::McpConfig;
 use super::protocol::{JsonRpcFailure, tool_error, tool_success};
@@ -19,6 +20,7 @@ pub async fn handle_tools_call(
     params: Option<Value>,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
+    let lifecycle_write_enabled = state.startup.snapshot().capabilities.mutate;
     let params =
         params.ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool call params"))?;
     let name = params
@@ -83,11 +85,19 @@ pub async fn handle_tools_call(
         "refresh_index" => read::refresh_index_tool(state, arguments).await,
         "get_git_sync_status" => read::get_git_sync_status_tool(state).await,
         "layer_diagnostics" => read::layer_diagnostics_tool(state, arguments).await,
-        "get_attachment_import_config" => read::get_attachment_import_config_tool(config),
+        "get_attachment_import_config" if config.write_enabled && lifecycle_write_enabled => {
+            read::get_attachment_import_config_tool(config)
+        }
+        "get_attachment_import_config" => Ok(tool_success(json!({
+            "enabled": false,
+            "allowed_extensions": allowed_attachment_extensions(),
+            "methods": [],
+            "usage": "Attachment upload is unavailable for the current vault lifecycle capabilities."
+        }))),
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
         | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
         | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
-            if config.write_enabled =>
+            if config.write_enabled && lifecycle_write_enabled =>
         {
             // Hold the vault write lock for the whole tool call so a concurrent
             // git-sync merge/reset cannot race a filesystem write.
@@ -112,7 +122,7 @@ pub async fn handle_tools_call(
                 _ => unreachable!(),
             }
         }
-        "list_note_attachments" if config.write_enabled => {
+        "list_note_attachments" if config.write_enabled && lifecycle_write_enabled => {
             write::list_note_attachments_tool(state, arguments).await
         }
         "create_note"
@@ -129,9 +139,14 @@ pub async fn handle_tools_call(
         | "move_attachment"
         | "rename_attachment"
         | "delete_attachment"
-        | "list_note_attachments" => Err(JsonRpcFailure::invalid_params(
-            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
-        )),
+        | "list_note_attachments" => {
+            let message = if !config.write_enabled {
+                "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED"
+            } else {
+                "MCP write tools are disabled by the vault lifecycle"
+            };
+            Err(JsonRpcFailure::invalid_params(message))
+        }
         other => Err(JsonRpcFailure::invalid_params(format!(
             "Unknown MCP tool: {other}"
         ))),
@@ -165,9 +180,13 @@ fn model_setup_status_payload(state: &AppState) -> Value {
     })
 }
 
-pub fn tools_list(config: &McpConfig, layers: &[crate::search::LayerInfo]) -> Vec<Value> {
+pub fn tools_list(
+    config: &McpConfig,
+    layers: &[crate::search::LayerInfo],
+    lifecycle_write_enabled: bool,
+) -> Vec<Value> {
     let mut tools = read::read_tools_list(layers);
-    if config.write_enabled {
+    if config.write_enabled && lifecycle_write_enabled {
         tools.extend(write::write_tools_list());
     }
     tools

@@ -598,6 +598,13 @@ mod tests {
             .unwrap();
         drop(remote);
         drop(repo);
+        // A bare repository created by libgit2 can retain an unborn `master`
+        // HEAD even after `main` is pushed. Point HEAD at the fixture branch so
+        // follow-up clones reliably check out the commit on every host.
+        Repository::open_bare(&remote_dir)
+            .unwrap()
+            .set_head("refs/heads/main")
+            .unwrap();
         (tmp, work_dir, remote_dir)
     }
 

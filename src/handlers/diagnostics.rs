@@ -225,7 +225,9 @@ pub async fn diagnostics_handler(
         Ok(cache) => cache,
         Err(err) => return err.into_response(),
     };
-    let vault_path = state.vault_path.clone();
+    let Some(vault_path) = state.vault_path().await else {
+        return crate::app_state::vault_unavailable().into_response();
+    };
     let scan_config = match state.live_scan_config() {
         Ok(scan_config) => scan_config,
         Err(error) => return internal_error(error).into_response(),

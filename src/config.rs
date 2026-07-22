@@ -7,9 +7,11 @@ use std::path::PathBuf;
 
 use tracing_subscriber::EnvFilter;
 
+use crate::vault_runtime::{ManagedGitMode, ManagedGitSource, VaultSource};
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub vault_path: PathBuf,
+    pub vault_source: VaultSource,
     pub cache_db_path: PathBuf,
     pub host: String,
     pub port: u16,
@@ -33,6 +35,11 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn from_env() -> Result<Self, String> {
         let vault_path = env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
+        let vault_source = parse_vault_source(
+            env::var("HATCHDOOR_VAULT_SOURCE").ok().as_deref(),
+            PathBuf::from(vault_path),
+            |key| env::var(key).ok(),
+        )?;
         let cache_db_path = env::var("HATCHDOOR_CACHE_DB")
             .unwrap_or_else(|_| "./data/cache/hatchdoor-cache.sqlite3".to_string());
         let host = env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -47,7 +54,7 @@ impl AppConfig {
         let port = parse_port(&port_raw)?;
 
         Ok(Self {
-            vault_path: PathBuf::from(vault_path),
+            vault_source,
             cache_db_path: PathBuf::from(cache_db_path),
             host,
             port,
@@ -81,6 +88,73 @@ impl AppConfig {
             .parse::<SocketAddr>()
             .map_err(|e| format!("invalid bind address: {e}"))
     }
+}
+
+fn parse_vault_source(
+    source: Option<&str>,
+    local_vault_path: PathBuf,
+    env_value: impl Fn(&str) -> Option<String>,
+) -> Result<VaultSource, String> {
+    match source
+        .unwrap_or("local")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "local" => Ok(VaultSource::Local {
+            vault_path: local_vault_path,
+        }),
+        "git" | "managed-git" => {
+            let repository_url = non_empty_value(
+                env_value("HATCHDOOR_VAULT_GIT_URL"),
+                "HATCHDOOR_VAULT_GIT_URL",
+            )?;
+            let checkout_path = PathBuf::from(non_empty_value(
+                env_value("HATCHDOOR_VAULT_GIT_CHECKOUT_PATH"),
+                "HATCHDOOR_VAULT_GIT_CHECKOUT_PATH",
+            )?);
+            let mode = match non_empty_value(
+                env_value("HATCHDOOR_VAULT_GIT_MODE"),
+                "HATCHDOOR_VAULT_GIT_MODE",
+            )?
+            .to_ascii_lowercase()
+            .as_str()
+            {
+                "pull-only" => ManagedGitMode::PullOnly,
+                "bidirectional" => ManagedGitMode::Bidirectional,
+                other => {
+                    return Err(format!(
+                        "invalid HATCHDOOR_VAULT_GIT_MODE '{other}': expected pull-only or bidirectional"
+                    ));
+                }
+            };
+            let branch = optional_trimmed(env_value("HATCHDOOR_VAULT_GIT_BRANCH"));
+            let vault_subdirectory =
+                optional_trimmed(env_value("HATCHDOOR_VAULT_GIT_SUBDIR")).map(PathBuf::from);
+
+            Ok(VaultSource::ManagedGit(ManagedGitSource {
+                repository_url,
+                checkout_path,
+                branch,
+                vault_subdirectory,
+                mode,
+            }))
+        }
+        other => Err(format!(
+            "invalid HATCHDOOR_VAULT_SOURCE '{other}': expected local or git"
+        )),
+    }
+}
+
+fn optional_trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn non_empty_value(value: Option<String>, key: &str) -> Result<String, String> {
+    optional_trimmed(value)
+        .ok_or_else(|| format!("HATCHDOOR_VAULT_SOURCE=git requires {key} to be set"))
 }
 
 pub fn parse_port(input: &str) -> Result<u16, String> {
@@ -143,7 +217,9 @@ mod tests {
     #[test]
     fn socket_addr_builds_expected_address() {
         let cfg = AppConfig {
-            vault_path: PathBuf::from("./vault"),
+            vault_source: VaultSource::Local {
+                vault_path: PathBuf::from("./vault"),
+            },
             cache_db_path: PathBuf::from("./data/cache/hatchdoor-cache.sqlite3"),
             host: "0.0.0.0".to_string(),
             port: 42824,
@@ -156,5 +232,54 @@ mod tests {
 
         let addr = cfg.socket_addr().expect("valid addr");
         assert_eq!(addr.to_string(), "0.0.0.0:42824");
+    }
+
+    #[test]
+    fn vault_source_defaults_to_legacy_local_path() {
+        let source = parse_vault_source(None, PathBuf::from("/legacy/vault"), |_| None)
+            .expect("local source");
+        assert_eq!(
+            source,
+            VaultSource::Local {
+                vault_path: PathBuf::from("/legacy/vault")
+            }
+        );
+    }
+
+    #[test]
+    fn managed_source_requires_explicit_mode_and_paths() {
+        let value = |key: &str| match key {
+            "HATCHDOOR_VAULT_GIT_URL" => Some("https://example.test/vault.git".to_string()),
+            "HATCHDOOR_VAULT_GIT_CHECKOUT_PATH" => Some("/data/vault".to_string()),
+            "HATCHDOOR_VAULT_GIT_MODE" => Some("pull-only".to_string()),
+            "HATCHDOOR_VAULT_GIT_BRANCH" => Some("main".to_string()),
+            "HATCHDOOR_VAULT_GIT_SUBDIR" => Some("notes".to_string()),
+            _ => None,
+        };
+        let source = parse_vault_source(Some("git"), PathBuf::from("ignored"), value)
+            .expect("managed source");
+
+        assert_eq!(
+            source,
+            VaultSource::ManagedGit(ManagedGitSource {
+                repository_url: "https://example.test/vault.git".to_string(),
+                checkout_path: PathBuf::from("/data/vault"),
+                branch: Some("main".to_string()),
+                vault_subdirectory: Some(PathBuf::from("notes")),
+                mode: ManagedGitMode::PullOnly,
+            })
+        );
+    }
+
+    #[test]
+    fn managed_source_rejects_implicit_mode() {
+        let value = |key: &str| match key {
+            "HATCHDOOR_VAULT_GIT_URL" => Some("https://example.test/vault.git".to_string()),
+            "HATCHDOOR_VAULT_GIT_CHECKOUT_PATH" => Some("/data/vault".to_string()),
+            _ => None,
+        };
+        let error = parse_vault_source(Some("git"), PathBuf::from("ignored"), value)
+            .expect_err("missing mode rejected");
+        assert!(error.contains("HATCHDOOR_VAULT_GIT_MODE"));
     }
 }

@@ -108,7 +108,11 @@ async fn handle_mcp_post(
         "tools/list" => {
             let layers = layer_catalog_for(&state).await;
             let mut tools = setup_tools_list();
-            tools.extend(tools_list(config, &layers));
+            tools.extend(tools_list(
+                config,
+                &layers,
+                state.startup.snapshot().capabilities.mutate,
+            ));
             Ok(json!({ "tools": tools }))
         }
         "tools/call" => handle_tools_call(state, request.params, config).await,
@@ -199,7 +203,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::RwLock;
 
-    use crate::app_state::{build_cache, test_embedder};
+    use crate::app_state::{ReadyVault, build_cache, test_embedder};
 
     fn enabled_config() -> McpConfig {
         McpConfig {
@@ -242,9 +246,12 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
-            vault_path: vault_root,
             cache_db_path: tmp.path().join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
+                vault_path: vault_root,
+                cache,
+            }))),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -295,9 +302,12 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
-            vault_path: vault_root,
             cache_db_path: tmp.path().join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
+                vault_path: vault_root,
+                cache,
+            }))),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -758,7 +768,14 @@ mod tests {
         )
         .await;
         assert_eq!(create["error"]["code"], -32602);
-        assert!(!state.vault_path.join("wiki/.hatchdoor-layer").exists());
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("wiki/.hatchdoor-layer")
+                .exists()
+        );
 
         let import = call_tool(
             state,
@@ -809,7 +826,14 @@ mod tests {
                 .contains("noise-exclusion"),
             "the refusal must explain the noise match"
         );
-        assert!(!state.vault_path.join("notes/scratch.tmp").exists());
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("notes/scratch.tmp")
+                .exists()
+        );
 
         let import = call_tool(
             state,
@@ -1299,6 +1323,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pull_only_lifecycle_hides_and_rejects_mcp_mutation_tools() {
+        let (mut state, _tmp) = test_state();
+        state.startup =
+            crate::startup::StartupTracker::new(crate::vault_runtime::VaultRuntime::ready(
+                crate::vault_runtime::VaultSource::ManagedGit(
+                    crate::vault_runtime::ManagedGitSource {
+                        repository_url: "https://example.test/vault.git".to_string(),
+                        checkout_path: "/data/repositories/vault".into(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_runtime::ManagedGitMode::PullOnly,
+                    },
+                ),
+            ));
+
+        let listed = post_json_with_auth(
+            state.clone(),
+            json!({"jsonrpc":"2.0","id":51,"method":"tools/list"}),
+            write_config(),
+        )
+        .await;
+        let body = response_json(listed).await;
+        let names: Vec<&str> = body["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name"))
+            .collect();
+        assert!(!names.contains(&"create_note"));
+
+        let called = post_json_with_auth(
+            state,
+            json!({
+                "jsonrpc":"2.0",
+                "id":52,
+                "method":"tools/call",
+                "params": {
+                    "name":"create_note",
+                    "arguments":{"relative_path":"Blocked.md","content":"no"}
+                }
+            }),
+            write_config(),
+        )
+        .await;
+        let body = response_json(called).await;
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .expect("error message")
+                .contains("vault lifecycle")
+        );
+    }
+
+    #[tokio::test]
     async fn attachment_import_config_lists_base64_and_http_methods() {
         let (state, _tmp) = test_state();
         let mut config = write_config();
@@ -1383,8 +1461,9 @@ mod tests {
         let attachment = &body["result"]["structuredContent"]["attachment"];
         assert_eq!(attachment["relative_path"], "Assets/diagram.png");
         assert_eq!(attachment["size_bytes"], 9);
+        let vault_path = state.vault_path().await.expect("ready vault");
         assert_eq!(
-            std::fs::read(state.vault_path.join("Assets/diagram.png")).expect("read attachment"),
+            std::fs::read(vault_path.join("Assets/diagram.png")).expect("read attachment"),
             b"png-bytes"
         );
     }
@@ -1404,7 +1483,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], -32602);
-        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Assets/diagram.png")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1425,7 +1511,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], -32602);
-        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Assets/diagram.png")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1444,8 +1537,9 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
+        let vault_path = state.vault_path().await.expect("ready vault");
         assert_eq!(
-            std::fs::read(state.vault_path.join("Assets/w.png")).expect("read attachment"),
+            std::fs::read(vault_path.join("Assets/w.png")).expect("read attachment"),
             b"png-bytes"
         );
     }
@@ -1471,7 +1565,14 @@ mod tests {
 
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], -32602);
-        assert!(!state.vault_path.join("Assets/diagram.png").exists());
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Assets/diagram.png")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1489,7 +1590,14 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], -32602);
-        assert!(!state.vault_path.join("Assets/evil.exe").exists());
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Assets/evil.exe")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -1516,8 +1624,9 @@ mod tests {
         .await;
         let conflict_body = response_json(conflict).await;
         assert_eq!(conflict_body["error"]["code"], -32602);
+        let vault_path = state.vault_path().await.expect("ready vault");
         assert_eq!(
-            std::fs::read(state.vault_path.join("Assets/diagram.png")).expect("read"),
+            std::fs::read(vault_path.join("Assets/diagram.png")).expect("read"),
             b"first"
         );
 
@@ -1531,7 +1640,14 @@ mod tests {
         .await;
         assert_eq!(overwrite.status(), StatusCode::OK);
         assert_eq!(
-            std::fs::read(state.vault_path.join("Assets/diagram.png")).expect("read"),
+            std::fs::read(
+                state
+                    .vault_path()
+                    .await
+                    .expect("ready vault")
+                    .join("Assets/diagram.png"),
+            )
+            .expect("read"),
             b"second"
         );
     }
@@ -1560,9 +1676,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["result"]["structuredContent"]["ok"], true);
-        assert!(state.vault_path.join("Projects/New.md").exists());
+        assert!(
+            state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Projects/New.md")
+                .exists()
+        );
 
-        let cache = state.cache.read().await;
+        let cache = state.ready_vault().await.expect("ready vault").cache;
         let note = cache
             .sqlite
             .read_note_by_slug("new")
@@ -1600,11 +1723,18 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["result"]["structuredContent"]["ok"], true);
         assert_eq!(
-            std::fs::read_to_string(state.vault_path.join("Home.md")).expect("read"),
+            std::fs::read_to_string(
+                state
+                    .vault_path()
+                    .await
+                    .expect("ready vault")
+                    .join("Home.md"),
+            )
+            .expect("read"),
             "# Home\nALPHA token\n[[Plan]]\n"
         );
 
-        let cache = state.cache.read().await;
+        let cache = state.ready_vault().await.expect("ready vault").cache;
         let note = cache
             .sqlite
             .read_note_by_slug("home")
@@ -1646,10 +1776,11 @@ mod tests {
         assert_eq!(content["ok"], true);
         assert_eq!(content["slug"], "renamed-home");
         assert_eq!(content["relative_path"], "Renamed Home");
-        assert!(state.vault_path.join("Renamed Home.md").exists());
-        assert!(!state.vault_path.join("Home.md").exists());
+        let vault_path = state.vault_path().await.expect("ready vault");
+        assert!(vault_path.join("Renamed Home.md").exists());
+        assert!(!vault_path.join("Home.md").exists());
 
-        let cache = state.cache.read().await;
+        let cache = state.ready_vault().await.expect("ready vault").cache;
         let note = cache
             .sqlite
             .read_note_by_slug("renamed-home")
@@ -1688,7 +1819,14 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["result"]["structuredContent"]["ok"], true);
         assert_eq!(
-            std::fs::read_to_string(state.vault_path.join("Home.md")).expect("read"),
+            std::fs::read_to_string(
+                state
+                    .vault_path()
+                    .await
+                    .expect("ready vault")
+                    .join("Home.md"),
+            )
+            .expect("read"),
             "# Home\nrewritten\n"
         );
     }
@@ -1763,9 +1901,10 @@ mod tests {
     #[tokio::test]
     async fn query_notes_lists_notes_by_metadata_without_a_search_query() {
         let (state, _tmp) = test_state();
-        std::fs::create_dir_all(state.vault_path.join("Devices")).expect("devices dir");
+        let vault_path = state.vault_path().await.expect("ready vault");
+        std::fs::create_dir_all(vault_path.join("Devices")).expect("devices dir");
         std::fs::write(
-            state.vault_path.join("Devices/Router.md"),
+            vault_path.join("Devices/Router.md"),
             "---\ntags: [type/device, action/review]\nstatus: active\nreview-date: 2026-08-01\nprivate: hidden\n---\n# Router",
         )
         .expect("write router");
