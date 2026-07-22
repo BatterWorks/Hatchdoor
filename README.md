@@ -441,13 +441,16 @@ backlinks, moves, and git sync.
 Agents and the web UI upload attachments directly — no shared staging folder to
 mount. Two paths cover the size/compatibility trade-off:
 
-- **`import_attachment` MCP tool** — send the file bytes base64-encoded inline.
-  Works with any MCP client, so it is the universal fallback, but base64 rides
-  inside the JSON-RPC message and gets unreliable as files grow. Capped by
-  `HATCHDOOR_MCP_MAX_BASE64_BYTES` (default 5 MiB), measured on the decoded file.
-- **`POST /api/attachment`** (multipart) — used by the web UI and by agents that
-  can make an HTTP request (e.g. shell out to `curl` with the bearer token). Use
-  it for larger files. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES` (default 10 MiB).
+- **`POST /api/attachment`** (multipart) — the default. Used by the web UI and
+  by any agent that can make an HTTP request (e.g. shell out to `curl`).
+  Accepts either the web bearer token or the MCP bearer token, so an MCP agent
+  can reuse its existing credential. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES`
+  (default 10 MiB).
+- **`import_attachment` MCP tool** — the fallback, for MCP clients that cannot
+  make an out-of-band HTTP request. Sends the file bytes base64-encoded inline;
+  works with any MCP client, but base64 rides inside the JSON-RPC message and
+  gets unreliable as files grow. Capped by `HATCHDOOR_MCP_MAX_BASE64_BYTES`
+  (default 5 MiB), measured on the decoded file.
 
 ```env
 HATCHDOOR_MCP_MAX_BASE64_BYTES=5242880

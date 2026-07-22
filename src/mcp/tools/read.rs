@@ -183,8 +183,9 @@ pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, J
 }
 
 /// Describe the available attachment-upload methods so an agent can pick one:
-/// the universal base64 MCP tool (the fallback) and the HTTP endpoint (for
-/// larger files, when the agent can make an out-of-band HTTP request).
+/// the HTTP endpoint (the default — it now accepts the MCP token directly,
+/// so no separate credential is needed) and the base64 MCP tool (the
+/// fallback, for clients that cannot make an out-of-band HTTP request).
 pub(super) fn get_attachment_import_config_tool(
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
@@ -192,23 +193,24 @@ pub(super) fn get_attachment_import_config_tool(
     let methods = if enabled {
         json!([
             {
-                "id": "mcp_base64",
-                "tool": "import_attachment",
-                "role": "fallback",
-                "max_bytes": config.max_base64_bytes,
-                "recommended_for": "small files; universal, works with any MCP client",
-                "usage": "Call import_attachment with base64-encoded `content` and a vault-relative `target_relative_path`."
-            },
-            {
                 "id": "http_multipart",
-                "role": "preferred_for_large_files",
+                "role": "default",
                 "method": "POST",
                 "path": "/api/attachment",
                 "path_note": "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
                 "max_bytes": config.max_attachment_bytes,
+                "recommended_for": "the default for any file size; use unless the client cannot make an out-of-band HTTP request",
                 "auth": "Accepts either the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) or the MCP token as `Authorization: Bearer <token>` — an agent can reuse its existing MCP token here, no separate credential needed. No token is required when neither is configured.",
                 "requires": "ability to make an HTTP request outside MCP (e.g. shell/curl)",
                 "usage": "POST multipart/form-data with fields `target_relative_path` and `file`."
+            },
+            {
+                "id": "mcp_base64",
+                "tool": "import_attachment",
+                "role": "fallback",
+                "max_bytes": config.max_base64_bytes,
+                "recommended_for": "fallback when an out-of-band HTTP request is not possible; universal, works with any MCP client, but size-limited",
+                "usage": "Call import_attachment with base64-encoded `content` and a vault-relative `target_relative_path`."
             }
         ])
     } else {
@@ -219,7 +221,7 @@ pub(super) fn get_attachment_import_config_tool(
         "allowed_extensions": allowed_attachment_extensions(),
         "methods": methods,
         "usage": if enabled {
-            "Two upload methods are available. Prefer import_attachment (base64) for small files; use the HTTP endpoint for larger files that exceed the base64 limit."
+            "Two upload methods are available. Prefer the HTTP endpoint (POST /api/attachment) by default; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible."
         } else {
             "Attachment upload is disabled. Set HATCHDOOR_MCP_WRITE_ENABLED to enable it."
         }

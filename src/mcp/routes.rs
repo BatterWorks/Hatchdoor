@@ -608,6 +608,8 @@ mod tests {
             .expect("http method");
         assert_eq!(http["path"], "/api/attachment");
         assert_eq!(http["max_bytes"], 5678);
+        // HTTP is the default upload path; base64 is only the fallback.
+        assert_eq!(http["role"], "default");
         // The path is relative; tell the agent it resolves against this same
         // MCP origin so it does not have to guess the host/port.
         assert!(

@@ -692,7 +692,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "import_attachment",
-            "description": "Upload an attachment into the vault by sending its bytes base64-encoded. This is the universal fallback that works with any MCP client; it is size-limited (see get_attachment_import_config for the limit). For larger files, use the HTTP upload endpoint instead. Returns compact metadata for the imported file.",
+            "description": "Upload an attachment into the vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (see get_attachment_import_config for the limit). Prefer the HTTP upload endpoint (POST /api/attachment) by default. Returns compact metadata for the imported file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
