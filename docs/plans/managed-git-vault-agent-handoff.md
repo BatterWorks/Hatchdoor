@@ -50,6 +50,63 @@ Before proposing implementation, inspect at least:
 Also inspect the current branch, working-tree status, recent commits, and any
 repository instructions before editing. Preserve unrelated user changes.
 
+## Verified Development VM Snapshot
+
+The following was checked on 2026-07-22. Treat it as a host snapshot rather than
+a permanent project guarantee, and recheck it if the environment changes.
+
+Available tooling:
+
+- Git 2.47.3;
+- Rust 1.97.1 with Cargo, rustfmt, and Clippy;
+- Node 24.16.0 and npm 12.0.1 under
+  `/home/alemhnan/.nvm/versions/node/v24.16.0/bin`;
+- GCC/G++, make, Perl, pkg-config, linker tools, SSH, curl, and Python;
+- Docker 26.1.5 with Docker Compose 2.26.1 and a reachable daemon; and
+- an existing Cargo registry cache.
+
+Preparation still required before verification:
+
+- The repository pins Rust 1.96.0, which is not currently installed. Install
+  that exact toolchain or explicitly agree to verify with the installed 1.97.1;
+  do not silently ignore the pin.
+- Node and npm are not on the non-interactive shell `PATH`. Prefix commands with
+  `/home/alemhnan/.nvm/versions/node/v24.16.0/bin` in `PATH` or load the matching
+  NVM environment before running frontend checks.
+- `frontend/node_modules` is absent, so `npm ci` is required.
+- GitHub CLI (`gh`) is absent. This does not block local work or ordinary Git
+  push, but GitHub Actions log and review-thread workflows need `gh` or the
+  available GitHub connector.
+- The current `origin` points to `BattermanZ/Hatchdoor`; the contributor fork
+  remote and push authentication must be configured and verified separately
+  before publishing.
+
+Host capacity at the same check:
+
+- 1.5 GiB physical RAM, with about 988 MiB available at measurement time;
+- 2.0 GiB swap, almost entirely free;
+- 2 logical CPUs; and
+- about 28 GiB free on the workspace filesystem.
+
+This is sufficient for development and verification, but memory is tight for
+parallel Rust, frontend, and container builds. Run the toolchains sequentially,
+use `CARGO_BUILD_JOBS=1` for local Cargo compilation, and avoid running a full
+container build alongside other compilation. Expect a release/container build
+to use swap and complete slowly. If it is killed for memory despite constrained
+parallelism, perform final container verification on a larger runner rather than
+weakening the checks.
+
+The production Hatchdoor instance reported to use about 1 GiB RAM is managed by
+Komodo on another host, not this development VM. At the 2026-07-22 check, the
+local Docker context had no running containers, no Hatchdoor or Komodo process
+was present, and total host memory use was about 557 MiB. The live deployment
+therefore does not consume this VM's build headroom.
+
+If Hatchdoor is later deployed on this same 1.5 GiB VM at roughly 1 GiB resident
+memory, do not compile alongside it: Rust or container compilation could force
+heavy swapping, disrupt the service, or trigger an out-of-memory kill. Stop or
+move the build, or use a larger runner in that situation.
+
 ## Required Debrief
 
 After reading and inspection, provide a concise debrief before writing code. It
