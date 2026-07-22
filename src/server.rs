@@ -17,7 +17,7 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{error, info};
 
 use crate::app_state::{AppState, VaultCache, build_cache_with_sqlite_and_progress};
-use crate::auth::{WebToken, require_web_token};
+use crate::auth::{WebOrMcpToken, WebToken, require_web_or_mcp_token, require_web_token};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder};
@@ -118,10 +118,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/api/recently-modified", get(recently_modified_handler))
         .route("/api/note", post(create_note_handler))
         .route(
-            "/api/attachment",
-            post(upload_attachment_handler).layer(DefaultBodyLimit::max(attachment_body_limit)),
-        )
-        .route(
             "/api/note/{slug}",
             get(note_handler)
                 .put(update_note_handler)
@@ -145,7 +141,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/api/write-capabilities", get(write_capabilities_handler))
         .route("/vault-assets/{*path}", get(vault_asset_handler));
 
-    let protected = match web_bearer_token {
+    let protected = match web_bearer_token.clone() {
         Some(token) => protected.layer(axum::middleware::from_fn_with_state(
             WebToken(token),
             require_web_token,
@@ -156,6 +152,33 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         state.clone(),
         require_vault_ready,
     ));
+
+    // The attachment endpoint sits outside the shared `protected` group: an MCP
+    // agent that already holds the MCP bearer token can use it directly,
+    // without provisioning the separate web token just for this one route. It
+    // still accepts the web token too, since the web UI's paste-to-upload flow
+    // hits the same endpoint.
+    let mcp_bearer_token = state.mcp_config.bearer_token.clone().map(Arc::from);
+    let attachment = Router::new().route(
+        "/api/attachment",
+        post(upload_attachment_handler).layer(DefaultBodyLimit::max(attachment_body_limit)),
+    );
+    let attachment = if web_bearer_token.is_some() || mcp_bearer_token.is_some() {
+        attachment.layer(axum::middleware::from_fn_with_state(
+            WebOrMcpToken {
+                web: web_bearer_token.clone(),
+                mcp: mcp_bearer_token,
+            },
+            require_web_or_mcp_token,
+        ))
+    } else {
+        attachment
+    };
+    let attachment = attachment.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        require_vault_ready,
+    ));
+
     let mcp = Router::new()
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .layer(DefaultBodyLimit::max(mcp_body_limit))
@@ -170,6 +193,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/api/startup-status", get(startup_status_handler))
         .merge(mcp)
         .merge(protected)
+        .merge(attachment)
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
         .route("/stats", get(spa_index_handler))
@@ -499,6 +523,122 @@ mod tests {
 
     fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         app_for_tests_with_web_auth(None)
+    }
+
+    fn app_for_tests_with_web_and_mcp_auth(
+        web_bearer_token: Option<Arc<str>>,
+        mcp_bearer_token: Option<String>,
+    ) -> (Router, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let mut mcp_config = crate::mcp::McpConfig::disabled();
+        mcp_config.bearer_token = mcp_bearer_token;
+        let state = AppState {
+            vault_path: vault_root,
+            cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            embedder,
+            web_auth_enabled: web_bearer_token.is_some(),
+            demo_mode: false,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: Arc::new(OnceLock::new()),
+            mcp_config: Arc::new(mcp_config),
+            archive_prefix: Arc::from("90-archive/"),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: StartupTracker::ready(),
+        };
+
+        (build_router(state, web_bearer_token), tmp)
+    }
+
+    fn attachment_upload_request(target_relative_path: &str, token: Option<&str>) -> Request<Body> {
+        let boundary = "hatchdoor-test-boundary";
+        let body = format!(
+            "--{boundary}\r\n\
+             Content-Disposition: form-data; name=\"target_relative_path\"\r\n\r\n\
+             {target_relative_path}\r\n\
+             --{boundary}\r\n\
+             Content-Disposition: form-data; name=\"file\"; filename=\"pasted.png\"\r\n\
+             Content-Type: image/png\r\n\r\n"
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(b"png-bytes".iter().copied())
+        .chain(format!("\r\n--{boundary}--\r\n").into_bytes())
+        .collect::<Vec<_>>();
+
+        let mut builder = Request::builder()
+            .uri("/api/attachment")
+            .method("POST")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            );
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        builder.body(Body::from(body)).expect("request")
+    }
+
+    #[tokio::test]
+    async fn attachment_route_accepts_either_web_or_mcp_token() {
+        let (app, _tmp) = app_for_tests_with_web_and_mcp_auth(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+        );
+
+        let no_token = app
+            .clone()
+            .oneshot(attachment_upload_request("Attachments/no-token.png", None))
+            .await
+            .expect("response");
+        assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_token = app
+            .clone()
+            .oneshot(attachment_upload_request(
+                "Attachments/wrong-token.png",
+                Some("not-a-real-token"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(wrong_token.status(), StatusCode::UNAUTHORIZED);
+
+        let with_web_token = app
+            .clone()
+            .oneshot(attachment_upload_request(
+                "Attachments/via-web-token.png",
+                Some("web-secret"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(with_web_token.status(), StatusCode::OK);
+
+        let with_mcp_token = app
+            .oneshot(attachment_upload_request(
+                "Attachments/via-mcp-token.png",
+                Some("mcp-secret"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(with_mcp_token.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn attachment_route_open_when_no_token_configured() {
+        let (app, _tmp) = app_for_tests_with_web_and_mcp_auth(None, None);
+
+        let response = app
+            .oneshot(attachment_upload_request("Attachments/open.png", None))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

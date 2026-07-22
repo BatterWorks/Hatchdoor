@@ -617,12 +617,11 @@ mod tests {
                 .contains("same"),
             "path_note should explain the path is same-origin as the MCP endpoint"
         );
-        // The HTTP endpoint uses the web bearer token, a DISTINCT credential from
-        // the MCP token; make that explicit so an agent does not assume its MCP
-        // token works here.
+        // The HTTP endpoint accepts the agent's existing MCP bearer token, so it
+        // does not need to be told to provision a separate web credential.
         assert!(
-            http["auth"].as_str().expect("auth").contains("separate"),
-            "auth should state the web token is separate from the MCP token"
+            http["auth"].as_str().expect("auth").contains("MCP token"),
+            "auth should state the MCP token is accepted on this endpoint"
         );
 
         assert!(

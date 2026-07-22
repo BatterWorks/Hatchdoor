@@ -206,7 +206,7 @@ pub(super) fn get_attachment_import_config_tool(
                 "path": "/api/attachment",
                 "path_note": "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
                 "max_bytes": config.max_attachment_bytes,
-                "auth": "When web auth is enabled, send the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) as `Authorization: Bearer <token>`. This is a separate credential from the MCP bearer token — the MCP token does NOT authorize this endpoint. When web auth is disabled, no token is required.",
+                "auth": "Accepts either the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) or the MCP token as `Authorization: Bearer <token>` — an agent can reuse its existing MCP token here, no separate credential needed. No token is required when neither is configured.",
                 "requires": "ability to make an HTTP request outside MCP (e.g. shell/curl)",
                 "usage": "POST multipart/form-data with fields `target_relative_path` and `file`."
             }
