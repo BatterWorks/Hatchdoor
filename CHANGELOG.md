@@ -29,6 +29,12 @@
 ### Changed
 - The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
   legitimately sized upload is not rejected before the tool's own size check.
+- `POST /api/attachment` now accepts the MCP bearer token as an alternative to
+  the web bearer token, so an agent uploading larger files over HTTP can reuse
+  its existing MCP credential instead of needing `HATCHDOOR_WEB_BEARER_TOKEN`
+  provisioned separately. The rest of the web API is unaffected — this route
+  was pulled out of the shared protected-routes group so the MCP token is not
+  granted any broader access.
 
 ## v2.3.0 - 2026-07-19
 
