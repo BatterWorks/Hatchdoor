@@ -133,6 +133,13 @@ Git is a transport and collaboration mechanism around the Markdown vault. A
 Git failure should affect synchronization, not the availability of the entire
 Hatchdoor application.
 
+The proposed first increment is detailed in the
+[managed Git vault foundation architecture](../architecture/managed-git-vault-foundation.md)
+and its [implementation plan](../plans/managed-git-vault-foundation.md). These
+are draft working documents for turning this roadmap outcome into reviewable
+delivery slices; they do not expand the product-managed configuration scope of
+Phase 1.
+
 ### 1.4 Configurable Embedding Provider
 
 > **Status: exploratory, low priority, not accepted.** External inference
