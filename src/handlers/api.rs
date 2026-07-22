@@ -22,11 +22,8 @@ use crate::app_state::{AppState, refresh_coalescing, run_blocking, sqlite_cache}
 const MAX_RESOLVE_BATCH: usize = 200;
 
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let cache = state.cache.read().await.sqlite.clone();
-    match run_blocking(move || cache.health_check()).await {
-        Ok(()) => (StatusCode::OK, "ok").into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response(),
-    }
+    let _ = state;
+    (StatusCode::OK, "ok").into_response()
 }
 
 pub async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {

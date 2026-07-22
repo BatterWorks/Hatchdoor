@@ -14,12 +14,19 @@ use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::{IndexingProgressSnapshot, StartupTracker};
 use crate::vault::{VaultIndex, VaultScanConfig, seed_empty_vault};
+use crate::vault_runtime::VaultSource;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub vault_path: PathBuf,
     pub cache_db_path: PathBuf,
-    pub cache: Arc<RwLock<VaultCache>>,
+    /// Disposable SQLite handle used while a configured local vault is still
+    /// being indexed. It is published through `ready_vault` only after a
+    /// successful build.
+    pub startup_sqlite: Arc<SqliteCache>,
+    /// Published only after a vault path has been validated and its first index
+    /// has committed. The application can serve liveness and lifecycle routes
+    /// while this is `None`.
+    pub ready_vault: Arc<RwLock<Option<ReadyVault>>>,
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
     /// Fires when a reindex changes the vault's layer marker set, so the MCP
@@ -298,8 +305,42 @@ impl AppState {
             handle.record(record);
         }
     }
+
+    pub async fn ready_vault(&self) -> Result<ReadyVault, (StatusCode, Json<ErrorResponse>)> {
+        self.ready_vault
+            .read()
+            .await
+            .clone()
+            .ok_or_else(vault_unavailable)
+    }
+
+    pub async fn publish_ready_vault(&self, vault_path: PathBuf, cache: VaultCache) {
+        *self.ready_vault.write().await = Some(ReadyVault { vault_path, cache });
+    }
+
+    pub async fn vault_path(&self) -> Option<PathBuf> {
+        self.ready_vault
+            .read()
+            .await
+            .as_ref()
+            .map(|ready| ready.vault_path.clone())
+    }
+
+    pub fn configured_local_vault_path(&self) -> Option<PathBuf> {
+        match self.startup.runtime().source() {
+            VaultSource::Local { vault_path } => Some(vault_path.clone()),
+            VaultSource::ManagedGit(_) => None,
+        }
+    }
 }
 
+#[derive(Clone)]
+pub struct ReadyVault {
+    pub vault_path: PathBuf,
+    pub cache: VaultCache,
+}
+
+#[derive(Clone)]
 pub struct VaultCache {
     pub sqlite: Arc<SqliteCache>,
 }
@@ -356,8 +397,16 @@ pub fn build_cache_with_sqlite_and_progress(
 pub async fn sqlite_cache(
     state: &AppState,
 ) -> Result<Arc<SqliteCache>, (StatusCode, Json<ErrorResponse>)> {
-    let guard = state.cache.read().await;
-    Ok(guard.sqlite.clone())
+    Ok(state.ready_vault().await?.cache.sqlite)
+}
+
+pub fn vault_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "Vault is not ready".to_string(),
+        }),
+    )
 }
 
 /// Build a generic `500` response, logging the real detail rather than leaking
@@ -438,8 +487,19 @@ async fn run_reindex(
     state: &AppState,
     on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
 ) -> Result<(), String> {
-    let sqlite = state.cache.read().await.sqlite.clone();
-    let vault_path = state.vault_path.clone();
+    let ready_vault = state.ready_vault.read().await.clone();
+    let was_ready = ready_vault.is_some();
+    let (sqlite, vault_path) = match ready_vault {
+        Some(ready) => (ready.cache.sqlite, ready.vault_path),
+        None => (
+            state.startup_sqlite.clone(),
+            state
+                .configured_local_vault_path()
+                .ok_or_else(|| "Vault is not ready".to_string())?,
+        ),
+    };
+    let current_sqlite = sqlite.clone();
+    let logged_vault_path = vault_path.clone();
     let embedder = state.embedder.clone();
     let runtime_snapshot = state.runtime_snapshot();
     let scan_config = state.live_scan_config()?;
@@ -477,13 +537,20 @@ async fn run_reindex(
     .await
     .map_err(|error| format!("background reindex task panicked: {error}"))??;
 
-    debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
+    if !was_ready {
+        state
+            .publish_ready_vault(
+                logged_vault_path.clone(),
+                VaultCache {
+                    sqlite: current_sqlite.clone(),
+                },
+            )
+            .await;
+    }
 
-    let current_marker_hash = state
-        .cache
-        .read()
-        .await
-        .sqlite
+    debug!(vault_path = %logged_vault_path.display(), "SQLite vault cache refreshed");
+
+    let current_marker_hash = current_sqlite
         .get_metadata("marker_set_hash")
         .ok()
         .flatten();
@@ -644,9 +711,9 @@ mod tests {
         let (vault_events, _) = broadcast::channel(64);
         let (mcp_tools_changed, _) = broadcast::channel(16);
         AppState {
-            vault_path,
             cache_db_path: state_root.join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault { vault_path, cache }))),
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -676,8 +743,9 @@ mod tests {
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
 
-        let mut state = state_with_vault(vault_path);
-        state.vault_path = dir.path().join("missing-vault");
+        let state = state_with_vault(vault_path);
+        state.ready_vault.write().await.as_mut().unwrap().vault_path =
+            dir.path().join("missing-vault");
 
         let result = refresh_coalescing(&state).await;
         assert!(result.is_err());
@@ -690,8 +758,9 @@ mod tests {
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
 
-        let mut state = state_with_vault(vault_path);
-        state.vault_path = dir.path().join("missing-vault");
+        let state = state_with_vault(vault_path);
+        state.ready_vault.write().await.as_mut().unwrap().vault_path =
+            dir.path().join("missing-vault");
 
         let result = sqlite_cache(&state).await;
         assert!(result.is_ok());
@@ -742,11 +811,9 @@ mod tests {
         refresh_now(&state).await.expect("refresh");
 
         assert!(
-            state
-                .cache
-                .read()
+            sqlite_cache(&state)
                 .await
-                .sqlite
+                .expect("ready cache")
                 .read_note_by_slug("ignored")
                 .expect("read")
                 .is_none(),
@@ -784,9 +851,10 @@ mod tests {
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-        let mut state = state_with_vault(vault_path);
+        let state = state_with_vault(vault_path);
         state.startup.set_failed();
-        state.vault_path = dir.path().join("missing-vault");
+        state.ready_vault.write().await.as_mut().unwrap().vault_path =
+            dir.path().join("missing-vault");
 
         let result = refresh_now(&state).await;
 

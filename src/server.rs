@@ -18,7 +18,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{error, info, warn};
 
-use crate::app_state::{AppState, VaultCache, build_cache_with_sqlite_and_progress};
+use crate::app_state::{AppState, build_cache_with_sqlite_and_progress};
 use crate::auth::{WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_token, require_web_token};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
@@ -39,6 +39,7 @@ use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
+use crate::vault_runtime::{VaultRuntime, VaultSource};
 use crate::vault_watcher::spawn_vault_watcher;
 
 /// Hosts that only accept connections from the local machine. Binding to any
@@ -73,7 +74,7 @@ pub fn check_web_auth_posture(
 pub fn check_demo_mode_posture(
     demo_mode: bool,
     mcp_enabled: bool,
-    git_sync_enabled: bool,
+    git_writes_enabled: bool,
 ) -> Result<(), String> {
     if !demo_mode {
         return Ok(());
@@ -84,9 +85,9 @@ pub fn check_demo_mode_posture(
                 .to_string(),
         );
     }
-    if git_sync_enabled {
+    if git_writes_enabled {
         return Err(
-            "HATCHDOOR_DEMO_MODE=true is incompatible with HATCHDOOR_GIT_SYNC_ENABLED=true; disable git sync for public demos."
+            "HATCHDOOR_DEMO_MODE=true is incompatible with Git writeback; disable HATCHDOOR_GIT_SYNC_ENABLED and managed bidirectional mode for public demos."
                 .to_string(),
         );
     }
@@ -257,6 +258,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
+        .route("/api/vault-status", get(vault_status_handler))
         .merge(model_setup)
         .merge(settings)
         .merge(mcp)
@@ -305,6 +307,14 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
 
 async fn startup_status_handler(State(state): State<AppState>) -> Response {
     let mut response = Json(state.startup.status()).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn vault_status_handler(State(state): State<AppState>) -> Response {
+    let mut response = Json(state.startup.snapshot()).into_response();
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -436,9 +446,19 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                 tracker.set_scanning();
                 let progress_tracker = tracker.clone();
                 let on_progress = Arc::new(move |progress| progress_tracker.set_indexing(progress));
+                let Some(vault_path) = state.configured_local_vault_path() else {
+                    state.model_setup_started.store(false, Ordering::Release);
+                    state.startup.runtime().set_unavailable(
+                        "managed_vault_not_acquired",
+                        "Managed Git vault acquisition is not implemented in this foundation slice.",
+                    );
+                    return;
+                };
+                let indexing_vault_path = vault_path.clone();
+                let indexing_sqlite = state.startup_sqlite.clone();
+                let indexing_embedder = state.embedder.clone();
                 let index_state = state.clone();
                 let index_result = tokio::task::spawn_blocking(move || {
-                    let sqlite = index_state.cache.blocking_read().sqlite.clone();
                     let runtime_snapshot = index_state.runtime_config.snapshot();
                     let embed_layers = runtime_snapshot
                         .setting("HATCHDOOR_EMBED_LAYERS")
@@ -446,9 +466,9 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                         .unwrap_or(true);
                     let scan_config = index_state.live_scan_config()?;
                     build_cache_with_sqlite_and_progress(
-                        &index_state.vault_path,
-                        sqlite,
-                        index_state.embedder.as_ref(),
+                        &indexing_vault_path,
+                        indexing_sqlite,
+                        indexing_embedder.as_ref(),
                         Some(on_progress),
                         &scan_config,
                         embed_layers,
@@ -456,14 +476,15 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                 })
                 .await;
                 match index_result {
-                    Ok(Ok(_)) => {
+                    Ok(Ok(cache)) => {
+                        state.publish_ready_vault(vault_path.clone(), cache).await;
                         tracker.set_ready();
                         info!(
                             model = model_name,
                             "Model setup and vault indexing complete"
                         );
                         let git_config = GitConfig::from_snapshot(
-                            state.vault_path.clone(),
+                            vault_path.clone(),
                             &state.runtime_snapshot(),
                         )
                         .unwrap_or_else(|error| {
@@ -489,7 +510,7 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                         }
                         spawn_vault_watcher(
                             state.clone(),
-                            state.vault_path.clone(),
+                            vault_path.clone(),
                             state.cache_db_path.clone(),
                         );
                     }
@@ -497,11 +518,7 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                         state.model_setup_started.store(false, Ordering::Release);
                         tracker.set_failed();
                         error!("Failed to index vault after model setup: {error}");
-                        spawn_vault_watcher(
-                            state.clone(),
-                            state.vault_path.clone(),
-                            state.cache_db_path.clone(),
-                        );
+                        spawn_vault_watcher(state.clone(), vault_path, state.cache_db_path.clone());
                     }
                     Err(error) => {
                         state.model_setup_started.store(false, Ordering::Release);
@@ -532,11 +549,23 @@ async fn require_vault_ready(
     if state.startup.is_ready() {
         return next.run(request).await;
     }
+    let snapshot = state.startup.snapshot();
+    let (error, code) = match snapshot.phase {
+        crate::vault_runtime::VaultPhase::Unavailable => (
+            "The configured vault is unavailable",
+            snapshot
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str())
+                .unwrap_or("vault_unavailable"),
+        ),
+        _ => ("Vault is still being indexed", "vault_indexing"),
+    };
     (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({
-            "error": "Vault is still being indexed",
-            "code": "vault_indexing"
+            "error": error,
+            "code": code
         })),
     )
         .into_response()
@@ -631,16 +660,40 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    let git_sync_config = GitConfig::from_snapshot(config.vault_path.clone(), &startup_snapshot)
-        .unwrap_or_else(|e| {
-            error!("Git sync configuration error: {e}");
-            std::process::exit(1);
-        });
+    let git_sync_config = match &config.vault_source {
+        VaultSource::Local { vault_path } => {
+            GitConfig::from_snapshot(vault_path.clone(), &startup_snapshot)
+        }
+        VaultSource::ManagedGit(_) => {
+            let legacy_mode_enabled = startup_snapshot
+                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
+                .is_some_and(|setting| {
+                    !matches!(
+                        setting.value.trim().to_ascii_lowercase().as_str(),
+                        "" | "off" | "false" | "0" | "no"
+                    )
+                });
+            if legacy_mode_enabled {
+                Err("HATCHDOOR_GIT_SYNC_ENABLED cannot be combined with HATCHDOOR_VAULT_SOURCE=git; managed source mode owns Git synchronization".to_string())
+            } else {
+                Ok(None)
+            }
+        }
+    }
+    .unwrap_or_else(|e| {
+        error!("Git sync configuration error: {e}");
+        std::process::exit(1);
+    });
 
+    let managed_writeback = matches!(
+        &config.vault_source,
+        VaultSource::ManagedGit(source)
+            if source.mode == crate::vault_runtime::ManagedGitMode::Bidirectional
+    );
     if let Err(message) = check_demo_mode_posture(
         config.demo_mode,
         mcp_config.enabled,
-        git_sync_config.is_some(),
+        git_sync_config.is_some() || managed_writeback,
     ) {
         error!("{message}");
         std::process::exit(1);
@@ -691,17 +744,19 @@ pub async fn run_server() {
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-    let startup = if selected_model == SelectedModel::TermsRequired {
-        StartupTracker::terms_required()
-    } else {
-        StartupTracker::scanning()
-    };
+    let runtime = VaultRuntime::new(config.vault_source.clone());
+    let startup = StartupTracker::new(runtime);
+    if matches!(config.vault_source, VaultSource::Local { .. }) {
+        if selected_model == SelectedModel::TermsRequired {
+            startup.set_terms_required();
+        } else {
+            startup.set_scanning();
+        }
+    }
     let state = AppState {
-        vault_path: config.vault_path.clone(),
         cache_db_path: config.cache_db_path.clone(),
-        cache: Arc::new(RwLock::new(VaultCache {
-            sqlite: sqlite.clone(),
-        })),
+        startup_sqlite: sqlite.clone(),
+        ready_vault: Arc::new(RwLock::new(None)),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
         mcp_tools_changed,
@@ -735,7 +790,7 @@ pub async fn run_server() {
     info!(
         host = %config.host,
         port = config.port,
-        vault_path = %config.vault_path.display(),
+        vault_source = ?config.vault_source.kind(),
         cache_db_path = %config.cache_db_path.display(),
         "Hatchdoor starting"
     );
@@ -747,8 +802,17 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
-    if selected_model != SelectedModel::TermsRequired {
-        spawn_model_startup(state.clone(), selected_model);
+    match config.vault_source {
+        VaultSource::Local { .. } if selected_model != SelectedModel::TermsRequired => {
+            spawn_model_startup(state.clone(), selected_model);
+        }
+        VaultSource::ManagedGit(_) => {
+            state.startup.runtime().set_unavailable(
+                "managed_vault_not_acquired",
+                "Managed Git vault acquisition is not implemented in this foundation slice.",
+            );
+        }
+        VaultSource::Local { .. } => {}
     }
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
@@ -760,6 +824,7 @@ pub async fn run_server() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_state::ReadyVault;
 
     #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
@@ -862,9 +927,12 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
-            vault_path: vault_root,
             cache_db_path: tmp.path().join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
+                vault_path: vault_root,
+                cache,
+            }))),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -925,9 +993,12 @@ mod tests {
                 .expect("save MCP token");
         }
         let state = AppState {
-            vault_path: vault_root,
             cache_db_path: tmp.path().join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
+                vault_path: vault_root,
+                cache,
+            }))),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -1435,6 +1506,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_managed_vault_keeps_liveness_status_and_spa_available() {
+        let (_app, _tmp, mut state) = app_for_tests_with_state();
+        *state.ready_vault.write().await = None;
+        state.startup = StartupTracker::new(VaultRuntime::new(VaultSource::ManagedGit(
+            crate::vault_runtime::ManagedGitSource {
+                repository_url: "https://example.test/vault.git".to_string(),
+                checkout_path: "/data/repositories/vault".into(),
+                branch: Some("main".to_string()),
+                vault_subdirectory: None,
+                mode: crate::vault_runtime::ManagedGitMode::PullOnly,
+            },
+        )));
+        state.startup.runtime().set_unavailable(
+            "managed_vault_not_acquired",
+            "Managed vault has not been acquired.",
+        );
+        let app = build_router(state, None);
+
+        for path in ["/health", "/api/startup-status", "/api/vault-status"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+
+        let spa = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let spa_status = spa.status();
+        let spa_body = to_bytes(spa.into_body(), usize::MAX)
+            .await
+            .expect("SPA body");
+        assert!(
+            spa_status == StatusCode::OK
+                || (spa_status == StatusCode::SERVICE_UNAVAILABLE
+                    && std::str::from_utf8(&spa_body)
+                        .expect("SPA html")
+                        .contains("Frontend not built")),
+            "SPA route must reach the SPA handler rather than vault readiness middleware"
+        );
+
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/vault-status")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let payload: serde_json::Value = serde_json::from_slice(
+            &to_bytes(status.into_body(), usize::MAX)
+                .await
+                .expect("status body"),
+        )
+        .expect("status json");
+        assert_eq!(payload["phase"], "unavailable");
+        assert_eq!(payload["source"], "managed-git");
+        assert_eq!(payload["mode"], "pull-only");
+        assert_eq!(payload["capabilities"]["mutate"], false);
+        assert!(!payload.to_string().contains("/data/repositories/vault"));
+
+        let vault_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(vault_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let payload: serde_json::Value = serde_json::from_slice(
+            &to_bytes(vault_response.into_body(), usize::MAX)
+                .await
+                .expect("vault response body"),
+        )
+        .expect("vault response json");
+        assert_eq!(payload["code"], "managed_vault_not_acquired");
+    }
+
+    #[tokio::test]
+    async fn pull_only_lifecycle_disables_browser_mutation() {
+        let (_app, _tmp, mut state) = app_for_tests_with_state();
+        state.startup = StartupTracker::new(VaultRuntime::ready(VaultSource::ManagedGit(
+            crate::vault_runtime::ManagedGitSource {
+                repository_url: "https://example.test/vault.git".to_string(),
+                checkout_path: "/data/repositories/vault".into(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: crate::vault_runtime::ManagedGitMode::PullOnly,
+            },
+        )));
+        let app = build_router(state, None);
+
+        let capabilities = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/write-capabilities")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let payload: serde_json::Value = serde_json::from_slice(
+            &to_bytes(capabilities.into_body(), usize::MAX)
+                .await
+                .expect("capabilities body"),
+        )
+        .expect("capabilities json");
+        assert_eq!(payload["enabled"], false);
+
+        let mutation = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"relative_path":"Blocked.md","content":"no"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(mutation.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
     async fn indexing_startup_keeps_shell_live_but_blocks_vault_surfaces() {
         let (_ready_app, _tmp, state) = app_for_tests_with_state();
         state
@@ -1635,9 +1851,12 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
-            vault_path: vault_root,
             cache_db_path: tmp.path().join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
+                vault_path: vault_root,
+                cache,
+            }))),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -2281,7 +2500,7 @@ mod tests {
     #[tokio::test]
     async fn router_reports_write_capabilities_disabled_for_read_only_vault() {
         let (app, tmp, state) = app_for_tests_with_state();
-        let vault_path = state.vault_path.clone();
+        let vault_path = state.vault_path().await.expect("ready vault path");
         let original_permissions = std::fs::metadata(&vault_path)
             .expect("vault metadata")
             .permissions();
@@ -2602,7 +2821,8 @@ mod tests {
         // rebuild must use HATCHDOOR_EXCLUDE too, or an excluded note becomes
         // writable even though it is absent from every read surface.
         let (_unused_app, _tmp, state) = app_for_tests_with_state();
-        std::fs::write(state.vault_path.join("Ignored.md"), "# Ignored\n").expect("write note");
+        let vault_path = state.vault_path().await.expect("ready vault");
+        std::fs::write(vault_path.join("Ignored.md"), "# Ignored\n").expect("write note");
         state
             .runtime_config
             .save([("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string())])
@@ -2680,7 +2900,11 @@ mod tests {
     #[tokio::test]
     async fn demo_mode_rejects_write_api_before_touching_vault() {
         let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        let blocked_path = state.vault_path.join("Demo Write.md");
+        let blocked_path = state
+            .vault_path()
+            .await
+            .expect("ready vault path")
+            .join("Demo Write.md");
 
         let response = app
             .oneshot(
@@ -2757,9 +2981,12 @@ mod tests {
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
-            vault_path: vault_root,
             cache_db_path: tmp.path().join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
+                vault_path: vault_root,
+                cache,
+            }))),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -2868,7 +3095,15 @@ mod tests {
         // but never shared-cacheable: authenticated deployments put
         // ?access_token= in asset URLs.
         let (app, tmp, state) = app_for_tests_with_web_auth(None);
-        std::fs::write(state.vault_path.join("diagram.png"), b"png-bytes").expect("write asset");
+        std::fs::write(
+            state
+                .vault_path()
+                .await
+                .expect("ready vault path")
+                .join("diagram.png"),
+            b"png-bytes",
+        )
+        .expect("write asset");
 
         let response = app
             .oneshot(

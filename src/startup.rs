@@ -1,6 +1,6 @@
-use std::sync::{Arc, RwLock};
-
 use serde::Serialize;
+
+use crate::vault_runtime::{VaultPhase, VaultRuntime, VaultRuntimeSnapshot, VaultSource};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct IndexingProgressSnapshot {
@@ -31,43 +31,41 @@ impl IndexingProgressSnapshot {
 }
 
 #[derive(Clone, Debug)]
-enum StartupPhase {
-    TermsRequired,
-    Downloading {
-        model: &'static str,
-        downloaded_bytes: Option<u64>,
-        total_bytes: Option<u64>,
-    },
-    Scanning,
-    Indexing(IndexingProgressSnapshot),
-    Ready,
-    Failed {
-        message: String,
-    },
-}
-
-#[derive(Clone, Debug)]
-pub struct StartupTracker(Arc<RwLock<StartupPhase>>);
+pub struct StartupTracker(VaultRuntime);
 
 impl StartupTracker {
+    pub fn new(runtime: VaultRuntime) -> Self {
+        Self(runtime)
+    }
+
     pub fn terms_required() -> Self {
-        Self(Arc::new(RwLock::new(StartupPhase::TermsRequired)))
+        let runtime = VaultRuntime::new(VaultSource::Local {
+            vault_path: "./vault".into(),
+        });
+        runtime.set_terms_required();
+        Self(runtime)
     }
 
     pub fn scanning() -> Self {
-        Self(Arc::new(RwLock::new(StartupPhase::Scanning)))
+        let runtime = VaultRuntime::new(VaultSource::Local {
+            vault_path: "./vault".into(),
+        });
+        runtime.set_scanning();
+        Self(runtime)
     }
 
     pub fn ready() -> Self {
-        Self(Arc::new(RwLock::new(StartupPhase::Ready)))
+        Self(VaultRuntime::ready(VaultSource::Local {
+            vault_path: "./vault".into(),
+        }))
     }
 
     pub fn set_scanning(&self) {
-        *self.0.write().expect("startup tracker poisoned") = StartupPhase::Scanning;
+        self.0.set_scanning();
     }
 
     pub fn set_terms_required(&self) {
-        *self.0.write().expect("startup tracker poisoned") = StartupPhase::TermsRequired;
+        self.0.set_terms_required();
     }
 
     pub fn set_downloading(
@@ -76,85 +74,84 @@ impl StartupTracker {
         downloaded_bytes: Option<u64>,
         total_bytes: Option<u64>,
     ) {
-        *self.0.write().expect("startup tracker poisoned") = StartupPhase::Downloading {
-            model,
-            downloaded_bytes,
-            total_bytes,
-        };
+        self.0.set_downloading(model, downloaded_bytes, total_bytes);
     }
 
     pub fn set_indexing(&self, progress: IndexingProgressSnapshot) {
-        *self.0.write().expect("startup tracker poisoned") = StartupPhase::Indexing(progress);
+        self.0.set_indexing(progress);
     }
 
     pub fn set_ready(&self) {
-        *self.0.write().expect("startup tracker poisoned") = StartupPhase::Ready;
+        self.0.set_ready();
     }
 
     pub fn set_failed(&self) {
-        self.set_failed_with_message("Indexing could not be completed.");
+        self.0
+            .set_unavailable("vault_index_failed", "Indexing could not be completed.");
     }
 
     pub fn set_model_setup_failed(&self) {
-        self.set_failed_with_message(
+        self.0.set_unavailable(
+            "model_setup_failed",
             "The search model could not be downloaded or loaded. Check the Hatchdoor logs, then retry setup.",
         );
     }
 
-    fn set_failed_with_message(&self, message: impl Into<String>) {
-        *self.0.write().expect("startup tracker poisoned") = StartupPhase::Failed {
-            message: message.into(),
-        };
+    pub fn is_ready(&self) -> bool {
+        self.0.is_ready()
     }
 
-    pub fn is_ready(&self) -> bool {
-        matches!(
-            *self.0.read().expect("startup tracker poisoned"),
-            StartupPhase::Ready
-        )
+    pub fn snapshot(&self) -> VaultRuntimeSnapshot {
+        self.0.snapshot()
+    }
+
+    pub fn runtime(&self) -> &VaultRuntime {
+        &self.0
     }
 
     pub fn status(&self) -> StartupStatusResponse {
-        match *self.0.read().expect("startup tracker poisoned") {
-            StartupPhase::TermsRequired => StartupStatusResponse::simple("terms_required", None),
-            StartupPhase::Downloading {
-                model,
-                downloaded_bytes,
-                total_bytes,
-            } => StartupStatusResponse {
+        let snapshot = self.0.snapshot();
+        match snapshot.phase {
+            VaultPhase::TermsRequired => StartupStatusResponse::simple("terms_required", None),
+            VaultPhase::Downloading => StartupStatusResponse {
                 state: "downloading",
-                model: Some(model),
-                downloaded_bytes,
-                total_bytes,
+                model: snapshot.model,
+                downloaded_bytes: snapshot.downloaded_bytes,
+                total_bytes: snapshot.total_bytes,
                 notes_completed: None,
                 notes_total: None,
                 chunks_completed: None,
                 chunks_total: None,
                 tokens_completed: None,
                 tokens_total: None,
-                percent: download_percent(downloaded_bytes, total_bytes),
+                percent: download_percent(snapshot.downloaded_bytes, snapshot.total_bytes),
                 eta_seconds: None,
                 message: None,
             },
-            StartupPhase::Scanning => StartupStatusResponse::simple("scanning", None),
-            StartupPhase::Indexing(progress) => StartupStatusResponse {
-                state: "indexing",
-                model: None,
-                downloaded_bytes: None,
-                total_bytes: None,
-                notes_completed: Some(progress.notes_completed),
-                notes_total: Some(progress.notes_total),
-                chunks_completed: Some(progress.chunks_completed),
-                chunks_total: Some(progress.chunks_total),
-                tokens_completed: Some(progress.tokens_completed),
-                tokens_total: Some(progress.tokens_total),
-                percent: Some(progress.percent()),
-                eta_seconds: progress.eta_seconds(),
-                message: None,
-            },
-            StartupPhase::Ready => StartupStatusResponse::simple("ready", None),
-            StartupPhase::Failed { ref message } => {
-                StartupStatusResponse::simple("failed", Some(message.clone()))
+            VaultPhase::Validating | VaultPhase::Scanning => {
+                StartupStatusResponse::simple("scanning", None)
+            }
+            VaultPhase::Indexing => {
+                let progress = snapshot.indexing.unwrap_or_default();
+                StartupStatusResponse {
+                    state: "indexing",
+                    model: None,
+                    downloaded_bytes: None,
+                    total_bytes: None,
+                    notes_completed: Some(progress.notes_completed),
+                    notes_total: Some(progress.notes_total),
+                    chunks_completed: Some(progress.chunks_completed),
+                    chunks_total: Some(progress.chunks_total),
+                    tokens_completed: Some(progress.tokens_completed),
+                    tokens_total: Some(progress.tokens_total),
+                    percent: Some(progress.percent()),
+                    eta_seconds: progress.eta_seconds(),
+                    message: None,
+                }
+            }
+            VaultPhase::Ready => StartupStatusResponse::simple("ready", None),
+            VaultPhase::Unavailable => {
+                StartupStatusResponse::simple("failed", snapshot.error.map(|error| error.message))
             }
         }
     }
