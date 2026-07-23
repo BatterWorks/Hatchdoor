@@ -5,6 +5,7 @@ use std::path::Path;
 
 use walkdir::WalkDir;
 
+use super::layers::LayerMap;
 use super::links::build_link_graph;
 use super::paths::{
     content_snippet, normalize_link_target, normalize_title, relative_note_path_without_ext,
@@ -12,11 +13,18 @@ use super::paths::{
 };
 use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
+    VaultScanConfig,
 };
 use crate::cache::parse::content_hash;
 
 impl VaultIndex {
+    /// Scans with default deployment configuration. Retained so existing
+    /// callers and tests are unaffected.
     pub fn build(root: impl AsRef<Path>) -> io::Result<Self> {
+        Self::build_with_config(root, &VaultScanConfig::default())
+    }
+
+    pub fn build_with_config(root: impl AsRef<Path>, config: &VaultScanConfig) -> io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         let mut by_slug = HashMap::new();
         let mut by_title = HashMap::new();
@@ -24,9 +32,23 @@ impl VaultIndex {
         let mut ordered_slugs = Vec::new();
         let mut markdown_paths = Vec::new();
 
+        // Markers are collected before pruning: a marker inside a directory a
+        // noise pattern would prune is still read, so per-deployment noise
+        // cannot silently delete a layer.
+        let layers = LayerMap::collect(&root).map_err(io::Error::other)?;
+
         for entry in WalkDir::new(&root)
+            .follow_links(false)
             .into_iter()
-            .filter_entry(|entry| entry.file_name() != ".hatchdoor-trash")
+            .filter_entry(|entry| {
+                entry.depth() == 0
+                    || match entry.path().strip_prefix(&root) {
+                        Ok(relative) => !config
+                            .exclude
+                            .is_excluded(relative, entry.file_type().is_dir()),
+                        Err(_) => true,
+                    }
+            })
         {
             let entry = entry.map_err(io::Error::other)?;
             let path = entry.path();
@@ -40,6 +62,14 @@ impl VaultIndex {
         }
 
         markdown_paths.sort();
+        // Default-surface notes claim their slugs first, so a compiled page
+        // beats the source it was compiled from on a title collision.
+        // `sort_by_key` is stable, so path order is preserved within each group.
+        markdown_paths.sort_by_key(|path| {
+            relative_note_path_without_ext(&root, path)
+                .map(|relative| layers.layer_for(&relative).is_some())
+                .unwrap_or(false)
+        });
 
         for path in markdown_paths {
             let stem = path
@@ -62,6 +92,7 @@ impl VaultIndex {
                 slug: slug.clone(),
                 path: path.to_path_buf(),
                 relative_path: relative_without_ext.clone(),
+                layer: layers.layer_for(&relative_without_ext).map(str::to_string),
             };
 
             by_title
@@ -96,6 +127,7 @@ impl VaultIndex {
             ordered_slugs,
             outgoing_by_slug,
             backlinks_by_slug,
+            layers,
         })
     }
 

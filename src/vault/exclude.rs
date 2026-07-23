@@ -94,6 +94,16 @@ impl ExcludeMatcher {
     }
 }
 
+/// Manual rather than derived: `Gitignore` is opaque, and the configured
+/// patterns are the only part worth printing.
+impl std::fmt::Debug for ExcludeMatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExcludeMatcher")
+            .field("user_patterns", &self.user_patterns)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Default for ExcludeMatcher {
     fn default() -> Self {
         Self::new(&[]).expect("built-in exclude patterns are valid")
