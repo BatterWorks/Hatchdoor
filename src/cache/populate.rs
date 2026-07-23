@@ -52,10 +52,42 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     ) -> Result<(), String> {
+        self.replace_with_options(index, embedder, on_progress, embed_layers_enabled())
+    }
+
+    /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
+    /// controls whether demoted-layer notes get their vectors built. When false,
+    /// demoted notes still get chunk rows (so keyword search works) but no vectors
+    /// and no embedding work — the cost win the flag exists for. Demoted layers
+    /// degrade to keyword-only, not to nothing.
+    pub(crate) fn replace_with_options(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        embed_layers: bool,
+    ) -> Result<(), String> {
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
         self.reset_if_embedder_changed(embedder)?;
+
+        // The embed-layers flag participates in the reindex the same way the
+        // marker set does: flipping it changes no note's content or mtime, so the
+        // incremental upsert would short-circuit and leave demoted notes either
+        // permanently unembedded (after true→false) or permanently vector-less
+        // (after false→true). Detect the flip and force every note back through
+        // the write path so demoted vectors are (re)built or dropped to match.
+        let embed_layers_value = if embed_layers { "true" } else { "false" };
+        let stored_embed_layers = self.get_metadata("embed_layers")?;
+        let embed_layers_changed = stored_embed_layers.is_some()
+            && stored_embed_layers.as_deref() != Some(embed_layers_value);
+        if embed_layers_changed {
+            tracing::info!(
+                embed_layers,
+                "HATCHDOOR_EMBED_LAYERS changed; rebuilding demoted-layer vectors"
+            );
+        }
 
         // Adding, removing, renaming a layer or editing a marker description
         // changes no note's content or mtime, so the incremental upsert would
@@ -142,10 +174,14 @@ impl SqliteCache {
         // of the measured full-vault runtime, and retaining these results gives
         // the heartbeat an exact embedding-work denominator without chunking
         // notes twice.
+        let force_note_refresh = marker_set_changed || embed_layers_changed;
         for entry in &entries {
             let note_sync_started = Instant::now();
-            let upsert_outcome = upsert_note_if_changed(&tx, entry, now, marker_set_changed)?;
+            let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
             metrics.note_sync += note_sync_started.elapsed();
+            // A demoted note is embedded only when the flag allows it; a
+            // default-surface note is always embedded.
+            let embed_this_note = embed_layers || entry.layer.is_none();
             match upsert_outcome {
                 UpsertOutcome::Wrote { slug, content } => {
                     match prepare_note_for_embedding(
@@ -153,6 +189,7 @@ impl SqliteCache {
                         slug,
                         content,
                         entry.layer.clone(),
+                        embed_this_note,
                         embedder,
                     ) {
                         Ok(prepared) => prepared_notes.push(prepared),
@@ -265,6 +302,9 @@ impl SqliteCache {
         let effective_markers_json = serde_json::to_string(&effective_markers)
             .map_err(|e| format!("failed serializing marker set: {e}"))?;
         self.set_metadata("marker_set", &effective_markers_json)?;
+        // Persist the embed-layers flag so a future flip is detected and forces a
+        // demoted-layer re-embed / vector drop above.
+        self.set_metadata("embed_layers", embed_layers_value)?;
 
         let elapsed = started_at.elapsed();
         let failure_summary = if per_note_failures == 0 {
@@ -1240,6 +1280,10 @@ struct PreparedNote {
     slug: String,
     /// The note's layer, routing its vectors to the default or demoted table.
     layer: Option<String>,
+    /// Whether this note is embedded at all. False for a demoted note under
+    /// `HATCHDOOR_EMBED_LAYERS=false`: chunk rows are written for keyword search
+    /// but no vectors are produced or stored.
+    embed: bool,
     chunking: NoteChunking,
     preserved: HashMap<String, Vec<f32>>,
     texts_to_embed: Vec<String>,
@@ -1256,11 +1300,31 @@ fn prepare_note_for_embedding(
     slug: String,
     content: String,
     layer: Option<String>,
+    embed: bool,
     embedder: &dyn Embedder,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
     let chunking = chunk_note(&content, embedder, ChunkOptions::default());
     let chunking_elapsed = chunking_started.elapsed();
+
+    // A note we are not embedding still gets chunk rows (keyword search) but no
+    // vector work: skip reuse, measurement and the embed list entirely.
+    if !embed {
+        return Ok(PreparedNote {
+            slug,
+            layer,
+            embed,
+            chunking,
+            preserved: HashMap::new(),
+            texts_to_embed: Vec::new(),
+            indices_needing_embed: Vec::new(),
+            embedding_input_bytes: 0,
+            embedding_input_token_lengths: Vec::new(),
+            chunk_measurements: Vec::new(),
+            chunking_elapsed,
+            vector_reuse_elapsed: Duration::ZERO,
+        });
+    }
 
     let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, &slug)?;
@@ -1315,6 +1379,7 @@ fn prepare_note_for_embedding(
     Ok(PreparedNote {
         slug,
         layer,
+        embed,
         chunking,
         preserved,
         texts_to_embed,
@@ -1338,6 +1403,7 @@ fn embed_prepared_note(
     let PreparedNote {
         slug,
         layer,
+        embed,
         chunking,
         preserved,
         texts_to_embed,
@@ -1351,6 +1417,46 @@ fn embed_prepared_note(
     if chunking.chunks.is_empty() {
         let sqlite_started = Instant::now();
         replace_chunks_for_note(tx, &slug, layer.as_deref(), &[], None, None)?;
+        return Ok(ChunkStats {
+            embedded: 0,
+            reused: 0,
+            embedder_calls: 0,
+            embedding_input_bytes: 0,
+            embedding_input_tokens: 0,
+            embedding_padded_tokens: 0,
+            embedding_input_token_lengths: Vec::new(),
+            embedding_call_durations: Vec::new(),
+            chunk_measurements: Vec::new(),
+            pipeline: pipeline_started.elapsed() + chunking_elapsed + vector_reuse_elapsed,
+            chunking: chunking_elapsed,
+            vector_reuse: vector_reuse_elapsed,
+            embedding: Duration::ZERO,
+            sqlite_write: sqlite_started.elapsed(),
+        });
+    }
+
+    // Not embedded (a demoted note under HATCHDOOR_EMBED_LAYERS=false): write the
+    // chunk rows so keyword/FTS search still finds it, but store no vectors.
+    if !embed {
+        let tags_json = serde_json::to_string(&chunking.tags).ok();
+        let aliases_json = serde_json::to_string(&chunking.aliases).ok();
+        let rows: Vec<ChunkRow<'_>> = chunking
+            .chunks
+            .iter()
+            .map(|chunk| ChunkRow {
+                chunk,
+                vector: None,
+            })
+            .collect();
+        let sqlite_started = Instant::now();
+        replace_chunks_for_note(
+            tx,
+            &slug,
+            layer.as_deref(),
+            &rows,
+            tags_json.as_deref(),
+            aliases_json.as_deref(),
+        )?;
         return Ok(ChunkStats {
             embedded: 0,
             reused: 0,
@@ -1519,14 +1625,121 @@ fn preserve_existing_vectors(
     Ok(out)
 }
 
+/// Whether demoted-layer vectors are built. `HATCHDOOR_EMBED_LAYERS` (default
+/// true); any non-truthy value turns it off.
+fn embed_layers_enabled() -> bool {
+    std::env::var("HATCHDOOR_EMBED_LAYERS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
+    use crate::search::LayerSelection;
     use crate::vault::VaultIndex;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Build a vault with a demoted `sources/` note and index it with an explicit
+    /// `embed_layers` flag.
+    fn demoted_vault_with_flag(
+        embed_layers: bool,
+    ) -> (tempfile::TempDir, SqliteCache, StubEmbedder) {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        std::fs::write(
+            dir.path().join("sources/Clip.md"),
+            "# Clip\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("note");
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_with_options(&index, &embedder, None, embed_layers)
+            .expect("populate");
+        (dir, cache, embedder)
+    }
+
+    fn sources_selection() -> LayerSelection {
+        let (selection, _) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        selection
+    }
+
+    #[test]
+    fn embed_layers_false_skips_demoted_vectors_but_keeps_keyword_search() {
+        let (_dir, cache, embedder) = demoted_vault_with_flag(false);
+
+        // No demoted vectors were built: a layer semantic search finds nothing.
+        let semantic = cache
+            .semantic_search_layered(&embedder, "melatonin circadian", 10, &sources_selection())
+            .expect("semantic");
+        assert!(
+            semantic.is_empty(),
+            "HATCHDOOR_EMBED_LAYERS=false must leave demoted layers without vectors: {:?}",
+            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        );
+        // The demoted vector table is genuinely empty.
+        let demoted_count: i64 = cache
+            .read()
+            .expect("read")
+            .query_row("SELECT COUNT(*) FROM chunk_vectors_demoted", [], |r| {
+                r.get(0)
+            })
+            .expect("count");
+        assert_eq!(demoted_count, 0);
+
+        // Keyword search still finds the demoted note (chunk rows were written).
+        let keyword = cache
+            .fts_search_chunks_layered("melatonin", 10, &sources_selection())
+            .expect("keyword");
+        assert!(
+            keyword.iter().any(|h| h.note_slug == "clip"),
+            "keyword search over the demoted layer must still find the note: {:?}",
+            keyword.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flipping_embed_layers_false_to_true_re_embeds_demoted_layers() {
+        // The flag must participate in the reindex: flipping it back to true must
+        // actually build the demoted vectors, not leave them permanently empty
+        // because no note's content changed.
+        let (dir, cache, embedder) = demoted_vault_with_flag(false);
+        assert!(
+            cache
+                .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
+                .expect("semantic")
+                .is_empty(),
+            "precondition: no demoted vectors while the flag is false"
+        );
+
+        // Reindex the SAME vault (no content change) with the flag now true.
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        cache
+            .replace_with_options(&index, &embedder, None, true)
+            .expect("re-embed");
+
+        let semantic = cache
+            .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
+            .expect("semantic after flip");
+        assert!(
+            semantic.iter().any(|h| h.note_slug == "clip"),
+            "flipping the flag back to true must re-embed the demoted layer: {:?}",
+            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn performance_percentiles_use_nearest_rank() {
