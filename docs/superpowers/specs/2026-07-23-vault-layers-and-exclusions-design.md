@@ -452,6 +452,26 @@ Two changes:
 1. **Default surface wins.** Slug allocation and `by_title` / `by_path_title`
    resolution prefer default-surface notes over demoted ones on any ambiguous
    match. A demoted note takes the suffixed slug.
+
+   **This has two halves, and phase 1 delivers only the first.** Verified
+   against a running server: slug *allocation* is correct (the compiled page
+   takes `melatonin`, the clipping takes `melatonin-2`), but live wikilink
+   *resolution* still returns the clipping. The reason is that the UI and MCP
+   resolve through SQL, not through the in-memory index:
+   `src/cache/queries/graph.rs:79` and `:102` both end
+   `ORDER BY relative_path LIMIT 1`, and `sources/Melatonin` sorts before
+   `wiki/Melatonin`.
+
+   `VaultIndex::resolve_wikilink` (`src/vault/index.rs:151`) does honour the
+   precedence, but its only production caller is backlink rewriting on rename;
+   the read path never touches it. **A unit test asserting
+   `index.resolve_wikilink` therefore proves nothing about live behaviour** —
+   that is exactly the false confidence that let this through phase 1.
+
+   Phase 2 owns the second half: once `notes.layer` exists, both queries must
+   order by layer before `relative_path`. Until then the motivating bug
+   (`[[Melatonin]]` opening the clipping) is still live, and the fix is
+   structurally blocked on the column.
 2. **`get_note` gains a `path` argument** (`src/mcp/tools/read.rs:317`,
    `SlugArgs` at `mod.rs:116`), accepting a vault-relative path as an
    alternative to `slug`. The earlier draft of this design asserted that

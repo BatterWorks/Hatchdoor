@@ -1329,6 +1329,8 @@ git commit -m "fix(vault): seeder ignores noise when checking for existing notes
 Written down so nothing here is mistaken for an omission. Each becomes its own plan.
 
 - **Phase 2 — Cache:** `notes.layer` column, layer on link/edge rows, `VaultStats`/`GraphResponse`, marker-set hash forcing a full note-row refresh, the refuse-silent-promotion guard, `SCHEMA_VERSION` bump and its full-re-embed migration note.
+
+  **Plus the second half of slug precedence, which phase 1 could not deliver.** Live testing confirmed that slug *allocation* is correct but wikilink *resolution* still returns the demoted note: `src/cache/queries/graph.rs:79` and `:102` order by `relative_path`, so `sources/Melatonin` beats `wiki/Melatonin`. Both queries must order by layer first once `notes.layer` exists. Note that `VaultIndex::resolve_wikilink` is not on the read path (its only production caller is backlink rewriting), so a unit test against it does not demonstrate live behaviour.
 - **Phase 3 — Vectors and search:** per-layer vec0 tables, `layers` selector semantics, `path_prefix` precedence error, `HATCHDOOR_EMBED_LAYERS` in the embedding cache key.
 - **Phase 4 — MCP:** per-vault enum generation, `tools/list_changed`, `get_note` path argument, `recently_modified` exposure, layer on responses and write outcomes.
 - **Phase 5 — Frontend:** `layer` on the seven note-identity types, tree/search/graph filtering, reveal toggle, badges, autocomplete keeping demoted candidates, resolve-batch layer signal.
