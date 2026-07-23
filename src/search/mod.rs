@@ -9,8 +9,10 @@ use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, NoteSummary};
 
 pub mod assemble;
+pub mod layer_selection;
 pub mod retrieve;
 
+pub use layer_selection::LayerSelection;
 pub use retrieve::ChunkHit;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
