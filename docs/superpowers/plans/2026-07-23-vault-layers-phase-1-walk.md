@@ -95,13 +95,20 @@ mod tests {
     }
 
     #[test]
-    fn normalize_layer_name_applies_nfkc_so_variants_collapse() {
-        // U+0065 U+0301 (e + combining acute) and U+00E9 (é) must not become
-        // two visually identical layers.
+    fn normalize_layer_name_applies_nfkc_before_validating() {
+        // Names are ASCII by contract. NFKC earns its place two ways.
+        // First, it folds compatibility variants into ASCII, so a full-width
+        // name is usable rather than mysteriously rejected.
         assert_eq!(
-            normalize_layer_name("sourc\u{0065}\u{0301}s").expect("valid"),
-            normalize_layer_name("sourc\u{00e9}s").expect("valid")
+            normalize_layer_name("\u{ff33}\u{ff2f}\u{ff35}\u{ff32}\u{ff23}\u{ff25}\u{ff33}")
+                .expect("valid"),
+            "sources"
         );
+        // Second, it makes rejection deterministic: an accented name is
+        // refused identically whether composed or decomposed, so the two can
+        // never become two visually identical layers.
+        assert!(normalize_layer_name("sourc\u{0065}\u{0301}s").is_err());
+        assert!(normalize_layer_name("sourc\u{00e9}s").is_err());
     }
 }
 ```
