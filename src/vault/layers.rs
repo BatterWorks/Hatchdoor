@@ -1,8 +1,13 @@
 //! Layer markers: parsing `.hatchdoor-layer` files and resolving which layer a
 //! vault path belongs to. Pure logic — the walk policy lives in `index.rs`.
 
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
+
 use serde::Deserialize;
 use unicode_normalization::UnicodeNormalization;
+use walkdir::WalkDir;
 
 pub const MARKER_FILE_NAME: &str = ".hatchdoor-layer";
 
@@ -151,9 +156,136 @@ fn sanitize_description(raw: &str) -> String {
     collapsed.chars().take(MAX_DESCRIPTION_CHARS).collect()
 }
 
+/// Which layer each marked directory declares, keyed by vault-relative
+/// directory path (`""` is the vault root). Resolution is longest-prefix.
+#[derive(Debug, Clone, Default)]
+pub struct LayerMap {
+    by_dir: BTreeMap<String, LayerDecl>,
+    descriptions: BTreeMap<String, String>,
+}
+
+impl LayerMap {
+    /// Walks the tree collecting markers. Deliberately independent of noise
+    /// pruning: a marker inside a directory a noise pattern would prune is
+    /// still collected, because per-deployment noise silently deleting a layer
+    /// would contradict the portability the marker mechanism exists for.
+    /// Directory symlinks are not followed.
+    pub fn collect(root: &Path) -> Result<Self, String> {
+        let mut by_dir: BTreeMap<String, LayerDecl> = BTreeMap::new();
+        // name -> (marker path, description); lexicographically-first wins.
+        let mut chosen: BTreeMap<String, (String, Option<String>)> = BTreeMap::new();
+
+        let mut marker_paths: Vec<(String, String)> = Vec::new();
+        for entry in WalkDir::new(root).follow_links(false) {
+            let entry = entry.map_err(|e| format!("vault walk failed: {e}"))?;
+            if !entry.file_type().is_file() || entry.file_name().to_str() != Some(MARKER_FILE_NAME)
+            {
+                continue;
+            }
+            let relative_dir = entry
+                .path()
+                .parent()
+                .and_then(|parent| parent.strip_prefix(root).ok())
+                .and_then(|relative| relative.to_str())
+                .map(|relative| relative.replace('\\', "/"))
+                .ok_or_else(|| "marker path outside vault root".to_string())?;
+            let display = if relative_dir.is_empty() {
+                MARKER_FILE_NAME.to_string()
+            } else {
+                format!("{relative_dir}/{MARKER_FILE_NAME}")
+            };
+            marker_paths.push((relative_dir, display));
+        }
+        marker_paths.sort();
+
+        for (relative_dir, display) in marker_paths {
+            let contents = fs::read_to_string(root.join(&display))
+                .map_err(|e| format!("could not read {display}: {e}"))?;
+            let decl = parse_marker(&contents).map_err(|e| format!("{display}: {e}"))?;
+
+            if relative_dir.is_empty() && !matches!(decl, LayerDecl::Default) {
+                return Err(format!(
+                    "{display}: a named layer marker at the vault root would demote the \
+                     entire vault, leaving the default surface empty"
+                ));
+            }
+
+            if let LayerDecl::Named { name, description } = &decl {
+                let entry = chosen
+                    .entry(name.clone())
+                    .or_insert_with(|| (display.clone(), description.clone()));
+                if entry.1.is_none() {
+                    entry.1 = description.clone();
+                }
+            }
+
+            by_dir.insert(relative_dir, decl);
+        }
+
+        let descriptions = chosen
+            .into_iter()
+            .filter_map(|(name, (_, description))| description.map(|d| (name, d)))
+            .collect();
+
+        Ok(Self {
+            by_dir,
+            descriptions,
+        })
+    }
+
+    /// `None` means the default surface.
+    pub fn layer_for(&self, relative_path: &str) -> Option<&str> {
+        if self.by_dir.is_empty() {
+            return None;
+        }
+
+        let mut best: Option<&LayerDecl> = None;
+        let mut best_len = 0usize;
+        for (dir, decl) in &self.by_dir {
+            let matches = dir.is_empty()
+                || relative_path == dir
+                || relative_path.starts_with(&format!("{dir}/"));
+            if matches && (dir.len() >= best_len || best.is_none()) {
+                best_len = dir.len();
+                best = Some(decl);
+            }
+        }
+
+        match best {
+            Some(LayerDecl::Named { name, .. }) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn layer_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .by_dir
+            .values()
+            .filter_map(|decl| match decl {
+                LayerDecl::Named { name, .. } => Some(name.clone()),
+                LayerDecl::Default => None,
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn description(&self, name: &str) -> Option<&str> {
+        self.descriptions.get(name).map(String::as_str)
+    }
+
+    /// Marker directories, for diagnostics and (in phase 2) the marker-set hash.
+    pub fn marker_paths(&self) -> Vec<String> {
+        self.by_dir.keys().cloned().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn normalize_layer_name_slugifies() {
@@ -387,6 +519,100 @@ mod tests {
         assert_eq!(
             sanitize_description("unicode: café, 資料, Материалы"),
             "unicode: café, 資料, Материалы"
+        );
+    }
+
+    #[test]
+    fn layer_map_resolves_nearest_marker_and_inherits() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources/deep")).expect("dirs");
+        fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        assert_eq!(map.layer_for("sources/A.md"), Some("sources"));
+        assert_eq!(map.layer_for("sources/deep/B.md"), Some("sources"));
+        assert_eq!(map.layer_for("wiki/C.md"), None);
+        assert_eq!(map.layer_for("Top.md"), None);
+    }
+
+    #[test]
+    fn layer_map_default_marker_reincludes_subtree() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources/curated")).expect("dirs");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(
+            dir.path().join("sources/curated/.hatchdoor-layer"),
+            "default",
+        )
+        .expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        assert_eq!(map.layer_for("sources/A.md"), Some("sources"));
+        assert_eq!(map.layer_for("sources/curated/B.md"), None);
+    }
+
+    #[test]
+    fn layer_map_two_folders_may_share_one_layer_name() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("raw")).expect("dirs");
+        fs::create_dir_all(dir.path().join("inbox")).expect("dirs");
+        fs::write(dir.path().join("raw/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(dir.path().join("inbox/.hatchdoor-layer"), "sources").expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        assert_eq!(map.layer_for("raw/A.md"), Some("sources"));
+        assert_eq!(map.layer_for("inbox/B.md"), Some("sources"));
+        assert_eq!(map.layer_names(), vec!["sources".to_string()]);
+    }
+
+    #[test]
+    fn layer_map_description_tiebreak_is_lexicographically_first_marker() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("aaa")).expect("dirs");
+        fs::create_dir_all(dir.path().join("zzz")).expect("dirs");
+        fs::write(
+            dir.path().join("aaa/.hatchdoor-layer"),
+            "name: sources\ndescription: from aaa\n",
+        )
+        .expect("marker");
+        fs::write(
+            dir.path().join("zzz/.hatchdoor-layer"),
+            "name: sources\ndescription: from zzz\n",
+        )
+        .expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        // Deterministic, so the generated tool schema cannot vary with filesystem
+        // walk order between restarts.
+        assert_eq!(map.description("sources"), Some("from aaa"));
+    }
+
+    #[test]
+    fn layer_map_rejects_named_marker_at_vault_root() {
+        let dir = tempdir().expect("temp dir");
+        fs::write(dir.path().join(".hatchdoor-layer"), "sources").expect("marker");
+
+        // Otherwise the default surface is empty, the UI is blank, and under
+        // demo_mode there is no toggle to reveal anything.
+        let err = LayerMap::collect(dir.path()).expect_err("root marker must fail");
+        assert!(err.contains("vault root"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn layer_map_reports_malformed_marker_with_its_path() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "- a\n- b\n").expect("marker");
+
+        let err = LayerMap::collect(dir.path()).expect_err("malformed marker must fail");
+        assert!(
+            err.contains("sources/.hatchdoor-layer"),
+            "unexpected: {err}"
         );
     }
 }
