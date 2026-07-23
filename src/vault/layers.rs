@@ -288,6 +288,52 @@ impl LayerMap {
     pub fn marker_paths(&self) -> Vec<String> {
         self.by_dir.keys().cloned().collect()
     }
+
+    /// A deterministic string covering every marker's directory path *and its
+    /// resolved declaration* (kind, name and description). Hashing this and
+    /// comparing against the stored value is what forces a note-row refresh when
+    /// the marker set changes: adding, removing, renaming a layer or editing a
+    /// description all change this string, and none of them touch any note's
+    /// content or mtime — so without it the incremental path would silently
+    /// leave every note on its old classification.
+    ///
+    /// `by_dir` is a `BTreeMap`, so iteration order is stable across restarts.
+    /// A record separator that cannot appear in a directory path, layer name or
+    /// sanitized description (`\u{1}`) delimits fields so distinct marker sets
+    /// cannot collide into one string.
+    pub fn hash_input(&self) -> String {
+        let mut input = String::new();
+        for (dir, decl) in &self.by_dir {
+            input.push_str(dir);
+            input.push('\u{1}');
+            match decl {
+                LayerDecl::Default => input.push_str("default"),
+                LayerDecl::Named { name, description } => {
+                    input.push_str("named");
+                    input.push('\u{1}');
+                    input.push_str(name);
+                    input.push('\u{1}');
+                    input.push_str(description.as_deref().unwrap_or(""));
+                }
+            }
+            input.push('\u{2}');
+        }
+        input
+    }
+
+    /// The resolved named-layer markers as `directory path -> layer name`,
+    /// excluding `default` re-includes (which are not layers and cannot cause a
+    /// silent *promotion* when they vanish). Persisted so a later reindex can
+    /// detect a marker that disappeared and refuse to promote its notes.
+    pub fn named_markers(&self) -> BTreeMap<String, String> {
+        self.by_dir
+            .iter()
+            .filter_map(|(dir, decl)| match decl {
+                LayerDecl::Named { name, .. } => Some((dir.clone(), name.clone())),
+                LayerDecl::Default => None,
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -662,6 +708,77 @@ mod tests {
         assert_eq!(map.layer_for("sources/A.md"), Some("primary"));
         // A note under sources-old/ (which has no marker) resolves to None (default surface)
         assert_eq!(map.layer_for("sources-old/B.md"), None);
+    }
+
+    #[test]
+    fn hash_input_changes_on_add_rename_and_description_edit() {
+        let base = tempdir().expect("temp dir");
+        fs::create_dir_all(base.path().join("sources")).expect("dirs");
+        fs::write(base.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        let a = LayerMap::collect(base.path())
+            .expect("collect")
+            .hash_input();
+
+        // Adding a second marker changes the hash input.
+        fs::create_dir_all(base.path().join("archive")).expect("dirs");
+        fs::write(base.path().join("archive/.hatchdoor-layer"), "archive").expect("marker");
+        let b = LayerMap::collect(base.path())
+            .expect("collect")
+            .hash_input();
+        assert_ne!(a, b, "adding a marker must change the hash input");
+
+        // Renaming a layer changes it.
+        fs::write(base.path().join("sources/.hatchdoor-layer"), "primary").expect("marker");
+        let c = LayerMap::collect(base.path())
+            .expect("collect")
+            .hash_input();
+        assert_ne!(b, c, "renaming a layer must change the hash input");
+
+        // Editing a description changes it.
+        fs::write(
+            base.path().join("sources/.hatchdoor-layer"),
+            "name: primary\ndescription: now with detail\n",
+        )
+        .expect("marker");
+        let d = LayerMap::collect(base.path())
+            .expect("collect")
+            .hash_input();
+        assert_ne!(c, d, "editing a description must change the hash input");
+    }
+
+    #[test]
+    fn hash_input_is_stable_across_recollection() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        fs::write(
+            dir.path().join("sources/.hatchdoor-layer"),
+            "name: sources\ndescription: ground truth\n",
+        )
+        .expect("marker");
+        let first = LayerMap::collect(dir.path()).expect("collect").hash_input();
+        let second = LayerMap::collect(dir.path()).expect("collect").hash_input();
+        assert_eq!(first, second, "hash input must be deterministic");
+    }
+
+    #[test]
+    fn named_markers_excludes_default_reincludes() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources/curated")).expect("dirs");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(
+            dir.path().join("sources/curated/.hatchdoor-layer"),
+            "default",
+        )
+        .expect("marker");
+
+        let markers = LayerMap::collect(dir.path())
+            .expect("collect")
+            .named_markers();
+        assert_eq!(markers.get("sources").map(String::as_str), Some("sources"));
+        assert!(
+            !markers.contains_key("sources/curated"),
+            "a default re-include is not a named marker"
+        );
     }
 
     #[test]
