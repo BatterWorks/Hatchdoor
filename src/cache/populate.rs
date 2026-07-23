@@ -56,6 +56,22 @@ impl SqliteCache {
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
         self.reset_if_embedder_changed(embedder)?;
+
+        // Adding, removing, renaming a layer or editing a marker description
+        // changes no note's content or mtime, so the incremental upsert would
+        // short-circuit to Unchanged and leave every note on its old
+        // classification. Detect a marker-set change up front and, when it
+        // changed, force every note row through the write path so `layer` is
+        // rewritten. Read the stored hash before opening the write transaction
+        // (get_metadata takes its own connection).
+        let marker_set_hash = content_hash(&index.layers.hash_input());
+        let stored_marker_set_hash = self.get_metadata("marker_set_hash")?;
+        let marker_set_changed =
+            stored_marker_set_hash.as_deref() != Some(marker_set_hash.as_str());
+        if marker_set_changed && stored_marker_set_hash.is_some() {
+            tracing::info!("Layer marker set changed; reclassifying every note");
+        }
+
         let entries = index.ordered_entries();
         let current_paths = entries
             .iter()
@@ -96,7 +112,7 @@ impl SqliteCache {
         // notes twice.
         for entry in &entries {
             let note_sync_started = Instant::now();
-            let upsert_outcome = upsert_note_if_changed(&tx, entry, now)?;
+            let upsert_outcome = upsert_note_if_changed(&tx, entry, now, marker_set_changed)?;
             metrics.note_sync += note_sync_started.elapsed();
             match upsert_outcome {
                 UpsertOutcome::Wrote { slug, content } => {
@@ -203,6 +219,10 @@ impl SqliteCache {
         // Record which model produced these vectors so a future build with a
         // different model triggers reset_if_embedder_changed above.
         self.set_metadata("embedder_id", &embedder.identity())?;
+
+        // Record the marker set so the next reindex can detect a change and force
+        // the reclassification above (and, in A3, guard against silent promotion).
+        self.set_metadata("marker_set_hash", &marker_set_hash)?;
 
         let elapsed = started_at.elapsed();
         let failure_summary = if per_note_failures == 0 {
@@ -773,6 +793,7 @@ fn upsert_note_if_changed(
     tx: &Transaction<'_>,
     entry: &NoteEntry,
     indexed_at: i64,
+    force_layer_refresh: bool,
 ) -> Result<UpsertOutcome, String> {
     let snapshot = file_snapshot(&entry.path)?;
     let cached = cached_note_state(tx, &entry.relative_path)?;
@@ -781,19 +802,25 @@ fn upsert_note_if_changed(
         .map_err(|error| format!("failed reading note '{}': {error}", entry.path.display()))?;
     let hash = content_hash(&content);
 
-    let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
-        cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
-    });
-    if cached_matches_file_and_content {
-        return Ok(UpsertOutcome::Unchanged);
-    }
+    // When the marker set changed, the note's `layer` may differ even though its
+    // content, mtime and slug are identical. `layer` is only written on the full
+    // write path (`upsert_note_content`), so both incremental short-circuits must
+    // be skipped to let the new classification land.
+    if !force_layer_refresh {
+        let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
+            cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
+        });
+        if cached_matches_file_and_content {
+            return Ok(UpsertOutcome::Unchanged);
+        }
 
-    let cached_matches_content = cached
-        .as_ref()
-        .is_some_and(|cached| cached.slug == entry.slug && cached.content_hash == hash);
-    if cached_matches_content {
-        update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
-        return Ok(UpsertOutcome::Unchanged);
+        let cached_matches_content = cached
+            .as_ref()
+            .is_some_and(|cached| cached.slug == entry.slug && cached.content_hash == hash);
+        if cached_matches_content {
+            update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
+            return Ok(UpsertOutcome::Unchanged);
+        }
     }
 
     if let Some(cached) = cached.as_ref()
@@ -1501,6 +1528,54 @@ mod tests {
             read_layer_for_slug(&cache, "page"),
             None,
             "default-surface note must record layer IS NULL"
+        );
+    }
+
+    #[test]
+    fn adding_a_marker_reclassifies_notes_without_any_note_edit() {
+        // The whole feature no-ops without this. `upsert_note_if_changed` returns
+        // Unchanged on matching slug+mtime+content-hash. Adding a `.hatchdoor-layer`
+        // marker changes no note's content or mtime, so without the marker-set-hash
+        // guard every note keeps `layer = NULL` after the user demotes a folder.
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        let note_path = dir.path().join("sources/Clip.md");
+        std::fs::write(&note_path, "# Clip\nraw source").expect("note");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+
+        // First pass: no marker anywhere, so the note is on the default surface.
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("initial populate");
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip"),
+            None,
+            "precondition: default-surface note starts NULL"
+        );
+
+        // Add a marker WITHOUT touching the note's content or mtime. Dropping a
+        // file into a directory does not change the mtime of the files already in
+        // it, so the incremental path would short-circuit to Unchanged.
+        let mtime_before = file_snapshot(&note_path).expect("snapshot").mtime_ns;
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        let mtime_after = file_snapshot(&note_path).expect("snapshot").mtime_ns;
+        assert_eq!(
+            mtime_before, mtime_after,
+            "precondition: the note file was not touched"
+        );
+
+        // Second pass: the marker set changed, so the note must be reclassified.
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("reindex populate");
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "adding a marker must force the note's layer to be rewritten"
         );
     }
 
