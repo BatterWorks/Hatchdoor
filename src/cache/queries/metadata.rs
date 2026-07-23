@@ -223,7 +223,10 @@ impl SqliteCache {
             .map_err(|error| format!("failed to read notes from SQLite cache: {error}"))
     }
 
-    pub fn vault_stats(&self) -> Result<crate::api_types::VaultStatsResponse, String> {
+    pub fn vault_stats(
+        &self,
+        selection: &LayerSelection,
+    ) -> Result<crate::api_types::VaultStatsResponse, String> {
         use crate::api_types::{
             FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
             VaultStatsResponse,
@@ -231,21 +234,52 @@ impl SqliteCache {
 
         let conn = self.read()?;
 
+        // Stats describe the selected surface: every note aggregate is
+        // restricted to the selection, and link aggregates only count links
+        // whose relevant endpoint(s) are also in the selection. Under the
+        // default selection this excludes demoted layers entirely.
+        let notes_f = selection.sql_filter("layer");
+        let n_f = selection.sql_filter("n.layer");
+        let src_f = selection.sql_filter("src.layer");
+        let s_f = selection.sql_filter("s.layer");
+        let t_f = selection.sql_filter("t.layer");
+        let tag_notes_f = selection.sql_filter("notes.layer");
+
         let note_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM notes WHERE {notes_f}"),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats note_count: {e}"))?;
 
         let tag_count: i64 = conn
-            .query_row("SELECT COUNT(DISTINCT tag) FROM tags", [], |row| row.get(0))
+            .query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT tag) FROM tags \
+                     JOIN notes ON notes.slug = tags.note_slug WHERE {tag_notes_f}"
+                ),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats tag_count: {e}"))?;
 
         let link_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM note_links", [], |row| row.get(0))
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM note_links l \
+                     JOIN notes s ON s.slug = l.source_slug \
+                     JOIN notes t ON t.slug = l.target_slug \
+                     WHERE {s_f} AND {t_f}"
+                ),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats link_count: {e}"))?;
 
         let vault_size_bytes: i64 = conn
             .query_row(
-                "SELECT COALESCE(SUM(size_bytes), 0) FROM notes",
+                &format!("SELECT COALESCE(SUM(size_bytes), 0) FROM notes WHERE {notes_f}"),
                 [],
                 |row| row.get(0),
             )
@@ -258,7 +292,9 @@ impl SqliteCache {
             content: String,
         }
         let mut content_stmt = conn
-            .prepare("SELECT slug, title, content FROM notes ORDER BY relative_path")
+            .prepare(&format!(
+                "SELECT slug, title, content FROM notes WHERE {notes_f} ORDER BY relative_path"
+            ))
             .map_err(|e| format!("vault_stats prepare content: {e}"))?;
         let content_rows: Vec<ContentRow> = content_stmt
             .query_map([], |row| {
@@ -313,10 +349,11 @@ impl SqliteCache {
             .collect();
 
         let mut tags_stmt = conn
-            .prepare(
-                "SELECT tag, COUNT(*) as note_count FROM tags GROUP BY tag \
-                 ORDER BY note_count DESC, tag LIMIT 20",
-            )
+            .prepare(&format!(
+                "SELECT tag, COUNT(*) as note_count FROM tags \
+                 JOIN notes ON notes.slug = tags.note_slug WHERE {tag_notes_f} \
+                 GROUP BY tag ORDER BY note_count DESC, tag LIMIT 20"
+            ))
             .map_err(|e| format!("vault_stats prepare top_tags: {e}"))?;
         let top_tags: Vec<TagStat> = tags_stmt
             .query_map([], |row| {
@@ -331,17 +368,19 @@ impl SqliteCache {
         drop(tags_stmt);
 
         let mut linked_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
-                SELECT n.title, n.slug, COUNT(l.source_slug) as backlink_count
+                SELECT n.title, n.slug, COUNT(src.slug) as backlink_count
                 FROM notes n
                 LEFT JOIN note_links l ON l.target_slug = n.slug
+                LEFT JOIN notes src ON src.slug = l.source_slug AND {src_f}
+                WHERE {n_f}
                 GROUP BY n.slug
                 HAVING backlink_count > 0
                 ORDER BY backlink_count DESC, n.title
                 LIMIT 20
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare most_linked: {e}"))?;
         let most_linked: Vec<LinkedNoteRef> = linked_stmt
             .query_map([], |row| {
@@ -357,16 +396,17 @@ impl SqliteCache {
         drop(linked_stmt);
 
         let mut activity_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT strftime('%Y-%m', mtime_ns / 1000000000, 'unixepoch') as month,
                        COUNT(*) as modified_count
                 FROM notes
+                WHERE {notes_f}
                 GROUP BY month
                 ORDER BY month DESC
                 LIMIT 6
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare activity_by_month: {e}"))?;
         let activity_by_month: Vec<MonthActivity> = activity_stmt
             .query_map([], |row| {
@@ -381,7 +421,7 @@ impl SqliteCache {
         drop(activity_stmt);
 
         let mut folder_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT
                   CASE WHEN instr(relative_path, '/') > 0
@@ -390,10 +430,11 @@ impl SqliteCache {
                   END as folder,
                   COUNT(*) as note_count
                 FROM notes
+                WHERE {notes_f}
                 GROUP BY folder
                 ORDER BY note_count DESC, folder
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare notes_per_folder: {e}"))?;
         let notes_per_folder: Vec<FolderStat> = folder_stmt
             .query_map([], |row| {
@@ -407,15 +448,26 @@ impl SqliteCache {
             .map_err(|e| format!("vault_stats read notes_per_folder: {e}"))?;
         drop(folder_stmt);
 
+        // Orphan status is per selection: a selected note is an orphan when it
+        // has no link to or from another note that is also in the selection. A
+        // default note whose only backlink comes from a demoted source is an
+        // orphan under the default selection.
         let mut orphan_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
-                SELECT title, slug FROM notes
-                WHERE slug NOT IN (SELECT DISTINCT source_slug FROM note_links)
-                  AND slug NOT IN (SELECT DISTINCT target_slug FROM note_links)
-                ORDER BY title
-                "#,
-            )
+                SELECT n.title, n.slug FROM notes n
+                WHERE {n_f}
+                  AND n.slug NOT IN (
+                    SELECT l.source_slug FROM note_links l
+                    JOIN notes t ON t.slug = l.target_slug WHERE {t_f}
+                  )
+                  AND n.slug NOT IN (
+                    SELECT l.target_slug FROM note_links l
+                    JOIN notes s ON s.slug = l.source_slug WHERE {s_f}
+                  )
+                ORDER BY n.title
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare orphan_notes: {e}"))?;
         let orphan_notes: Vec<NoteRef> = orphan_stmt
             .query_map([], |row| {
@@ -430,13 +482,14 @@ impl SqliteCache {
         drop(orphan_stmt);
 
         let mut no_tag_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT title, slug FROM notes
-                WHERE slug NOT IN (SELECT DISTINCT note_slug FROM tags)
+                WHERE {notes_f}
+                  AND slug NOT IN (SELECT DISTINCT note_slug FROM tags)
                 ORDER BY title
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare no_tag_notes: {e}"))?;
         let no_tag_notes: Vec<NoteRef> = no_tag_stmt
             .query_map([], |row| {
@@ -452,21 +505,25 @@ impl SqliteCache {
 
         let week_total: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM notes \
-                 WHERE mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000",
+                &format!(
+                    "SELECT COUNT(*) FROM notes \
+                     WHERE {notes_f} \
+                     AND mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000"
+                ),
                 [],
                 |row| row.get(0),
             )
             .map_err(|e| format!("vault_stats week_count: {e}"))?;
         let mut week_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT title, slug FROM notes
-                WHERE mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000
+                WHERE {notes_f}
+                  AND mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000
                 ORDER BY mtime_ns DESC
                 LIMIT 20
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare modified_this_week: {e}"))?;
         let week_notes: Vec<NoteRef> = week_stmt
             .query_map([], |row| {
@@ -482,21 +539,25 @@ impl SqliteCache {
 
         let month_total: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM notes \
-                 WHERE mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000",
+                &format!(
+                    "SELECT COUNT(*) FROM notes \
+                     WHERE {notes_f} \
+                     AND mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000"
+                ),
                 [],
                 |row| row.get(0),
             )
             .map_err(|e| format!("vault_stats month_count: {e}"))?;
         let mut month_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT title, slug FROM notes
-                WHERE mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000
+                WHERE {notes_f}
+                  AND mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000
                 ORDER BY mtime_ns DESC
                 LIMIT 20
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare modified_this_month: {e}"))?;
         let month_notes: Vec<NoteRef> = month_stmt
             .query_map([], |row| {
@@ -695,6 +756,60 @@ mod tests {
             .expect("recent");
         assert!(recent.iter().any(|n| n.slug == "clip"));
         assert!(recent.iter().all(|n| n.slug != "page"));
+    }
+
+    #[test]
+    fn orphan_status_is_computed_per_selection() {
+        // Lonely (default) has one backlink, from a demoted source. Under the
+        // default selection that backlink is hidden, so Lonely reads as an
+        // orphan; across all layers it is linked and is not an orphan.
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(
+            dir.path().join("wiki/Lonely.md"),
+            "# Lonely\n\nno outgoing links",
+        )
+        .expect("lonely");
+        fs::write(
+            dir.path().join("sources/Src.md"),
+            "# Src\n\nrefers to [[Lonely]]",
+        )
+        .expect("src");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+
+        let default_stats = cache
+            .vault_stats(&LayerSelection::default_surface())
+            .expect("default stats");
+        let default_orphans: Vec<&str> = default_stats
+            .orphan_notes
+            .iter()
+            .map(|n| n.slug.as_str())
+            .collect();
+        assert!(
+            default_orphans.contains(&"lonely"),
+            "under default, Lonely's only backlink is from a hidden demoted source, so it is an orphan"
+        );
+
+        let all_stats = cache
+            .vault_stats(&LayerSelection::all())
+            .expect("all stats");
+        let all_orphans: Vec<&str> = all_stats
+            .orphan_notes
+            .iter()
+            .map(|n| n.slug.as_str())
+            .collect();
+        assert!(
+            !all_orphans.contains(&"lonely"),
+            "across all layers Lonely is linked from Src and is not an orphan"
+        );
     }
 
     #[test]

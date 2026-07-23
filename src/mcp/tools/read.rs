@@ -112,7 +112,12 @@ pub(super) async fn get_note_links_tool(
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
-    match cache.note_links(&slug).map_err(JsonRpcFailure::internal)? {
+    // Group D threads a `layers` selector here; until then get_note_links uses
+    // the default surface (forward links still resolve across the boundary).
+    match cache
+        .note_links(&slug, &crate::search::LayerSelection::default_surface())
+        .map_err(JsonRpcFailure::internal)?
+    {
         Some(links) => Ok(tool_success(json!({ "links": links }))),
         None => Ok(tool_error(format!("Note not found: {slug}"))),
     }

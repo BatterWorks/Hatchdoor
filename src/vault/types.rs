@@ -86,6 +86,9 @@ pub struct NoteLink {
     pub title: String,
     pub slug: String,
     pub relative_path: String,
+    /// The linked note's layer (`None` = default surface). An agent needs to
+    /// know whether a link points at compiled synthesis or ground truth.
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

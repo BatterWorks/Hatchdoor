@@ -77,7 +77,14 @@ pub async fn note_links_handler(
     };
 
     let lookup_slug = slug.clone();
-    match run_blocking(move || cache.note_links(&lookup_slug)).await {
+    match run_blocking(move || {
+        cache.note_links(
+            &lookup_slug,
+            &crate::search::LayerSelection::default_surface(),
+        )
+    })
+    .await
+    {
         Ok(Some(links)) => (StatusCode::OK, Json(NoteLinksResponse { links })).into_response(),
         Ok(None) => note_not_found_response(&slug),
         Err(err) => err.into_response(),
@@ -267,7 +274,9 @@ pub async fn stats_handler(State(state): State<AppState>) -> impl IntoResponse {
         Err(err) => return err.into_response(),
     };
 
-    match run_blocking(move || cache.vault_stats()).await {
+    match run_blocking(move || cache.vault_stats(&crate::search::LayerSelection::default_surface()))
+        .await
+    {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(err) => err.into_response(),
     }
@@ -279,7 +288,9 @@ pub async fn graph_handler(State(state): State<AppState>) -> impl IntoResponse {
         Err(err) => return err.into_response(),
     };
 
-    match run_blocking(move || cache.graph_data()).await {
+    match run_blocking(move || cache.graph_data(&crate::search::LayerSelection::default_surface()))
+        .await
+    {
         Ok(data) => (StatusCode::OK, Json(data)).into_response(),
         Err(err) => err.into_response(),
     }
