@@ -316,6 +316,14 @@ Rules:
 - Git sync stages `add_all(["*"])` (`src/git/sync.rs:334`) and therefore commits
   noise files. Out of scope to change; stated so it is a known behaviour rather
   than a surprise.
+- **Upgrade impact, requires a release note.** Three of the six built-in
+  patterns can match `.md` files that existing vaults currently index:
+  `.trash/` (Obsidian's locally deleted notes), `*.sync-conflict-*` (Syncthing
+  conflict files, which are markdown), and `.obsidian/` (plugin documentation
+  and some template setups). Notes under those paths leave the index on
+  upgrade, disappearing from search and from wikilink resolution. This is
+  intended, and a deployment that wants one back can negate it
+  (`HATCHDOOR_EXCLUDE=!*.sync-conflict-*`), but it must not ship silently.
 - Startup logs the full effective pattern list with provenance (built-in vs
   `HATCHDOOR_EXCLUDE`). No shell-expansion heuristic: `HATCHDOOR_EXCLUDE=*.tmp`
   expands only when the working directory happens to contain matching files, so

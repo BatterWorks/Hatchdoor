@@ -21,7 +21,14 @@
 - Built-in noise patterns, in this order: `.obsidian/`, `.trash/`, `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, `*.sync-conflict-*`.
 - `.hatchdoor-layer` is never excluded by any pattern, built-in or user-supplied.
 - Directory symlinks are not followed.
-- **Nothing in this phase changes observable behaviour of the running app.** `VaultIndex::build` must keep producing identical output for a vault with no markers and no configured excludes, except for the `.hatchdoor-trash` filter now coming from the default pattern set.
+- **Nothing in this phase changes observable behaviour of the running app, except for the default noise set.** `VaultIndex::build` must keep producing identical output for a vault with no markers and no configured excludes, with one deliberate exception: every path matching the built-in noise patterns is no longer indexed, where previously only `.hatchdoor-trash` was skipped.
+
+  This exception is wider than it looks and must be stated accurately, because three of the six default patterns can match `.md` files that were previously indexed and searchable:
+  - `.trash/` holds Obsidian's locally deleted notes.
+  - `*.sync-conflict-*` matches Syncthing conflict files, which are `.md`.
+  - `.obsidian/` can hold plugin documentation and some template setups.
+
+  Notes under those paths disappear from search and from wikilink resolution after upgrade. That is the intended behaviour of the feature, but it is a user-visible index change and requires a release note.
 
 ## File Structure
 
