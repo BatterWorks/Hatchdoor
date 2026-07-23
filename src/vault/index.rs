@@ -325,6 +325,7 @@ impl VaultIndex {
                     title: entry.title.clone(),
                     slug: entry.slug.clone(),
                     relative_path: entry.relative_path.clone(),
+                    layer: entry.layer.clone(),
                 })
             })
             .collect()

@@ -76,12 +76,17 @@ pub struct GraphNode {
     pub title: String,
     pub primary_tag: Option<String>,
     pub backlink_count: i64,
+    /// The node's layer (`None` = default surface).
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GraphEdge {
     pub source: String,
     pub target: String,
+    /// Layers of the edge's endpoints (`None` = default surface).
+    pub source_layer: Option<String>,
+    pub target_layer: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
