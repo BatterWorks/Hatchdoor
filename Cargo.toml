@@ -38,6 +38,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-normalization = "0.1"
 walkdir = "2"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
