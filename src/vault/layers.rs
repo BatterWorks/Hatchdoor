@@ -13,9 +13,28 @@ pub const RESERVED_LAYER_NAMES: [&str; 4] = ["default", "all", "noise", "none"];
 
 const MAX_NAME_CHARS: usize = 32;
 
-/// NFKC → trim → lowercase → spaces to `-`, then validate. Unicode
-/// normalization is specified so NFC/NFD variants cannot produce two visually
-/// identical layers.
+/// NFKC → trim → lowercase → spaces to `-`, then validate against a whitelist
+/// of alphanumerics plus `-`.
+///
+/// Names are Unicode, not ASCII: `sources-privées` and `資料` are as valid as
+/// `sources`. The whitelist is what makes that safe. Layer names reach an MCP
+/// tool schema that agents read and a URL query parameter, so the characters
+/// that matter are the ones that can make two names *look* identical — and
+/// none of them are alphanumeric. Zero-width spaces and joiners, bidirectional
+/// overrides (U+202E and friends), control characters, punctuation and emoji
+/// are all rejected by the whitelist without needing a rule of their own.
+///
+/// NFKC additionally folds compatibility variants, so full-width `ＳＯＵＲＣＥＳ`
+/// becomes `sources`, and composed and decomposed spellings of the same
+/// accented name normalize to one layer rather than two visually identical
+/// ones.
+///
+/// What remains is homoglyph confusion between scripts — Cyrillic `а` against
+/// Latin `a`. Catching that needs a UTS #39 mixed-script check and a
+/// dependency to go with it; it is deliberately not done here, because the
+/// hostile path (an agent planting a marker) is closed separately by write
+/// tools refusing to write `.hatchdoor-layer`, leaving only a single-user
+/// vault owner confusing themselves.
 pub fn normalize_layer_name(raw: &str) -> Result<String, String> {
     let normalized: String = raw.nfkc().collect::<String>().trim().to_lowercase();
     let candidate: String = normalized
@@ -37,12 +56,12 @@ pub fn normalize_layer_name(raw: &str) -> Result<String, String> {
 
     let mut chars = candidate.chars();
     let first = chars.next().expect("non-empty checked above");
-    if !first.is_ascii_alphanumeric() {
+    if !first.is_alphanumeric() {
         return Err(format!(
             "layer name '{candidate}' must start with a letter or digit"
         ));
     }
-    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !chars.all(|c| c.is_alphanumeric() || c == '-') {
         return Err(format!(
             "layer name '{candidate}' may contain only letters, digits and '-'"
         ));
@@ -141,19 +160,70 @@ mod tests {
 
     #[test]
     fn normalize_layer_name_applies_nfkc_before_validating() {
-        // Names are ASCII by contract. NFKC earns its place two ways.
-        // First, it folds compatibility variants into ASCII, so a full-width
-        // name is usable rather than mysteriously rejected.
+        // NFKC folds compatibility variants, so a full-width name is usable
+        // rather than mysteriously rejected.
         assert_eq!(
             normalize_layer_name("\u{ff33}\u{ff2f}\u{ff35}\u{ff32}\u{ff23}\u{ff25}\u{ff33}")
                 .expect("valid"),
             "sources"
         );
-        // Second, it makes rejection deterministic: an accented name is
-        // refused identically whether composed or decomposed, so the two can
-        // never become two visually identical layers.
-        assert!(normalize_layer_name("sourc\u{0065}\u{0301}s").is_err());
-        assert!(normalize_layer_name("sourc\u{00e9}s").is_err());
+        // It also collapses composed and decomposed spellings of the same
+        // accented name into one layer, rather than two that look identical.
+        assert_eq!(
+            normalize_layer_name("sourc\u{0065}\u{0301}s").expect("valid"),
+            normalize_layer_name("sourc\u{00e9}s").expect("valid")
+        );
+    }
+
+    #[test]
+    fn normalize_layer_name_accepts_non_ascii_scripts() {
+        // A vault is not required to be English. Names are Unicode.
+        assert_eq!(
+            normalize_layer_name("Sources-Privées").expect("valid"),
+            "sources-privées"
+        );
+        assert_eq!(normalize_layer_name("資料").expect("valid"), "資料");
+        assert_eq!(
+            normalize_layer_name("Материалы").expect("valid"),
+            "материалы"
+        );
+    }
+
+    #[test]
+    fn normalize_layer_name_rejects_invisible_and_directional_characters() {
+        // These are the characters that let two names render identically or
+        // reorder the tool schema an agent reads. None are alphanumeric, so
+        // the whitelist refuses them without a rule of their own.
+        assert!(
+            normalize_layer_name("sour\u{200b}ces").is_err(),
+            "zero-width space"
+        );
+        assert!(
+            normalize_layer_name("sour\u{200d}ces").is_err(),
+            "zero-width joiner"
+        );
+        assert!(
+            normalize_layer_name("sour\u{202e}ces").is_err(),
+            "right-to-left override"
+        );
+        assert!(normalize_layer_name("sources\u{1f600}").is_err(), "emoji");
+        assert!(normalize_layer_name("sources/raw").is_err(), "punctuation");
+    }
+
+    #[test]
+    fn normalize_layer_name_caps_length_in_characters_not_bytes() {
+        // `é` is one character and two bytes: a byte-based cap would reject a
+        // name that is well under the limit.
+        let thirty_two_chars = "é".repeat(32);
+        assert_eq!(thirty_two_chars.len(), 64, "precondition: 64 bytes");
+        assert_eq!(
+            normalize_layer_name(&thirty_two_chars)
+                .expect("valid")
+                .chars()
+                .count(),
+            32
+        );
+        assert!(normalize_layer_name(&"é".repeat(33)).is_err());
     }
 
     #[test]
