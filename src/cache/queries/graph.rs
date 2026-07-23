@@ -76,7 +76,7 @@ impl SqliteCache {
                 SELECT slug, relative_path
                 FROM notes
                 WHERE normalized_relative_path = ?1
-                ORDER BY relative_path
+                ORDER BY (layer IS NOT NULL), relative_path
                 LIMIT 1
                 "#,
                 params![normalized_path],
@@ -99,7 +99,7 @@ impl SqliteCache {
                 SELECT slug, relative_path
                 FROM notes
                 WHERE normalized_title = ?1
-                ORDER BY relative_path
+                ORDER BY (layer IS NOT NULL), relative_path
                 LIMIT 1
                 "#,
                 params![normalized_base],
@@ -385,5 +385,74 @@ mod notes_with_outbound_links_batch_tests {
         let cache = build_cache(&[("Alpha.md", "# Alpha\n\nbody")]);
         let map = cache.notes_with_outbound_links_batch(&[]).expect("batch");
         assert!(map.is_empty());
+    }
+
+    /// Builds a two-layer vault where a compiled `wiki/` page and a demoted
+    /// `sources/` clipping share the title "Melatonin". Populates a real cache
+    /// so the assertion runs through the SQL resolve path, not the in-memory
+    /// `VaultIndex::resolve_wikilink` (whose only caller is backlink rewriting).
+    fn build_layered_cache(files: &[(&str, &str)]) -> SqliteCache {
+        let dir = TempDir::new().expect("tempdir");
+        for (name, body) in files {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        }
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("index");
+        cache
+    }
+
+    #[test]
+    fn wikilink_resolves_to_the_default_surface_on_a_title_collision() {
+        // `sources/Melatonin` sorts before `wiki/Melatonin` by relative_path, so
+        // the pre-fix `ORDER BY relative_path` returned the clipping. The fix
+        // orders by layer first (default surface before demoted).
+        let cache = build_layered_cache(&[
+            ("sources/.hatchdoor-layer", "sources"),
+            ("sources/Melatonin.md", "# Melatonin\n\nraw clipping"),
+            ("wiki/Melatonin.md", "# Melatonin\n\ncompiled page"),
+        ]);
+
+        let resolved = cache
+            .resolve_wikilink("Melatonin")
+            .expect("resolve")
+            .expect("a note resolves");
+        assert_eq!(
+            resolved.1, "wiki/Melatonin",
+            "[[Melatonin]] must resolve to the default-surface page, not the demoted clipping"
+        );
+    }
+
+    #[test]
+    fn wikilink_by_path_prefers_the_default_surface() {
+        // Exercise the by-path branch: a bare stem that matches two notes'
+        // normalized_relative_path... which cannot happen across folders, so use
+        // an explicit same-basename path to confirm ordering is layer-first.
+        let cache = build_layered_cache(&[
+            ("sources/.hatchdoor-layer", "sources"),
+            ("sources/Melatonin.md", "# Melatonin\n\nraw clipping"),
+            ("wiki/Melatonin.md", "# Melatonin\n\ncompiled page"),
+        ]);
+        // A demoted-only title still resolves (reachability preserved).
+        let cache_single = build_layered_cache(&[
+            ("sources/.hatchdoor-layer", "sources"),
+            ("sources/Ashwagandha.md", "# Ashwagandha\n\nraw clipping"),
+        ]);
+        let resolved = cache_single
+            .resolve_wikilink("Ashwagandha")
+            .expect("resolve")
+            .expect("demoted-only note still resolves");
+        assert_eq!(resolved.1, "sources/Ashwagandha");
+        // And the collision case still prefers default.
+        let resolved = cache
+            .resolve_wikilink("Melatonin")
+            .expect("resolve")
+            .expect("resolves");
+        assert_eq!(resolved.1, "wiki/Melatonin");
     }
 }
