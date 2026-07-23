@@ -290,6 +290,34 @@ impl LayerMap {
     }
 }
 
+/// A note may override its inherited folder marker with frontmatter:
+///
+/// ```yaml
+/// hatchdoor:
+///   layer: sources
+/// ```
+///
+/// Frontmatter is already parsed, is Obsidian-native, and travels with the file
+/// when it moves.
+pub fn layer_from_frontmatter(properties: &serde_json::Value) -> Result<Option<LayerDecl>, String> {
+    let Some(raw) = properties
+        .get("hatchdoor")
+        .and_then(|section| section.get("layer"))
+        .and_then(|value| value.as_str())
+    else {
+        return Ok(None);
+    };
+
+    if raw.nfkc().collect::<String>().trim().to_lowercase() == "default" {
+        return Ok(Some(LayerDecl::Default));
+    }
+
+    Ok(Some(LayerDecl::Named {
+        name: normalize_layer_name(raw)?,
+        description: None,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +713,42 @@ mod tests {
             Some("This is the archive."),
             "description should backfill from later marker"
         );
+    }
+
+    #[test]
+    fn frontmatter_declares_a_file_level_layer() {
+        let properties = serde_json::json!({ "hatchdoor": { "layer": "sources" } });
+        assert_eq!(
+            layer_from_frontmatter(&properties).expect("valid"),
+            Some(LayerDecl::Named {
+                name: "sources".to_string(),
+                description: None
+            })
+        );
+    }
+
+    #[test]
+    fn frontmatter_default_reincludes_a_single_file() {
+        let properties = serde_json::json!({ "hatchdoor": { "layer": "default" } });
+        assert_eq!(
+            layer_from_frontmatter(&properties).expect("valid"),
+            Some(LayerDecl::Default)
+        );
+    }
+
+    #[test]
+    fn frontmatter_without_hatchdoor_key_declares_nothing() {
+        let properties = serde_json::json!({ "tags": ["a"] });
+        assert_eq!(layer_from_frontmatter(&properties).expect("valid"), None);
+        assert_eq!(
+            layer_from_frontmatter(&serde_json::Value::Null).expect("valid"),
+            None
+        );
+    }
+
+    #[test]
+    fn frontmatter_rejects_reserved_layer_name() {
+        let properties = serde_json::json!({ "hatchdoor": { "layer": "noise" } });
+        assert!(layer_from_frontmatter(&properties).is_err());
     }
 }
