@@ -9,6 +9,8 @@ pub struct NoteEntry {
     pub slug: String,
     pub path: PathBuf,
     pub relative_path: String,
+    /// `None` is the default surface.
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -46,6 +48,7 @@ pub struct VaultIndex {
     pub ordered_slugs: Vec<String>,
     pub outgoing_by_slug: HashMap<String, Vec<String>>,
     pub backlinks_by_slug: HashMap<String, Vec<String>>,
+    pub layers: super::layers::LayerMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -89,4 +92,11 @@ pub struct NoteLink {
 pub struct NoteLinks {
     pub outgoing: Vec<NoteLink>,
     pub backlinks: Vec<NoteLink>,
+}
+
+/// Deployment-side scan configuration. Layer classification comes from the
+/// vault itself and is not represented here.
+#[derive(Debug, Default)]
+pub struct VaultScanConfig {
+    pub exclude: super::exclude::ExcludeMatcher,
 }
