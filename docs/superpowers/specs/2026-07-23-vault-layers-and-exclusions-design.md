@@ -550,6 +550,12 @@ model is out of scope. Stated interactions:
   and therefore **promotes a demoted note onto the default surface**. The
   response reports the resulting layer and the server logs a warning. This is a
   known, documented interaction, not a silent one.
+- `delete_note` moves a note to `.hatchdoor-trash/<original path>`
+  (`src/vault/write/paths.rs:311`), which preserves the demoted path *inside* a
+  noise folder. Trash is noise, so the note leaves every surface as intended;
+  because the original path is preserved, restoring it re-resolves to the same
+  layer. No special handling is required — stated so the round trip is a
+  verified property rather than an accident.
 
 ## Web UI
 
@@ -658,6 +664,8 @@ wiki/index.md       → default surface
   by default.
 - **Attachments:** asset serving unaffected by noise; write to a noise path
   errors; layer reported.
+- **Trash round trip:** deleting a demoted note removes it from every surface;
+  restoring it re-resolves to the same layer.
 - **UI:** tree, search, graph and stats hide demoted layers; toggle reveals;
   direct navigation renders with a badge; autocomplete still offers demoted
   notes; citation links carry the layer signal.
