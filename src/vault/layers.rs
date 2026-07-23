@@ -72,6 +72,21 @@ pub fn normalize_layer_name(raw: &str) -> Result<String, String> {
 
 const MAX_DESCRIPTION_CHARS: usize = 500;
 
+/// Test whether a character is a Unicode format character (Cf category) that can
+/// visually reorder or hide text in schemas. Covers the specific ranges that
+/// matter for visual spoofing:
+/// - U+200B–U+200F: zero-width space, ZWNJ, ZWJ, LRM, RLM
+/// - U+202A–U+202E: legacy bidi embedding/override controls (LRE, RLE, PDF, LRO, RLO)
+/// - U+2060–U+2064: word joiner and invisible operators
+/// - U+2066–U+2069: directional isolates (LDI, RDI, FSI, PDI)
+/// - U+FEFF: byte-order mark / zero-width no-break space
+fn is_format_character(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xfeff
+    )
+}
+
 /// What a `.hatchdoor-layer` file declares about its folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayerDecl {
@@ -119,12 +134,18 @@ pub fn parse_marker(contents: &str) -> Result<LayerDecl, String> {
 }
 
 /// Descriptions reach the MCP tool schema every agent reads, so they are
-/// treated as untrusted vault content: control characters stripped, newlines
-/// collapsed, length capped.
+/// treated as untrusted vault content: control characters and format characters
+/// stripped, newlines collapsed, length capped.
 fn sanitize_description(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || is_format_character(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     collapsed.chars().take(MAX_DESCRIPTION_CHARS).collect()
@@ -281,5 +302,91 @@ mod tests {
         assert!(!description.contains('\u{0007}'));
         assert!(description.starts_with("line one line two"));
         assert_eq!(description.chars().count(), 500);
+    }
+
+    #[test]
+    fn sanitize_description_strips_format_characters() {
+        // Format characters (Cf category) can visually reorder or hide text in
+        // schemas that agents read. They must be removed along with control
+        // characters. Test the specific ranges that matter for visual spoofing.
+
+        // Zero-width space U+200B, ZWNJ U+200D, ZWJ U+200C, LRM U+200E, RLM U+200F
+        let with_zwsp = "normal\u{200b}text";
+        assert!(!sanitize_description(with_zwsp).contains('\u{200b}'));
+
+        let with_zwnj = "normal\u{200d}text";
+        assert!(!sanitize_description(with_zwnj).contains('\u{200d}'));
+
+        let with_zwj = "normal\u{200c}text";
+        assert!(!sanitize_description(with_zwj).contains('\u{200c}'));
+
+        let with_lrm = "normal\u{200e}text";
+        assert!(!sanitize_description(with_lrm).contains('\u{200e}'));
+
+        let with_rlm = "normal\u{200f}text";
+        assert!(!sanitize_description(with_rlm).contains('\u{200f}'));
+
+        // Legacy bidi embedding/override controls: U+202A–U+202E
+        let with_lre = "normal\u{202a}text";
+        assert!(!sanitize_description(with_lre).contains('\u{202a}'));
+
+        let with_rle = "normal\u{202b}text";
+        assert!(!sanitize_description(with_rle).contains('\u{202b}'));
+
+        let with_pdf = "normal\u{202c}text";
+        assert!(!sanitize_description(with_pdf).contains('\u{202c}'));
+
+        let with_lro = "normal\u{202d}text";
+        assert!(!sanitize_description(with_lro).contains('\u{202d}'));
+
+        let with_rlo = "normal\u{202e}text";
+        assert!(!sanitize_description(with_rlo).contains('\u{202e}'));
+
+        // Word joiner and invisible operators: U+2060–U+2064
+        let with_wj = "normal\u{2060}text";
+        assert!(!sanitize_description(with_wj).contains('\u{2060}'));
+
+        let with_ifm = "normal\u{2061}text";
+        assert!(!sanitize_description(with_ifm).contains('\u{2061}'));
+
+        let with_it = "normal\u{2062}text";
+        assert!(!sanitize_description(with_it).contains('\u{2062}'));
+
+        let with_is = "normal\u{2063}text";
+        assert!(!sanitize_description(with_is).contains('\u{2063}'));
+
+        let with_ip = "normal\u{2064}text";
+        assert!(!sanitize_description(with_ip).contains('\u{2064}'));
+
+        // Directional isolates: U+2066–U+2069
+        let with_ldi = "normal\u{2066}text";
+        assert!(!sanitize_description(with_ldi).contains('\u{2066}'));
+
+        let with_rdi = "normal\u{2067}text";
+        assert!(!sanitize_description(with_rdi).contains('\u{2067}'));
+
+        let with_fsi = "normal\u{2068}text";
+        assert!(!sanitize_description(with_fsi).contains('\u{2068}'));
+
+        let with_pdi = "normal\u{2069}text";
+        assert!(!sanitize_description(with_pdi).contains('\u{2069}'));
+
+        // Byte-order mark / zero-width no-break space: U+FEFF
+        let with_bom = "normal\u{feff}text";
+        assert!(!sanitize_description(with_bom).contains('\u{feff}'));
+
+        // Verify ordinary text still survives
+        assert_eq!(
+            sanitize_description("A normal description"),
+            "A normal description"
+        );
+        assert_eq!(
+            sanitize_description("with    multiple  spaces"),
+            "with multiple spaces"
+        );
+        assert_eq!(
+            sanitize_description("unicode: café, 資料, Материалы"),
+            "unicode: café, 資料, Материалы"
+        );
     }
 }
