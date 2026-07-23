@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,7 @@ use crate::cache::chunk_ops::{
 use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::startup::IndexingProgressSnapshot;
-use crate::vault::{NoteEntry, VaultIndex, normalize_title};
+use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex, normalize_title};
 
 use super::SqliteCache;
 use super::parse::{
@@ -72,7 +72,39 @@ impl SqliteCache {
             tracing::info!("Layer marker set changed; reclassifying every note");
         }
 
-        let entries = index.ordered_entries();
+        // Guard against silent promotion: if a `.hatchdoor-layer` marker present
+        // at the last index has vanished (a sync tool dropped the dotfile), keep
+        // its notes on their prior layer rather than leaking them onto the default
+        // surface. Read the persisted marker set before opening the write
+        // transaction (get_metadata takes its own connection).
+        let fresh_markers = index.layers.named_markers();
+        let persisted_markers: BTreeMap<String, String> = self
+            .get_metadata("marker_set")?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let mut entries = index.ordered_entries();
+        let vanished_markers =
+            retain_vanished_classifications(&mut entries, &persisted_markers, &fresh_markers);
+        for marker in &vanished_markers {
+            tracing::warn!(
+                expected_marker = %marker.marker_path,
+                layer = %marker.layer,
+                notes = marker.note_count,
+                "Layer marker file is missing; refusing to silently promote its notes to the \
+                 default surface and retaining their prior classification. Reinstate the marker \
+                 to restore it, or clear the persisted marker set to acknowledge the promotion."
+            );
+        }
+        // Persist the effective marker set: fresh markers, plus any vanished ones
+        // whose classification we are retaining, so the guard keeps firing until
+        // the marker is reinstated or the persisted entry is cleared.
+        let mut effective_markers = fresh_markers.clone();
+        for (dir, name) in &persisted_markers {
+            effective_markers
+                .entry(dir.clone())
+                .or_insert_with(|| name.clone());
+        }
+
         let current_paths = entries
             .iter()
             .map(|entry| entry.relative_path.clone())
@@ -221,8 +253,12 @@ impl SqliteCache {
         self.set_metadata("embedder_id", &embedder.identity())?;
 
         // Record the marker set so the next reindex can detect a change and force
-        // the reclassification above (and, in A3, guard against silent promotion).
+        // the reclassification above, and the resolved marker directories so it
+        // can detect a vanished marker and refuse to promote its notes.
         self.set_metadata("marker_set_hash", &marker_set_hash)?;
+        let effective_markers_json = serde_json::to_string(&effective_markers)
+            .map_err(|e| format!("failed serializing marker set: {e}"))?;
+        self.set_metadata("marker_set", &effective_markers_json)?;
 
         let elapsed = started_at.elapsed();
         let failure_summary = if per_note_failures == 0 {
@@ -787,6 +823,86 @@ fn delete_note_by_relative_path(tx: &Transaction<'_>, relative_path: &str) -> Re
     )
     .map_err(|error| format!("failed deleting cached note '{relative_path}': {error}"))?;
     Ok(())
+}
+
+/// A marker that was in the persisted set but is absent from the freshly
+/// collected one, plus the count of notes whose classification is being retained
+/// (rather than silently promoted to the default surface).
+#[derive(Debug, PartialEq, Eq)]
+struct VanishedMarker {
+    marker_path: String,
+    layer: String,
+    note_count: usize,
+}
+
+/// True when `relative_path` sits inside (or is) the marker directory `dir`.
+fn path_is_under(relative_path: &str, dir: &str) -> bool {
+    dir.is_empty() || relative_path == dir || relative_path.starts_with(&format!("{dir}/"))
+}
+
+/// Guard against silent promotion. A `.hatchdoor-layer` dotfile can be dropped
+/// invisibly by sync tooling; if its notes were then reclassified onto the
+/// default surface they would leak into every default search, tree and graph.
+///
+/// For each marker present in the persisted set but gone from the fresh one,
+/// any note that the fresh index would place on the default surface (`layer =
+/// None`) but that still sits under the vanished marker's directory keeps the
+/// marker's layer. Notes the fresh index still classifies (nearest surviving
+/// marker) are left alone — a reclassification between two live layers is not a
+/// promotion. Returns one report per vanished marker so the caller can log it.
+fn retain_vanished_classifications(
+    entries: &mut [NoteEntry],
+    persisted_markers: &BTreeMap<String, String>,
+    fresh_markers: &BTreeMap<String, String>,
+) -> Vec<VanishedMarker> {
+    let vanished: BTreeMap<&String, &String> = persisted_markers
+        .iter()
+        .filter(|(dir, _)| !fresh_markers.contains_key(*dir))
+        .collect();
+    if vanished.is_empty() {
+        return Vec::new();
+    }
+
+    for entry in entries.iter_mut() {
+        if entry.layer.is_some() {
+            continue;
+        }
+        // Longest-prefix wins, matching nearest-marker resolution.
+        let mut best: Option<(&str, usize)> = None;
+        for (dir, name) in &vanished {
+            if path_is_under(&entry.relative_path, dir)
+                && best.is_none_or(|(_, len)| dir.len() >= len)
+            {
+                best = Some((name.as_str(), dir.len()));
+            }
+        }
+        if let Some((name, _)) = best {
+            entry.layer = Some(name.to_string());
+        }
+    }
+
+    vanished
+        .into_iter()
+        .map(|(dir, name)| {
+            let note_count = entries
+                .iter()
+                .filter(|entry| {
+                    entry.layer.as_deref() == Some(name.as_str())
+                        && path_is_under(&entry.relative_path, dir)
+                })
+                .count();
+            let marker_path = if dir.is_empty() {
+                MARKER_FILE_NAME.to_string()
+            } else {
+                format!("{dir}/{MARKER_FILE_NAME}")
+            };
+            VanishedMarker {
+                marker_path,
+                layer: name.clone(),
+                note_count,
+            }
+        })
+        .collect()
 }
 
 fn upsert_note_if_changed(
@@ -1529,6 +1645,103 @@ mod tests {
             None,
             "default-surface note must record layer IS NULL"
         );
+    }
+
+    #[test]
+    fn a_vanished_marker_does_not_silently_promote_its_notes() {
+        // `.hatchdoor-layer` is a dotfile that sync tools drop invisibly. If the
+        // marker disappears, promoting its (possibly thousands of) notes onto the
+        // default surface is the modal silent failure. The reindex must refuse to
+        // promote and retain the prior classification instead.
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        std::fs::write(dir.path().join("sources/Clip.md"), "# Clip\nraw source").expect("note");
+        let marker = dir.path().join("sources/.hatchdoor-layer");
+        std::fs::write(&marker, "sources").expect("marker");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("initial populate");
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "precondition: note is demoted while the marker exists"
+        );
+
+        // The marker vanishes (a sync tool dropped it).
+        std::fs::remove_file(&marker).expect("remove marker");
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        assert_eq!(
+            index.by_slug["clip"].layer, None,
+            "precondition: the fresh index would promote the note to the default surface"
+        );
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("reindex populate");
+
+        // The note must keep its prior classification, not be silently promoted.
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "a vanished marker must not silently promote its notes"
+        );
+    }
+
+    #[test]
+    fn retain_vanished_classifications_reports_and_overrides() {
+        let mut entries = vec![
+            NoteEntry {
+                title: "Clip".to_string(),
+                slug: "clip".to_string(),
+                path: "/x/sources/Clip.md".into(),
+                relative_path: "sources/Clip.md".to_string(),
+                layer: None,
+            },
+            NoteEntry {
+                title: "Page".to_string(),
+                slug: "page".to_string(),
+                path: "/x/wiki/Page.md".into(),
+                relative_path: "wiki/Page.md".to_string(),
+                layer: None,
+            },
+        ];
+        let persisted: BTreeMap<String, String> = [("sources".to_string(), "sources".to_string())]
+            .into_iter()
+            .collect();
+        let fresh: BTreeMap<String, String> = BTreeMap::new();
+
+        let report = retain_vanished_classifications(&mut entries, &persisted, &fresh);
+
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].marker_path, "sources/.hatchdoor-layer");
+        assert_eq!(report[0].layer, "sources");
+        assert_eq!(report[0].note_count, 1);
+        // The note under the vanished marker retains its layer; the unrelated
+        // default-surface note is untouched.
+        assert_eq!(entries[0].layer.as_deref(), Some("sources"));
+        assert_eq!(entries[1].layer, None);
+    }
+
+    #[test]
+    fn retain_vanished_classifications_noop_when_nothing_vanished() {
+        let mut entries = vec![NoteEntry {
+            title: "Clip".to_string(),
+            slug: "clip".to_string(),
+            path: "/x/sources/Clip.md".into(),
+            relative_path: "sources/Clip.md".to_string(),
+            layer: Some("sources".to_string()),
+        }];
+        let markers: BTreeMap<String, String> = [("sources".to_string(), "sources".to_string())]
+            .into_iter()
+            .collect();
+
+        let report = retain_vanished_classifications(&mut entries, &markers, &markers);
+        assert!(report.is_empty());
+        assert_eq!(entries[0].layer.as_deref(), Some("sources"));
     }
 
     #[test]
