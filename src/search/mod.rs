@@ -192,8 +192,11 @@ pub fn query_notes(
     include_properties: &[String],
     limit: usize,
 ) -> Result<Vec<NoteSummary>, String> {
+    // Group D threads the caller's LayerSelection here; until search itself is
+    // layer-aware (Group C's per-layer vector tables), preserve today's
+    // behaviour of considering every layer.
     Ok(cache
-        .note_summaries()?
+        .note_summaries(&LayerSelection::all())?
         .into_iter()
         .filter(|note| filters.matches(note))
         .take(limit)
@@ -213,7 +216,7 @@ pub(crate) fn matching_note_slugs(
     }
     Ok(Some(
         cache
-            .note_summaries()?
+            .note_summaries(&LayerSelection::all())?
             .into_iter()
             .filter(|note| filters.matches(note))
             .map(|note| note.slug)

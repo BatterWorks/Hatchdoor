@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, params};
 
 use crate::cache::SqliteCache;
+use crate::search::LayerSelection;
 use crate::vault::{ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteMetadata, NoteSummary};
 
 impl SqliteCache {
@@ -81,7 +82,7 @@ impl SqliteCache {
         }))
     }
 
-    pub fn note_summaries(&self) -> Result<Vec<NoteSummary>, String> {
+    pub fn note_summaries(&self, selection: &LayerSelection) -> Result<Vec<NoteSummary>, String> {
         let conn = self.read()?;
         let mut tags_by_slug: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
@@ -99,11 +100,13 @@ impl SqliteCache {
         }
         drop(tags_stmt);
 
+        let sql = format!(
+            "SELECT title, slug, relative_path, aliases_json, frontmatter_json \
+             FROM notes WHERE {} ORDER BY relative_path",
+            selection.sql_filter("layer"),
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT title, slug, relative_path, aliases_json, frontmatter_json \
-                 FROM notes ORDER BY relative_path",
-            )
+            .prepare(&sql)
             .map_err(|error| format!("failed preparing note metadata query: {error}"))?;
         let rows = stmt
             .query_map([], |row| {
@@ -137,8 +140,8 @@ impl SqliteCache {
         Ok(notes)
     }
 
-    pub fn explorer_tree(&self) -> Result<ExplorerFolder, String> {
-        let rows = self.note_rows_ordered()?;
+    pub fn explorer_tree(&self, selection: &LayerSelection) -> Result<ExplorerFolder, String> {
+        let rows = self.note_rows_ordered(selection)?;
         let mut root = FolderBuilder::default();
 
         for row in rows {
@@ -159,21 +162,28 @@ impl SqliteCache {
         Ok(root.build("Vault"))
     }
 
-    pub fn recently_modified_notes(&self, limit: usize) -> Result<Vec<ModifiedNote>, String> {
+    pub fn recently_modified_notes(
+        &self,
+        limit: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<ModifiedNote>, String> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
         let conn = self.read()?;
-        let mut stmt = conn
-            .prepare(
-                r#"
+        let sql = format!(
+            r#"
                 SELECT title, slug, relative_path, mtime_ns
                 FROM notes
+                WHERE {}
                 ORDER BY mtime_ns DESC, relative_path ASC
                 LIMIT ?1
                 "#,
-            )
+            selection.sql_filter("layer"),
+        );
+        let mut stmt = conn
+            .prepare(&sql)
             .map_err(|error| format!("failed to prepare recently modified query: {error}"))?;
         let rows = stmt
             .query_map(params![limit as i64], |row| {
@@ -190,10 +200,14 @@ impl SqliteCache {
             .map_err(|error| format!("failed to read recently modified notes: {error}"))
     }
 
-    fn note_rows_ordered(&self) -> Result<Vec<NoteRow>, String> {
+    fn note_rows_ordered(&self, selection: &LayerSelection) -> Result<Vec<NoteRow>, String> {
         let conn = self.read()?;
+        let sql = format!(
+            "SELECT title, slug, relative_path FROM notes WHERE {} ORDER BY relative_path",
+            selection.sql_filter("layer"),
+        );
         let mut stmt = conn
-            .prepare("SELECT title, slug, relative_path FROM notes ORDER BY relative_path")
+            .prepare(&sql)
             .map_err(|error| format!("failed to prepare note list query: {error}"))?;
         let rows = stmt
             .query_map([], |row| {
@@ -596,6 +610,93 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    use crate::search::LayerSelection;
+
+    /// Builds a vault with a demoted `sources/` layer and a default-surface
+    /// `wiki/` folder, then populates a fresh in-memory cache from it.
+    fn build_layered_cache() -> SqliteCache {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(dir.path().join("sources/Clip.md"), "# Clip\nraw source").expect("clip");
+        fs::write(dir.path().join("wiki/Page.md"), "# Page\ncompiled").expect("page");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+        cache
+    }
+
+    fn tree_slugs(folder: &crate::vault::ExplorerFolder, out: &mut Vec<String>) {
+        for note in &folder.notes {
+            out.push(note.slug.clone());
+        }
+        for child in &folder.folders {
+            tree_slugs(child, out);
+        }
+    }
+
+    #[test]
+    fn default_selection_hides_demoted_notes_from_tree_and_summaries() {
+        let cache = build_layered_cache();
+
+        // Default surface: the demoted clipping is absent from both surfaces.
+        let tree = cache
+            .explorer_tree(&LayerSelection::default_surface())
+            .expect("tree");
+        let mut slugs = Vec::new();
+        tree_slugs(&tree, &mut slugs);
+        assert!(
+            slugs.contains(&"page".to_string()),
+            "default tree keeps the wiki page"
+        );
+        assert!(
+            !slugs.contains(&"clip".to_string()),
+            "default tree must hide the demoted clipping"
+        );
+
+        let summaries = cache
+            .note_summaries(&LayerSelection::default_surface())
+            .expect("summaries");
+        let summary_slugs: Vec<String> = summaries.iter().map(|n| n.slug.clone()).collect();
+        assert!(summary_slugs.contains(&"page".to_string()));
+        assert!(
+            !summary_slugs.contains(&"clip".to_string()),
+            "default summaries must hide the demoted clipping"
+        );
+
+        let recent = cache
+            .recently_modified_notes(10, &LayerSelection::default_surface())
+            .expect("recent");
+        assert!(recent.iter().all(|n| n.slug != "clip"));
+    }
+
+    #[test]
+    fn selecting_the_layer_reveals_its_demoted_notes() {
+        let cache = build_layered_cache();
+        let (selection, warnings) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        assert!(warnings.is_empty());
+
+        let summaries = cache.note_summaries(&selection).expect("summaries");
+        let summary_slugs: Vec<String> = summaries.iter().map(|n| n.slug.clone()).collect();
+        assert_eq!(
+            summary_slugs,
+            vec!["clip".to_string()],
+            "selecting sources returns only the demoted clipping"
+        );
+
+        let recent = cache
+            .recently_modified_notes(10, &selection)
+            .expect("recent");
+        assert!(recent.iter().any(|n| n.slug == "clip"));
+        assert!(recent.iter().all(|n| n.slug != "page"));
+    }
+
     #[test]
     fn read_note_exposes_normalized_frontmatter_metadata() {
         let dir = tempdir().expect("temp dir");
@@ -659,7 +760,7 @@ mod tests {
         }
 
         let notes = cache
-            .recently_modified_notes(2)
+            .recently_modified_notes(2, &LayerSelection::default_surface())
             .expect("recently modified notes");
 
         assert_eq!(
