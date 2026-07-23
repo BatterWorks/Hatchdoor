@@ -198,23 +198,21 @@ prompt-injection channel from vault content into the tool contract, in a server
 whose own instructions already declare note content untrusted. Before rendering:
 strip control characters, collapse newlines, cap at 500 characters.
 
-### File-level override via frontmatter
+### File-level demotion is out of scope
 
-Markers are folder-scoped, which cannot express individual files that are
-content but not a browsing surface — `log.md`, `index.md`, `README.md`, a
-`TODO.md`. Moving such a file into a demoted folder changes its path and breaks
-its wikilinks.
+Layers are folder-scoped: a `.hatchdoor-layer` marker demotes its folder and
+everything beneath it. There is no way to demote an *individual* file whose
+folder is otherwise on the default surface — `log.md`, `index.md`, a running
+`README.md`.
 
-A note may therefore carry frontmatter:
-
-```yaml
-hatchdoor:
-  layer: sources
-```
-
-Frontmatter is already parsed, is Obsidian-native, and travels with the file.
-File-level declaration overrides any inherited folder marker. The same name
-rules and reserved names apply; `layer: default` re-includes a single file.
+A frontmatter override (`hatchdoor: { layer: … }`) was designed and built for
+this, then removed before it had any consumer, because the single-file need is
+unproven and the feature created an awkward asymmetry: `VaultIndex::build` never
+opens a file, so a frontmatter-declared layer could never participate in slug
+precedence the way a folder marker does. If the need materialises, it can be
+reintroduced deliberately — and the slug-precedence question resolved at the
+same time — rather than carried as speculative surface area. The near-term
+answer for such a file is to place it in a demoted folder.
 
 ### Write tools must refuse to write markers
 
@@ -703,8 +701,8 @@ wiki/index.md       → default surface
 ## Testing
 
 - **Layer resolution:** nearest-marker-wins, inheritance, `default` override on
-  a nested folder, two folders sharing one layer name, frontmatter override
-  beating a folder marker, root marker rejected, symlinks not followed.
+  a nested folder, two folders sharing one layer name, root marker rejected,
+  symlinks not followed.
 - **Marker parsing:** bare scalar, full mapping, unknown keys ignored, reserved
   names rejected, slug normalization (NFKC, case, spaces, over-length, empty),
   description sanitized and capped, malformed marker fails startup, malformed

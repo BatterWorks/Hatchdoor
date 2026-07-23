@@ -10,7 +10,7 @@ mod types;
 mod write;
 
 pub use exclude::{DEFAULT_EXCLUDE_PATTERNS, ExcludeMatcher};
-pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME, layer_from_frontmatter};
+pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME};
 #[cfg(test)]
 pub use paths::strip_md_extension;
 pub use paths::{content_snippet, normalize_link_target, normalize_title, slugify};

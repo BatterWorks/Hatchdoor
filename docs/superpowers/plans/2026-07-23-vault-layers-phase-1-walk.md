@@ -1338,6 +1338,7 @@ Written down so nothing here is mistaken for an omission. Each becomes its own p
 
   **Phase 6 also owns the startup failure path, which phase 1 leaves unrecoverable.** A malformed marker fails the index build; `src/server.rs:413` then marks startup failed and skips spawning both the vault watcher and git sync, so the server serves the stale cache forever and fixing the marker on disk does nothing until a restart. Phase 6 must spawn the watcher in the failure arm and clear the failed state on a successful recovery. Reconcile at the same time with the codebase's warn-and-degrade convention for malformed vault YAML (`src/cache/populate.rs:896`).
 
-- **Unassigned, needs a phase:** `layer_from_frontmatter` is implemented and exported but has no consumer and appears in no phase. The spec's requirement that write tools refuse to create `.hatchdoor-layer` files also has no phase. Both need owners before they rot.
+- **Removed:** file-level demotion via frontmatter (`layer_from_frontmatter`) was built in Task 5 and removed afterward — the single-file need is unproven and it could never participate in slug precedence (the walk does not open files). See the spec's "File-level demotion is out of scope".
+- **Unassigned, needs a phase:** the spec's requirement that write tools refuse to create `.hatchdoor-layer` files has no phase yet. It needs an owner before it rots.
 
 Note that until phase 6 lands, `HATCHDOOR_EXCLUDE` is not yet read from the environment: this phase builds the mechanism and wires only the built-in defaults.
