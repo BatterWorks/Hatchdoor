@@ -1,5 +1,7 @@
 //! Layer markers: parsing `.hatchdoor-layer` files and resolving which layer a
-//! vault path belongs to. Pure logic — the walk policy lives in `index.rs`.
+//! vault path belongs to. This module owns the marker-collection walk (a separate,
+//! independent traversal from the noise-pruning content walk in `index.rs`), because
+//! a marker inside a noise-pruned directory must still be collected for portability.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -214,6 +216,13 @@ impl LayerMap {
                 let entry = chosen
                     .entry(name.clone())
                     .or_insert_with(|| (display.clone(), description.clone()));
+                // When multiple markers declare the same layer name, the
+                // lexicographically-first marker's path wins. However, if the first
+                // marker has no description and a later one does, the later description
+                // backfills. This is deliberate: a description beats none, and picking
+                // the first *non-empty* description in lexicographic order is still
+                // fully deterministic and more useful than silently discarding a
+                // provided description.
                 if entry.1.is_none() {
                     entry.1 = description.clone();
                 }
@@ -613,6 +622,68 @@ mod tests {
         assert!(
             err.contains("sources/.hatchdoor-layer"),
             "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn layer_map_does_not_confuse_sibling_directories_sharing_a_prefix() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        fs::create_dir_all(dir.path().join("sources-old")).expect("dirs");
+        fs::write(
+            dir.path().join("sources/.hatchdoor-layer"),
+            "name: primary\n",
+        )
+        .expect("marker");
+        fs::write(
+            dir.path().join("sources-old/.hatchdoor-layer"),
+            "name: archive\n",
+        )
+        .expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        // A note under sources/ resolves to the first layer
+        assert_eq!(map.layer_for("sources/A.md"), Some("primary"));
+        // A note under sources-old/ resolves to the second layer, not the first
+        assert_eq!(map.layer_for("sources-old/B.md"), Some("archive"));
+    }
+
+    #[test]
+    fn layer_map_does_not_confuse_sibling_directories_when_only_prefix_has_marker() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        fs::create_dir_all(dir.path().join("sources-old")).expect("dirs");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "primary").expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        // A note under sources/ resolves to the marker's layer
+        assert_eq!(map.layer_for("sources/A.md"), Some("primary"));
+        // A note under sources-old/ (which has no marker) resolves to None (default surface)
+        assert_eq!(map.layer_for("sources-old/B.md"), None);
+    }
+
+    #[test]
+    fn layer_map_description_backfills_when_the_first_marker_has_none() {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("aaa")).expect("dirs");
+        fs::create_dir_all(dir.path().join("zzz")).expect("dirs");
+        fs::write(dir.path().join("aaa/.hatchdoor-layer"), "name: sources\n").expect("marker");
+        fs::write(
+            dir.path().join("zzz/.hatchdoor-layer"),
+            "name: sources\ndescription: This is the archive.\n",
+        )
+        .expect("marker");
+
+        let map = LayerMap::collect(dir.path()).expect("collect");
+
+        // The lexicographically-first marker (aaa/) has no description, but the
+        // second one (zzz/) does, so backfill applies and we get the zzz description
+        assert_eq!(
+            map.description("sources"),
+            Some("This is the archive."),
+            "description should backfill from later marker"
         );
     }
 }
