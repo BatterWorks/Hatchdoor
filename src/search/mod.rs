@@ -31,6 +31,9 @@ pub struct SearchRequest {
     pub per_note_cap: usize,
     pub filters: NoteFilters,
     pub include_properties: Vec<String>,
+    /// Which layers to search. Defaults to the default surface only; Group D
+    /// wires the MCP `layers` parameter through to here.
+    pub layers: LayerSelection,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -291,6 +294,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("run");
@@ -315,6 +319,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("run");
@@ -336,6 +341,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect_err("expected empty-query error");
@@ -364,6 +370,7 @@ mod tests {
                 per_note_cap: 1,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("run");
@@ -407,6 +414,7 @@ mod tests {
                     .expect("property filters"),
                 },
                 include_properties: vec!["status".to_string()],
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("filtered search");
@@ -434,6 +442,7 @@ mod tests {
                     ..Default::default()
                 },
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("filtered semantic search");
@@ -477,6 +486,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("nested tag search");
@@ -558,6 +568,7 @@ mod tests {
                     ..Default::default()
                 },
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("filtered search");

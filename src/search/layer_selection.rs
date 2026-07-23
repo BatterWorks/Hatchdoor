@@ -109,6 +109,43 @@ impl LayerSelection {
         )
     }
 
+    /// True for the default-surface-only selection (an omitted/empty `layers`).
+    /// Used to keep that common case on the exact unfiltered KNN fast path.
+    pub fn is_default_surface(&self) -> bool {
+        matches!(
+            self,
+            LayerSelection::Set {
+                include_default: true,
+                layers,
+            } if layers.is_empty()
+        )
+    }
+
+    /// Whether this selection includes the default surface (`layer IS NULL`).
+    pub fn includes_default(&self) -> bool {
+        match self {
+            LayerSelection::All => true,
+            LayerSelection::Set {
+                include_default, ..
+            } => *include_default,
+        }
+    }
+
+    /// The named demoted layers this selection asks for. Empty for the default
+    /// surface. Note `All` returns empty here — callers must treat `All` as
+    /// "every demoted layer" separately (an unconstrained demoted-table query).
+    pub fn named_layers(&self) -> Vec<String> {
+        match self {
+            LayerSelection::All => Vec::new(),
+            LayerSelection::Set { layers, .. } => layers.iter().cloned().collect(),
+        }
+    }
+
+    /// Whether this selection covers every demoted layer (the `all` token).
+    pub fn is_all(&self) -> bool {
+        matches!(self, LayerSelection::All)
+    }
+
     /// A SQL boolean expression over `column` (e.g. `"layer"`, `"n.layer"`,
     /// `"target.layer"`) that is true for exactly the rows this selection
     /// includes. Splice it into a `WHERE`/`AND` clause.

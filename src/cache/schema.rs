@@ -131,6 +131,7 @@ fn existing_schema_version(conn: &rusqlite::Connection) -> Result<SchemaState, S
 fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute_batch(
         r#"
+        DROP TABLE IF EXISTS chunk_vectors_demoted;
         DROP TABLE IF EXISTS chunk_vectors;
         DROP TRIGGER IF EXISTS chunk_fts_au;
         DROP TRIGGER IF EXISTS chunk_fts_ad;
@@ -260,6 +261,20 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors USING vec0(
             chunk_id  INTEGER PRIMARY KEY,
             embedding FLOAT[{dim}]
+        );
+
+        -- Demoted-layer chunk vectors live in a SEPARATE vec0 table from the
+        -- default surface so that default search stays an unfiltered KNN against
+        -- `chunk_vectors` (the proven fast path) and never scans a demoted vector.
+        -- `layer` is a vec0 PARTITION KEY: a per-layer KNN
+        -- (`... WHERE embedding MATCH ? AND k = ? AND layer = ?`) is pushed down to
+        -- the matching partition and stays on the KNN plan, so layer separation
+        -- never falls back to the Rust full-scan path. One table (not one per
+        -- layer) keeps the DDL fixed regardless of the vault's layer names.
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vectors_demoted USING vec0(
+            chunk_id  INTEGER PRIMARY KEY,
+            embedding FLOAT[{dim}],
+            layer     TEXT PARTITION KEY
         );
 
         INSERT INTO metadata(key, value)

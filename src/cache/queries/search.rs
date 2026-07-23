@@ -7,7 +7,42 @@ use rusqlite::params;
 use crate::cache::SqliteCache;
 use crate::cache::parse::{build_fts_query, fts_query_terms};
 use crate::embed::Embedder;
+use crate::search::LayerSelection;
 use crate::vault::{SearchHit, content_snippet, normalize_title};
+
+/// The default-surface semantic KNN query (against `chunk_vectors`). Kept as a
+/// named constant so a test can assert the default search path runs THIS query —
+/// the unfiltered vec0 KNN — rather than the Rust full-scan fallback.
+pub(crate) const DEFAULT_SEMANTIC_KNN_SQL: &str = r#"
+    SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance
+    FROM chunk_vectors v
+    JOIN chunks c ON c.id = v.chunk_id
+    WHERE v.embedding MATCH ?1
+      AND v.k = ?2
+    ORDER BY v.distance
+    "#;
+
+/// The per-layer demoted KNN query. `?3` binds the layer, which is the vec0
+/// PARTITION KEY, so the scan is pruned to that partition and stays a KNN.
+const DEMOTED_SEMANTIC_KNN_SQL: &str = r#"
+    SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance
+    FROM chunk_vectors_demoted v
+    JOIN chunks c ON c.id = v.chunk_id
+    WHERE v.embedding MATCH ?1
+      AND v.k = ?2
+      AND v.layer = ?3
+    ORDER BY v.distance
+    "#;
+
+/// The demoted KNN query across every layer (for the `all` selector).
+const DEMOTED_SEMANTIC_KNN_ALL_SQL: &str = r#"
+    SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance
+    FROM chunk_vectors_demoted v
+    JOIN chunks c ON c.id = v.chunk_id
+    WHERE v.embedding MATCH ?1
+      AND v.k = ?2
+    ORDER BY v.distance
+    "#;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -186,16 +221,7 @@ impl SqliteCache {
 
         let conn = self.read()?;
         let mut stmt = conn
-            .prepare(
-                r#"
-            SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance
-            FROM chunk_vectors v
-            JOIN chunks c ON c.id = v.chunk_id
-            WHERE v.embedding MATCH ?1
-              AND v.k = ?2
-            ORDER BY v.distance
-            "#,
-            )
+            .prepare(DEFAULT_SEMANTIC_KNN_SQL)
             .map_err(|e| format!("prepare semantic_search: {e}"))?;
         let rows = stmt
             .query_map(rusqlite::params![query_bytes, k as i64], |row| {
@@ -215,11 +241,96 @@ impl SqliteCache {
         Ok(hits)
     }
 
+    /// Layer-aware semantic search on the fast vec0 KNN path (no note filters).
+    ///
+    /// Runs an unfiltered KNN against each vec0 table the selection covers — the
+    /// default table (`chunk_vectors`) for the default surface and the demoted
+    /// table (`chunk_vectors_demoted`, partition-pruned per layer) for named
+    /// layers — then merges by distance. No path scans a table it does not
+    /// select, so default search never touches a demoted vector and never falls
+    /// onto the Rust full-scan path.
+    pub fn semantic_search_layered(
+        &self,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<SemanticHit>, String> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let prefixed_query = format!("{}{}", embedder.query_prefix(), query);
+        let query_vec = embedder
+            .embed(&[prefixed_query])?
+            .into_iter()
+            .next()
+            .ok_or("embedder returned no vectors")?;
+        let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
+
+        let conn = self.read()?;
+        let read_hit = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SemanticHit> {
+            Ok(SemanticHit {
+                chunk_id: row.get(0)?,
+                note_slug: row.get(1)?,
+                heading_path: row.get(2)?,
+                content: row.get(3)?,
+                distance: row.get::<_, f64>(4)? as f32,
+            })
+        };
+        let mut hits = Vec::new();
+
+        if selection.includes_default() {
+            let mut stmt = conn
+                .prepare(DEFAULT_SEMANTIC_KNN_SQL)
+                .map_err(|e| format!("prepare default KNN: {e}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params![query_bytes, k as i64], read_hit)
+                .map_err(|e| format!("query default KNN: {e}"))?;
+            for row in rows {
+                hits.push(row.map_err(|e| format!("read default KNN row: {e}"))?);
+            }
+        }
+
+        if selection.is_all() {
+            let mut stmt = conn
+                .prepare(DEMOTED_SEMANTIC_KNN_ALL_SQL)
+                .map_err(|e| format!("prepare demoted-all KNN: {e}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params![query_bytes, k as i64], read_hit)
+                .map_err(|e| format!("query demoted-all KNN: {e}"))?;
+            for row in rows {
+                hits.push(row.map_err(|e| format!("read demoted-all KNN row: {e}"))?);
+            }
+        } else {
+            for layer in selection.named_layers() {
+                let mut stmt = conn
+                    .prepare(DEMOTED_SEMANTIC_KNN_SQL)
+                    .map_err(|e| format!("prepare demoted KNN: {e}"))?;
+                let rows = stmt
+                    .query_map(rusqlite::params![query_bytes, k as i64, layer], read_hit)
+                    .map_err(|e| format!("query demoted KNN: {e}"))?;
+                for row in rows {
+                    hits.push(row.map_err(|e| format!("read demoted KNN row: {e}"))?);
+                }
+            }
+        }
+
+        hits.sort_by(|left, right| left.distance.total_cmp(&right.distance));
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    /// Layer-aware semantic search with a note-slug filter (tags/path/property
+    /// filters are present). This is the accepted slow path — it reads every
+    /// vector in the SELECTED tables and scores in Rust — but it is only entered
+    /// when note filters exist, never for plain layer separation, and it reads
+    /// only the tables the selection covers.
     pub fn semantic_search_filtered(
         &self,
         embedder: &dyn Embedder,
         query: &str,
         k: usize,
+        selection: &LayerSelection,
         eligible_slugs: &HashSet<String>,
     ) -> Result<Vec<SemanticHit>, String> {
         if k == 0 || eligible_slugs.is_empty() {
@@ -232,17 +343,15 @@ impl SqliteCache {
             .next()
             .ok_or("embedder returned no vectors")?;
         let conn = self.read()?;
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.embedding
-                FROM chunk_vectors v
-                JOIN chunks c ON c.id = v.chunk_id
-                "#,
-            )
-            .map_err(|error| format!("prepare filtered semantic search: {error}"))?;
-        let rows = stmt
-            .query_map([], |row| {
+        let mut hits = Vec::new();
+
+        // Each (sql, params) scan reads chunk_id, note_slug, heading_path,
+        // content, embedding for one selected table.
+        let mut scan = |sql: &str, layer: Option<&str>| -> Result<(), String> {
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|error| format!("prepare filtered semantic scan: {error}"))?;
+            let map_row = |row: &rusqlite::Row<'_>| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -250,38 +359,68 @@ impl SqliteCache {
                     row.get::<_, String>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
                 ))
-            })
-            .map_err(|error| format!("query filtered semantic search: {error}"))?;
-        let mut hits = Vec::new();
-        for row in rows {
-            let (chunk_id, note_slug, heading_path, content, bytes) =
-                row.map_err(|error| format!("read filtered semantic row: {error}"))?;
-            if !eligible_slugs.contains(&note_slug) {
-                continue;
+            };
+            let rows = match layer {
+                None => stmt.query_map([], map_row),
+                Some(layer) => stmt.query_map(rusqlite::params![layer], map_row),
             }
-            if bytes.len() != query_vector.len() * std::mem::size_of::<f32>() {
-                return Err(format!(
-                    "cached embedding dimension mismatch for chunk {chunk_id}"
-                ));
+            .map_err(|error| format!("query filtered semantic scan: {error}"))?;
+            for row in rows {
+                let (chunk_id, note_slug, heading_path, content, bytes) =
+                    row.map_err(|error| format!("read filtered semantic row: {error}"))?;
+                if !eligible_slugs.contains(&note_slug) {
+                    continue;
+                }
+                if bytes.len() != query_vector.len() * std::mem::size_of::<f32>() {
+                    return Err(format!(
+                        "cached embedding dimension mismatch for chunk {chunk_id}"
+                    ));
+                }
+                let distance = bytes
+                    .chunks_exact(4)
+                    .zip(&query_vector)
+                    .map(|(bytes, query_value)| {
+                        let value = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                        let difference = value - query_value;
+                        difference * difference
+                    })
+                    .sum::<f32>()
+                    .sqrt();
+                hits.push(SemanticHit {
+                    chunk_id,
+                    note_slug,
+                    heading_path,
+                    content,
+                    distance,
+                });
             }
-            let distance = bytes
-                .chunks_exact(4)
-                .zip(&query_vector)
-                .map(|(bytes, query_value)| {
-                    let value = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                    let difference = value - query_value;
-                    difference * difference
-                })
-                .sum::<f32>()
-                .sqrt();
-            hits.push(SemanticHit {
-                chunk_id,
-                note_slug,
-                heading_path,
-                content,
-                distance,
-            });
+            Ok(())
+        };
+
+        if selection.includes_default() {
+            scan(
+                "SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.embedding \
+                 FROM chunk_vectors v JOIN chunks c ON c.id = v.chunk_id",
+                None,
+            )?;
         }
+        if selection.is_all() {
+            scan(
+                "SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.embedding \
+                 FROM chunk_vectors_demoted v JOIN chunks c ON c.id = v.chunk_id",
+                None,
+            )?;
+        } else {
+            for layer in selection.named_layers() {
+                scan(
+                    "SELECT v.chunk_id, c.note_slug, c.heading_path, c.content, v.embedding \
+                     FROM chunk_vectors_demoted v JOIN chunks c ON c.id = v.chunk_id \
+                     WHERE v.layer = ?1",
+                    Some(&layer),
+                )?;
+            }
+        }
+
         hits.sort_by(|left, right| left.distance.total_cmp(&right.distance));
         hits.truncate(k);
         Ok(hits)
@@ -364,10 +503,62 @@ impl SqliteCache {
         Ok(hits)
     }
 
+    /// Layer-aware keyword search (no note filters). Applies the same
+    /// `LayerSelection` as semantic search by joining `notes` and constraining
+    /// `notes.layer` — a cheap, indexed SQL predicate, so keyword search over the
+    /// default surface never returns a demoted chunk.
+    pub fn fts_search_chunks_layered(
+        &self,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(fts_q) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.read()?;
+        let sql = format!(
+            r#"
+            SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)
+            FROM chunk_fts
+            JOIN chunks c ON c.id = chunk_fts.rowid
+            JOIN notes n ON n.slug = c.note_slug
+            WHERE chunk_fts MATCH ?1
+              AND {layer}
+            ORDER BY bm25(chunk_fts)
+            LIMIT ?2
+            "#,
+            layer = selection.sql_filter("n.layer"),
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("prepare layered FTS search: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![fts_q, k as i64], |row| {
+                Ok(ChunkFtsHit {
+                    chunk_id: row.get(0)?,
+                    note_slug: row.get(1)?,
+                    heading_path: row.get(2)?,
+                    content: row.get(3)?,
+                    bm25: row.get::<_, f64>(4)? as f32,
+                })
+            })
+            .map_err(|e| format!("query layered FTS search: {e}"))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            hits.push(row.map_err(|e| format!("read layered FTS row: {e}"))?);
+        }
+        Ok(hits)
+    }
+
     pub fn fts_search_chunks_filtered(
         &self,
         query: &str,
         k: usize,
+        selection: &LayerSelection,
         eligible_slugs: &HashSet<String>,
     ) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 || eligible_slugs.is_empty() {
@@ -377,16 +568,20 @@ impl SqliteCache {
             return Ok(Vec::new());
         };
         let conn = self.read()?;
-        let mut stmt = conn
-            .prepare(
-                r#"
+        let sql = format!(
+            r#"
                 SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)
                 FROM chunk_fts
                 JOIN chunks c ON c.id = chunk_fts.rowid
+                JOIN notes n ON n.slug = c.note_slug
                 WHERE chunk_fts MATCH ?1
+                  AND {layer}
                 ORDER BY bm25(chunk_fts)
                 "#,
-            )
+            layer = selection.sql_filter("n.layer"),
+        );
+        let mut stmt = conn
+            .prepare(&sql)
             .map_err(|error| format!("prepare filtered FTS search: {error}"))?;
         let rows = stmt
             .query_map(params![fts_q], |row| {
@@ -451,6 +646,166 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].match_kind, "content");
         assert_eq!(hits[0].snippet.as_deref(), Some("alpha context only"));
+    }
+}
+
+#[cfg(test)]
+mod layer_search_tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+
+    use crate::cache::SqliteCache;
+    use crate::embed::{Embedder, StubEmbedder};
+    use crate::search::LayerSelection;
+    use crate::vault::VaultIndex;
+
+    /// A vault with a default-surface note (`wiki/Melatonin.md`) and a demoted
+    /// `sources/` note carrying the same distinctive term.
+    fn demoted_vault() -> (SqliteCache, Arc<dyn Embedder>) {
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        std::fs::write(
+            dir.path().join("wiki/Compiled.md"),
+            "# Compiled\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("write compiled");
+        std::fs::write(
+            dir.path().join("sources/Clipping.md"),
+            "# Clipping\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("write clipping");
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("index");
+        (cache, embedder)
+    }
+
+    fn slugs(hits: &[super::SemanticHit]) -> Vec<String> {
+        hits.iter().map(|h| h.note_slug.clone()).collect()
+    }
+
+    #[test]
+    fn default_semantic_search_excludes_demoted_but_layer_search_includes_it() {
+        let (cache, embedder) = demoted_vault();
+
+        // Default surface: the demoted clipping must NOT appear.
+        let default_hits = cache
+            .semantic_search_layered(
+                embedder.as_ref(),
+                "melatonin circadian",
+                10,
+                &LayerSelection::default_surface(),
+            )
+            .expect("default search");
+        let default_slugs = slugs(&default_hits);
+        assert!(
+            default_slugs.contains(&"compiled".to_string()),
+            "default note present: {default_slugs:?}"
+        );
+        assert!(
+            !default_slugs.contains(&"clipping".to_string()),
+            "demoted clipping must be absent from the default surface: {default_slugs:?}"
+        );
+
+        // Selecting the `sources` layer surfaces the clipping.
+        let (selection, warnings) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        assert!(warnings.is_empty());
+        let layer_hits = cache
+            .semantic_search_layered(embedder.as_ref(), "melatonin circadian", 10, &selection)
+            .expect("layer search");
+        let layer_slugs = slugs(&layer_hits);
+        assert!(
+            layer_slugs.contains(&"clipping".to_string()),
+            "demoted clipping present when its layer is selected: {layer_slugs:?}"
+        );
+        assert!(
+            !layer_slugs.contains(&"compiled".to_string()),
+            "a `sources`-only search must not return the default note: {layer_slugs:?}"
+        );
+
+        // `all` unions both.
+        let all_hits = cache
+            .semantic_search_layered(
+                embedder.as_ref(),
+                "melatonin circadian",
+                10,
+                &LayerSelection::all(),
+            )
+            .expect("all search");
+        let all_slugs = slugs(&all_hits);
+        assert!(all_slugs.contains(&"compiled".to_string()));
+        assert!(all_slugs.contains(&"clipping".to_string()));
+    }
+
+    #[test]
+    fn default_keyword_search_excludes_demoted_but_layer_search_includes_it() {
+        let (cache, _embedder) = demoted_vault();
+
+        let default_hits = cache
+            .fts_search_chunks_layered("melatonin", 10, &LayerSelection::default_surface())
+            .expect("default keyword");
+        let default: Vec<String> = default_hits.iter().map(|h| h.note_slug.clone()).collect();
+        assert!(default.contains(&"compiled".to_string()), "{default:?}");
+        assert!(!default.contains(&"clipping".to_string()), "{default:?}");
+
+        let (selection, _) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        let layer_hits = cache
+            .fts_search_chunks_layered("melatonin", 10, &selection)
+            .expect("layer keyword");
+        let layer: Vec<String> = layer_hits.iter().map(|h| h.note_slug.clone()).collect();
+        assert!(layer.contains(&"clipping".to_string()), "{layer:?}");
+        assert!(!layer.contains(&"compiled".to_string()), "{layer:?}");
+    }
+
+    /// The default semantic path must be the unfiltered vec0 KNN, never the Rust
+    /// full-scan fallback. vec0 encodes its query plan in the idxStr shown by
+    /// EXPLAIN QUERY PLAN: `VIRTUAL TABLE INDEX 0:3…` is the KNN plan, `0:1` is a
+    /// full table scan. Assert the default query is KNN and that a bare scan of
+    /// the same table (what the filtered fallback runs) is the full-scan plan —
+    /// proving the two paths are genuinely different query plans.
+    #[test]
+    fn default_semantic_query_uses_the_vec0_knn_plan_not_a_full_scan() {
+        let (cache, _embedder) = demoted_vault();
+        let conn = cache.read().expect("read conn");
+
+        let dummy_vec = vec![0.0f32; 384];
+        let dummy_bytes: &[u8] = bytemuck::cast_slice(&dummy_vec);
+        let knn_plan: String = conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {}", super::DEFAULT_SEMANTIC_KNN_SQL),
+                rusqlite::params![dummy_bytes, 10_i64],
+                |row| row.get(3),
+            )
+            .expect("explain default knn");
+        assert!(
+            knn_plan.contains("VIRTUAL TABLE INDEX 0:3"),
+            "default semantic query must use the vec0 KNN plan (0:3), got: {knn_plan}"
+        );
+
+        let scan_plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT v.chunk_id FROM chunk_vectors v JOIN chunks c ON c.id = v.chunk_id",
+                [],
+                |row| row.get(3),
+            )
+            .expect("explain full scan");
+        assert!(
+            scan_plan.contains("VIRTUAL TABLE INDEX 0:1"),
+            "the full-scan fallback plan must be a vec0 fullscan (0:1), got: {scan_plan}"
+        );
+        assert_ne!(
+            knn_plan, scan_plan,
+            "the fast KNN path and the full-scan path must be different query plans"
+        );
     }
 }
 
