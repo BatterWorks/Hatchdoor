@@ -917,13 +917,14 @@ fn upsert_note_content(
             absolute_path,
             content,
             content_hash,
+            layer,
             aliases_json,
             frontmatter_json,
             mtime_ns,
             size_bytes,
             indexed_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(relative_path) DO UPDATE SET
             slug = excluded.slug,
             title = excluded.title,
@@ -932,6 +933,7 @@ fn upsert_note_content(
             absolute_path = excluded.absolute_path,
             content = excluded.content,
             content_hash = excluded.content_hash,
+            layer = excluded.layer,
             aliases_json = excluded.aliases_json,
             frontmatter_json = excluded.frontmatter_json,
             mtime_ns = excluded.mtime_ns,
@@ -947,6 +949,7 @@ fn upsert_note_content(
             &absolute_path,
             content,
             hash,
+            &entry.layer,
             &aliases_json,
             &frontmatter_json,
             snapshot.mtime_ns,
@@ -1458,6 +1461,46 @@ mod tests {
         assert!(
             dur.parse::<f64>().is_ok(),
             "duration should parse as f64, got {dur}"
+        );
+    }
+
+    /// Reads the `layer` column for a note by slug directly from the notes table.
+    #[cfg(test)]
+    fn read_layer_for_slug(cache: &SqliteCache, slug: &str) -> Option<String> {
+        let conn = cache.connection().expect("connection");
+        conn.query_row(
+            "SELECT layer FROM notes WHERE slug = ?1",
+            params![slug],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .expect("query layer")
+    }
+
+    #[test]
+    fn populate_writes_note_layer_from_index() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        std::fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        std::fs::write(dir.path().join("sources/Clip.md"), "# Clip\nraw source").expect("note");
+        std::fs::write(dir.path().join("wiki/Page.md"), "# Page\ncompiled").expect("note");
+
+        let index = VaultIndex::build(dir.path()).expect("index");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        cache
+            .replace_from_index_with_embedder(&index, &StubEmbedder::new(384))
+            .expect("populate");
+
+        // The demoted note carries its layer name; the default-surface note is NULL.
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "demoted note must record layer = 'sources'"
+        );
+        assert_eq!(
+            read_layer_for_slug(&cache, "page"),
+            None,
+            "default-surface note must record layer IS NULL"
         );
     }
 
