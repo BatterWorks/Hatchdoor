@@ -144,7 +144,11 @@ pub(super) async fn get_tree_tool(
     let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let tree = cache.explorer_tree().map_err(JsonRpcFailure::internal)?;
+    // Group D threads a `layers` selector here; until then get_tree serves the
+    // default surface, matching the omitted-selection semantics.
+    let tree = cache
+        .explorer_tree(&crate::search::LayerSelection::default_surface())
+        .map_err(JsonRpcFailure::internal)?;
 
     Ok(tool_success(json!({ "tree": tree })))
 }

@@ -35,7 +35,13 @@ pub async fn tree_handler(State(state): State<AppState>) -> impl IntoResponse {
         Err(err) => return err.into_response(),
     };
 
-    match run_blocking(move || cache.explorer_tree()).await {
+    // The web routes always serve the default surface; demoted layers are
+    // reachable only over MCP or by direct address, never via a query parameter.
+    match run_blocking(move || {
+        cache.explorer_tree(&crate::search::LayerSelection::default_surface())
+    })
+    .await
+    {
         Ok(tree) => (StatusCode::OK, Json(tree)).into_response(),
         Err(err) => err.into_response(),
     }
@@ -194,7 +200,11 @@ pub async fn recently_modified_handler(
     };
 
     let limit = query.limit.unwrap_or(5).clamp(1, 25);
-    match run_blocking(move || cache.recently_modified_notes(limit)).await {
+    match run_blocking(move || {
+        cache.recently_modified_notes(limit, &crate::search::LayerSelection::default_surface())
+    })
+    .await
+    {
         Ok(notes) => (StatusCode::OK, Json(RecentlyModifiedResponse { notes })).into_response(),
         Err(err) => err.into_response(),
     }
