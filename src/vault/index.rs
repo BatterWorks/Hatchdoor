@@ -64,8 +64,12 @@ impl VaultIndex {
         markdown_paths.sort();
         // Default-surface notes claim their slugs first, so a compiled page
         // beats the source it was compiled from on a title collision.
-        // `sort_by_key` is stable, so path order is preserved within each group.
-        markdown_paths.sort_by_key(|path| {
+        // `sort_by_cached_key` is stable, so path order is preserved within each
+        // group. Cached rather than plain `sort_by_key` because the key
+        // allocates a String: plain would recompute it O(n log n) times on every
+        // index build, and every MCP write, HTTP write and watcher refresh
+        // rebuilds the index. Cached computes it once per note.
+        markdown_paths.sort_by_cached_key(|path| {
             relative_note_path_without_ext(&root, path)
                 .map(|relative| layers.layer_for(&relative).is_some())
                 .unwrap_or(false)

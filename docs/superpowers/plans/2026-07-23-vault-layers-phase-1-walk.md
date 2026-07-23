@@ -1334,4 +1334,8 @@ Written down so nothing here is mistaken for an omission. Each becomes its own p
 - **Phase 5 — Frontend:** `layer` on the seven note-identity types, tree/search/graph filtering, reveal toggle, badges, autocomplete keeping demoted candidates, resolve-batch layer signal.
 - **Phase 6 — Config, demo_mode and diagnostics:** `HATCHDOOR_EXCLUDE` wiring into `AppConfig` and `VaultScanConfig`, effective-pattern startup log, watcher noise filtering and marker-triggered full reindex, runtime malformed-marker last-good retention, server-side layer-parameter rejection under `demo_mode`, the three-output diagnostic surface.
 
+  **Phase 6 also owns the startup failure path, which phase 1 leaves unrecoverable.** A malformed marker fails the index build; `src/server.rs:413` then marks startup failed and skips spawning both the vault watcher and git sync, so the server serves the stale cache forever and fixing the marker on disk does nothing until a restart. Phase 6 must spawn the watcher in the failure arm and clear the failed state on a successful recovery. Reconcile at the same time with the codebase's warn-and-degrade convention for malformed vault YAML (`src/cache/populate.rs:896`).
+
+- **Unassigned, needs a phase:** `layer_from_frontmatter` is implemented and exported but has no consumer and appears in no phase. The spec's requirement that write tools refuse to create `.hatchdoor-layer` files also has no phase. Both need owners before they rot.
+
 Note that until phase 6 lands, `HATCHDOOR_EXCLUDE` is not yet read from the environment: this phase builds the mechanism and wires only the built-in defaults.
