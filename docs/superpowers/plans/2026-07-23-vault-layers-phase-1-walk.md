@@ -523,7 +523,23 @@ impl Default for ExcludeMatcher {
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `cargo test --lib vault::exclude`
-Expected: PASS, 5 tests. If `invalid_pattern_is_rejected` fails because `ignore` accepts `[`, change that test's pattern to `"a[".to_string()`; if it still passes validation, delete that test and note in the commit message that `ignore` does not reject malformed character classes.
+Expected: PASS, 5 tests.
+
+If `invalid_pattern_is_rejected` fails, `ignore` accepts `[` rather than
+rejecting it. Do not delete the test — rewrite it to assert the behaviour you
+actually observe, so the crate's contract stays pinned:
+
+```rust
+#[test]
+fn unparseable_pattern_is_surfaced_not_silently_dropped() {
+    // `ignore` is lenient about some malformed patterns. Whatever it does,
+    // pin it: a pattern must either be rejected at construction or take
+    // effect — it must never be silently ignored.
+    let matcher = matcher(&["a["]);
+    let patterns = matcher.effective_patterns();
+    assert!(patterns.contains(&("a[".to_string(), "HATCHDOOR_EXCLUDE")));
+}
+```
 
 - [ ] **Step 6: Commit**
 
@@ -1180,7 +1196,9 @@ Expected: PASS. If `build_indexes_markdown_files_only` fails, the `.hatchdoor-tr
 
 ```bash
 cargo fmt
-git add src/vault.rs src/vault/types.rs src/vault/index.rs src/
+git add src/vault.rs src/vault/types.rs src/vault/index.rs src/vault/exclude.rs src/vault/tests.rs
+# Plus every file Step 5 touched to add `layer: None` — list them explicitly
+# from `git status`; do not `git add src/` wholesale.
 git commit -m "feat(vault): classify notes by layer and prune noise during the walk"
 ```
 
