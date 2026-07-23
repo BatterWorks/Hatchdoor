@@ -358,3 +358,38 @@ fn build_gives_the_unsuffixed_slug_to_the_default_surface() {
         Some("melatonin")
     );
 }
+
+#[test]
+fn seeding_is_not_suppressed_by_noise_only_markdown() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join(".obsidian")).expect("dirs");
+    fs::write(dir.path().join(".obsidian/Plugin Notes.md"), "# Noise").expect("note");
+
+    // The vault has no real content, so the starter vault must still be written.
+    let seeded = crate::vault::seed_empty_vault(dir.path()).expect("seed");
+    assert!(seeded, "noise-only markdown must not count as content");
+}
+
+#[test]
+fn build_with_config_honours_user_supplied_exclude_patterns() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("drafts")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("drafts/Scratch.md"), "# Scratch").expect("note");
+    fs::write(dir.path().join("wiki/Keep.md"), "# Keep").expect("note");
+
+    let config = VaultScanConfig {
+        exclude: ExcludeMatcher::new(&["drafts/".to_string()]).expect("valid pattern"),
+    };
+
+    let index = VaultIndex::build_with_config(dir.path(), &config).expect("index");
+
+    assert!(
+        index.find_by_slug("keep").is_some(),
+        "Keep should be indexed"
+    );
+    assert!(
+        index.find_by_slug("scratch").is_none(),
+        "Scratch should be excluded"
+    );
+}

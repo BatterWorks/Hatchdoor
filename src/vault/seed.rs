@@ -4,6 +4,8 @@ use std::path::Path;
 
 use walkdir::WalkDir;
 
+use super::exclude::ExcludeMatcher;
+
 const STARTER_NOTES: &[(&str, &str)] = &[
     (
         "README.md",
@@ -67,9 +69,18 @@ pub fn seed_empty_vault(root: impl AsRef<Path>) -> io::Result<bool> {
 }
 
 fn has_markdown_notes(root: &Path) -> io::Result<bool> {
+    let exclude = ExcludeMatcher::default();
+
     for entry in WalkDir::new(root)
+        .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| entry.file_name() != ".hatchdoor-trash")
+        .filter_entry(|entry| {
+            entry.depth() == 0
+                || match entry.path().strip_prefix(root) {
+                    Ok(relative) => !exclude.is_excluded(relative, entry.file_type().is_dir()),
+                    Err(_) => true,
+                }
+        })
     {
         let entry = entry.map_err(io::Error::other)?;
         let path = entry.path();
