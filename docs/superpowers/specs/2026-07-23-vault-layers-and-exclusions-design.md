@@ -154,10 +154,31 @@ both forms (untagged enum: scalar string, or mapping with `name` and optional
 
 ### Names
 
-`name` is normalized: NFKC, trim, lowercase, spaces to `-`. The result must
-match `[a-z0-9][a-z0-9-]{0,31}`; anything else is a startup error. Unicode
-normalization is specified so NFC/NFD variants cannot produce two visually
-identical layers.
+`name` is normalized: NFKC, trim, lowercase, spaces to `-`. The result must be
+alphanumeric characters plus `-`, starting with an alphanumeric, at most 32
+**characters** (not bytes); anything else is a startup error.
+
+Names are Unicode, not ASCII — `sources-privées` and `資料` are as valid as
+`sources`, because a vault is not required to be English. The alphanumeric
+whitelist is what makes that safe: layer names reach an MCP tool schema that
+agents read and a URL query parameter, so the characters that matter are the
+ones that can make two names *look* identical, and none of those are
+alphanumeric. Zero-width spaces and joiners, bidirectional overrides,
+control characters, punctuation and emoji are all refused by the whitelist
+without needing rules of their own.
+
+NFKC additionally folds compatibility variants (full-width `ＳＯＵＲＣＥＳ` becomes
+`sources`) and collapses composed and decomposed spellings of the same accented
+name into one layer rather than two visually identical ones.
+
+What remains is homoglyph confusion across scripts — Cyrillic `а` against Latin
+`a`. Catching that needs a UTS #39 mixed-script check and the dependency to go
+with it, and is deliberately deferred: the hostile path (an agent planting a
+marker) is closed separately by write tools refusing to write
+`.hatchdoor-layer`, which leaves only a single-user vault owner confusing
+themselves. Adding the check later is non-breaking in the safe direction only —
+it would narrow what is accepted — so it needs a deliberate decision rather
+than a drive-by.
 
 Reserved names, rejected as marker names with a startup error: `default`,
 `all`, `noise`, `none`. `noise` is never expressible in-vault — that would

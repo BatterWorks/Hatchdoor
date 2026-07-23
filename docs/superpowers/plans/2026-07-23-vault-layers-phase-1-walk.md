@@ -16,7 +16,7 @@
 - Fallible functions return `Result<T, String>`, matching the existing precedent in `AppConfig::from_env` (`src/config.rs:27`). Do not add `thiserror` or `anyhow`.
 - Marker file name is exactly `.hatchdoor-layer`.
 - Reserved layer names, rejected as marker names: `default`, `all`, `noise`, `none`.
-- Layer names must match `[a-z0-9][a-z0-9-]{0,31}` after NFKC → trim → lowercase → spaces-to-`-`.
+- Layer names, after NFKC → trim → lowercase → spaces-to-`-`, must be alphanumeric characters plus `-`, starting with an alphanumeric, at most 32 **characters** (not bytes). Alphanumeric is Unicode-wide (`char::is_alphanumeric`), not ASCII-only: `sources-privées` and `資料` are valid. The whitelist is the security mechanism — zero-width characters, bidi overrides, control characters, punctuation and emoji are non-alphanumeric and therefore already refused.
 - Descriptions are capped at 500 characters after sanitization.
 - Built-in noise patterns, in this order: `.obsidian/`, `.trash/`, `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, `*.sync-conflict-*`.
 - `.hatchdoor-layer` is never excluded by any pattern, built-in or user-supplied.
