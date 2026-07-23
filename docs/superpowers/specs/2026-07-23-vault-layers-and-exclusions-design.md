@@ -225,8 +225,25 @@ malformed-marker rules below) breaking the next reindex.
 
 ### Malformed markers
 
-- **At startup:** a hard error. Loud beats silent for operator-authored config,
-  and with markers not agent-writable the outage path is an operator's own typo.
+- **At startup:** the index build fails. Note carefully what that does *not*
+  mean: the process does not abort. `src/server.rs:413` catches the failure,
+  marks startup failed, logs, and **skips spawning both the vault watcher and
+  git sync**, which live only in the success arm. The server then serves the
+  previous SQLite cache indefinitely, with no watcher — so correcting the marker
+  on disk has no effect and recovery requires a restart. Git sync never starts
+  either, so a vault that would have self-healed by pulling a corrected marker
+  cannot.
+
+  That is a worse failure than "loud", and phase 6 owns fixing it: spawn the
+  watcher in the failure arm so a corrected marker triggers a recovering
+  reindex, and have a successful recovery clear the failed startup state.
+
+  Also worth reconciling in phase 6: this codebase's established convention for
+  malformed vault-authored YAML is warn-and-degrade
+  (`src/cache/populate.rs:896` logs "Ignoring malformed YAML frontmatter" and
+  continues). Markers hard-fail on the same class of input. Two philosophies for
+  the same category of user-authored file is a seam worth closing deliberately
+  rather than by accident.
 - **At runtime:** `VaultIndex::build` also runs on every write and on watcher
   refresh (`src/handlers/write_api.rs:584`, `src/mcp/tools/write.rs:376`,
   `src/app_state.rs:160`), where there is no startup to abort. A marker that
