@@ -44,6 +44,9 @@ pub(super) async fn search_notes_tool(
         per_note_cap,
         filters: args.filters,
         include_properties: args.include_properties,
+        // Group D threads the MCP `layers` parameter through here; until then MCP
+        // search targets the default surface only.
+        layers: crate::search::LayerSelection::default_surface(),
     };
     let response =
         crate::search::run(cache.as_ref(), embedder, req).map_err(JsonRpcFailure::internal)?;

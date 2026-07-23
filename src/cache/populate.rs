@@ -148,7 +148,13 @@ impl SqliteCache {
             metrics.note_sync += note_sync_started.elapsed();
             match upsert_outcome {
                 UpsertOutcome::Wrote { slug, content } => {
-                    match prepare_note_for_embedding(&tx, slug, content, embedder) {
+                    match prepare_note_for_embedding(
+                        &tx,
+                        slug,
+                        content,
+                        entry.layer.clone(),
+                        embedder,
+                    ) {
                         Ok(prepared) => prepared_notes.push(prepared),
                         Err(error) => {
                             per_note_failures += 1;
@@ -1232,6 +1238,8 @@ struct ChunkMeasurement {
 
 struct PreparedNote {
     slug: String,
+    /// The note's layer, routing its vectors to the default or demoted table.
+    layer: Option<String>,
     chunking: NoteChunking,
     preserved: HashMap<String, Vec<f32>>,
     texts_to_embed: Vec<String>,
@@ -1247,6 +1255,7 @@ fn prepare_note_for_embedding(
     tx: &Transaction<'_>,
     slug: String,
     content: String,
+    layer: Option<String>,
     embedder: &dyn Embedder,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
@@ -1255,7 +1264,8 @@ fn prepare_note_for_embedding(
 
     let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, &slug)?;
-    let preserved = preserve_existing_vectors(tx, &slug, &chunking.chunks, &existing)?;
+    let preserved =
+        preserve_existing_vectors(tx, &slug, layer.as_deref(), &chunking.chunks, &existing)?;
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let doc_prefix = embedder.doc_prefix();
@@ -1304,6 +1314,7 @@ fn prepare_note_for_embedding(
 
     Ok(PreparedNote {
         slug,
+        layer,
         chunking,
         preserved,
         texts_to_embed,
@@ -1326,6 +1337,7 @@ fn embed_prepared_note(
     let pipeline_started = Instant::now();
     let PreparedNote {
         slug,
+        layer,
         chunking,
         preserved,
         texts_to_embed,
@@ -1338,7 +1350,7 @@ fn embed_prepared_note(
     } = prepared;
     if chunking.chunks.is_empty() {
         let sqlite_started = Instant::now();
-        replace_chunks_for_note(tx, &slug, &[], None, None)?;
+        replace_chunks_for_note(tx, &slug, layer.as_deref(), &[], None, None)?;
         return Ok(ChunkStats {
             embedded: 0,
             reused: 0,
@@ -1438,13 +1450,17 @@ fn embed_prepared_note(
         .chunks
         .iter()
         .zip(vectors.iter())
-        .map(|(chunk, vector)| ChunkRow { chunk, vector })
+        .map(|(chunk, vector)| ChunkRow {
+            chunk,
+            vector: Some(vector.as_slice()),
+        })
         .collect();
 
     let sqlite_started = Instant::now();
     replace_chunks_for_note(
         tx,
         &slug,
+        layer.as_deref(),
         &rows,
         tags_json.as_deref(),
         aliases_json.as_deref(),
@@ -1470,20 +1486,34 @@ fn embed_prepared_note(
 fn preserve_existing_vectors(
     tx: &Transaction<'_>,
     _slug: &str,
+    layer: Option<&str>,
     chunks: &[crate::chunk::Chunk],
     existing: &std::collections::HashMap<String, i64>,
 ) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
     let mut out = std::collections::HashMap::new();
+    // A note's vectors live in the table its layer routes to, so read from the
+    // matching one. A missing row is not an error: it means the chunk was never
+    // vectored (e.g. a demoted note built while HATCHDOOR_EMBED_LAYERS=false, now
+    // being embedded), so it simply falls through to a fresh embed.
+    let table = match layer {
+        None => "chunk_vectors",
+        Some(_) => "chunk_vectors_demoted",
+    };
     let mut stmt = tx
-        .prepare("SELECT embedding FROM chunk_vectors WHERE chunk_id = ?1")
+        .prepare(&format!(
+            "SELECT embedding FROM {table} WHERE chunk_id = ?1"
+        ))
         .map_err(|e| format!("prepare vector lookup: {e}"))?;
     for chunk in chunks {
         if let Some(chunk_id) = existing.get(&chunk.content_hash) {
-            let bytes: Vec<u8> = stmt
+            let bytes: Option<Vec<u8>> = stmt
                 .query_row(rusqlite::params![chunk_id], |row| row.get(0))
+                .optional()
                 .map_err(|e| format!("read preserved vector: {e}"))?;
-            let floats: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
-            out.insert(chunk.content_hash.clone(), floats);
+            if let Some(bytes) = bytes {
+                let floats: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                out.insert(chunk.content_hash.clone(), floats);
+            }
         }
     }
     Ok(out)

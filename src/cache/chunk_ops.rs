@@ -5,13 +5,25 @@ use crate::chunk::Chunk;
 #[allow(dead_code)]
 pub struct ChunkRow<'a> {
     pub chunk: &'a Chunk,
-    pub vector: &'a [f32],
+    /// The chunk's embedding, or `None` when the note is not embedded: the chunk
+    /// row is still written so keyword/FTS search works, but no vector is stored.
+    pub vector: Option<&'a [f32]>,
 }
 
+/// Replace a note's chunk rows and their vectors.
+///
+/// `layer` routes the vector writes: `None` (the default surface) writes into
+/// `chunk_vectors`, keeping default semantic search on its unfiltered KNN fast
+/// path; a demoted layer writes into `chunk_vectors_demoted` with the layer as
+/// the vec0 partition key, so a per-layer KNN is partition-pruned rather than
+/// scanned. Vectors for this note are cleared from BOTH tables first so a note
+/// that crossed a layer boundary since the last build cannot leave a stale
+/// vector in the other table.
 #[allow(dead_code)]
 pub fn replace_chunks_for_note(
     tx: &Transaction<'_>,
     note_slug: &str,
+    layer: Option<&str>,
     rows: &[ChunkRow<'_>],
     tags_json: Option<&str>,
     aliases_json: Option<&str>,
@@ -21,6 +33,11 @@ pub fn replace_chunks_for_note(
         params![note_slug],
     )
     .map_err(|e| format!("failed to clear chunk_vectors for {note_slug}: {e}"))?;
+    tx.execute(
+        "DELETE FROM chunk_vectors_demoted WHERE chunk_id IN (SELECT id FROM chunks WHERE note_slug = ?1)",
+        params![note_slug],
+    )
+    .map_err(|e| format!("failed to clear chunk_vectors_demoted for {note_slug}: {e}"))?;
     tx.execute(
         "DELETE FROM chunks WHERE note_slug = ?1",
         params![note_slug],
@@ -37,9 +54,14 @@ pub fn replace_chunks_for_note(
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
            RETURNING id"#,
     ).map_err(|e| format!("prepare chunk insert: {e}"))?;
-    let mut insert_vector = tx
+    let mut insert_default_vector = tx
         .prepare("INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?1, ?2)")
         .map_err(|e| format!("prepare vector insert: {e}"))?;
+    let mut insert_demoted_vector = tx
+        .prepare(
+            "INSERT INTO chunk_vectors_demoted (chunk_id, embedding, layer) VALUES (?1, ?2, ?3)",
+        )
+        .map_err(|e| format!("prepare demoted vector insert: {e}"))?;
 
     for row in rows {
         let chunk_id: i64 = insert_chunk
@@ -58,10 +80,17 @@ pub fn replace_chunks_for_note(
                 |r| r.get(0),
             )
             .map_err(|e| format!("insert chunk: {e}"))?;
-        let vector_bytes: &[u8] = bytemuck::cast_slice(row.vector);
-        insert_vector
-            .execute(params![chunk_id, vector_bytes])
-            .map_err(|e| format!("insert vector: {e}"))?;
+        if let Some(vector) = row.vector {
+            let vector_bytes: &[u8] = bytemuck::cast_slice(vector);
+            match layer {
+                None => insert_default_vector
+                    .execute(params![chunk_id, vector_bytes])
+                    .map_err(|e| format!("insert vector: {e}"))?,
+                Some(layer) => insert_demoted_vector
+                    .execute(params![chunk_id, vector_bytes, layer])
+                    .map_err(|e| format!("insert demoted vector: {e}"))?,
+            };
+        }
     }
     Ok(())
 }
@@ -89,13 +118,19 @@ pub fn existing_chunk_hashes(
 
 #[allow(dead_code)]
 pub fn delete_orphan_vectors(tx: &Transaction<'_>) -> Result<usize, String> {
-    let removed = tx
+    let removed_default = tx
         .execute(
             "DELETE FROM chunk_vectors WHERE chunk_id NOT IN (SELECT id FROM chunks)",
             [],
         )
         .map_err(|e| format!("delete orphan vectors: {e}"))?;
-    Ok(removed)
+    let removed_demoted = tx
+        .execute(
+            "DELETE FROM chunk_vectors_demoted WHERE chunk_id NOT IN (SELECT id FROM chunks)",
+            [],
+        )
+        .map_err(|e| format!("delete orphan demoted vectors: {e}"))?;
+    Ok(removed_default + removed_demoted)
 }
 
 #[cfg(test)]
@@ -139,9 +174,10 @@ mod tests {
             replace_chunks_for_note(
                 &tx,
                 "n1",
+                None,
                 &[ChunkRow {
                     chunk: &chunk,
-                    vector: &vector,
+                    vector: Some(&vector),
                 }],
                 None,
                 None,
@@ -177,9 +213,10 @@ mod tests {
             replace_chunks_for_note(
                 &tx,
                 "n1",
+                None,
                 &[ChunkRow {
                     chunk: &fake_chunk(0, "old"),
-                    vector: &vector,
+                    vector: Some(&vector),
                 }],
                 None,
                 None,
@@ -194,14 +231,15 @@ mod tests {
             replace_chunks_for_note(
                 &tx,
                 "n1",
+                None,
                 &[
                     ChunkRow {
                         chunk: &fake_chunk(0, "fresh-1"),
-                        vector: &vector,
+                        vector: Some(&vector),
                     },
                     ChunkRow {
                         chunk: &fake_chunk(1, "fresh-2"),
-                        vector: &vector,
+                        vector: Some(&vector),
                     },
                 ],
                 None,
@@ -238,9 +276,10 @@ mod tests {
         replace_chunks_for_note(
             &tx,
             "n1",
+            None,
             &[ChunkRow {
                 chunk: &chunk,
-                vector: &vector,
+                vector: Some(&vector),
             }],
             None,
             None,

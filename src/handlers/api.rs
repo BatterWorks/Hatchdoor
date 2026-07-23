@@ -255,6 +255,10 @@ pub async fn search_handler(
         per_note_cap,
         filters: Default::default(),
         include_properties: Vec::new(),
+        // The web route never accepts a layer selection (the UI is out of scope
+        // and demo_mode depends on this), so it always searches the default
+        // surface only.
+        layers: crate::search::LayerSelection::default_surface(),
     };
     // Query embedding + SQLite work runs off the async runtime.
     let result = run_blocking(move || {
