@@ -66,9 +66,22 @@ impl ExcludeMatcher {
             .is_ignore()
     }
 
-    /// Every active pattern with where it came from, for the diagnostic surface
-    /// and the startup log.
-    pub fn effective_patterns(&self) -> Vec<(String, &'static str)> {
+    /// Every pattern handed to the builder, with where it came from, for the
+    /// diagnostic surface and the startup log.
+    ///
+    /// This reports *configured* input, not verified matcher state: a pattern
+    /// appearing here means `GitignoreBuilder::add_line` accepted it, not that
+    /// it was confirmed to affect any real match in `self.inner`. `ignore`
+    /// does not expose per-pattern introspection (there is no "did glob N ever
+    /// fire" API), so the two cannot be told apart from this list alone. A
+    /// pattern can be lenient-parsed in a surprising way — e.g. an unclosed
+    /// character class like `"a["` builds without error and is treated as a
+    /// literal filename match rather than rejected, see
+    /// `unclosed_character_class_matches_literally` below — yet it would
+    /// still show up here identically to a pattern behaving exactly as
+    /// written. If a pattern's effect is in question, verify it with
+    /// `is_excluded` against a concrete path instead of trusting this list.
+    pub fn configured_patterns(&self) -> Vec<(String, &'static str)> {
         DEFAULT_EXCLUDE_PATTERNS
             .iter()
             .map(|p| ((*p).to_string(), "built-in"))
@@ -127,20 +140,31 @@ mod tests {
     }
 
     #[test]
-    fn effective_patterns_report_provenance() {
+    fn configured_patterns_report_provenance() {
         let matcher = matcher(&["build/"]);
-        let patterns = matcher.effective_patterns();
+        let patterns = matcher.configured_patterns();
         assert!(patterns.contains(&(".DS_Store".to_string(), "built-in")));
         assert!(patterns.contains(&("build/".to_string(), "HATCHDOOR_EXCLUDE")));
     }
 
     #[test]
-    fn unparseable_pattern_is_surfaced_not_silently_dropped() {
-        // `ignore` is lenient about some malformed patterns. Whatever it does,
-        // pin it: a pattern must either be rejected at construction or take
-        // effect — it must never be silently ignored.
+    fn unclosed_character_class_matches_literally() {
+        // `"a["` is a malformed gitignore glob (an unclosed character class),
+        // but `ignore` is lenient: `add_line`/`build` both succeed, and the
+        // pattern is incorporated as a *literal* match on the exact string
+        // "a[" rather than being rejected or silently dropped. It does NOT
+        // behave as a class matching e.g. "a" or "ab". Pin this exact
+        // behaviour through `is_excluded` (the real matcher), not through
+        // `configured_patterns` (which only echoes configured input and would
+        // report this pattern as present regardless of whether `ignore`
+        // incorporated it) — see the doc comment on `configured_patterns`.
+        // If a future `ignore` upgrade starts rejecting this pattern at
+        // construction, `matcher()` here will panic and this test will fail
+        // loudly, which is the desired outcome.
         let matcher = matcher(&["a["]);
-        let patterns = matcher.effective_patterns();
-        assert!(patterns.contains(&("a[".to_string(), "HATCHDOOR_EXCLUDE")));
+        assert!(matcher.is_excluded(Path::new("a["), false));
+        assert!(!matcher.is_excluded(Path::new("a"), false));
+        assert!(!matcher.is_excluded(Path::new("ab"), false));
+        assert!(!matcher.is_excluded(Path::new("a[b"), false));
     }
 }
