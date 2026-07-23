@@ -498,11 +498,21 @@ impl ExcludeMatcher {
 
     /// `relative` is vault-relative. The marker file is never excluded: a broad
     /// user pattern must not be able to disable the layer model.
+    ///
+    /// Uses `matched_path_or_any_parents` rather than `matched`: `matched`
+    /// tests only the path's own final component, so a directory pattern like
+    /// `.obsidian/` would match the directory and then report `.obsidian/
+    /// workspace.json` as *not* excluded. Inside a `filter_entry` walk the
+    /// pruned directory hides its children anyway, but the seeder, the
+    /// diagnostic surface and any future per-path caller ask about a single
+    /// path with no walk context, and they must get the right answer.
     pub fn is_excluded(&self, relative: &Path, is_dir: bool) -> bool {
         if relative.file_name().and_then(|n| n.to_str()) == Some(MARKER_FILE_NAME) {
             return false;
         }
-        self.inner.matched(relative, is_dir).is_ignore()
+        self.inner
+            .matched_path_or_any_parents(relative, is_dir)
+            .is_ignore()
     }
 
     /// Every active pattern with where it came from, for the diagnostic surface
