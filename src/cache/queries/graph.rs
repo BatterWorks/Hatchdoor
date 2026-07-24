@@ -21,6 +21,7 @@ pub struct NoteWithLinks {
     pub slug: String,
     pub title: String,
     pub relative_path: String,
+    pub layer: Option<String>,
     pub metadata: NoteMetadata,
     pub outbound_links: Vec<OutboundLinkRow>,
 }
@@ -181,7 +182,7 @@ impl SqliteCache {
 
         // Note metadata
         let sql_a = format!(
-            "SELECT slug, title, relative_path, aliases_json, frontmatter_json \
+            "SELECT slug, title, relative_path, layer, aliases_json, frontmatter_json \
              FROM notes WHERE slug IN ({placeholders})"
         );
         let mut stmt_a = conn
@@ -193,13 +194,14 @@ impl SqliteCache {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| format!("query notes batch: {e}"))?;
         for row in rows_a {
-            let (slug, title, relative_path, aliases_json, properties_json) =
+            let (slug, title, relative_path, layer, aliases_json, properties_json) =
                 row.map_err(|e| format!("read notes batch row: {e}"))?;
             map.insert(
                 slug.clone(),
@@ -207,6 +209,7 @@ impl SqliteCache {
                     slug: slug.clone(),
                     title,
                     relative_path,
+                    layer,
                     metadata: NoteMetadata {
                         tags: Vec::new(),
                         aliases: serde_json::from_str(&aliases_json)

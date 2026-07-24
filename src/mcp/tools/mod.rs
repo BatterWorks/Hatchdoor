@@ -37,6 +37,7 @@ pub async fn handle_tools_call(
         "get_note_links" => read::get_note_links_tool(state, arguments).await,
         "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
         "get_tree" => read::get_tree_tool(state, arguments).await,
+        "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "refresh_index" => read::refresh_index_tool(state, arguments).await,
         "get_git_sync_status" => read::get_git_sync_status_tool(state).await,
         "get_attachment_import_config" => read::get_attachment_import_config_tool(config),

@@ -408,6 +408,228 @@ mod tests {
         );
     }
 
+    async fn call_tool(state: AppState, name: &str, arguments: Value, config: McpConfig) -> Value {
+        let response = post_json(
+            state,
+            json!({"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+            config,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    #[tokio::test]
+    async fn get_note_reaches_a_demoted_note_by_path_and_reports_layer() {
+        let (state, _tmp) = layered_test_state();
+        // By path, with a .md extension, reaching the demoted layer.
+        let body = call_tool(
+            state.clone(),
+            "get_note",
+            json!({"path": "sources/Clip.md"}),
+            enabled_config(),
+        )
+        .await;
+        let note = &body["result"]["structuredContent"]["note"];
+        assert_eq!(note["slug"], "clip");
+        assert_eq!(note["layer"], "sources");
+
+        // A default-surface note reports a null layer.
+        let page = call_tool(state, "get_note", json!({"slug": "page"}), enabled_config()).await;
+        assert_eq!(
+            page["result"]["structuredContent"]["note"]["layer"],
+            Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn get_note_rejects_both_or_neither_addresses() {
+        let (state, _tmp) = layered_test_state();
+        let both = call_tool(
+            state.clone(),
+            "get_note",
+            json!({"slug": "page", "path": "wiki/Page.md"}),
+            enabled_config(),
+        )
+        .await;
+        assert_eq!(both["error"]["code"], -32602);
+
+        let neither = call_tool(state, "get_note", json!({}), enabled_config()).await;
+        assert_eq!(neither["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn search_and_query_responses_carry_layer() {
+        let (state, _tmp) = layered_test_state();
+        // A default search hit reports a null layer.
+        let search = call_tool(
+            state.clone(),
+            "search_notes",
+            json!({"query": "melatonin"}),
+            enabled_config(),
+        )
+        .await;
+        let first = &search["result"]["structuredContent"]["results"][0];
+        assert!(
+            first.get("layer").is_some(),
+            "search hit must carry a layer field"
+        );
+
+        // query_notes selecting the layer reports the demoted layer name.
+        let query = call_tool(
+            state,
+            "query_notes",
+            json!({"filters": {"tags": ["topic/x"]}, "layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        let notes = query["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n["slug"] == "clip" && n["layer"] == "sources")
+        );
+    }
+
+    #[tokio::test]
+    async fn recently_modified_tool_honors_layers() {
+        let (state, _tmp) = layered_test_state();
+        // Default: the demoted clip is absent.
+        let default = call_tool(
+            state.clone(),
+            "recently_modified",
+            json!({}),
+            enabled_config(),
+        )
+        .await;
+        let default_slugs: Vec<&str> = default["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .map(|n| n["slug"].as_str().expect("slug"))
+            .collect();
+        assert!(default_slugs.contains(&"page"));
+        assert!(!default_slugs.contains(&"clip"));
+
+        // Selecting the layer reveals it, with the layer reported.
+        let sourced = call_tool(
+            state,
+            "recently_modified",
+            json!({"layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        let notes = sourced["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n["slug"] == "clip" && n["layer"] == "sources")
+        );
+    }
+
+    #[tokio::test]
+    async fn path_prefix_into_an_unselected_demoted_layer_errors_with_guidance() {
+        let (state, _tmp) = layered_test_state();
+        // A path_prefix wholly inside the demoted `sources/` folder, with no
+        // layers selected, must error (not return empty) and name the layer.
+        let body = call_tool(
+            state.clone(),
+            "query_notes",
+            json!({"filters": {"path_prefix": "sources"}}),
+            enabled_config(),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("sources"),
+            "error names the layer: {message}"
+        );
+
+        // With the layer selected, the same query succeeds.
+        let ok = call_tool(
+            state,
+            "query_notes",
+            json!({"filters": {"path_prefix": "sources"}, "layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        assert!(
+            ok.get("error").is_none(),
+            "selecting the layer resolves the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_tools_refuse_the_layer_marker_basename() {
+        let (state, _tmp) = layered_test_state();
+        let create = call_tool(
+            state.clone(),
+            "create_note",
+            json!({"relative_path": "wiki/.hatchdoor-layer", "content": "sneaky"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(create["error"]["code"], -32602);
+        assert!(!state.vault_path.join("wiki/.hatchdoor-layer").exists());
+
+        let import = call_tool(
+            state,
+            "import_attachment",
+            json!({"content": b64(b"x"), "target_relative_path": "wiki/.hatchdoor-layer"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(import["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn create_note_response_reports_resulting_layer() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            state,
+            "create_note",
+            json!({"relative_path": "sources/New.md", "content": "# New"}),
+            write_config(),
+        )
+        .await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(
+            content["layer"], "sources",
+            "a note created under a demoted folder reports its layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_combines_a_note_filter_with_a_named_layer() {
+        // Group C deferred this: the note-filter (slow) path scoped to a named
+        // layer must return the demoted note and only it.
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            state,
+            "search_notes",
+            json!({"query": "melatonin", "filters": {"tags": ["topic/x"]}, "layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        let results = body["result"]["structuredContent"]["results"]
+            .as_array()
+            .expect("results");
+        assert!(
+            !results.is_empty(),
+            "a filtered search in the named layer returns the demoted note"
+        );
+        assert!(
+            results.iter().all(|r| r["note_slug"] == "clip"),
+            "only the demoted note matches the filter within the selected layer"
+        );
+    }
+
     async fn response_json(response: Response) -> Value {
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -645,6 +867,7 @@ mod tests {
                 "get_note_links",
                 "resolve_wikilink",
                 "get_tree",
+                "recently_modified",
                 "refresh_index",
                 "get_attachment_import_config",
                 "get_git_sync_status"

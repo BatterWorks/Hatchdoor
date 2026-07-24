@@ -656,6 +656,7 @@ mod tests {
             relative_path: "Docs/README".to_string(),
             content: "# Readme".to_string(),
             content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
             metadata: Default::default(),
         };
 
@@ -708,6 +709,7 @@ mod tests {
             relative_path: "Notes/Home".to_string(),
             content: "---\ntags: [vault/sort]\n---\n# Home\n\nSee [[Plan|Plan]].\n\n![[diagram.png|Topology]]\n\n[External](https://example.com)".to_string(),
             content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
             metadata: Default::default(),
         };
 

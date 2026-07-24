@@ -26,6 +26,7 @@ pub(super) async fn create_note_tool(
         JsonRpcFailure::invalid_params(format!("Invalid create_note arguments: {error}"))
     })?;
     let relative_path = non_empty_argument("relative_path", args.relative_path)?;
+    refuse_marker_write(&relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
@@ -243,6 +244,7 @@ pub(super) async fn import_attachment_tool(
     })?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
+    refuse_marker_write(&target_relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
 
     // Whitespace-tolerant so line-wrapped base64 still decodes.
@@ -298,6 +300,8 @@ pub(super) async fn move_attachment_tool(
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
+    refuse_marker_write(&source_relative_path)?;
+    refuse_marker_write(&target_relative_path)?;
     let index = current_index(&state).await?;
     let outcome = move_attachment(
         &state.vault_path,
@@ -322,6 +326,8 @@ pub(super) async fn rename_attachment_tool(
     let source_relative_path =
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let new_filename = non_empty_argument("new_filename", args.new_filename)?;
+    refuse_marker_write(&source_relative_path)?;
+    refuse_marker_write(&new_filename)?;
     let index = current_index(&state).await?;
     let outcome = rename_attachment(
         &state.vault_path,
@@ -424,7 +430,22 @@ async fn finalize_note_write(
     }
     record_note_write(state, op, &outcome, commit_summary);
     let warning = git_sync_warning(state).await;
-    Ok(write_success(outcome, warning))
+    // Report the note's resulting layer (None = default surface) so a caller
+    // sees which surface a create/move/rename/archive landed on. Read from the
+    // just-refreshed cache; a delete leaves no note, so the layer is None.
+    let layer = match &outcome.slug {
+        Some(slug) => state
+            .cache
+            .read()
+            .await
+            .sqlite
+            .read_note_by_slug(slug)
+            .ok()
+            .flatten()
+            .and_then(|note| note.layer),
+        None => None,
+    };
+    Ok(write_success(outcome, warning, layer))
 }
 
 fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<String> {
@@ -450,6 +471,26 @@ async fn git_sync_warning(state: &AppState) -> Option<String> {
     }
 }
 
+/// Hard-refuse any write whose target basename is the layer marker file. A
+/// marker demotes its whole folder, so letting a write tool create or rename
+/// one would let an agent silently reclassify a subtree; markers are edited in
+/// the vault directly, never through the API.
+fn refuse_marker_write(path: &str) -> Result<(), JsonRpcFailure> {
+    let basename = path
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path);
+    if basename == crate::vault::MARKER_FILE_NAME {
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "'{}' is a reserved Hatchdoor layer marker and cannot be written through the API; \
+             edit it directly in the vault.",
+            crate::vault::MARKER_FILE_NAME
+        )));
+    }
+    Ok(())
+}
+
 fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     match error {
         WriteError::InvalidInput(message) => JsonRpcFailure::invalid_params(message),
@@ -458,12 +499,17 @@ fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     }
 }
 
-fn write_success(outcome: WriteOutcome, git_sync_warning: Option<String>) -> Value {
+fn write_success(
+    outcome: WriteOutcome,
+    git_sync_warning: Option<String>,
+    layer: Option<String>,
+) -> Value {
     tool_success(json!({
         "ok": true,
         "slug": outcome.slug,
         "relative_path": outcome.relative_path,
         "content_hash": outcome.content_hash,
+        "layer": layer,
         "quality_warnings": outcome.quality_warnings,
         "rewritten_notes": outcome.rewritten_notes,
         "moved_assets": outcome.moved_assets,

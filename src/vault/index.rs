@@ -188,6 +188,7 @@ impl VaultIndex {
             relative_path: entry.relative_path.clone(),
             content_hash: content_hash(&content),
             content,
+            layer: entry.layer.clone(),
             metadata: Default::default(),
         }))
     }

@@ -141,6 +141,8 @@ pub struct SearchResult {
     pub heading_path: Option<String>,
     pub content: String,
     pub score: f32,
+    /// The hit note's layer (`None` = default surface).
+    pub layer: Option<String>,
     pub outbound_links: Vec<OutboundLink>,
     pub metadata: NoteMetadata,
 }
@@ -184,6 +186,7 @@ pub fn run(
             heading_path: None,
             content: format!("Matched tag: #{tag_prefix}"),
             score: 1.0,
+            layer: note.layer,
             outbound_links: Vec::new(),
             metadata: note.metadata,
         })
