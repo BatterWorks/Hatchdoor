@@ -27,6 +27,7 @@ pub(super) async fn create_note_tool(
     })?;
     let relative_path = non_empty_argument("relative_path", args.relative_path)?;
     refuse_marker_write(&relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
@@ -129,6 +130,7 @@ pub(super) async fn rename_note_tool(
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let target = replace_filename(&entry.relative_path, &new_title);
+    refuse_noise_write(&state.scan_config.exclude, &target)?;
     let outcome = move_or_rename_note(
         &state.vault_path,
         &index,
@@ -160,6 +162,7 @@ pub(super) async fn move_note_tool(
     } else {
         format!("{target_folder}/{file_name}")
     };
+    refuse_noise_write(&state.scan_config.exclude, &target)?;
     let outcome = move_or_rename_note(
         &state.vault_path,
         &index,
@@ -180,6 +183,7 @@ pub(super) async fn move_rename_note_tool(
     })?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = move_or_rename_note(
@@ -245,6 +249,7 @@ pub(super) async fn import_attachment_tool(
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     refuse_marker_write(&target_relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
 
     // Whitespace-tolerant so line-wrapped base64 still decodes.
@@ -302,6 +307,7 @@ pub(super) async fn move_attachment_tool(
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     refuse_marker_write(&source_relative_path)?;
     refuse_marker_write(&target_relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let index = current_index(&state).await?;
     let outcome = move_attachment(
         &state.vault_path,
@@ -328,6 +334,7 @@ pub(super) async fn rename_attachment_tool(
     let new_filename = non_empty_argument("new_filename", args.new_filename)?;
     refuse_marker_write(&source_relative_path)?;
     refuse_marker_write(&new_filename)?;
+    refuse_noise_write(&state.scan_config.exclude, &new_filename)?;
     let index = current_index(&state).await?;
     let outcome = rename_attachment(
         &state.vault_path,
@@ -369,8 +376,8 @@ pub(super) async fn list_note_attachments_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
-    let attachments =
-        list_note_attachments(&state.vault_path, &entry).map_err(write_error_to_jsonrpc)?;
+    let attachments = list_note_attachments(&state.vault_path, &index.layers, &entry)
+        .map_err(write_error_to_jsonrpc)?;
     Ok(tool_success(json!({ "attachments": attachments })))
 }
 
@@ -488,6 +495,24 @@ fn refuse_marker_write(path: &str) -> Result<(), JsonRpcFailure> {
             "'{}' is a reserved Hatchdoor layer marker and cannot be written through the API; \
              edit it directly in the vault.",
             crate::vault::MARKER_FILE_NAME
+        )));
+    }
+    Ok(())
+}
+
+/// Hard-refuse a write whose target path matches a noise-exclusion pattern. The
+/// index applies the same matcher, so such a note or attachment would be written
+/// to disk yet silently absent from every read surface — an invisible write. The
+/// `.hatchdoor-layer` marker is exempt from exclusion, so this never fires on a
+/// marker (which `refuse_marker_write` handles separately).
+fn refuse_noise_write(
+    exclude: &crate::vault::ExcludeMatcher,
+    path: &str,
+) -> Result<(), JsonRpcFailure> {
+    if exclude.is_excluded(std::path::Path::new(path.trim()), false) {
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "'{path}' matches a Hatchdoor noise-exclusion pattern and would be ignored by the \
+             index; choose a path outside the excluded set."
         )));
     }
     Ok(())

@@ -144,6 +144,28 @@ pub(crate) fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
     })
 }
 
+/// Refuse a write whose target path matches a noise-exclusion pattern: the index
+/// applies the same matcher, so the file would land on disk yet be invisible to
+/// every read surface. Mirrors the MCP write path's `refuse_noise_write`.
+fn reject_noise_write(state: &AppState, path: &str) -> Option<Response> {
+    state
+        .scan_config
+        .exclude
+        .is_excluded(std::path::Path::new(path.trim()), false)
+        .then(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "'{path}' matches a Hatchdoor noise-exclusion pattern and would be \
+                         ignored by the index; choose a path outside the excluded set."
+                    ),
+                }),
+            )
+                .into_response()
+        })
+}
+
 pub async fn upload_attachment_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -206,6 +228,9 @@ pub async fn upload_attachment_handler(
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
+    if let Some(response) = reject_noise_write(&state, &target_relative_path) {
+        return response;
+    }
     let file_bytes = match file_bytes {
         Some(bytes) if !bytes.is_empty() => bytes,
         _ => {
@@ -259,6 +284,9 @@ pub async fn create_note_handler(
         Ok(relative_path) => relative_path,
         Err(err) => return err.into_response(),
     };
+    if let Some(response) = reject_noise_write(&state, &relative_path) {
+        return response;
+    }
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
     let vault_path = state.vault_path.clone();

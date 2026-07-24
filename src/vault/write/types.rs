@@ -20,6 +20,9 @@ pub struct AttachmentInfo {
     pub relative_path: String,
     pub size_bytes: u64,
     pub content_hash: String,
+    /// The containing folder's layer (`None` = default surface). Additive and
+    /// always present, like the `layer` field on note responses.
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
