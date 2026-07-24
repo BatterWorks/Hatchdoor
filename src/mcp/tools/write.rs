@@ -476,12 +476,14 @@ async fn git_sync_warning(state: &AppState) -> Option<String> {
 /// one would let an agent silently reclassify a subtree; markers are edited in
 /// the vault directly, never through the API.
 fn refuse_marker_write(path: &str) -> Result<(), JsonRpcFailure> {
+    // Take the last non-empty path segment so trailing separators or a bare `.`
+    // component can't hide the marker basename, and compare case-insensitively
+    // so a case-folding filesystem can't smuggle one in either.
     let basename = path
-        .trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
+        .split(['/', '\\'])
+        .rfind(|segment| !segment.is_empty() && *segment != ".")
         .unwrap_or(path);
-    if basename == crate::vault::MARKER_FILE_NAME {
+    if basename.eq_ignore_ascii_case(crate::vault::MARKER_FILE_NAME) {
         return Err(JsonRpcFailure::invalid_params(format!(
             "'{}' is a reserved Hatchdoor layer marker and cannot be written through the API; \
              edit it directly in the vault.",

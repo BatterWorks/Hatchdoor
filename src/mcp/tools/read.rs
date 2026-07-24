@@ -635,18 +635,29 @@ fn check_path_prefix_precedence(
     if prefix.trim().is_empty() || selection.is_all() {
         return Ok(());
     }
-    let Some(layer) = cache
-        .demoted_only_layer_under_prefix(prefix)
+    let Some(layers) = cache
+        .demoted_layers_under_prefix(prefix)
         .map_err(JsonRpcFailure::internal)?
     else {
         return Ok(());
     };
-    if selection.named_layers().iter().any(|name| name == &layer) {
+    // The prefix is wholly inside demoted space. If the selection already covers
+    // one of those layers the query returns something, so let it through; only
+    // when it covers none of them would the result be silently empty — error
+    // instead, naming the layer(s) and how to include them.
+    let selected = selection.named_layers();
+    if layers.iter().any(|layer| selected.contains(layer)) {
         return Ok(());
     }
+    let names = layers
+        .iter()
+        .map(|layer| format!("\"{layer}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let plural = if layers.len() == 1 { "layer" } else { "layers" };
     Err(JsonRpcFailure::invalid_params(format!(
-        "path_prefix '{prefix}' is inside the demoted layer '{layer}', which is not selected. \
-         Pass layers: [\"{layer}\"] (or [\"all\"]) to include it."
+        "path_prefix '{prefix}' is inside the demoted {plural} {names}, which is not selected. \
+         Pass layers: [{names}] (or [\"all\"]) to include it."
     )))
 }
 
