@@ -3,7 +3,7 @@
 //! independent traversal from the noise-pruning content walk in `index.rs`), because
 //! a marker inside a noise-pruned directory must still be collected for portability.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -287,6 +287,37 @@ impl LayerMap {
     /// Marker directories, for diagnostics and (in phase 2) the marker-set hash.
     pub fn marker_paths(&self) -> Vec<String> {
         self.by_dir.keys().cloned().collect()
+    }
+
+    /// Diagnostics helper: layer names whose markers declare more than one
+    /// distinct description. `collect` resolves these silently (the first
+    /// non-empty description in lexicographic order wins); the diagnostics
+    /// surface reports them so an operator can reconcile the markers. Malformed
+    /// markers are skipped here — they surface as an index build failure instead.
+    pub fn description_conflicts(root: &Path) -> Result<Vec<(String, Vec<String>)>, String> {
+        let mut by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for entry in WalkDir::new(root).follow_links(false) {
+            let entry = entry.map_err(|e| format!("vault walk failed: {e}"))?;
+            if !entry.file_type().is_file() || entry.file_name().to_str() != Some(MARKER_FILE_NAME)
+            {
+                continue;
+            }
+            let Ok(contents) = fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            if let Ok(LayerDecl::Named {
+                name,
+                description: Some(description),
+            }) = parse_marker(&contents)
+            {
+                by_name.entry(name).or_default().insert(description);
+            }
+        }
+        Ok(by_name
+            .into_iter()
+            .filter(|(_, descriptions)| descriptions.len() > 1)
+            .map(|(name, descriptions)| (name, descriptions.into_iter().collect()))
+            .collect())
     }
 
     /// A deterministic string covering every marker's directory path *and its

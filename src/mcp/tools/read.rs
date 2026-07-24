@@ -223,6 +223,51 @@ pub(super) async fn refresh_index_tool(
     Ok(tool_success(json!(RefreshResponse { refreshed: true })))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerDiagnosticsArgs {
+    #[serde(default)]
+    path: Option<String>,
+}
+
+pub(super) async fn layer_diagnostics_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    // Disabled under demo mode (it reveals demoted paths). MCP is already refused
+    // alongside demo_mode at startup, so this is a defensive belt-and-braces guard.
+    if state.demo_mode {
+        return Err(JsonRpcFailure::invalid_params(
+            "layer_diagnostics is disabled in demo mode",
+        ));
+    }
+    let args: LayerDiagnosticsArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid layer_diagnostics arguments: {error}"))
+    })?;
+    let cache = sqlite_cache(&state)
+        .await
+        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
+    let vault_path = state.vault_path.clone();
+    let scan_config = state.scan_config.clone();
+    let diagnostics = tokio::task::spawn_blocking(move || {
+        crate::handlers::diagnostics::build_layer_diagnostics(
+            &vault_path,
+            &scan_config,
+            &cache,
+            args.path.as_deref(),
+        )
+    })
+    .await
+    .map_err(|join_error| {
+        JsonRpcFailure::internal(format!("diagnostics task panicked: {join_error}"))
+    })?
+    .map_err(JsonRpcFailure::internal)?;
+
+    Ok(tool_success(serde_json::to_value(&diagnostics).map_err(
+        |e| JsonRpcFailure::internal(format!("serialize diagnostics: {e}")),
+    )?))
+}
+
 pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailure> {
     let status = match state.git_sync.get() {
         Some(handle) => {
@@ -547,6 +592,21 @@ fn read_tools_list_base() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_only_tool_annotations()
+        }),
+        json!({
+            "name": "layer_diagnostics",
+            "description": "Explain the vault's layer and noise classification. Dumps the active noise-exclusion ruleset with provenance (built-in vs HATCHDOOR_EXCLUDE), the discovered layer markers, per-layer note counts, and any conflicts (a marker directory that is itself noise-excluded, a vanished marker whose notes are retained, disagreeing marker descriptions). Pass an optional `path` to classify an arbitrary path string by re-running the matchers, whether or not it is indexed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "A vault-relative path to classify (noise? which layer?). Re-runs the matchers on the raw string; does not require the path to exist or be indexed."
+                    }
+                },
                 "additionalProperties": false
             },
             "annotations": read_only_tool_annotations()

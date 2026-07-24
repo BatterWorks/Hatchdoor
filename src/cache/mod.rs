@@ -251,6 +251,26 @@ impl SqliteCache {
             None => Ok(Vec::new()),
         }
     }
+
+    /// Note counts grouped by layer (`None` = the default surface), reflecting
+    /// the last populate. Drives the diagnostics surface's per-layer tally and
+    /// its vanished-marker detection (a layer with notes but no live marker).
+    pub fn layer_note_counts(&self) -> Result<Vec<(Option<String>, i64)>, String> {
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare("SELECT layer, COUNT(*) FROM notes GROUP BY layer ORDER BY layer IS NOT NULL, layer")
+            .map_err(|e| format!("prepare layer_note_counts: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("query layer_note_counts: {e}"))?;
+        let mut counts = Vec::new();
+        for row in rows {
+            counts.push(row.map_err(|e| format!("row layer_note_counts: {e}"))?);
+        }
+        Ok(counts)
+    }
 }
 
 #[cfg(test)]
