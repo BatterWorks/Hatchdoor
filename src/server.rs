@@ -327,6 +327,7 @@ pub async fn run_server() {
     }
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
+    let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let startup = StartupTracker::scanning();
     let state = AppState {
         vault_path: config.vault_path.clone(),
@@ -335,6 +336,7 @@ pub async fn run_server() {
         })),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
+        mcp_tools_changed,
         embedder,
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
@@ -502,11 +504,13 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
@@ -536,6 +540,7 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let mut mcp_config = crate::mcp::McpConfig::disabled();
         mcp_config.bearer_token = mcp_bearer_token;
         let state = AppState {
@@ -543,6 +548,7 @@ mod tests {
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode: false,
@@ -884,11 +890,13 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: false,
             demo_mode: false,

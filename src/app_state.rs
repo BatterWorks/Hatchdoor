@@ -20,6 +20,12 @@ pub struct AppState {
     pub cache: Arc<RwLock<VaultCache>>,
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
+    /// Fires when a reindex changes the vault's layer marker set, so the MCP
+    /// `tools/list` (its per-vault `layers` enum) is now different. A future
+    /// streaming MCP transport turns each signal into a
+    /// `notifications/tools/list_changed`; today it is the tested seam that
+    /// backs the advertised `tools.listChanged` capability.
+    pub mcp_tools_changed: broadcast::Sender<()>,
     pub embedder: Arc<dyn Embedder>,
     /// True when the web API is protected by `HATCHDOOR_WEB_BEARER_TOKEN`.
     pub web_auth_enabled: bool,
@@ -151,6 +157,12 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     let vault_path = state.vault_path.clone();
     let embedder = state.embedder.clone();
 
+    // The marker-set hash the last build persisted. Compared against the value
+    // after this reindex to detect a runtime layer change (a marker added,
+    // removed, renamed, or its description edited), which changes the MCP
+    // `tools/list` `layers` enum.
+    let previous_marker_hash = sqlite.get_metadata("marker_set_hash").ok().flatten();
+
     // The reindex writes inside a single SQLite transaction; WAL lets readers on
     // pooled connections keep serving the prior snapshot until it commits, so we
     // no longer hold the cache write lock for the whole rebuild (F-03).
@@ -168,6 +180,22 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     .await?;
 
     debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
+
+    let current_marker_hash = state
+        .cache
+        .read()
+        .await
+        .sqlite
+        .get_metadata("marker_set_hash")
+        .ok()
+        .flatten();
+    if previous_marker_hash != current_marker_hash {
+        info!("Layer marker set changed; MCP clients should re-list tools");
+        // No live receiver over the current stateless HTTP transport; a future
+        // streaming transport subscribes and emits notifications/tools/list_changed.
+        let _ = state.mcp_tools_changed.send(());
+    }
+
     broadcast_vault_revision(state);
     Ok(())
 }
@@ -209,11 +237,13 @@ mod tests {
         let embedder = test_embedder();
         let cache = build_cache(&vault_path, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = broadcast::channel(64);
+        let (mcp_tools_changed, _) = broadcast::channel(16);
         AppState {
             vault_path,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: false,
             demo_mode: false,
@@ -252,6 +282,35 @@ mod tests {
 
         let result = sqlite_cache(&state).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn reindex_signals_mcp_tools_changed_only_when_the_marker_set_changes() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(vault_path.join("sources")).expect("sources dir");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+        let state = state_with_vault(vault_path.clone());
+        let mut tools_changed = state.mcp_tools_changed.subscribe();
+
+        // An ordinary content reindex (no marker change) must NOT signal a
+        // tool-list change: the `layers` enum is unaffected.
+        std::fs::write(vault_path.join("Second.md"), "second").expect("write note");
+        refresh_now(&state).await.expect("refresh");
+        assert!(
+            tools_changed.try_recv().is_err(),
+            "a content-only reindex must not signal a tools/list change"
+        );
+
+        // Adding a layer marker changes the vault's layers, so the tool list's
+        // `layers` enum is now different and the signal must fire.
+        std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        std::fs::write(vault_path.join("sources/Clip.md"), "clip").expect("write note");
+        refresh_now(&state).await.expect("refresh");
+        assert!(
+            tools_changed.try_recv().is_ok(),
+            "adding a layer marker must signal a tools/list change"
+        );
     }
 
     #[tokio::test]

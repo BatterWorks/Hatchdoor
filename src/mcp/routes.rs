@@ -149,7 +149,11 @@ fn handle_initialize(params: Option<&Value>, layers: &[LayerInfo]) -> Value {
         "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
-                "listChanged": false
+                // The vault's `layers` enum changes when its marker set changes,
+                // so the tool list is not static. run_reindex fires
+                // state.mcp_tools_changed on such a change; a streaming transport
+                // turns that into a notifications/tools/list_changed.
+                "listChanged": true
             }
         },
         "serverInfo": {
@@ -209,11 +213,13 @@ mod tests {
         let embedder = test_embedder();
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: false,
             demo_mode: false,
@@ -252,11 +258,13 @@ mod tests {
         let embedder = test_embedder();
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: false,
             demo_mode: false,
@@ -560,6 +568,11 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
         assert!(body["result"]["capabilities"]["tools"].is_object());
+        assert_eq!(
+            body["result"]["capabilities"]["tools"]["listChanged"], true,
+            "the tool list is not static (its layers enum tracks the marker set), \
+             so listChanged must be advertised"
+        );
         let instructions = body["result"]["instructions"]
             .as_str()
             .expect("instructions");
