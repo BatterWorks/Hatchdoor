@@ -90,6 +90,17 @@ pub fn jsonrpc_error_response(
         .into_response()
 }
 
+/// The `notifications/tools/list_changed` JSON-RPC notification (no `id`), sent
+/// to tell a client its cached tool list is stale and it should re-`tools/list`.
+/// Built here so the shape is defined once; a streaming MCP transport writes it
+/// to the client when `AppState::mcp_tools_changed` fires.
+pub fn tools_list_changed_notification() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/tools/list_changed",
+    })
+}
+
 pub fn tool_success(payload: Value) -> Value {
     let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
     json!({
@@ -114,4 +125,19 @@ pub fn tool_error(message: String) -> Value {
         ],
         "isError": true
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tools_list_changed_notification_is_an_idless_jsonrpc_notification() {
+        let notification = tools_list_changed_notification();
+        assert_eq!(notification["jsonrpc"], "2.0");
+        assert_eq!(notification["method"], "notifications/tools/list_changed");
+        // A notification carries no id (it expects no response) and no params.
+        assert!(notification.get("id").is_none());
+        assert!(notification.get("params").is_none());
+    }
 }

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use rusqlite::{OptionalExtension, params};
 
 use crate::cache::SqliteCache;
+use crate::search::LayerSelection;
 use crate::vault::{ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteMetadata, NoteSummary};
 
 impl SqliteCache {
@@ -23,7 +24,7 @@ impl SqliteCache {
             .query_row(
                 r#"
             SELECT title, slug, relative_path, content, content_hash,
-                   aliases_json, frontmatter_json
+                   layer, aliases_json, frontmatter_json
             FROM notes
             WHERE slug = ?1
             "#,
@@ -35,8 +36,9 @@ impl SqliteCache {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -48,6 +50,7 @@ impl SqliteCache {
             relative_path,
             content,
             content_hash,
+            layer,
             aliases_json,
             properties_json,
         )) = row
@@ -73,6 +76,7 @@ impl SqliteCache {
             relative_path,
             content,
             content_hash,
+            layer,
             metadata: NoteMetadata {
                 tags,
                 aliases,
@@ -81,7 +85,69 @@ impl SqliteCache {
         }))
     }
 
-    pub fn note_summaries(&self) -> Result<Vec<NoteSummary>, String> {
+    /// Fetch a note by its vault-relative path (with or without a `.md`
+    /// extension), reaching any layer. The path is normalized the same way a
+    /// wikilink target is, so `sources/Clip`, `sources/Clip.md` and
+    /// `Sources/clip` all resolve to the same note. A demoted note stays
+    /// reachable by this stable address regardless of the default surface.
+    pub fn read_note_by_path(&self, path: &str) -> Result<Option<Note>, String> {
+        use crate::vault::{normalize_link_target, normalize_title};
+        let normalized = normalize_title(&normalize_link_target(path));
+        let conn = self.read()?;
+        let slug: Option<String> = conn
+            .query_row(
+                "SELECT slug FROM notes WHERE normalized_relative_path = ?1 \
+                 ORDER BY (layer IS NOT NULL), relative_path LIMIT 1",
+                params![normalized],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("failed to resolve note by path '{path}': {error}"))?;
+        drop(conn);
+        match slug {
+            Some(slug) => self.read_note_by_slug(&slug),
+            None => Ok(None),
+        }
+    }
+
+    /// If every note under `path_prefix` sits in demoted layers (no
+    /// default-surface note among them), returns those layer names, sorted;
+    /// otherwise `None`. Used to turn a `path_prefix` that points wholly inside
+    /// unselected demoted layers into an actionable error rather than a silently
+    /// empty result. A prefix that also covers a default-surface note, or that
+    /// matches nothing, returns `None`, so a mixed or ordinary prefix never
+    /// errors — even when it spans more than one demoted layer.
+    pub fn demoted_layers_under_prefix(
+        &self,
+        path_prefix: &str,
+    ) -> Result<Option<Vec<String>>, String> {
+        let needle = path_prefix.trim().trim_matches('/').to_lowercase();
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.read()?;
+        let like = format!("{}%", super::search::escape_like(&needle));
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT layer FROM notes WHERE LOWER(relative_path) LIKE ?1 ESCAPE '\\'",
+            )
+            .map_err(|e| format!("prepare prefix-layer query: {e}"))?;
+        let layers: Vec<Option<String>> = stmt
+            .query_map(params![like], |row| row.get::<_, Option<String>>(0))
+            .map_err(|e| format!("query prefix layers: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("read prefix layers: {e}"))?;
+        // A default-surface note under the prefix (or no match at all) means the
+        // prefix is not wholly inside demoted space: no error.
+        if layers.is_empty() || layers.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let mut names: Vec<String> = layers.into_iter().flatten().collect();
+        names.sort();
+        Ok(Some(names))
+    }
+
+    pub fn note_summaries(&self, selection: &LayerSelection) -> Result<Vec<NoteSummary>, String> {
         let conn = self.read()?;
         let mut tags_by_slug: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
@@ -99,11 +165,13 @@ impl SqliteCache {
         }
         drop(tags_stmt);
 
+        let sql = format!(
+            "SELECT title, slug, relative_path, layer, aliases_json, frontmatter_json \
+             FROM notes WHERE {} ORDER BY relative_path",
+            selection.sql_filter("layer"),
+        );
         let mut stmt = conn
-            .prepare(
-                "SELECT title, slug, relative_path, aliases_json, frontmatter_json \
-                 FROM notes ORDER BY relative_path",
-            )
+            .prepare(&sql)
             .map_err(|error| format!("failed preparing note metadata query: {error}"))?;
         let rows = stmt
             .query_map([], |row| {
@@ -111,14 +179,15 @@ impl SqliteCache {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|error| format!("failed querying note metadata: {error}"))?;
         let mut notes = Vec::new();
         for row in rows {
-            let (title, slug, relative_path, aliases_json, properties_json) =
+            let (title, slug, relative_path, layer, aliases_json, properties_json) =
                 row.map_err(|error| format!("failed reading note metadata: {error}"))?;
             notes.push(NoteSummary {
                 title,
@@ -132,13 +201,14 @@ impl SqliteCache {
                 },
                 slug,
                 relative_path,
+                layer,
             });
         }
         Ok(notes)
     }
 
-    pub fn explorer_tree(&self) -> Result<ExplorerFolder, String> {
-        let rows = self.note_rows_ordered()?;
+    pub fn explorer_tree(&self, selection: &LayerSelection) -> Result<ExplorerFolder, String> {
+        let rows = self.note_rows_ordered(selection)?;
         let mut root = FolderBuilder::default();
 
         for row in rows {
@@ -159,21 +229,28 @@ impl SqliteCache {
         Ok(root.build("Vault"))
     }
 
-    pub fn recently_modified_notes(&self, limit: usize) -> Result<Vec<ModifiedNote>, String> {
+    pub fn recently_modified_notes(
+        &self,
+        limit: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<ModifiedNote>, String> {
         if limit == 0 {
             return Ok(Vec::new());
         }
 
         let conn = self.read()?;
-        let mut stmt = conn
-            .prepare(
-                r#"
-                SELECT title, slug, relative_path, mtime_ns
+        let sql = format!(
+            r#"
+                SELECT title, slug, relative_path, mtime_ns, layer
                 FROM notes
+                WHERE {}
                 ORDER BY mtime_ns DESC, relative_path ASC
                 LIMIT ?1
                 "#,
-            )
+            selection.sql_filter("layer"),
+        );
+        let mut stmt = conn
+            .prepare(&sql)
             .map_err(|error| format!("failed to prepare recently modified query: {error}"))?;
         let rows = stmt
             .query_map(params![limit as i64], |row| {
@@ -182,6 +259,7 @@ impl SqliteCache {
                     slug: row.get(1)?,
                     relative_path: row.get(2)?,
                     mtime_ns: row.get(3)?,
+                    layer: row.get(4)?,
                 })
             })
             .map_err(|error| format!("failed to query recently modified notes: {error}"))?;
@@ -190,10 +268,14 @@ impl SqliteCache {
             .map_err(|error| format!("failed to read recently modified notes: {error}"))
     }
 
-    fn note_rows_ordered(&self) -> Result<Vec<NoteRow>, String> {
+    fn note_rows_ordered(&self, selection: &LayerSelection) -> Result<Vec<NoteRow>, String> {
         let conn = self.read()?;
+        let sql = format!(
+            "SELECT title, slug, relative_path FROM notes WHERE {} ORDER BY relative_path",
+            selection.sql_filter("layer"),
+        );
         let mut stmt = conn
-            .prepare("SELECT title, slug, relative_path FROM notes ORDER BY relative_path")
+            .prepare(&sql)
             .map_err(|error| format!("failed to prepare note list query: {error}"))?;
         let rows = stmt
             .query_map([], |row| {
@@ -209,7 +291,10 @@ impl SqliteCache {
             .map_err(|error| format!("failed to read notes from SQLite cache: {error}"))
     }
 
-    pub fn vault_stats(&self) -> Result<crate::api_types::VaultStatsResponse, String> {
+    pub fn vault_stats(
+        &self,
+        selection: &LayerSelection,
+    ) -> Result<crate::api_types::VaultStatsResponse, String> {
         use crate::api_types::{
             FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
             VaultStatsResponse,
@@ -217,21 +302,52 @@ impl SqliteCache {
 
         let conn = self.read()?;
 
+        // Stats describe the selected surface: every note aggregate is
+        // restricted to the selection, and link aggregates only count links
+        // whose relevant endpoint(s) are also in the selection. Under the
+        // default selection this excludes demoted layers entirely.
+        let notes_f = selection.sql_filter("layer");
+        let n_f = selection.sql_filter("n.layer");
+        let src_f = selection.sql_filter("src.layer");
+        let s_f = selection.sql_filter("s.layer");
+        let t_f = selection.sql_filter("t.layer");
+        let tag_notes_f = selection.sql_filter("notes.layer");
+
         let note_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM notes WHERE {notes_f}"),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats note_count: {e}"))?;
 
         let tag_count: i64 = conn
-            .query_row("SELECT COUNT(DISTINCT tag) FROM tags", [], |row| row.get(0))
+            .query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT tag) FROM tags \
+                     JOIN notes ON notes.slug = tags.note_slug WHERE {tag_notes_f}"
+                ),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats tag_count: {e}"))?;
 
         let link_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM note_links", [], |row| row.get(0))
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM note_links l \
+                     JOIN notes s ON s.slug = l.source_slug \
+                     JOIN notes t ON t.slug = l.target_slug \
+                     WHERE {s_f} AND {t_f}"
+                ),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("vault_stats link_count: {e}"))?;
 
         let vault_size_bytes: i64 = conn
             .query_row(
-                "SELECT COALESCE(SUM(size_bytes), 0) FROM notes",
+                &format!("SELECT COALESCE(SUM(size_bytes), 0) FROM notes WHERE {notes_f}"),
                 [],
                 |row| row.get(0),
             )
@@ -244,7 +360,9 @@ impl SqliteCache {
             content: String,
         }
         let mut content_stmt = conn
-            .prepare("SELECT slug, title, content FROM notes ORDER BY relative_path")
+            .prepare(&format!(
+                "SELECT slug, title, content FROM notes WHERE {notes_f} ORDER BY relative_path"
+            ))
             .map_err(|e| format!("vault_stats prepare content: {e}"))?;
         let content_rows: Vec<ContentRow> = content_stmt
             .query_map([], |row| {
@@ -299,10 +417,11 @@ impl SqliteCache {
             .collect();
 
         let mut tags_stmt = conn
-            .prepare(
-                "SELECT tag, COUNT(*) as note_count FROM tags GROUP BY tag \
-                 ORDER BY note_count DESC, tag LIMIT 20",
-            )
+            .prepare(&format!(
+                "SELECT tag, COUNT(*) as note_count FROM tags \
+                 JOIN notes ON notes.slug = tags.note_slug WHERE {tag_notes_f} \
+                 GROUP BY tag ORDER BY note_count DESC, tag LIMIT 20"
+            ))
             .map_err(|e| format!("vault_stats prepare top_tags: {e}"))?;
         let top_tags: Vec<TagStat> = tags_stmt
             .query_map([], |row| {
@@ -317,17 +436,19 @@ impl SqliteCache {
         drop(tags_stmt);
 
         let mut linked_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
-                SELECT n.title, n.slug, COUNT(l.source_slug) as backlink_count
+                SELECT n.title, n.slug, COUNT(src.slug) as backlink_count
                 FROM notes n
                 LEFT JOIN note_links l ON l.target_slug = n.slug
+                LEFT JOIN notes src ON src.slug = l.source_slug AND {src_f}
+                WHERE {n_f}
                 GROUP BY n.slug
                 HAVING backlink_count > 0
                 ORDER BY backlink_count DESC, n.title
                 LIMIT 20
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare most_linked: {e}"))?;
         let most_linked: Vec<LinkedNoteRef> = linked_stmt
             .query_map([], |row| {
@@ -343,16 +464,17 @@ impl SqliteCache {
         drop(linked_stmt);
 
         let mut activity_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT strftime('%Y-%m', mtime_ns / 1000000000, 'unixepoch') as month,
                        COUNT(*) as modified_count
                 FROM notes
+                WHERE {notes_f}
                 GROUP BY month
                 ORDER BY month DESC
                 LIMIT 6
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare activity_by_month: {e}"))?;
         let activity_by_month: Vec<MonthActivity> = activity_stmt
             .query_map([], |row| {
@@ -367,7 +489,7 @@ impl SqliteCache {
         drop(activity_stmt);
 
         let mut folder_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT
                   CASE WHEN instr(relative_path, '/') > 0
@@ -376,10 +498,11 @@ impl SqliteCache {
                   END as folder,
                   COUNT(*) as note_count
                 FROM notes
+                WHERE {notes_f}
                 GROUP BY folder
                 ORDER BY note_count DESC, folder
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare notes_per_folder: {e}"))?;
         let notes_per_folder: Vec<FolderStat> = folder_stmt
             .query_map([], |row| {
@@ -393,15 +516,26 @@ impl SqliteCache {
             .map_err(|e| format!("vault_stats read notes_per_folder: {e}"))?;
         drop(folder_stmt);
 
+        // Orphan status is per selection: a selected note is an orphan when it
+        // has no link to or from another note that is also in the selection. A
+        // default note whose only backlink comes from a demoted source is an
+        // orphan under the default selection.
         let mut orphan_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
-                SELECT title, slug FROM notes
-                WHERE slug NOT IN (SELECT DISTINCT source_slug FROM note_links)
-                  AND slug NOT IN (SELECT DISTINCT target_slug FROM note_links)
-                ORDER BY title
-                "#,
-            )
+                SELECT n.title, n.slug FROM notes n
+                WHERE {n_f}
+                  AND n.slug NOT IN (
+                    SELECT l.source_slug FROM note_links l
+                    JOIN notes t ON t.slug = l.target_slug WHERE {t_f}
+                  )
+                  AND n.slug NOT IN (
+                    SELECT l.target_slug FROM note_links l
+                    JOIN notes s ON s.slug = l.source_slug WHERE {s_f}
+                  )
+                ORDER BY n.title
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare orphan_notes: {e}"))?;
         let orphan_notes: Vec<NoteRef> = orphan_stmt
             .query_map([], |row| {
@@ -416,13 +550,14 @@ impl SqliteCache {
         drop(orphan_stmt);
 
         let mut no_tag_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT title, slug FROM notes
-                WHERE slug NOT IN (SELECT DISTINCT note_slug FROM tags)
+                WHERE {notes_f}
+                  AND slug NOT IN (SELECT DISTINCT note_slug FROM tags)
                 ORDER BY title
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare no_tag_notes: {e}"))?;
         let no_tag_notes: Vec<NoteRef> = no_tag_stmt
             .query_map([], |row| {
@@ -438,21 +573,25 @@ impl SqliteCache {
 
         let week_total: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM notes \
-                 WHERE mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000",
+                &format!(
+                    "SELECT COUNT(*) FROM notes \
+                     WHERE {notes_f} \
+                     AND mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000"
+                ),
                 [],
                 |row| row.get(0),
             )
             .map_err(|e| format!("vault_stats week_count: {e}"))?;
         let mut week_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT title, slug FROM notes
-                WHERE mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000
+                WHERE {notes_f}
+                  AND mtime_ns >= (unixepoch('now') - 7 * 86400) * 1000000000
                 ORDER BY mtime_ns DESC
                 LIMIT 20
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare modified_this_week: {e}"))?;
         let week_notes: Vec<NoteRef> = week_stmt
             .query_map([], |row| {
@@ -468,21 +607,25 @@ impl SqliteCache {
 
         let month_total: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM notes \
-                 WHERE mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000",
+                &format!(
+                    "SELECT COUNT(*) FROM notes \
+                     WHERE {notes_f} \
+                     AND mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000"
+                ),
                 [],
                 |row| row.get(0),
             )
             .map_err(|e| format!("vault_stats month_count: {e}"))?;
         let mut month_stmt = conn
-            .prepare(
+            .prepare(&format!(
                 r#"
                 SELECT title, slug FROM notes
-                WHERE mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000
+                WHERE {notes_f}
+                  AND mtime_ns >= (unixepoch('now') - 30 * 86400) * 1000000000
                 ORDER BY mtime_ns DESC
                 LIMIT 20
-                "#,
-            )
+                "#
+            ))
             .map_err(|e| format!("vault_stats prepare modified_this_month: {e}"))?;
         let month_notes: Vec<NoteRef> = month_stmt
             .query_map([], |row| {
@@ -596,6 +739,190 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    use crate::search::LayerSelection;
+
+    /// Builds a vault with a demoted `sources/` layer and a default-surface
+    /// `wiki/` folder, then populates a fresh in-memory cache from it.
+    fn build_layered_cache() -> SqliteCache {
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(dir.path().join("sources/Clip.md"), "# Clip\nraw source").expect("clip");
+        fs::write(dir.path().join("wiki/Page.md"), "# Page\ncompiled").expect("page");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+        cache
+    }
+
+    #[test]
+    fn demoted_layers_under_prefix_reports_all_demoted_layers_and_skips_mixed_prefixes() {
+        // Two demoted layers share the `20-` path prefix; a default note lives
+        // elsewhere.
+        let dir = tempdir().expect("temp dir");
+        for (folder, layer) in [("20-sources", "sources"), ("20-archive", "archive")] {
+            fs::create_dir_all(dir.path().join(folder)).expect("dir");
+            fs::write(dir.path().join(folder).join(".hatchdoor-layer"), layer).expect("marker");
+            fs::write(dir.path().join(folder).join("N.md"), "# N").expect("note");
+        }
+        fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        fs::write(dir.path().join("wiki/Page.md"), "# Page").expect("page");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+
+        // A prefix spanning two demoted layers (no default note) reports both,
+        // sorted — so the precedence check can name them instead of returning
+        // a silent empty result.
+        assert_eq!(
+            cache.demoted_layers_under_prefix("20").expect("query"),
+            Some(vec!["archive".to_string(), "sources".to_string()])
+        );
+        // A single demoted layer still reported.
+        assert_eq!(
+            cache
+                .demoted_layers_under_prefix("20-sources")
+                .expect("query"),
+            Some(vec!["sources".to_string()])
+        );
+        // A default-surface prefix never errors.
+        assert_eq!(
+            cache.demoted_layers_under_prefix("wiki").expect("query"),
+            None
+        );
+        // An empty prefix (matches everything, incl. default) never errors.
+        assert_eq!(cache.demoted_layers_under_prefix("").expect("query"), None);
+    }
+
+    fn tree_slugs(folder: &crate::vault::ExplorerFolder, out: &mut Vec<String>) {
+        for note in &folder.notes {
+            out.push(note.slug.clone());
+        }
+        for child in &folder.folders {
+            tree_slugs(child, out);
+        }
+    }
+
+    #[test]
+    fn default_selection_hides_demoted_notes_from_tree_and_summaries() {
+        let cache = build_layered_cache();
+
+        // Default surface: the demoted clipping is absent from both surfaces.
+        let tree = cache
+            .explorer_tree(&LayerSelection::default_surface())
+            .expect("tree");
+        let mut slugs = Vec::new();
+        tree_slugs(&tree, &mut slugs);
+        assert!(
+            slugs.contains(&"page".to_string()),
+            "default tree keeps the wiki page"
+        );
+        assert!(
+            !slugs.contains(&"clip".to_string()),
+            "default tree must hide the demoted clipping"
+        );
+
+        let summaries = cache
+            .note_summaries(&LayerSelection::default_surface())
+            .expect("summaries");
+        let summary_slugs: Vec<String> = summaries.iter().map(|n| n.slug.clone()).collect();
+        assert!(summary_slugs.contains(&"page".to_string()));
+        assert!(
+            !summary_slugs.contains(&"clip".to_string()),
+            "default summaries must hide the demoted clipping"
+        );
+
+        let recent = cache
+            .recently_modified_notes(10, &LayerSelection::default_surface())
+            .expect("recent");
+        assert!(recent.iter().all(|n| n.slug != "clip"));
+    }
+
+    #[test]
+    fn selecting_the_layer_reveals_its_demoted_notes() {
+        let cache = build_layered_cache();
+        let (selection, warnings) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        assert!(warnings.is_empty());
+
+        let summaries = cache.note_summaries(&selection).expect("summaries");
+        let summary_slugs: Vec<String> = summaries.iter().map(|n| n.slug.clone()).collect();
+        assert_eq!(
+            summary_slugs,
+            vec!["clip".to_string()],
+            "selecting sources returns only the demoted clipping"
+        );
+
+        let recent = cache
+            .recently_modified_notes(10, &selection)
+            .expect("recent");
+        assert!(recent.iter().any(|n| n.slug == "clip"));
+        assert!(recent.iter().all(|n| n.slug != "page"));
+    }
+
+    #[test]
+    fn orphan_status_is_computed_per_selection() {
+        // Lonely (default) has one backlink, from a demoted source. Under the
+        // default selection that backlink is hidden, so Lonely reads as an
+        // orphan; across all layers it is linked and is not an orphan.
+        let dir = tempdir().expect("temp dir");
+        fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        fs::write(
+            dir.path().join("wiki/Lonely.md"),
+            "# Lonely\n\nno outgoing links",
+        )
+        .expect("lonely");
+        fs::write(
+            dir.path().join("sources/Src.md"),
+            "# Src\n\nrefers to [[Lonely]]",
+        )
+        .expect("src");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+
+        let default_stats = cache
+            .vault_stats(&LayerSelection::default_surface())
+            .expect("default stats");
+        let default_orphans: Vec<&str> = default_stats
+            .orphan_notes
+            .iter()
+            .map(|n| n.slug.as_str())
+            .collect();
+        assert!(
+            default_orphans.contains(&"lonely"),
+            "under default, Lonely's only backlink is from a hidden demoted source, so it is an orphan"
+        );
+
+        let all_stats = cache
+            .vault_stats(&LayerSelection::all())
+            .expect("all stats");
+        let all_orphans: Vec<&str> = all_stats
+            .orphan_notes
+            .iter()
+            .map(|n| n.slug.as_str())
+            .collect();
+        assert!(
+            !all_orphans.contains(&"lonely"),
+            "across all layers Lonely is linked from Src and is not an orphan"
+        );
+    }
+
     #[test]
     fn read_note_exposes_normalized_frontmatter_metadata() {
         let dir = tempdir().expect("temp dir");
@@ -659,7 +986,7 @@ mod tests {
         }
 
         let notes = cache
-            .recently_modified_notes(2)
+            .recently_modified_notes(2, &LayerSelection::default_surface())
             .expect("recently modified notes");
 
         assert_eq!(

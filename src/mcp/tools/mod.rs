@@ -37,8 +37,10 @@ pub async fn handle_tools_call(
         "get_note_links" => read::get_note_links_tool(state, arguments).await,
         "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
         "get_tree" => read::get_tree_tool(state, arguments).await,
+        "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "refresh_index" => read::refresh_index_tool(state, arguments).await,
         "get_git_sync_status" => read::get_git_sync_status_tool(state).await,
+        "layer_diagnostics" => read::layer_diagnostics_tool(state, arguments).await,
         "get_attachment_import_config" => read::get_attachment_import_config_tool(config),
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
         | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
@@ -102,8 +104,8 @@ pub async fn handle_tools_call(
     }
 }
 
-pub fn tools_list(config: &McpConfig) -> Vec<Value> {
-    let mut tools = read::read_tools_list();
+pub fn tools_list(config: &McpConfig, layers: &[crate::search::LayerInfo]) -> Vec<Value> {
+    let mut tools = read::read_tools_list(layers);
     if config.write_enabled {
         tools.extend(write::write_tools_list());
     }

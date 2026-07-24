@@ -23,12 +23,12 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
-    archive_note_handler, create_note_handler, delete_note_handler, graph_handler, health_handler,
-    move_note_handler, move_rename_note_handler, note_download_handler, note_handler,
-    note_links_handler, recently_modified_handler, refresh_handler, rename_note_handler,
-    resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, stats_handler,
-    tree_handler, update_note_handler, upload_attachment_handler, vault_asset_handler,
-    vault_events_handler, write_capabilities_handler,
+    archive_note_handler, create_note_handler, delete_note_handler, diagnostics_handler,
+    graph_handler, health_handler, move_note_handler, move_rename_note_handler,
+    note_download_handler, note_handler, note_links_handler, recently_modified_handler,
+    refresh_handler, rename_note_handler, resolve_batch_handler, resolve_handler, search_handler,
+    spa_index_handler, stats_handler, tree_handler, update_note_handler, upload_attachment_handler,
+    vault_asset_handler, vault_events_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::startup::StartupTracker;
@@ -136,6 +136,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/api/resolve-batch", post(resolve_batch_handler))
         .route("/api/search", get(search_handler))
         .route("/api/stats", get(stats_handler))
+        .route("/api/diagnostics", get(diagnostics_handler))
         .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
         .route("/api/write-capabilities", get(write_capabilities_handler))
@@ -151,6 +152,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     let protected = protected.layer(axum::middleware::from_fn_with_state(
         state.clone(),
         require_vault_ready,
+    ));
+    let protected = protected.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        reject_demo_layer_query,
     ));
 
     // The attachment endpoint sits outside the shared `protected` group: an MCP
@@ -268,6 +273,32 @@ async fn require_vault_ready(
         .into_response()
 }
 
+/// The HTTP surface is intentionally default-only. In demo mode reject an
+/// attempted layer selector explicitly rather than silently ignoring it, which
+/// could make a caller believe demoted data was being queried safely.
+async fn reject_demo_layer_query(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let requests_layers = request.uri().query().is_some_and(|query| {
+        query
+            .split('&')
+            .filter_map(|part| part.split_once('=').map(|(key, _)| key).or(Some(part)))
+            .any(|key| key == "layers")
+    });
+    if state.demo_mode && requests_layers {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "layers is unavailable in demo mode"
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
 pub async fn run_server() {
     let config = AppConfig::from_env().unwrap_or_else(|e| {
         error!("Configuration error: {e}");
@@ -318,6 +349,20 @@ pub async fn run_server() {
             std::process::exit(1);
         }));
 
+    let scan_config = Arc::new(crate::vault::VaultScanConfig {
+        exclude: crate::vault::ExcludeMatcher::new(&config.exclude_patterns).unwrap_or_else(|e| {
+            error!("Invalid HATCHDOOR_EXCLUDE configuration: {e}");
+            std::process::exit(1);
+        }),
+    });
+    for (pattern, source) in scan_config.exclude.configured_patterns() {
+        info!(pattern = %pattern, source, "Noise-exclusion pattern active");
+    }
+    info!(
+        embed_layers = config.embed_layers,
+        "Demoted-layer vector embedding (HATCHDOOR_EMBED_LAYERS)"
+    );
+
     let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
     if let Some(git_config) = &git_sync_config
         && let Err(e) = git::validate_repo(git_config)
@@ -327,6 +372,7 @@ pub async fn run_server() {
     }
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
+    let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let startup = StartupTracker::scanning();
     let state = AppState {
         vault_path: config.vault_path.clone(),
@@ -335,6 +381,7 @@ pub async fn run_server() {
         })),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         vault_events,
+        mcp_tools_changed,
         embedder,
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
@@ -342,6 +389,7 @@ pub async fn run_server() {
         git_sync: Arc::new(OnceLock::new()),
         mcp_config,
         archive_prefix: Arc::from(config.archive_prefix.as_str()),
+        scan_config: scan_config.clone(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         startup,
     };
@@ -381,12 +429,14 @@ pub async fn run_server() {
             progress_tracker.set_indexing(progress);
         });
         let indexing_vault_path = vault_path.clone();
+        let indexing_scan_config = indexing_state.scan_config.clone();
         let result = tokio::task::spawn_blocking(move || {
             build_cache_with_sqlite_and_progress(
                 &indexing_vault_path,
                 indexing_sqlite,
                 indexing_embedder.as_ref(),
                 Some(on_progress),
+                &indexing_scan_config,
             )
         })
         .await;
@@ -414,10 +464,19 @@ pub async fn run_server() {
             Ok(Err(e)) => {
                 tracker.set_failed();
                 error!(
-                    "Failed to index vault at {} into SQLite cache {}: {e}",
+                    "Failed to index vault at {} into SQLite cache {}: {e}. The vault watcher \
+                     will retry on the next change — correct the error (e.g. a malformed \
+                     .hatchdoor-layer marker) to recover without a restart. Git sync, if \
+                     configured, was not started and requires a restart.",
                     vault_path.display(),
                     cache_db_path.display()
                 );
+                // Spawn the watcher even though the first index failed, so a
+                // corrected vault triggers a recovering reindex (run_reindex
+                // clears the failed startup state on success). git_sync_config is
+                // intentionally dropped here: git sync begins only after a clean
+                // startup index.
+                spawn_vault_watcher(indexing_state, vault_path, cache_db_path);
             }
             Err(e) => {
                 tracker.set_failed();
@@ -502,11 +561,13 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
@@ -514,6 +575,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         };
@@ -536,6 +598,7 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let mut mcp_config = crate::mcp::McpConfig::disabled();
         mcp_config.bearer_token = mcp_bearer_token;
         let state = AppState {
@@ -543,6 +606,7 @@ mod tests {
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode: false,
@@ -550,6 +614,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(mcp_config),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         };
@@ -884,11 +949,13 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: false,
             demo_mode: false,
@@ -896,6 +963,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         };
@@ -1420,6 +1488,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_api_rejects_create_to_a_noise_path() {
+        // A note written to a built-in noise path (*.tmp) would be indexed away;
+        // the HTTP create route must refuse it, matching the MCP write path.
+        let (app, tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Notes/scratch.tmp","content":"# Ignored\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!tmp.path().join("vault/Notes/scratch.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_move_to_a_noise_path() {
+        // Moving an already-indexed note into `.trash/` would make it disappear
+        // on the next refresh. Every write target, not just creates, must be
+        // checked against the scan config.
+        let (app, tmp, _state) = app_for_tests_with_state();
+        let hash = crate::cache::parse::content_hash("# Home\n");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home/move")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"target_folder":".trash","expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(tmp.path().join("vault/Home.md").exists());
+        assert!(!tmp.path().join("vault/.trash/Home.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_api_current_index_honours_user_excludes() {
+        // Write routes rebuild a short-lived index for slug/path work. That
+        // rebuild must use HATCHDOOR_EXCLUDE too, or an excluded note becomes
+        // writable even though it is absent from every read surface.
+        let (_unused_app, _tmp, mut state) = app_for_tests_with_state();
+        std::fs::write(state.vault_path.join("Ignored.md"), "# Ignored\n").expect("write note");
+        state.scan_config = Arc::new(crate::vault::VaultScanConfig {
+            exclude: crate::vault::ExcludeMatcher::new(&["Ignored.md".to_string()])
+                .expect("valid exclude"),
+        });
+        let app = build_router(state, None);
+        let hash = crate::cache::parse::content_hash("# Ignored\n");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/ignored")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Changed\n","expected_content_hash":"{hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_archive_to_a_noise_path() {
+        let (_unused_app, tmp, mut state) = app_for_tests_with_state();
+        state.scan_config = Arc::new(crate::vault::VaultScanConfig {
+            exclude: crate::vault::ExcludeMatcher::new(&["90-archive/".to_string()])
+                .expect("valid exclude"),
+        });
+        let app = build_router(state, None);
+        let hash = crate::cache::parse::content_hash("# Home\n");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home/archive")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(tmp.path().join("vault/Home.md").exists());
+        assert!(!tmp.path().join("vault/90-archive/Home.md").exists());
+    }
+
+    #[tokio::test]
     async fn write_api_rejects_create_path_traversal() {
         let (app, _tmp) = app_for_tests();
 
@@ -1461,6 +1640,162 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!blocked_path.exists());
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_route_serves_ruleset_and_is_disabled_in_demo_mode() {
+        // Non-demo: the route returns the active noise ruleset.
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            payload["noise_patterns"]
+                .as_array()
+                .expect("noise_patterns")
+                .iter()
+                .any(|p| p["source"] == "built-in"),
+            "the ruleset dump must list the built-in noise patterns"
+        );
+
+        // Demo mode: the surface is disabled entirely (it would reveal demoted paths).
+        let (demo_app, _demo_tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let demo = demo_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demo.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn demo_mode_404s_demoted_notes_on_fetch_and_download() {
+        // In demo mode demotion becomes exclusion: a demoted note is a 404 on the
+        // note and download routes, while a default-surface note stays reachable.
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("sources dir");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        std::fs::write(vault_root.join("sources/Clip.md"), "# Clip\n").expect("clip");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("home");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState {
+            vault_path: vault_root,
+            cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            mcp_tools_changed,
+            embedder,
+            web_auth_enabled: false,
+            demo_mode: true,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: Arc::new(OnceLock::new()),
+            mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: StartupTracker::ready(),
+        };
+        let app = build_router(state, None);
+
+        let demoted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/clip")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demoted.status(), StatusCode::NOT_FOUND);
+
+        let demoted_download = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/clip/download")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demoted_download.status(), StatusCode::NOT_FOUND);
+
+        let demoted_links = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/clip/links")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demoted_links.status(), StatusCode::NOT_FOUND);
+
+        let resolved_demoted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resolve?target=sources%2FClip")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resolved_demoted.status(), StatusCode::OK);
+        let resolve_body = to_bytes(resolved_demoted.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let resolved: serde_json::Value = serde_json::from_slice(&resolve_body).expect("json");
+        assert_eq!(resolved["slug"], serde_json::Value::Null);
+
+        let rejected_layer_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree?layers=sources")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(rejected_layer_query.status(), StatusCode::BAD_REQUEST);
+
+        let default = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            default.status(),
+            StatusCode::OK,
+            "a default-surface note stays reachable in demo mode"
+        );
         drop(tmp);
     }
 
@@ -1638,6 +1973,7 @@ mod tests {
             "rewritten_notes",
             "moved_assets",
             "trashed_path",
+            "layer",
             "git_sync_warning",
         ] {
             assert!(created_object.contains_key(field), "missing field {field}");
@@ -1728,6 +2064,7 @@ mod tests {
         let archived_slug = archived["slug"].as_str().expect("archived slug");
         let archived_hash = archived["content_hash"].as_str().expect("archived hash");
         assert_eq!(archived["relative_path"], "90-archive/Renamed Note");
+        assert_eq!(archived["layer"], serde_json::Value::Null);
 
         let delete = app
             .oneshot(

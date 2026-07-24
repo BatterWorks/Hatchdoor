@@ -4,7 +4,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, sqlite_cache};
+use crate::search::LayerInfo;
 
 use super::auth::validate_mcp_request;
 use super::config::{McpConfig, SERVER_INSTRUCTIONS, negotiate_protocol_version};
@@ -87,9 +88,15 @@ async fn handle_mcp_post(
     };
 
     let result = match request.method.as_str() {
-        "initialize" => Ok(handle_initialize(request.params.as_ref())),
+        "initialize" => {
+            let layers = layer_catalog_for(&state).await;
+            Ok(handle_initialize(request.params.as_ref(), &layers))
+        }
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools_list(config) })),
+        "tools/list" => {
+            let layers = layer_catalog_for(&state).await;
+            Ok(json!({ "tools": tools_list(config, &layers) }))
+        }
         "tools/call" => handle_tools_call(state, request.params, config).await,
         method => Err(JsonRpcFailure::method_not_found(format!(
             "Unsupported MCP method: {method}"
@@ -102,7 +109,38 @@ async fn handle_mcp_post(
     }
 }
 
-fn handle_initialize(params: Option<&Value>) -> Value {
+/// Read the vault's layer catalog for tool-list / instructions generation. A
+/// cache read failure degrades to "no layers" rather than failing the request,
+/// so a transient error never breaks `initialize`/`tools/list`.
+async fn layer_catalog_for(state: &AppState) -> Vec<LayerInfo> {
+    match sqlite_cache(state).await {
+        Ok(cache) => cache.layer_catalog().unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Append a runtime line naming the vault's demoted layers to the static server
+/// instructions, so an agent learns the vault has layers and how to reach them.
+fn instructions_with_layers(layers: &[LayerInfo]) -> String {
+    if layers.is_empty() {
+        return SERVER_INSTRUCTIONS.to_string();
+    }
+    let described = layers
+        .iter()
+        .map(|layer| match &layer.description {
+            Some(description) => format!("'{}' ({})", layer.name, description),
+            None => format!("'{}'", layer.name),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{SERVER_INSTRUCTIONS} This vault has demoted layers that are hidden from default \
+         results: {described}. Read and search tools accept a `layers` array to include them \
+         (pass [\"all\"] for every layer); omitting it returns the default surface only."
+    )
+}
+
+fn handle_initialize(params: Option<&Value>, layers: &[LayerInfo]) -> Value {
     let requested = params
         .and_then(|params| params.get("protocolVersion"))
         .and_then(Value::as_str);
@@ -111,14 +149,18 @@ fn handle_initialize(params: Option<&Value>) -> Value {
         "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
-                "listChanged": false
+                // The vault's `layers` enum changes when its marker set changes,
+                // so the tool list is not static. run_reindex fires
+                // state.mcp_tools_changed on such a change; a streaming transport
+                // turns that into a notifications/tools/list_changed.
+                "listChanged": true
             }
         },
         "serverInfo": {
             "name": "hatchdoor",
             "version": env!("CARGO_PKG_VERSION")
         },
-        "instructions": SERVER_INSTRUCTIONS,
+        "instructions": instructions_with_layers(layers),
     })
 }
 
@@ -171,11 +213,13 @@ mod tests {
         let embedder = test_embedder();
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
+            mcp_tools_changed,
             embedder,
             web_auth_enabled: false,
             demo_mode: false,
@@ -183,10 +227,507 @@ mod tests {
             git_sync: Arc::new(std::sync::OnceLock::new()),
             mcp_config: Arc::new(McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: crate::startup::StartupTracker::ready(),
         };
         (state, tmp)
+    }
+
+    /// A vault with a demoted `sources/` layer (described) and a demoted note,
+    /// plus a default-surface note that shares a tag with it.
+    fn layered_test_state() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_root.join("wiki")).expect("wiki dir");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("sources dir");
+        std::fs::write(
+            vault_root.join("sources/.hatchdoor-layer"),
+            "name: sources\ndescription: Raw captured clippings.\n",
+        )
+        .expect("marker");
+        std::fs::write(
+            vault_root.join("wiki/Page.md"),
+            "---\ntags: [topic/x]\n---\n# Page\nmelatonin body",
+        )
+        .expect("page");
+        std::fs::write(
+            vault_root.join("sources/Clip.md"),
+            "---\ntags: [topic/x]\n---\n# Clip\nmelatonin clipping",
+        )
+        .expect("clip");
+        let embedder = test_embedder();
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState {
+            vault_path: vault_root,
+            cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            mcp_tools_changed,
+            embedder,
+            web_auth_enabled: false,
+            demo_mode: false,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: Arc::new(std::sync::OnceLock::new()),
+            mcp_config: Arc::new(McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: crate::startup::StartupTracker::ready(),
+        };
+        (state, tmp)
+    }
+
+    fn tool_named<'a>(body: &'a Value, name: &str) -> &'a Value {
+        body["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("tool {name} present"))
+    }
+
+    #[tokio::test]
+    async fn zero_layer_vault_omits_the_layers_parameter() {
+        let (state, _tmp) = test_state();
+        let response = post_json(
+            state,
+            json!({"jsonrpc":"2.0","id":70,"method":"tools/list"}),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        let search = tool_named(&body, "search_notes");
+        assert!(
+            search["inputSchema"]["properties"].get("layers").is_none(),
+            "a vault with no layers must not advertise a layers parameter"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_list_generates_layers_enum_and_docs_from_markers() {
+        let (state, _tmp) = layered_test_state();
+        let response = post_json(
+            state,
+            json!({"jsonrpc":"2.0","id":71,"method":"tools/list"}),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+
+        for tool_name in ["search_notes", "query_notes", "get_note_links", "get_tree"] {
+            let tool = tool_named(&body, tool_name);
+            let layers = &tool["inputSchema"]["properties"]["layers"];
+            let enum_values: Vec<&str> = layers["items"]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{tool_name} layers enum"))
+                .iter()
+                .map(|v| v.as_str().expect("enum string"))
+                .collect();
+            assert!(enum_values.contains(&"default"), "{tool_name}");
+            assert!(enum_values.contains(&"all"), "{tool_name}");
+            assert!(enum_values.contains(&"sources"), "{tool_name}");
+        }
+        // The marker description is folded into the parameter docs.
+        let search = tool_named(&body, "search_notes");
+        assert!(
+            search["inputSchema"]["properties"]["layers"]["description"]
+                .as_str()
+                .expect("layers description")
+                .contains("Raw captured clippings."),
+            "the layer's marker description must reach the tool schema"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_instructions_name_the_vault_layers() {
+        let (state, _tmp) = layered_test_state();
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":72,"method":"initialize",
+                "params": {"protocolVersion":"2025-11-25","capabilities":{}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        let instructions = body["result"]["instructions"]
+            .as_str()
+            .expect("instructions");
+        assert!(
+            instructions.contains("Use search_notes first"),
+            "static prefix kept"
+        );
+        assert!(
+            instructions.contains("sources"),
+            "runtime instructions should name the vault's layers"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_notes_over_mcp_hides_demoted_by_default_and_reveals_with_layers() {
+        let (state, _tmp) = layered_test_state();
+        let call = |layers: Value| {
+            json!({
+                "jsonrpc":"2.0","id":73,"method":"tools/call",
+                "params": {
+                    "name":"query_notes",
+                    "arguments": {"filters": {"tags":["topic/x"]}, "layers": layers}
+                }
+            })
+        };
+
+        // Default (omitted layers): the demoted clipping must not leak.
+        let default = post_json(state.clone(), call(json!([])), enabled_config()).await;
+        let default_body = response_json(default).await;
+        let default_slugs: Vec<&str> = default_body["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .map(|n| n["slug"].as_str().expect("slug"))
+            .collect();
+        assert!(default_slugs.contains(&"page"));
+        assert!(
+            !default_slugs.contains(&"clip"),
+            "query_notes must not leak the demoted note by default: {default_slugs:?}"
+        );
+
+        // Selecting the layer reveals it.
+        let sourced = post_json(state, call(json!(["sources"])), enabled_config()).await;
+        let sourced_body = response_json(sourced).await;
+        let sourced_slugs: Vec<&str> = sourced_body["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .map(|n| n["slug"].as_str().expect("slug"))
+            .collect();
+        assert!(
+            sourced_slugs.contains(&"clip"),
+            "layers:[sources] must reveal the demoted note: {sourced_slugs:?}"
+        );
+    }
+
+    async fn call_tool(state: AppState, name: &str, arguments: Value, config: McpConfig) -> Value {
+        let response = post_json(
+            state,
+            json!({"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+            config,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    #[tokio::test]
+    async fn get_note_reaches_a_demoted_note_by_path_and_reports_layer() {
+        let (state, _tmp) = layered_test_state();
+        // By path, with a .md extension, reaching the demoted layer.
+        let body = call_tool(
+            state.clone(),
+            "get_note",
+            json!({"path": "sources/Clip.md"}),
+            enabled_config(),
+        )
+        .await;
+        let note = &body["result"]["structuredContent"]["note"];
+        assert_eq!(note["slug"], "clip");
+        assert_eq!(note["layer"], "sources");
+
+        // A default-surface note reports a null layer.
+        let page = call_tool(state, "get_note", json!({"slug": "page"}), enabled_config()).await;
+        assert_eq!(
+            page["result"]["structuredContent"]["note"]["layer"],
+            Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn get_note_rejects_both_or_neither_addresses() {
+        let (state, _tmp) = layered_test_state();
+        let both = call_tool(
+            state.clone(),
+            "get_note",
+            json!({"slug": "page", "path": "wiki/Page.md"}),
+            enabled_config(),
+        )
+        .await;
+        assert_eq!(both["error"]["code"], -32602);
+
+        let neither = call_tool(state, "get_note", json!({}), enabled_config()).await;
+        assert_eq!(neither["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn search_and_query_responses_carry_layer() {
+        let (state, _tmp) = layered_test_state();
+        // A default search hit reports a null layer.
+        let search = call_tool(
+            state.clone(),
+            "search_notes",
+            json!({"query": "melatonin"}),
+            enabled_config(),
+        )
+        .await;
+        let first = &search["result"]["structuredContent"]["results"][0];
+        assert!(
+            first.get("layer").is_some(),
+            "search hit must carry a layer field"
+        );
+
+        // query_notes selecting the layer reports the demoted layer name.
+        let query = call_tool(
+            state,
+            "query_notes",
+            json!({"filters": {"tags": ["topic/x"]}, "layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        let notes = query["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n["slug"] == "clip" && n["layer"] == "sources")
+        );
+    }
+
+    #[tokio::test]
+    async fn recently_modified_tool_honors_layers() {
+        let (state, _tmp) = layered_test_state();
+        // Default: the demoted clip is absent.
+        let default = call_tool(
+            state.clone(),
+            "recently_modified",
+            json!({}),
+            enabled_config(),
+        )
+        .await;
+        let default_slugs: Vec<&str> = default["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes")
+            .iter()
+            .map(|n| n["slug"].as_str().expect("slug"))
+            .collect();
+        assert!(default_slugs.contains(&"page"));
+        assert!(!default_slugs.contains(&"clip"));
+
+        // Selecting the layer reveals it, with the layer reported.
+        let sourced = call_tool(
+            state,
+            "recently_modified",
+            json!({"layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        let notes = sourced["result"]["structuredContent"]["notes"]
+            .as_array()
+            .expect("notes");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n["slug"] == "clip" && n["layer"] == "sources")
+        );
+    }
+
+    #[tokio::test]
+    async fn path_prefix_into_an_unselected_demoted_layer_errors_with_guidance() {
+        let (state, _tmp) = layered_test_state();
+        // A path_prefix wholly inside the demoted `sources/` folder, with no
+        // layers selected, must error (not return empty) and name the layer.
+        let body = call_tool(
+            state.clone(),
+            "query_notes",
+            json!({"filters": {"path_prefix": "sources"}}),
+            enabled_config(),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+        let message = body["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("sources"),
+            "error names the layer: {message}"
+        );
+
+        // With the layer selected, the same query succeeds.
+        let ok = call_tool(
+            state,
+            "query_notes",
+            json!({"filters": {"path_prefix": "sources"}, "layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        assert!(
+            ok.get("error").is_none(),
+            "selecting the layer resolves the error"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_tools_refuse_the_layer_marker_basename() {
+        let (state, _tmp) = layered_test_state();
+        let create = call_tool(
+            state.clone(),
+            "create_note",
+            json!({"relative_path": "wiki/.hatchdoor-layer", "content": "sneaky"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(create["error"]["code"], -32602);
+        assert!(!state.vault_path.join("wiki/.hatchdoor-layer").exists());
+
+        let import = call_tool(
+            state,
+            "import_attachment",
+            json!({"content": b64(b"x"), "target_relative_path": "wiki/.hatchdoor-layer"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(import["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn create_note_response_reports_resulting_layer() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            state,
+            "create_note",
+            json!({"relative_path": "sources/New.md", "content": "# New"}),
+            write_config(),
+        )
+        .await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(
+            content["layer"], "sources",
+            "a note created under a demoted folder reports its layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_tools_refuse_a_noise_matched_target_path() {
+        // A note or attachment written to a noise path would be indexed away —
+        // invisible after the write. The write tools must refuse it up front.
+        let (state, _tmp) = layered_test_state();
+
+        let create = call_tool(
+            state.clone(),
+            "create_note",
+            json!({"relative_path": "notes/scratch.tmp", "content": "ignore me"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(create["error"]["code"], -32602);
+        assert!(
+            create["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("noise-exclusion"),
+            "the refusal must explain the noise match"
+        );
+        assert!(!state.vault_path.join("notes/scratch.tmp").exists());
+
+        let import = call_tool(
+            state,
+            "import_attachment",
+            json!({"content": b64(b"x"), "target_relative_path": ".obsidian/pasted.png"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(import["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn archiving_a_demoted_note_promotes_it_to_the_default_surface() {
+        let (state, _tmp) = layered_test_state();
+        // The demoted note starts on the `sources` layer.
+        let before = call_tool(
+            state.clone(),
+            "get_note",
+            json!({"slug": "clip"}),
+            enabled_config(),
+        )
+        .await;
+        let note = &before["result"]["structuredContent"]["note"];
+        assert_eq!(note["layer"], "sources");
+        let hash = note["content_hash"].as_str().expect("content hash");
+
+        let archived = call_tool(
+            state,
+            "archive_note",
+            json!({"slug": "clip", "expected_content_hash": hash}),
+            write_config(),
+        )
+        .await;
+        let content = &archived["result"]["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(
+            content["relative_path"], "90-archive/Clip",
+            "the note moves under the archive prefix"
+        );
+        assert_eq!(
+            content["layer"],
+            Value::Null,
+            "archiving promotes the demoted note to the default surface"
+        );
+    }
+
+    #[tokio::test]
+    async fn layer_diagnostics_tool_reports_markers_and_classifies_a_path() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            state,
+            "layer_diagnostics",
+            json!({"path": "sources/Clip.md"}),
+            enabled_config(),
+        )
+        .await;
+        let diag = &body["result"]["structuredContent"];
+        assert_eq!(diag["classification"]["layer"], "sources");
+        assert!(
+            diag["markers"]
+                .as_array()
+                .expect("markers")
+                .iter()
+                .any(|m| m["directory"] == "sources"),
+            "the discovered sources marker must be reported"
+        );
+        assert!(
+            diag["noise_patterns"]
+                .as_array()
+                .expect("noise_patterns")
+                .iter()
+                .any(|p| p["source"] == "built-in"),
+            "the built-in ruleset must be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_combines_a_note_filter_with_a_named_layer() {
+        // Group C deferred this: the note-filter (slow) path scoped to a named
+        // layer must return the demoted note and only it.
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            state,
+            "search_notes",
+            json!({"query": "melatonin", "filters": {"tags": ["topic/x"]}, "layers": ["sources"]}),
+            enabled_config(),
+        )
+        .await;
+        let results = body["result"]["structuredContent"]["results"]
+            .as_array()
+            .expect("results");
+        assert!(
+            !results.is_empty(),
+            "a filtered search in the named layer returns the demoted note"
+        );
+        assert!(
+            results.iter().all(|r| r["note_slug"] == "clip"),
+            "only the demoted note matches the filter within the selected layer"
+        );
     }
 
     async fn response_json(response: Response) -> Value {
@@ -349,6 +890,11 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
         assert!(body["result"]["capabilities"]["tools"].is_object());
+        assert_eq!(
+            body["result"]["capabilities"]["tools"]["listChanged"], true,
+            "the tool list is not static (its layers enum tracks the marker set), \
+             so listChanged must be advertised"
+        );
         let instructions = body["result"]["instructions"]
             .as_str()
             .expect("instructions");
@@ -421,9 +967,11 @@ mod tests {
                 "get_note_links",
                 "resolve_wikilink",
                 "get_tree",
+                "recently_modified",
                 "refresh_index",
                 "get_attachment_import_config",
-                "get_git_sync_status"
+                "get_git_sync_status",
+                "layer_diagnostics"
             ]
         );
         assert!(

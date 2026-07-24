@@ -26,10 +26,16 @@ pub async fn note_download_handler(
     // off the async runtime.
     let lookup_slug = slug.clone();
     let vault_path = state.vault_path.clone();
+    let demo_mode = state.demo_mode;
     let export = match crate::app_state::run_blocking(move || {
         let Some(note) = cache.read_note_by_slug(&lookup_slug)? else {
             return Ok(None);
         };
+        // In demo mode a demoted note is excluded outright — downloading it must
+        // 404 like a missing note, not stream demoted content to the public.
+        if demo_mode && note.layer.is_some() {
+            return Ok(None);
+        }
         build_note_export(&vault_path, &note).map(Some)
     })
     .await
@@ -656,6 +662,7 @@ mod tests {
             relative_path: "Docs/README".to_string(),
             content: "# Readme".to_string(),
             content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
             metadata: Default::default(),
         };
 
@@ -708,6 +715,7 @@ mod tests {
             relative_path: "Notes/Home".to_string(),
             content: "---\ntags: [vault/sort]\n---\n# Home\n\nSee [[Plan|Plan]].\n\n![[diagram.png|Topology]]\n\n[External](https://example.com)".to_string(),
             content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
             metadata: Default::default(),
         };
 

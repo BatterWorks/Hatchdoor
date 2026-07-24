@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+use crate::vault::LayerMap;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
@@ -16,6 +17,7 @@ use super::types::{AttachmentInfo, AttachmentOutcome, WriteError};
 
 pub fn list_note_attachments(
     vault_root: &Path,
+    layers: &LayerMap,
     entry: &NoteEntry,
 ) -> Result<Vec<AttachmentInfo>, WriteError> {
     let content = fs::read_to_string(&entry.path).map_err(|error| {
@@ -37,7 +39,7 @@ pub fn list_note_attachments(
             continue;
         };
         if seen.insert(relative_path.clone()) {
-            attachments.push(attachment_info(vault_root, &path)?);
+            attachments.push(attachment_info(vault_root, &path, layers)?);
         }
     }
     Ok(attachments)
@@ -67,6 +69,11 @@ pub fn import_attachment_bytes(
         )));
     }
 
+    // Resolve markers before mutating the filesystem. A malformed marker must
+    // fail this request atomically rather than leaving a persisted attachment
+    // behind after the response reports an error.
+    let layers = LayerMap::collect(vault_root).map_err(WriteError::Io)?;
+
     fs::write(&target_path, bytes).map_err(|error| {
         WriteError::Io(format!(
             "failed to write attachment '{}': {error}",
@@ -74,8 +81,10 @@ pub fn import_attachment_bytes(
         ))
     })?;
 
+    // No caller-supplied index here (imports do not rebuild one), so use the
+    // marker snapshot collected before the write to report the new asset's layer.
     Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, &target_path)?,
+        attachment: attachment_info(vault_root, &target_path, &layers)?,
         rewritten_notes: 0,
         trashed_path: None,
         cleanup_warning: None,
@@ -117,7 +126,7 @@ pub fn move_attachment(
     affected_paths.push(source_path.clone());
     affected_paths.push(target_path.clone());
     Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, &target_path)?,
+        attachment: attachment_info(vault_root, &target_path, &index.layers)?,
         rewritten_notes,
         trashed_path: None,
         cleanup_warning: None,
@@ -165,7 +174,7 @@ pub fn delete_attachment(
     affected_paths.push(source_path.clone());
     affected_paths.push(trash_path.clone());
     Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, &trash_path)?,
+        attachment: attachment_info(vault_root, &trash_path, &index.layers)?,
         rewritten_notes,
         trashed_path: Some(trash_relative),
         cleanup_warning: None,
@@ -205,7 +214,7 @@ fn move_attachment_by_paths(
     affected_paths.push(source_path.to_path_buf());
     affected_paths.push(target_path.to_path_buf());
     Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, target_path)?,
+        attachment: attachment_info(vault_root, target_path, &index.layers)?,
         rewritten_notes,
         trashed_path: None,
         cleanup_warning: None,
@@ -213,7 +222,11 @@ fn move_attachment_by_paths(
     })
 }
 
-fn attachment_info(vault_root: &Path, path: &Path) -> Result<AttachmentInfo, WriteError> {
+fn attachment_info(
+    vault_root: &Path,
+    path: &Path,
+    layers: &LayerMap,
+) -> Result<AttachmentInfo, WriteError> {
     let relative_path = vault_relative_file_path(vault_root, path)?.ok_or_else(|| {
         WriteError::InvalidInput("attachment path cannot escape the vault".to_string())
     })?;
@@ -223,10 +236,15 @@ fn attachment_info(vault_root: &Path, path: &Path) -> Result<AttachmentInfo, Wri
             path.display()
         ))
     })?;
+    // An asset's layer is its containing folder's layer — the same longest-prefix
+    // resolution the index uses for notes. Reported, never filtered on: an
+    // embedded image in a demoted note must stay fetchable.
+    let layer = layers.layer_for(&relative_path).map(str::to_string);
     Ok(AttachmentInfo {
         relative_path,
         size_bytes: bytes.len().min(u64::MAX as usize) as u64,
         content_hash: bytes_hash(&bytes),
+        layer,
     })
 }
 
@@ -241,4 +259,28 @@ fn bytes_hash(bytes: &[u8]) -> String {
     }
 
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn import_attachment_rejects_a_malformed_marker_before_writing() {
+        let vault = tempdir().expect("vault");
+        let sources = vault.path().join("sources");
+        fs::create_dir_all(&sources).expect("sources directory");
+        fs::write(sources.join(".hatchdoor-layer"), "name: all\n").expect("marker");
+
+        let target = "sources/image.png";
+        let error = import_attachment_bytes(vault.path(), target, b"image", 1024, false)
+            .expect_err("malformed marker must reject the import");
+
+        assert!(matches!(error, WriteError::Io(_)));
+        assert!(
+            !vault.path().join(target).exists(),
+            "a failed import must not leave an attachment on disk"
+        );
+    }
 }

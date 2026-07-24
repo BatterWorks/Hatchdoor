@@ -9,8 +9,10 @@ use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, NoteSummary};
 
 pub mod assemble;
+pub mod layer_selection;
 pub mod retrieve;
 
+pub use layer_selection::{LayerInfo, LayerSelection};
 pub use retrieve::ChunkHit;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -29,6 +31,9 @@ pub struct SearchRequest {
     pub per_note_cap: usize,
     pub filters: NoteFilters,
     pub include_properties: Vec<String>,
+    /// Which layers to search. Defaults to the default surface only; Group D
+    /// wires the MCP `layers` parameter through to here.
+    pub layers: LayerSelection,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -136,6 +141,8 @@ pub struct SearchResult {
     pub heading_path: Option<String>,
     pub content: String,
     pub score: f32,
+    /// The hit note's layer (`None` = default surface).
+    pub layer: Option<String>,
     pub outbound_links: Vec<OutboundLink>,
     pub metadata: NoteMetadata,
 }
@@ -163,20 +170,27 @@ pub fn run(
     if let Some(tag_prefix) = tag_prefix_query(&req.query) {
         let mut filters = req.filters;
         filters.tag_prefixes.push(tag_prefix.clone());
-        let results = query_notes(cache, &filters, &req.include_properties, req.limit)?
-            .into_iter()
-            .map(|note| SearchResult {
-                chunk_id: 0,
-                note_slug: note.slug,
-                note_title: note.title,
-                note_path: note.relative_path,
-                heading_path: None,
-                content: format!("Matched tag: #{tag_prefix}"),
-                score: 1.0,
-                outbound_links: Vec::new(),
-                metadata: note.metadata,
-            })
-            .collect();
+        let results = query_notes(
+            cache,
+            &filters,
+            &req.include_properties,
+            req.limit,
+            &req.layers,
+        )?
+        .into_iter()
+        .map(|note| SearchResult {
+            chunk_id: 0,
+            note_slug: note.slug,
+            note_title: note.title,
+            note_path: note.relative_path,
+            heading_path: None,
+            content: format!("Matched tag: #{tag_prefix}"),
+            score: 1.0,
+            layer: note.layer,
+            outbound_links: Vec::new(),
+            metadata: note.metadata,
+        })
+        .collect();
         return Ok(SearchResponse { mode, results });
     }
     let hits = retrieve::retrieve(cache, embedder, &req)?;
@@ -189,9 +203,12 @@ pub fn query_notes(
     filters: &NoteFilters,
     include_properties: &[String],
     limit: usize,
+    layers: &LayerSelection,
 ) -> Result<Vec<NoteSummary>, String> {
+    // Honor the caller's layer selection: an omitted/default selection returns
+    // the default surface only, so demoted notes never leak from query_notes.
     Ok(cache
-        .note_summaries()?
+        .note_summaries(layers)?
         .into_iter()
         .filter(|note| filters.matches(note))
         .take(limit)
@@ -205,13 +222,16 @@ pub fn query_notes(
 pub(crate) fn matching_note_slugs(
     cache: &SqliteCache,
     filters: &NoteFilters,
+    layers: &LayerSelection,
 ) -> Result<Option<HashSet<String>>, String> {
     if filters.is_empty() {
         return Ok(None);
     }
+    // Scope the eligible set to the same selection the search itself uses, so a
+    // metadata pre-filter never widens the layer scope of a search.
     Ok(Some(
         cache
-            .note_summaries()?
+            .note_summaries(layers)?
             .into_iter()
             .filter(|note| filters.matches(note))
             .map(|note| note.slug)
@@ -286,6 +306,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("run");
@@ -310,6 +331,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("run");
@@ -331,6 +353,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect_err("expected empty-query error");
@@ -359,6 +382,7 @@ mod tests {
                 per_note_cap: 1,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("run");
@@ -402,6 +426,7 @@ mod tests {
                     .expect("property filters"),
                 },
                 include_properties: vec!["status".to_string()],
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("filtered search");
@@ -429,6 +454,7 @@ mod tests {
                     ..Default::default()
                 },
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("filtered semantic search");
@@ -472,6 +498,7 @@ mod tests {
                 per_note_cap: 2,
                 filters: Default::default(),
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("nested tag search");
@@ -509,12 +536,59 @@ mod tests {
             },
             &[],
             10,
+            &crate::search::LayerSelection::default_surface(),
         )
         .expect("query tag branch");
 
         assert_eq!(
             notes.into_iter().map(|note| note.slug).collect::<Vec<_>>(),
             vec!["immich", "opencloud"]
+        );
+    }
+
+    #[test]
+    fn query_notes_honors_layer_selection() {
+        // The MCP `query_notes` tool must not leak demoted notes. Omitted layers
+        // (the default selection) returns default-surface notes only; naming the
+        // layer reveals it. This is carried-forward correctness item 1: before
+        // the fix, query_notes passed LayerSelection::all() and leaked.
+        let (cache, _embedder) = build_cache(&[
+            ("wiki/Page.md", "---\ntags: [t/x]\n---\n# Page"),
+            ("sources/.hatchdoor-layer", "sources"),
+            ("sources/Clip.md", "---\ntags: [t/x]\n---\n# Clip"),
+        ]);
+        let filters = NoteFilters {
+            tags: vec!["t/x".to_string()],
+            ..Default::default()
+        };
+
+        let default = query_notes(
+            &cache,
+            &filters,
+            &[],
+            10,
+            &crate::search::LayerSelection::default_surface(),
+        )
+        .expect("default query");
+        let default_slugs: Vec<String> = default.iter().map(|n| n.slug.clone()).collect();
+        assert!(default_slugs.contains(&"page".to_string()));
+        assert!(
+            !default_slugs.contains(&"clip".to_string()),
+            "query_notes must not leak demoted notes under the default selection"
+        );
+
+        let (selection, _) = crate::search::LayerSelection::parse(
+            &["sources".to_string()],
+            &["sources".to_string()],
+        );
+        let sourced = query_notes(&cache, &filters, &[], 10, &selection).expect("sourced query");
+        assert!(
+            sourced.iter().any(|n| n.slug == "clip"),
+            "selecting the layer must reveal its demoted notes"
+        );
+        assert!(
+            sourced.iter().all(|n| n.slug != "page"),
+            "a named-layer selection returns that layer only, not the default surface"
         );
     }
 
@@ -553,6 +627,7 @@ mod tests {
                     ..Default::default()
                 },
                 include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
             },
         )
         .expect("filtered search");
