@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,7 @@ use crate::cache::chunk_ops::{
 use crate::chunk::{ChunkOptions, NoteChunking, chunk_note};
 use crate::embed::Embedder;
 use crate::startup::IndexingProgressSnapshot;
-use crate::vault::{NoteEntry, VaultIndex, normalize_title};
+use crate::vault::{MARKER_FILE_NAME, NoteEntry, VaultIndex, normalize_title};
 
 use super::SqliteCache;
 use super::parse::{
@@ -52,11 +52,91 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     ) -> Result<(), String> {
+        self.replace_with_options(index, embedder, on_progress, embed_layers_enabled())
+    }
+
+    /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
+    /// controls whether demoted-layer notes get their vectors built. When false,
+    /// demoted notes still get chunk rows (so keyword search works) but no vectors
+    /// and no embedding work — the cost win the flag exists for. Demoted layers
+    /// degrade to keyword-only, not to nothing.
+    pub(crate) fn replace_with_options(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        embed_layers: bool,
+    ) -> Result<(), String> {
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
         self.reset_if_embedder_changed(embedder)?;
-        let entries = index.ordered_entries();
+
+        // The embed-layers flag participates in the reindex the same way the
+        // marker set does: flipping it changes no note's content or mtime, so the
+        // incremental upsert would short-circuit and leave demoted notes either
+        // permanently unembedded (after true→false) or permanently vector-less
+        // (after false→true). Detect the flip and force every note back through
+        // the write path so demoted vectors are (re)built or dropped to match.
+        let embed_layers_value = if embed_layers { "true" } else { "false" };
+        let stored_embed_layers = self.get_metadata("embed_layers")?;
+        let embed_layers_changed = stored_embed_layers.is_some()
+            && stored_embed_layers.as_deref() != Some(embed_layers_value);
+        if embed_layers_changed {
+            tracing::info!(
+                embed_layers,
+                "HATCHDOOR_EMBED_LAYERS changed; rebuilding demoted-layer vectors"
+            );
+        }
+
+        // Adding, removing, renaming a layer or editing a marker description
+        // changes no note's content or mtime, so the incremental upsert would
+        // short-circuit to Unchanged and leave every note on its old
+        // classification. Detect a marker-set change up front and, when it
+        // changed, force every note row through the write path so `layer` is
+        // rewritten. Read the stored hash before opening the write transaction
+        // (get_metadata takes its own connection).
+        let marker_set_hash = content_hash(&index.layers.hash_input());
+        let stored_marker_set_hash = self.get_metadata("marker_set_hash")?;
+        let marker_set_changed =
+            stored_marker_set_hash.as_deref() != Some(marker_set_hash.as_str());
+        if marker_set_changed && stored_marker_set_hash.is_some() {
+            tracing::info!("Layer marker set changed; reclassifying every note");
+        }
+
+        // Guard against silent promotion: if a `.hatchdoor-layer` marker present
+        // at the last index has vanished (a sync tool dropped the dotfile), keep
+        // its notes on their prior layer rather than leaking them onto the default
+        // surface. Read the persisted marker set before opening the write
+        // transaction (get_metadata takes its own connection).
+        let fresh_markers = index.layers.named_markers();
+        let persisted_markers: BTreeMap<String, String> = self
+            .get_metadata("marker_set")?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let mut entries = index.ordered_entries();
+        let vanished_markers =
+            retain_vanished_classifications(&mut entries, &persisted_markers, &fresh_markers);
+        for marker in &vanished_markers {
+            tracing::warn!(
+                expected_marker = %marker.marker_path,
+                layer = %marker.layer,
+                notes = marker.note_count,
+                "Layer marker file is missing; refusing to silently promote its notes to the \
+                 default surface and retaining their prior classification. Reinstate the marker \
+                 to restore it, or clear the persisted marker set to acknowledge the promotion."
+            );
+        }
+        // Persist the effective marker set: fresh markers, plus any vanished ones
+        // whose classification we are retaining, so the guard keeps firing until
+        // the marker is reinstated or the persisted entry is cleared.
+        let mut effective_markers = fresh_markers.clone();
+        for (dir, name) in &persisted_markers {
+            effective_markers
+                .entry(dir.clone())
+                .or_insert_with(|| name.clone());
+        }
+
         let current_paths = entries
             .iter()
             .map(|entry| entry.relative_path.clone())
@@ -94,13 +174,24 @@ impl SqliteCache {
         // of the measured full-vault runtime, and retaining these results gives
         // the heartbeat an exact embedding-work denominator without chunking
         // notes twice.
+        let force_note_refresh = marker_set_changed || embed_layers_changed;
         for entry in &entries {
             let note_sync_started = Instant::now();
-            let upsert_outcome = upsert_note_if_changed(&tx, entry, now)?;
+            let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
             metrics.note_sync += note_sync_started.elapsed();
+            // A demoted note is embedded only when the flag allows it; a
+            // default-surface note is always embedded.
+            let embed_this_note = embed_layers || entry.layer.is_none();
             match upsert_outcome {
                 UpsertOutcome::Wrote { slug, content } => {
-                    match prepare_note_for_embedding(&tx, slug, content, embedder) {
+                    match prepare_note_for_embedding(
+                        &tx,
+                        slug,
+                        content,
+                        entry.layer.clone(),
+                        embed_this_note,
+                        embedder,
+                    ) {
                         Ok(prepared) => prepared_notes.push(prepared),
                         Err(error) => {
                             per_note_failures += 1;
@@ -203,6 +294,35 @@ impl SqliteCache {
         // Record which model produced these vectors so a future build with a
         // different model triggers reset_if_embedder_changed above.
         self.set_metadata("embedder_id", &embedder.identity())?;
+
+        // Record the marker set so the next reindex can detect a change and force
+        // the reclassification above, and the resolved marker directories so it
+        // can detect a vanished marker and refuse to promote its notes.
+        self.set_metadata("marker_set_hash", &marker_set_hash)?;
+        let effective_markers_json = serde_json::to_string(&effective_markers)
+            .map_err(|e| format!("failed serializing marker set: {e}"))?;
+        self.set_metadata("marker_set", &effective_markers_json)?;
+        // Persist the embed-layers flag so a future flip is detected and forces a
+        // demoted-layer re-embed / vector drop above.
+        self.set_metadata("embed_layers", embed_layers_value)?;
+
+        // Persist the layer catalog (names + descriptions) so the MCP tool-list
+        // builder can generate the `layers` enum and its per-value docs at
+        // request time, when only the SQLite cache is reachable and the
+        // in-memory LayerMap is gone. Uses the freshly discovered markers, so a
+        // vanished-and-retained marker's layer is not advertised for selection.
+        let layer_catalog: Vec<crate::search::LayerInfo> = index
+            .layers
+            .layer_names()
+            .into_iter()
+            .map(|name| {
+                let description = index.layers.description(&name).map(str::to_string);
+                crate::search::LayerInfo { name, description }
+            })
+            .collect();
+        let layer_catalog_json = serde_json::to_string(&layer_catalog)
+            .map_err(|e| format!("failed serializing layer catalog: {e}"))?;
+        self.set_metadata("layer_catalog", &layer_catalog_json)?;
 
         let elapsed = started_at.elapsed();
         let failure_summary = if per_note_failures == 0 {
@@ -769,10 +889,91 @@ fn delete_note_by_relative_path(tx: &Transaction<'_>, relative_path: &str) -> Re
     Ok(())
 }
 
+/// A marker that was in the persisted set but is absent from the freshly
+/// collected one, plus the count of notes whose classification is being retained
+/// (rather than silently promoted to the default surface).
+#[derive(Debug, PartialEq, Eq)]
+struct VanishedMarker {
+    marker_path: String,
+    layer: String,
+    note_count: usize,
+}
+
+/// True when `relative_path` sits inside (or is) the marker directory `dir`.
+fn path_is_under(relative_path: &str, dir: &str) -> bool {
+    dir.is_empty() || relative_path == dir || relative_path.starts_with(&format!("{dir}/"))
+}
+
+/// Guard against silent promotion. A `.hatchdoor-layer` dotfile can be dropped
+/// invisibly by sync tooling; if its notes were then reclassified onto the
+/// default surface they would leak into every default search, tree and graph.
+///
+/// For each marker present in the persisted set but gone from the fresh one,
+/// any note that the fresh index would place on the default surface (`layer =
+/// None`) but that still sits under the vanished marker's directory keeps the
+/// marker's layer. Notes the fresh index still classifies (nearest surviving
+/// marker) are left alone — a reclassification between two live layers is not a
+/// promotion. Returns one report per vanished marker so the caller can log it.
+fn retain_vanished_classifications(
+    entries: &mut [NoteEntry],
+    persisted_markers: &BTreeMap<String, String>,
+    fresh_markers: &BTreeMap<String, String>,
+) -> Vec<VanishedMarker> {
+    let vanished: BTreeMap<&String, &String> = persisted_markers
+        .iter()
+        .filter(|(dir, _)| !fresh_markers.contains_key(*dir))
+        .collect();
+    if vanished.is_empty() {
+        return Vec::new();
+    }
+
+    for entry in entries.iter_mut() {
+        if entry.layer.is_some() {
+            continue;
+        }
+        // Longest-prefix wins, matching nearest-marker resolution.
+        let mut best: Option<(&str, usize)> = None;
+        for (dir, name) in &vanished {
+            if path_is_under(&entry.relative_path, dir)
+                && best.is_none_or(|(_, len)| dir.len() >= len)
+            {
+                best = Some((name.as_str(), dir.len()));
+            }
+        }
+        if let Some((name, _)) = best {
+            entry.layer = Some(name.to_string());
+        }
+    }
+
+    vanished
+        .into_iter()
+        .map(|(dir, name)| {
+            let note_count = entries
+                .iter()
+                .filter(|entry| {
+                    entry.layer.as_deref() == Some(name.as_str())
+                        && path_is_under(&entry.relative_path, dir)
+                })
+                .count();
+            let marker_path = if dir.is_empty() {
+                MARKER_FILE_NAME.to_string()
+            } else {
+                format!("{dir}/{MARKER_FILE_NAME}")
+            };
+            VanishedMarker {
+                marker_path,
+                layer: name.clone(),
+                note_count,
+            }
+        })
+        .collect()
+}
+
 fn upsert_note_if_changed(
     tx: &Transaction<'_>,
     entry: &NoteEntry,
     indexed_at: i64,
+    force_layer_refresh: bool,
 ) -> Result<UpsertOutcome, String> {
     let snapshot = file_snapshot(&entry.path)?;
     let cached = cached_note_state(tx, &entry.relative_path)?;
@@ -781,19 +982,25 @@ fn upsert_note_if_changed(
         .map_err(|error| format!("failed reading note '{}': {error}", entry.path.display()))?;
     let hash = content_hash(&content);
 
-    let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
-        cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
-    });
-    if cached_matches_file_and_content {
-        return Ok(UpsertOutcome::Unchanged);
-    }
+    // When the marker set changed, the note's `layer` may differ even though its
+    // content, mtime and slug are identical. `layer` is only written on the full
+    // write path (`upsert_note_content`), so both incremental short-circuits must
+    // be skipped to let the new classification land.
+    if !force_layer_refresh {
+        let cached_matches_file_and_content = cached.as_ref().is_some_and(|cached| {
+            cached.slug == entry.slug && cached.snapshot == snapshot && cached.content_hash == hash
+        });
+        if cached_matches_file_and_content {
+            return Ok(UpsertOutcome::Unchanged);
+        }
 
-    let cached_matches_content = cached
-        .as_ref()
-        .is_some_and(|cached| cached.slug == entry.slug && cached.content_hash == hash);
-    if cached_matches_content {
-        update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
-        return Ok(UpsertOutcome::Unchanged);
+        let cached_matches_content = cached
+            .as_ref()
+            .is_some_and(|cached| cached.slug == entry.slug && cached.content_hash == hash);
+        if cached_matches_content {
+            update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
+            return Ok(UpsertOutcome::Unchanged);
+        }
     }
 
     if let Some(cached) = cached.as_ref()
@@ -917,13 +1124,14 @@ fn upsert_note_content(
             absolute_path,
             content,
             content_hash,
+            layer,
             aliases_json,
             frontmatter_json,
             mtime_ns,
             size_bytes,
             indexed_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
         ON CONFLICT(relative_path) DO UPDATE SET
             slug = excluded.slug,
             title = excluded.title,
@@ -932,6 +1140,7 @@ fn upsert_note_content(
             absolute_path = excluded.absolute_path,
             content = excluded.content,
             content_hash = excluded.content_hash,
+            layer = excluded.layer,
             aliases_json = excluded.aliases_json,
             frontmatter_json = excluded.frontmatter_json,
             mtime_ns = excluded.mtime_ns,
@@ -947,6 +1156,7 @@ fn upsert_note_content(
             &absolute_path,
             content,
             hash,
+            &entry.layer,
             &aliases_json,
             &frontmatter_json,
             snapshot.mtime_ns,
@@ -1086,6 +1296,12 @@ struct ChunkMeasurement {
 
 struct PreparedNote {
     slug: String,
+    /// The note's layer, routing its vectors to the default or demoted table.
+    layer: Option<String>,
+    /// Whether this note is embedded at all. False for a demoted note under
+    /// `HATCHDOOR_EMBED_LAYERS=false`: chunk rows are written for keyword search
+    /// but no vectors are produced or stored.
+    embed: bool,
     chunking: NoteChunking,
     preserved: HashMap<String, Vec<f32>>,
     texts_to_embed: Vec<String>,
@@ -1101,15 +1317,37 @@ fn prepare_note_for_embedding(
     tx: &Transaction<'_>,
     slug: String,
     content: String,
+    layer: Option<String>,
+    embed: bool,
     embedder: &dyn Embedder,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
     let chunking = chunk_note(&content, embedder, ChunkOptions::default());
     let chunking_elapsed = chunking_started.elapsed();
 
+    // A note we are not embedding still gets chunk rows (keyword search) but no
+    // vector work: skip reuse, measurement and the embed list entirely.
+    if !embed {
+        return Ok(PreparedNote {
+            slug,
+            layer,
+            embed,
+            chunking,
+            preserved: HashMap::new(),
+            texts_to_embed: Vec::new(),
+            indices_needing_embed: Vec::new(),
+            embedding_input_bytes: 0,
+            embedding_input_token_lengths: Vec::new(),
+            chunk_measurements: Vec::new(),
+            chunking_elapsed,
+            vector_reuse_elapsed: Duration::ZERO,
+        });
+    }
+
     let reuse_started = Instant::now();
     let existing = existing_chunk_hashes(tx, &slug)?;
-    let preserved = preserve_existing_vectors(tx, &slug, &chunking.chunks, &existing)?;
+    let preserved =
+        preserve_existing_vectors(tx, &slug, layer.as_deref(), &chunking.chunks, &existing)?;
     let vector_reuse_elapsed = reuse_started.elapsed();
 
     let doc_prefix = embedder.doc_prefix();
@@ -1158,6 +1396,8 @@ fn prepare_note_for_embedding(
 
     Ok(PreparedNote {
         slug,
+        layer,
+        embed,
         chunking,
         preserved,
         texts_to_embed,
@@ -1180,6 +1420,8 @@ fn embed_prepared_note(
     let pipeline_started = Instant::now();
     let PreparedNote {
         slug,
+        layer,
+        embed,
         chunking,
         preserved,
         texts_to_embed,
@@ -1192,7 +1434,47 @@ fn embed_prepared_note(
     } = prepared;
     if chunking.chunks.is_empty() {
         let sqlite_started = Instant::now();
-        replace_chunks_for_note(tx, &slug, &[], None, None)?;
+        replace_chunks_for_note(tx, &slug, layer.as_deref(), &[], None, None)?;
+        return Ok(ChunkStats {
+            embedded: 0,
+            reused: 0,
+            embedder_calls: 0,
+            embedding_input_bytes: 0,
+            embedding_input_tokens: 0,
+            embedding_padded_tokens: 0,
+            embedding_input_token_lengths: Vec::new(),
+            embedding_call_durations: Vec::new(),
+            chunk_measurements: Vec::new(),
+            pipeline: pipeline_started.elapsed() + chunking_elapsed + vector_reuse_elapsed,
+            chunking: chunking_elapsed,
+            vector_reuse: vector_reuse_elapsed,
+            embedding: Duration::ZERO,
+            sqlite_write: sqlite_started.elapsed(),
+        });
+    }
+
+    // Not embedded (a demoted note under HATCHDOOR_EMBED_LAYERS=false): write the
+    // chunk rows so keyword/FTS search still finds it, but store no vectors.
+    if !embed {
+        let tags_json = serde_json::to_string(&chunking.tags).ok();
+        let aliases_json = serde_json::to_string(&chunking.aliases).ok();
+        let rows: Vec<ChunkRow<'_>> = chunking
+            .chunks
+            .iter()
+            .map(|chunk| ChunkRow {
+                chunk,
+                vector: None,
+            })
+            .collect();
+        let sqlite_started = Instant::now();
+        replace_chunks_for_note(
+            tx,
+            &slug,
+            layer.as_deref(),
+            &rows,
+            tags_json.as_deref(),
+            aliases_json.as_deref(),
+        )?;
         return Ok(ChunkStats {
             embedded: 0,
             reused: 0,
@@ -1292,13 +1574,17 @@ fn embed_prepared_note(
         .chunks
         .iter()
         .zip(vectors.iter())
-        .map(|(chunk, vector)| ChunkRow { chunk, vector })
+        .map(|(chunk, vector)| ChunkRow {
+            chunk,
+            vector: Some(vector.as_slice()),
+        })
         .collect();
 
     let sqlite_started = Instant::now();
     replace_chunks_for_note(
         tx,
         &slug,
+        layer.as_deref(),
         &rows,
         tags_json.as_deref(),
         aliases_json.as_deref(),
@@ -1324,23 +1610,50 @@ fn embed_prepared_note(
 fn preserve_existing_vectors(
     tx: &Transaction<'_>,
     _slug: &str,
+    layer: Option<&str>,
     chunks: &[crate::chunk::Chunk],
     existing: &std::collections::HashMap<String, i64>,
 ) -> Result<std::collections::HashMap<String, Vec<f32>>, String> {
     let mut out = std::collections::HashMap::new();
+    // A note's vectors live in the table its layer routes to, so read from the
+    // matching one. A missing row is not an error: it means the chunk was never
+    // vectored (e.g. a demoted note built while HATCHDOOR_EMBED_LAYERS=false, now
+    // being embedded), so it simply falls through to a fresh embed.
+    let table = match layer {
+        None => "chunk_vectors",
+        Some(_) => "chunk_vectors_demoted",
+    };
     let mut stmt = tx
-        .prepare("SELECT embedding FROM chunk_vectors WHERE chunk_id = ?1")
+        .prepare(&format!(
+            "SELECT embedding FROM {table} WHERE chunk_id = ?1"
+        ))
         .map_err(|e| format!("prepare vector lookup: {e}"))?;
     for chunk in chunks {
         if let Some(chunk_id) = existing.get(&chunk.content_hash) {
-            let bytes: Vec<u8> = stmt
+            let bytes: Option<Vec<u8>> = stmt
                 .query_row(rusqlite::params![chunk_id], |row| row.get(0))
+                .optional()
                 .map_err(|e| format!("read preserved vector: {e}"))?;
-            let floats: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
-            out.insert(chunk.content_hash.clone(), floats);
+            if let Some(bytes) = bytes {
+                let floats: Vec<f32> = bytemuck::cast_slice(&bytes).to_vec();
+                out.insert(chunk.content_hash.clone(), floats);
+            }
         }
     }
     Ok(out)
+}
+
+/// Whether demoted-layer vectors are built. `HATCHDOOR_EMBED_LAYERS` (default
+/// true); any non-truthy value turns it off.
+fn embed_layers_enabled() -> bool {
+    std::env::var("HATCHDOOR_EMBED_LAYERS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(true)
 }
 
 #[cfg(test)]
@@ -1348,9 +1661,161 @@ mod tests {
     use super::*;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
+    use crate::search::LayerSelection;
     use crate::vault::VaultIndex;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Build a vault with a demoted `sources/` note and index it with an explicit
+    /// `embed_layers` flag.
+    fn demoted_vault_with_flag(
+        embed_layers: bool,
+    ) -> (tempfile::TempDir, SqliteCache, StubEmbedder) {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        std::fs::write(
+            dir.path().join("sources/Clip.md"),
+            "# Clip\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("note");
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_with_options(&index, &embedder, None, embed_layers)
+            .expect("populate");
+        (dir, cache, embedder)
+    }
+
+    fn sources_selection() -> LayerSelection {
+        let (selection, _) =
+            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        selection
+    }
+
+    #[test]
+    fn populate_persists_layer_catalog_with_names_and_descriptions() {
+        // The MCP surface (Group D) generates its `layers` enum and per-value
+        // docs at request time, when only the SQLite cache is reachable — the
+        // in-memory LayerMap is long gone. So populate must persist the vault's
+        // layer names and descriptions for the tool-list builder to read back.
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        std::fs::create_dir_all(dir.path().join("archive")).expect("archive dir");
+        std::fs::write(
+            dir.path().join("sources/.hatchdoor-layer"),
+            "name: sources\ndescription: Raw captured clippings.\n",
+        )
+        .expect("sources marker");
+        // A second layer with no description exercises the None case.
+        std::fs::write(dir.path().join("archive/.hatchdoor-layer"), "archive").expect("marker");
+        std::fs::write(dir.path().join("sources/Clip.md"), "# Clip\n\nbody").expect("note");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+
+        let catalog = cache.layer_catalog().expect("layer catalog");
+        assert_eq!(
+            catalog,
+            vec![
+                crate::search::LayerInfo {
+                    name: "archive".to_string(),
+                    description: None,
+                },
+                crate::search::LayerInfo {
+                    name: "sources".to_string(),
+                    description: Some("Raw captured clippings.".to_string()),
+                },
+            ],
+            "catalog must carry every discovered layer, sorted, with its description"
+        );
+    }
+
+    #[test]
+    fn layer_catalog_is_empty_for_a_vault_with_no_markers() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("Home.md"), "# Home").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+        assert!(
+            cache.layer_catalog().expect("catalog").is_empty(),
+            "a vault with no layer markers advertises no layers"
+        );
+    }
+
+    #[test]
+    fn embed_layers_false_skips_demoted_vectors_but_keeps_keyword_search() {
+        let (_dir, cache, embedder) = demoted_vault_with_flag(false);
+
+        // No demoted vectors were built: a layer semantic search finds nothing.
+        let semantic = cache
+            .semantic_search_layered(&embedder, "melatonin circadian", 10, &sources_selection())
+            .expect("semantic");
+        assert!(
+            semantic.is_empty(),
+            "HATCHDOOR_EMBED_LAYERS=false must leave demoted layers without vectors: {:?}",
+            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        );
+        // The demoted vector table is genuinely empty.
+        let demoted_count: i64 = cache
+            .read()
+            .expect("read")
+            .query_row("SELECT COUNT(*) FROM chunk_vectors_demoted", [], |r| {
+                r.get(0)
+            })
+            .expect("count");
+        assert_eq!(demoted_count, 0);
+
+        // Keyword search still finds the demoted note (chunk rows were written).
+        let keyword = cache
+            .fts_search_chunks_layered("melatonin", 10, &sources_selection())
+            .expect("keyword");
+        assert!(
+            keyword.iter().any(|h| h.note_slug == "clip"),
+            "keyword search over the demoted layer must still find the note: {:?}",
+            keyword.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flipping_embed_layers_false_to_true_re_embeds_demoted_layers() {
+        // The flag must participate in the reindex: flipping it back to true must
+        // actually build the demoted vectors, not leave them permanently empty
+        // because no note's content changed.
+        let (dir, cache, embedder) = demoted_vault_with_flag(false);
+        assert!(
+            cache
+                .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
+                .expect("semantic")
+                .is_empty(),
+            "precondition: no demoted vectors while the flag is false"
+        );
+
+        // Reindex the SAME vault (no content change) with the flag now true.
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        cache
+            .replace_with_options(&index, &embedder, None, true)
+            .expect("re-embed");
+
+        let semantic = cache
+            .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
+            .expect("semantic after flip");
+        assert!(
+            semantic.iter().any(|h| h.note_slug == "clip"),
+            "flipping the flag back to true must re-embed the demoted layer: {:?}",
+            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn performance_percentiles_use_nearest_rank() {
@@ -1458,6 +1923,191 @@ mod tests {
         assert!(
             dur.parse::<f64>().is_ok(),
             "duration should parse as f64, got {dur}"
+        );
+    }
+
+    /// Reads the `layer` column for a note by slug directly from the notes table.
+    #[cfg(test)]
+    fn read_layer_for_slug(cache: &SqliteCache, slug: &str) -> Option<String> {
+        let conn = cache.connection().expect("connection");
+        conn.query_row(
+            "SELECT layer FROM notes WHERE slug = ?1",
+            params![slug],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .expect("query layer")
+    }
+
+    #[test]
+    fn populate_writes_note_layer_from_index() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        std::fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        std::fs::write(dir.path().join("sources/Clip.md"), "# Clip\nraw source").expect("note");
+        std::fs::write(dir.path().join("wiki/Page.md"), "# Page\ncompiled").expect("note");
+
+        let index = VaultIndex::build(dir.path()).expect("index");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        cache
+            .replace_from_index_with_embedder(&index, &StubEmbedder::new(384))
+            .expect("populate");
+
+        // The demoted note carries its layer name; the default-surface note is NULL.
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "demoted note must record layer = 'sources'"
+        );
+        assert_eq!(
+            read_layer_for_slug(&cache, "page"),
+            None,
+            "default-surface note must record layer IS NULL"
+        );
+    }
+
+    #[test]
+    fn a_vanished_marker_does_not_silently_promote_its_notes() {
+        // `.hatchdoor-layer` is a dotfile that sync tools drop invisibly. If the
+        // marker disappears, promoting its (possibly thousands of) notes onto the
+        // default surface is the modal silent failure. The reindex must refuse to
+        // promote and retain the prior classification instead.
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        std::fs::write(dir.path().join("sources/Clip.md"), "# Clip\nraw source").expect("note");
+        let marker = dir.path().join("sources/.hatchdoor-layer");
+        std::fs::write(&marker, "sources").expect("marker");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("initial populate");
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "precondition: note is demoted while the marker exists"
+        );
+
+        // The marker vanishes (a sync tool dropped it).
+        std::fs::remove_file(&marker).expect("remove marker");
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        assert_eq!(
+            index.by_slug["clip"].layer, None,
+            "precondition: the fresh index would promote the note to the default surface"
+        );
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("reindex populate");
+
+        // The note must keep its prior classification, not be silently promoted.
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "a vanished marker must not silently promote its notes"
+        );
+    }
+
+    #[test]
+    fn retain_vanished_classifications_reports_and_overrides() {
+        let mut entries = vec![
+            NoteEntry {
+                title: "Clip".to_string(),
+                slug: "clip".to_string(),
+                path: "/x/sources/Clip.md".into(),
+                relative_path: "sources/Clip.md".to_string(),
+                layer: None,
+            },
+            NoteEntry {
+                title: "Page".to_string(),
+                slug: "page".to_string(),
+                path: "/x/wiki/Page.md".into(),
+                relative_path: "wiki/Page.md".to_string(),
+                layer: None,
+            },
+        ];
+        let persisted: BTreeMap<String, String> = [("sources".to_string(), "sources".to_string())]
+            .into_iter()
+            .collect();
+        let fresh: BTreeMap<String, String> = BTreeMap::new();
+
+        let report = retain_vanished_classifications(&mut entries, &persisted, &fresh);
+
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].marker_path, "sources/.hatchdoor-layer");
+        assert_eq!(report[0].layer, "sources");
+        assert_eq!(report[0].note_count, 1);
+        // The note under the vanished marker retains its layer; the unrelated
+        // default-surface note is untouched.
+        assert_eq!(entries[0].layer.as_deref(), Some("sources"));
+        assert_eq!(entries[1].layer, None);
+    }
+
+    #[test]
+    fn retain_vanished_classifications_noop_when_nothing_vanished() {
+        let mut entries = vec![NoteEntry {
+            title: "Clip".to_string(),
+            slug: "clip".to_string(),
+            path: "/x/sources/Clip.md".into(),
+            relative_path: "sources/Clip.md".to_string(),
+            layer: Some("sources".to_string()),
+        }];
+        let markers: BTreeMap<String, String> = [("sources".to_string(), "sources".to_string())]
+            .into_iter()
+            .collect();
+
+        let report = retain_vanished_classifications(&mut entries, &markers, &markers);
+        assert!(report.is_empty());
+        assert_eq!(entries[0].layer.as_deref(), Some("sources"));
+    }
+
+    #[test]
+    fn adding_a_marker_reclassifies_notes_without_any_note_edit() {
+        // The whole feature no-ops without this. `upsert_note_if_changed` returns
+        // Unchanged on matching slug+mtime+content-hash. Adding a `.hatchdoor-layer`
+        // marker changes no note's content or mtime, so without the marker-set-hash
+        // guard every note keeps `layer = NULL` after the user demotes a folder.
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+        let note_path = dir.path().join("sources/Clip.md");
+        std::fs::write(&note_path, "# Clip\nraw source").expect("note");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+
+        // First pass: no marker anywhere, so the note is on the default surface.
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("initial populate");
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip"),
+            None,
+            "precondition: default-surface note starts NULL"
+        );
+
+        // Add a marker WITHOUT touching the note's content or mtime. Dropping a
+        // file into a directory does not change the mtime of the files already in
+        // it, so the incremental path would short-circuit to Unchanged.
+        let mtime_before = file_snapshot(&note_path).expect("snapshot").mtime_ns;
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        let mtime_after = file_snapshot(&note_path).expect("snapshot").mtime_ns;
+        assert_eq!(
+            mtime_before, mtime_after,
+            "precondition: the note file was not touched"
+        );
+
+        // Second pass: the marker set changed, so the note must be reclassified.
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("reindex populate");
+        assert_eq!(
+            read_layer_for_slug(&cache, "clip").as_deref(),
+            Some("sources"),
+            "adding a marker must force the note's layer to be rewritten"
         );
     }
 

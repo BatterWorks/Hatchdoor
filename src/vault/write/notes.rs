@@ -435,6 +435,22 @@ pub fn archive_note(
             entry.relative_path
         )));
     }
+    // Archiving a demoted note into a default-surface archive folder promotes it:
+    // it becomes visible on every default surface. Layer resolution (which the
+    // index applies before any archived flag) runs on the *destination* path, so
+    // compare source and destination layers and warn the operator when the move
+    // reveals a previously-hidden note. `entry.relative_path` and
+    // `target_relative_path` are both extension-free, matching what `layer_for`
+    // expects.
+    if let Some(from_layer) = entry.layer.as_deref()
+        && index.layers.layer_for(&target_relative_path).is_none()
+    {
+        tracing::warn!(
+            note = %entry.relative_path,
+            from_layer,
+            "Archiving promotes a demoted note to the default surface"
+        );
+    }
     move_or_rename_note(
         vault_root,
         index,

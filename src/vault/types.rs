@@ -9,6 +9,8 @@ pub struct NoteEntry {
     pub slug: String,
     pub path: PathBuf,
     pub relative_path: String,
+    /// `None` is the default surface.
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -18,6 +20,9 @@ pub struct Note {
     pub relative_path: String,
     pub content: String,
     pub content_hash: String,
+    /// The note's layer (`None` = default surface). Reachable by slug or path
+    /// regardless of layer; the field tells the caller which surface it is on.
+    pub layer: Option<String>,
     pub metadata: NoteMetadata,
 }
 
@@ -33,6 +38,8 @@ pub struct NoteSummary {
     pub title: String,
     pub slug: String,
     pub relative_path: String,
+    /// The note's layer (`None` = default surface).
+    pub layer: Option<String>,
     pub metadata: NoteMetadata,
 }
 
@@ -46,6 +53,7 @@ pub struct VaultIndex {
     pub ordered_slugs: Vec<String>,
     pub outgoing_by_slug: HashMap<String, Vec<String>>,
     pub backlinks_by_slug: HashMap<String, Vec<String>>,
+    pub layers: super::layers::LayerMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -67,6 +75,8 @@ pub struct ModifiedNote {
     pub slug: String,
     pub relative_path: String,
     pub mtime_ns: i64,
+    /// The note's layer (`None` = default surface).
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -83,10 +93,20 @@ pub struct NoteLink {
     pub title: String,
     pub slug: String,
     pub relative_path: String,
+    /// The linked note's layer (`None` = default surface). An agent needs to
+    /// know whether a link points at compiled synthesis or ground truth.
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NoteLinks {
     pub outgoing: Vec<NoteLink>,
     pub backlinks: Vec<NoteLink>,
+}
+
+/// Deployment-side scan configuration. Layer classification comes from the
+/// vault itself and is not represented here.
+#[derive(Debug, Default)]
+pub struct VaultScanConfig {
+    pub exclude: super::exclude::ExcludeMatcher,
 }

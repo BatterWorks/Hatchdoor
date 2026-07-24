@@ -224,6 +224,27 @@ mod tests {
     }
 
     #[test]
+    fn resolve_asset_path_serves_assets_under_noise_paths() {
+        // Noise patterns must never gate /vault-assets/ serving: an image
+        // embedded in a demoted or otherwise noise-matched folder still renders.
+        // A user HATCHDOOR_EXCLUDE glob silently breaking an embedded image would
+        // be a nasty surprise, so the asset route deliberately ignores exclusion.
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        let noise_dir = vault_root.join(".trash");
+        fs::create_dir_all(&noise_dir).expect("create noise dir");
+        let image_path = noise_dir.join("diagram.png");
+        fs::write(&image_path, b"png").expect("write image");
+
+        let resolved = resolve_asset_path(&vault_root, ".trash/diagram.png")
+            .expect("a noise-path asset must still resolve and serve");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(image_path).expect("canonical image path")
+        );
+    }
+
+    #[test]
     fn resolve_asset_path_blocks_traversal_and_non_images() {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");

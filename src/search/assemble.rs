@@ -41,6 +41,7 @@ pub fn assemble(
             heading_path: h.heading_path,
             content: h.content,
             score: h.score,
+            layer: note.layer.clone(),
             outbound_links: note
                 .outbound_links
                 .iter()

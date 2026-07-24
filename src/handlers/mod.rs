@@ -1,5 +1,6 @@
 mod api;
 mod assets;
+pub mod diagnostics;
 mod downloads;
 mod spa;
 mod write_api;
@@ -10,6 +11,7 @@ pub use api::{
     tree_handler, vault_events_handler,
 };
 pub use assets::vault_asset_handler;
+pub use diagnostics::diagnostics_handler;
 pub use downloads::note_download_handler;
 pub use spa::spa_index_handler;
 pub use write_api::{

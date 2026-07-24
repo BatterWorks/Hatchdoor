@@ -76,6 +76,8 @@ struct WriteOutcomeResponse {
     pub rewritten_notes: usize,
     pub moved_assets: usize,
     pub trashed_path: Option<String>,
+    /// The resulting note's layer (`None` = default surface).
+    pub layer: Option<String>,
     pub git_sync_warning: Option<String>,
 }
 
@@ -144,6 +146,28 @@ pub(crate) fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
     })
 }
 
+/// Refuse a write whose target path matches a noise-exclusion pattern: the index
+/// applies the same matcher, so the file would land on disk yet be invisible to
+/// every read surface. Mirrors the MCP write path's `refuse_noise_write`.
+fn reject_noise_write(state: &AppState, path: &str) -> Option<Response> {
+    state
+        .scan_config
+        .exclude
+        .is_excluded(std::path::Path::new(path.trim()), false)
+        .then(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "'{path}' matches a Hatchdoor noise-exclusion pattern and would be \
+                         ignored by the index; choose a path outside the excluded set."
+                    ),
+                }),
+            )
+                .into_response()
+        })
+}
+
 pub async fn upload_attachment_handler(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -206,6 +230,9 @@ pub async fn upload_attachment_handler(
         Ok(path) => path,
         Err(err) => return err.into_response(),
     };
+    if let Some(response) = reject_noise_write(&state, &target_relative_path) {
+        return response;
+    }
     let file_bytes = match file_bytes {
         Some(bytes) if !bytes.is_empty() => bytes,
         _ => {
@@ -259,6 +286,9 @@ pub async fn create_note_handler(
         Ok(relative_path) => relative_path,
         Err(err) => return err.into_response(),
     };
+    if let Some(response) = reject_noise_write(&state, &relative_path) {
+        return response;
+    }
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
     let vault_path = state.vault_path.clone();
@@ -351,6 +381,9 @@ pub async fn rename_note_handler(
         Err(err) => return err.into_response(),
     };
     let target_relative_path = replace_filename(&entry.relative_path, &new_title);
+    if let Some(response) = reject_noise_write(&state, &target_relative_path) {
+        return response;
+    }
     let vault_path = state.vault_path.clone();
     let outcome = match run_write_op(move || {
         move_or_rename_note(
@@ -406,6 +439,9 @@ pub async fn move_note_handler(
     } else {
         format!("{target_folder}/{file_name}")
     };
+    if let Some(response) = reject_noise_write(&state, &target_relative_path) {
+        return response;
+    }
     let vault_path = state.vault_path.clone();
     let expected_content_hash = payload.expected_content_hash;
     let outcome = match run_write_op(move || {
@@ -457,6 +493,9 @@ pub async fn move_rename_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
+    if let Some(response) = reject_noise_write(&state, &target_relative_path) {
+        return response;
+    }
     let vault_path = state.vault_path.clone();
     let outcome = match run_write_op(move || {
         move_or_rename_note(
@@ -502,6 +541,16 @@ pub async fn archive_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
+    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let file_name = entry
+        .relative_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.relative_path);
+    let target_relative_path = format!("{archive_folder}/{file_name}");
+    if let Some(response) = reject_noise_write(&state, &target_relative_path) {
+        return response;
+    }
     let vault_path = state.vault_path.clone();
     let archive_prefix = state.archive_prefix.clone();
     let outcome = match run_write_op(move || {
@@ -581,7 +630,12 @@ where
 
 async fn current_index(state: &AppState) -> Result<VaultIndex, (StatusCode, Json<ErrorResponse>)> {
     let vault_path = state.vault_path.clone();
-    match tokio::task::spawn_blocking(move || VaultIndex::build(&vault_path)).await {
+    let scan_config = state.scan_config.clone();
+    match tokio::task::spawn_blocking(move || {
+        VaultIndex::build_with_config(&vault_path, &scan_config)
+    })
+    .await
+    {
         Ok(Ok(index)) => Ok(index),
         Ok(Err(error)) => Err(internal_error(format!(
             "failed to index vault at '{}': {error}",
@@ -699,6 +753,11 @@ fn write_response_from_outcome(
         ));
     }
 
+    let layer = slug
+        .as_deref()
+        .and_then(|slug| index.find_by_slug(slug))
+        .and_then(|entry| entry.layer.clone());
+
     Ok(WriteOutcomeResponse {
         ok: true,
         slug,
@@ -708,6 +767,7 @@ fn write_response_from_outcome(
         rewritten_notes: outcome.rewritten_notes,
         moved_assets: outcome.moved_assets,
         trashed_path: outcome.trashed_path,
+        layer,
         git_sync_warning,
     })
 }

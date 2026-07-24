@@ -302,3 +302,96 @@ fn read_note_by_slug_surfaces_io_error_for_deleted_file() {
     let result = vault.read_note_by_slug("home");
     assert!(result.is_err());
 }
+
+#[test]
+fn build_assigns_layers_and_skips_noise() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::create_dir_all(dir.path().join(".obsidian")).expect("dirs");
+    fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+    fs::write(dir.path().join("sources/Clipping.md"), "# Clipping").expect("note");
+    fs::write(dir.path().join("wiki/Topic.md"), "# Topic").expect("note");
+    fs::write(dir.path().join(".obsidian/Plugin Notes.md"), "# Noise").expect("note");
+    fs::write(dir.path().join("wiki/Scratch.tmp"), "ignored").expect("tmp");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    let layer_of = |title: &str| {
+        index
+            .by_slug
+            .values()
+            .find(|entry| entry.title == title)
+            .map(|entry| entry.layer.clone())
+    };
+
+    assert_eq!(layer_of("Clipping"), Some(Some("sources".to_string())));
+    assert_eq!(layer_of("Topic"), Some(None));
+    assert_eq!(layer_of("Plugin Notes"), None, "noise must not be indexed");
+    assert_eq!(index.layers.layer_names(), vec!["sources".to_string()]);
+}
+
+#[test]
+fn build_gives_the_unsuffixed_slug_to_the_default_surface() {
+    // A compiled page named after the source it compiles is the normal case in
+    // a layered vault, and `sources/` sorts before `wiki/`. Without precedence
+    // every [[Melatonin]] would resolve to the clipping.
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("sources")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+    fs::write(dir.path().join("sources/Melatonin.md"), "# Source").expect("note");
+    fs::write(dir.path().join("wiki/Melatonin.md"), "# Compiled").expect("note");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    let compiled = index.find_by_slug("melatonin").expect("slug melatonin");
+    assert_eq!(compiled.relative_path, "wiki/Melatonin");
+    assert_eq!(compiled.layer, None);
+
+    let source = index.find_by_slug("melatonin-2").expect("slug melatonin-2");
+    assert_eq!(source.relative_path, "sources/Melatonin");
+    assert_eq!(source.layer.as_deref(), Some("sources"));
+
+    assert_eq!(
+        index.resolve_wikilink("Melatonin").map(|e| e.slug.as_str()),
+        Some("melatonin")
+    );
+}
+
+#[test]
+fn seeding_is_not_suppressed_by_noise_only_markdown() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join(".obsidian")).expect("dirs");
+    fs::write(dir.path().join(".obsidian/Plugin Notes.md"), "# Noise").expect("note");
+
+    // The vault has no real content, so the starter vault must still be written.
+    let seeded =
+        crate::vault::seed_empty_vault(dir.path(), &crate::vault::ExcludeMatcher::default())
+            .expect("seed");
+    assert!(seeded, "noise-only markdown must not count as content");
+}
+
+#[test]
+fn build_with_config_honours_user_supplied_exclude_patterns() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("drafts")).expect("dirs");
+    fs::create_dir_all(dir.path().join("wiki")).expect("dirs");
+    fs::write(dir.path().join("drafts/Scratch.md"), "# Scratch").expect("note");
+    fs::write(dir.path().join("wiki/Keep.md"), "# Keep").expect("note");
+
+    let config = VaultScanConfig {
+        exclude: ExcludeMatcher::new(&["drafts/".to_string()]).expect("valid pattern"),
+    };
+
+    let index = VaultIndex::build_with_config(dir.path(), &config).expect("index");
+
+    assert!(
+        index.find_by_slug("keep").is_some(),
+        "Keep should be indexed"
+    );
+    assert!(
+        index.find_by_slug("scratch").is_none(),
+        "Scratch should be excluded"
+    );
+}
