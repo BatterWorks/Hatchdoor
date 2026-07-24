@@ -206,6 +206,14 @@ pub(super) async fn archive_note_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
+    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let file_name = entry
+        .relative_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.relative_path);
+    let target = format!("{archive_folder}/{file_name}");
+    refuse_noise_write(&state.scan_config.exclude, &target)?;
     let outcome = archive_note(
         &state.vault_path,
         &index,
@@ -334,7 +342,8 @@ pub(super) async fn rename_attachment_tool(
     let new_filename = non_empty_argument("new_filename", args.new_filename)?;
     refuse_marker_write(&source_relative_path)?;
     refuse_marker_write(&new_filename)?;
-    refuse_noise_write(&state.scan_config.exclude, &new_filename)?;
+    let target_relative_path = replace_filename(&source_relative_path, &new_filename);
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let index = current_index(&state).await?;
     let outcome = rename_attachment(
         &state.vault_path,
@@ -386,7 +395,12 @@ pub(super) async fn list_note_attachments_tool(
 /// tokio worker.
 async fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
     let vault_path = state.vault_path.clone();
-    match tokio::task::spawn_blocking(move || VaultIndex::build(&vault_path)).await {
+    let scan_config = state.scan_config.clone();
+    match tokio::task::spawn_blocking(move || {
+        VaultIndex::build_with_config(&vault_path, &scan_config)
+    })
+    .await
+    {
         Ok(Ok(index)) => Ok(index),
         Ok(Err(error)) => Err(JsonRpcFailure::internal(format!(
             "failed to index vault at '{}': {error}",

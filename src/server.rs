@@ -153,6 +153,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         state.clone(),
         require_vault_ready,
     ));
+    let protected = protected.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        reject_demo_layer_query,
+    ));
 
     // The attachment endpoint sits outside the shared `protected` group: an MCP
     // agent that already holds the MCP bearer token can use it directly,
@@ -267,6 +271,32 @@ async fn require_vault_ready(
         })),
     )
         .into_response()
+}
+
+/// The HTTP surface is intentionally default-only. In demo mode reject an
+/// attempted layer selector explicitly rather than silently ignoring it, which
+/// could make a caller believe demoted data was being queried safely.
+async fn reject_demo_layer_query(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let requests_layers = request.uri().query().is_some_and(|query| {
+        query
+            .split('&')
+            .filter_map(|part| part.split_once('=').map(|(key, _)| key).or(Some(part)))
+            .any(|key| key == "layers")
+    });
+    if state.demo_mode && requests_layers {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "layers is unavailable in demo mode"
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
 }
 
 pub async fn run_server() {
@@ -1482,6 +1512,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_api_rejects_move_to_a_noise_path() {
+        // Moving an already-indexed note into `.trash/` would make it disappear
+        // on the next refresh. Every write target, not just creates, must be
+        // checked against the scan config.
+        let (app, tmp, _state) = app_for_tests_with_state();
+        let hash = crate::cache::parse::content_hash("# Home\n");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home/move")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"target_folder":".trash","expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(tmp.path().join("vault/Home.md").exists());
+        assert!(!tmp.path().join("vault/.trash/Home.md").exists());
+    }
+
+    #[tokio::test]
+    async fn write_api_current_index_honours_user_excludes() {
+        // Write routes rebuild a short-lived index for slug/path work. That
+        // rebuild must use HATCHDOOR_EXCLUDE too, or an excluded note becomes
+        // writable even though it is absent from every read surface.
+        let (_unused_app, _tmp, mut state) = app_for_tests_with_state();
+        std::fs::write(state.vault_path.join("Ignored.md"), "# Ignored\n").expect("write note");
+        state.scan_config = Arc::new(crate::vault::VaultScanConfig {
+            exclude: crate::vault::ExcludeMatcher::new(&["Ignored.md".to_string()])
+                .expect("valid exclude"),
+        });
+        let app = build_router(state, None);
+        let hash = crate::cache::parse::content_hash("# Ignored\n");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/ignored")
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r##"{{"content":"# Changed\n","expected_content_hash":"{hash}"}}"##
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn write_api_rejects_archive_to_a_noise_path() {
+        let (_unused_app, tmp, mut state) = app_for_tests_with_state();
+        state.scan_config = Arc::new(crate::vault::VaultScanConfig {
+            exclude: crate::vault::ExcludeMatcher::new(&["90-archive/".to_string()])
+                .expect("valid exclude"),
+        });
+        let app = build_router(state, None);
+        let hash = crate::cache::parse::content_hash("# Home\n");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home/archive")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"expected_content_hash":"{hash}"}}"#
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(tmp.path().join("vault/Home.md").exists());
+        assert!(!tmp.path().join("vault/90-archive/Home.md").exists());
+    }
+
+    #[tokio::test]
     async fn write_api_rejects_create_path_traversal() {
         let (app, _tmp) = app_for_tests();
 
@@ -1623,6 +1740,47 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(demoted_download.status(), StatusCode::NOT_FOUND);
+
+        let demoted_links = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/clip/links")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demoted_links.status(), StatusCode::NOT_FOUND);
+
+        let resolved_demoted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/resolve?target=sources%2FClip")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resolved_demoted.status(), StatusCode::OK);
+        let resolve_body = to_bytes(resolved_demoted.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let resolved: serde_json::Value = serde_json::from_slice(&resolve_body).expect("json");
+        assert_eq!(resolved["slug"], serde_json::Value::Null);
+
+        let rejected_layer_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tree?layers=sources")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(rejected_layer_query.status(), StatusCode::BAD_REQUEST);
 
         let default = app
             .oneshot(
@@ -1815,6 +1973,7 @@ mod tests {
             "rewritten_notes",
             "moved_assets",
             "trashed_path",
+            "layer",
             "git_sync_warning",
         ] {
             assert!(created_object.contains_key(field), "missing field {field}");
@@ -1905,6 +2064,7 @@ mod tests {
         let archived_slug = archived["slug"].as_str().expect("archived slug");
         let archived_hash = archived["content_hash"].as_str().expect("archived hash");
         assert_eq!(archived["relative_path"], "90-archive/Renamed Note");
+        assert_eq!(archived["layer"], serde_json::Value::Null);
 
         let delete = app
             .oneshot(

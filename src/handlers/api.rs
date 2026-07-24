@@ -87,11 +87,23 @@ pub async fn note_links_handler(
     };
 
     let lookup_slug = slug.clone();
+    let demo_mode = state.demo_mode;
     match run_blocking(move || {
-        cache.note_links(
+        let source = cache.read_note_by_slug(&lookup_slug)?;
+        if demo_mode && source.as_ref().is_some_and(|note| note.layer.is_some()) {
+            return Ok(None);
+        }
+        let mut links = cache.note_links(
             &lookup_slug,
             &crate::search::LayerSelection::default_surface(),
-        )
+        )?;
+        // Outside demo mode an outgoing citation is deliberately allowed to
+        // cross into a demoted layer. In a public demo that would reveal the
+        // hidden note, so expose default-surface targets only.
+        if demo_mode && let Some(links) = &mut links {
+            links.outgoing.retain(|link| link.layer.is_none());
+        }
+        Ok(links)
     })
     .await
     {
@@ -110,7 +122,21 @@ pub async fn resolve_handler(
         Err(err) => return err.into_response(),
     };
 
-    match run_blocking(move || cache.resolve_wikilink(&query.target)).await {
+    let demo_mode = state.demo_mode;
+    match run_blocking(move || {
+        let resolved = cache.resolve_wikilink(&query.target)?;
+        if demo_mode
+            && let Some((slug, _)) = &resolved
+            && cache
+                .read_note_by_slug(slug)?
+                .is_some_and(|note| note.layer.is_some())
+        {
+            return Ok(None);
+        }
+        Ok(resolved)
+    })
+    .await
+    {
         Ok(resolved) => {
             let slug = resolved.map(|(slug, _)| slug);
             (StatusCode::OK, Json(ResolveResponse { slug })).into_response()
@@ -138,16 +164,25 @@ pub async fn resolve_batch_handler(
         Err(err) => return err.into_response(),
     };
     let archive_prefix = state.archive_prefix.clone();
+    let demo_mode = state.demo_mode;
 
     let result = run_blocking(move || {
         let mut results = Vec::with_capacity(payload.targets.len());
         for target in payload.targets {
             let resolved = cache.resolve_wikilink(&target)?;
             let (slug, archived) = match resolved {
-                Some((slug, relative_path)) => {
+                Some((slug, relative_path))
+                    if !demo_mode
+                        || cache
+                            .read_note_by_slug(&slug)?
+                            .is_none_or(|note| note.layer.is_none()) =>
+                {
                     let archived = relative_path.starts_with(&*archive_prefix);
                     (Some(slug), archived)
                 }
+                // In demo mode a resolved demoted note is deliberately
+                // indistinguishable from an unresolved target.
+                Some(_) => (None, false),
                 None => (None, false),
             };
             results.push(ResolveTargetResult {
