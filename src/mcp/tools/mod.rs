@@ -102,8 +102,8 @@ pub async fn handle_tools_call(
     }
 }
 
-pub fn tools_list(config: &McpConfig) -> Vec<Value> {
-    let mut tools = read::read_tools_list();
+pub fn tools_list(config: &McpConfig, layers: &[crate::search::LayerInfo]) -> Vec<Value> {
+    let mut tools = read::read_tools_list(layers);
     if config.write_enabled {
         tools.extend(write::write_tools_list());
     }
