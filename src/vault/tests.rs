@@ -366,7 +366,9 @@ fn seeding_is_not_suppressed_by_noise_only_markdown() {
     fs::write(dir.path().join(".obsidian/Plugin Notes.md"), "# Noise").expect("note");
 
     // The vault has no real content, so the starter vault must still be written.
-    let seeded = crate::vault::seed_empty_vault(dir.path()).expect("seed");
+    let seeded =
+        crate::vault::seed_empty_vault(dir.path(), &crate::vault::ExcludeMatcher::default())
+            .expect("seed");
     assert!(seeded, "noise-only markdown must not count as content");
 }
 
