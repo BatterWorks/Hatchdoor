@@ -12,7 +12,7 @@ use crate::api_types::ErrorResponse;
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::{IndexingProgressSnapshot, StartupTracker};
-use crate::vault::{VaultIndex, seed_empty_vault};
+use crate::vault::{VaultIndex, VaultScanConfig, seed_empty_vault};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +39,10 @@ pub struct AppState {
     pub mcp_config: Arc<crate::mcp::McpConfig>,
     /// Folder prefix treated as archived in resolve results.
     pub archive_prefix: Arc<str>,
+    /// Noise-exclusion configuration (built-in defaults plus `HATCHDOOR_EXCLUDE`),
+    /// applied to every index build on the server path so the watcher, writes and
+    /// startup all see the same excluded set.
+    pub scan_config: Arc<VaultScanConfig>,
     /// Held while a reindex runs so concurrent refreshes coalesce into one.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
     pub startup: StartupTracker,
@@ -67,7 +71,13 @@ pub fn build_cache_with_sqlite(
     sqlite: Arc<SqliteCache>,
     embedder: &dyn Embedder,
 ) -> Result<VaultCache, String> {
-    build_cache_with_sqlite_and_progress(vault_path, sqlite, embedder, None)
+    build_cache_with_sqlite_and_progress(
+        vault_path,
+        sqlite,
+        embedder,
+        None,
+        &VaultScanConfig::default(),
+    )
 }
 
 pub fn build_cache_with_sqlite_and_progress(
@@ -75,9 +85,10 @@ pub fn build_cache_with_sqlite_and_progress(
     sqlite: Arc<SqliteCache>,
     embedder: &dyn Embedder,
     on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+    scan_config: &VaultScanConfig,
 ) -> Result<VaultCache, String> {
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
-    if seed_empty_vault(vault_path).map_err(|e| e.to_string())? {
+    if seed_empty_vault(vault_path, &scan_config.exclude).map_err(|e| e.to_string())? {
         info!(
             vault_path = %vault_path.display(),
             "Seeded fresh vault with Hatchdoor starter notes"
@@ -85,7 +96,8 @@ pub fn build_cache_with_sqlite_and_progress(
     }
     info!("Scanning vault for notes…");
     let scan_started = Instant::now();
-    let index = VaultIndex::build(vault_path).map_err(|e| e.to_string())?;
+    let index =
+        VaultIndex::build_with_config(vault_path, scan_config).map_err(|e| e.to_string())?;
     debug!(
         notes = index.ordered_slugs.len(),
         elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
@@ -156,6 +168,7 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     let sqlite = state.cache.read().await.sqlite.clone();
     let vault_path = state.vault_path.clone();
     let embedder = state.embedder.clone();
+    let scan_config = state.scan_config.clone();
 
     // The marker-set hash the last build persisted. Compared against the value
     // after this reindex to detect a runtime layer change (a marker added,
@@ -169,7 +182,8 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     run_blocking(move || {
         info!("Scanning vault for notes…");
         let scan_started = Instant::now();
-        let index = VaultIndex::build(&vault_path).map_err(|e| e.to_string())?;
+        let index =
+            VaultIndex::build_with_config(&vault_path, &scan_config).map_err(|e| e.to_string())?;
         debug!(
             notes = index.ordered_slugs.len(),
             elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
@@ -216,6 +230,48 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn build_cache_honours_user_exclude_pattern_on_the_real_build_path() {
+        use crate::vault::ExcludeMatcher;
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(vault_path.join("build")).expect("build dir");
+        std::fs::write(vault_path.join("Home.md"), "# Home\n").expect("write home");
+        std::fs::write(vault_path.join("build/Generated.md"), "# Generated\n")
+            .expect("write generated");
+
+        let embedder = test_embedder();
+        let sqlite = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+        let scan_config = VaultScanConfig {
+            exclude: ExcludeMatcher::new(&["build/".to_string()]).expect("matcher"),
+        };
+        let cache = build_cache_with_sqlite_and_progress(
+            &vault_path,
+            sqlite,
+            embedder.as_ref(),
+            None,
+            &scan_config,
+        )
+        .expect("build cache");
+
+        assert!(
+            cache
+                .sqlite
+                .read_note_by_slug("home")
+                .expect("read")
+                .is_some(),
+            "the default note must be indexed"
+        );
+        assert!(
+            cache
+                .sqlite
+                .read_note_by_slug("generated")
+                .expect("read")
+                .is_none(),
+            "a note under a HATCHDOOR_EXCLUDE pattern must be excluded on the real build path"
+        );
+    }
+
+    #[test]
     fn build_cache_seeds_fresh_vault_before_indexing() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
@@ -251,6 +307,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         }

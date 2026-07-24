@@ -318,6 +318,20 @@ pub async fn run_server() {
             std::process::exit(1);
         }));
 
+    let scan_config = Arc::new(crate::vault::VaultScanConfig {
+        exclude: crate::vault::ExcludeMatcher::new(&config.exclude_patterns).unwrap_or_else(|e| {
+            error!("Invalid HATCHDOOR_EXCLUDE configuration: {e}");
+            std::process::exit(1);
+        }),
+    });
+    for (pattern, source) in scan_config.exclude.configured_patterns() {
+        info!(pattern = %pattern, source, "Noise-exclusion pattern active");
+    }
+    info!(
+        embed_layers = config.embed_layers,
+        "Demoted-layer vector embedding (HATCHDOOR_EMBED_LAYERS)"
+    );
+
     let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
     if let Some(git_config) = &git_sync_config
         && let Err(e) = git::validate_repo(git_config)
@@ -344,6 +358,7 @@ pub async fn run_server() {
         git_sync: Arc::new(OnceLock::new()),
         mcp_config,
         archive_prefix: Arc::from(config.archive_prefix.as_str()),
+        scan_config: scan_config.clone(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         startup,
     };
@@ -383,12 +398,14 @@ pub async fn run_server() {
             progress_tracker.set_indexing(progress);
         });
         let indexing_vault_path = vault_path.clone();
+        let indexing_scan_config = indexing_state.scan_config.clone();
         let result = tokio::task::spawn_blocking(move || {
             build_cache_with_sqlite_and_progress(
                 &indexing_vault_path,
                 indexing_sqlite,
                 indexing_embedder.as_ref(),
                 Some(on_progress),
+                &indexing_scan_config,
             )
         })
         .await;
@@ -518,6 +535,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         };
@@ -556,6 +574,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(mcp_config),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         };
@@ -904,6 +923,7 @@ mod tests {
             git_sync: Arc::new(OnceLock::new()),
             mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: StartupTracker::ready(),
         };

@@ -227,6 +227,7 @@ mod tests {
             git_sync: Arc::new(std::sync::OnceLock::new()),
             mcp_config: Arc::new(McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: crate::startup::StartupTracker::ready(),
         };
@@ -272,6 +273,7 @@ mod tests {
             git_sync: Arc::new(std::sync::OnceLock::new()),
             mcp_config: Arc::new(McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             startup: crate::startup::StartupTracker::ready(),
         };
