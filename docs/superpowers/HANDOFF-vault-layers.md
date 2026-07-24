@@ -2,7 +2,9 @@
 
 **Written 2026-07-23. You are picking up mid-implementation. Read this top to bottom before doing anything.**
 
-You are continuing a multi-group backend implementation of configurable vault layers + noise exclusion for Hatchdoor (Rust server over an Obsidian-style markdown vault). Groups A, B, C are done and reviewed. **Groups D and E remain.** Then a final live test.
+You are continuing a multi-group backend implementation of configurable vault layers + noise exclusion for Hatchdoor (Rust server over an Obsidian-style markdown vault). Groups A, B, C, **D** are done and reviewed. **Group E remains.** Then a final live test.
+
+> **Update 2026-07-24 — Group D complete.** See the "Group D done → Group E" addendum at the end of this file before starting. HEAD is now `0f45b28` (was `26a9583`). The three documents below are still the source of truth; the addendum records what D delivered and the specific carry-over for E4/E6.
 
 ## The three documents that define the work
 
@@ -56,7 +58,7 @@ After each clean group: append a line to `.superpowers/sdd/progress.md`, and `gi
 
 ## Groups remaining
 
-- **Group D (MCP surface):** D1 `layers` param + per-vault enum + runtime instructions + `tools/list_changed`; D2 flip `listChanged`; D3 layer on responses, `get_note` path arg, expose `recently_modified`, `path_prefix` precedence error, write tools report layer, write tools refuse `.hatchdoor-layer`. Closes carried items 1–4. Add the note-filter+named-layer test Group C deferred.
+- **Group D (MCP surface): DONE** (`98370b7 3475870 076b416` + review fix `0f45b28`). Closed carried items 1–4. See the addendum.
 - **Group E (config/ops/attachments/demo/diagnostics):** E1 `HATCHDOOR_EXCLUDE` + startup log + seeder config; E2 watcher noise filtering + marker-triggered full reindex; E3 startup recovery; E4 attachments/assets layer + noise handling + `archive_prefix` interaction; E5 `demo_mode` server-side rejection + 404 demoted paths; E6 diagnostics surface (route + MCP tool, disabled in demo_mode). Closes carried items 5–8.
 
 ## Final live test (after E, before calling it done)
@@ -80,3 +82,31 @@ Build, run against a FRESH cache and a scratch vault with a `sources/.hatchdoor-
 - **No file-level frontmatter demotion** — it was built then removed; folder markers only.
 - **No lint logic** (orphan reports etc.); the data model landed in Group B, the checks are out of scope.
 - **No per-surface `hide_from`**; demotion hides from all default surfaces together.
+
+---
+
+## Addendum (2026-07-24) — Group D done → starting Group E
+
+Group D was implemented **inline** (not via a per-group implementer subagent) with per-task TDD, then an **adversarial opus subagent review at the boundary** → APPROVE-WITH-MINORS, no Critical. Gates at the boundary: `cargo test --lib` 371 pass, `cargo clippy --all-targets -- -D warnings` clean, `cargo fmt --check` clean. Branch pushed. **A fresh session can start Group E cleanly from the plan; this addendum records only what E actually needs from D.**
+
+### State to read first
+- Progress ledger `.superpowers/sdd/progress.md` — has a full "GROUP D COMPLETE" block.
+- `.superpowers/sdd/groupD-review-followups.md` — the four unfixed, non-design review findings (M-2..M-5). **M-2 is relevant to E6.**
+- Toolchain is **1.97.1** (`rust-toolchain.toml`), not 1.96. `SCHEMA_VERSION` is **8** — do NOT bump it again (Group A owns the one v7→v8 bump). The atomic-release / wipe-mid-branch-v8-cache deploy rule still stands; live-test E on a FRESH cache dir.
+
+### What D added that E will reuse (don't re-derive)
+- **Persisted metadata keys** (written in `src/cache/populate.rs::replace_with_options`, near the other `set_metadata` calls; read via `SqliteCache::get_metadata`): `marker_set_hash`, `marker_set` (JSON `dir→name`, from `LayerMap::named_markers()`, includes retained-vanished markers), `embed_layers` (`"true"`/`"false"`), and **new in D:** `layer_catalog` (JSON `[{name, description?}]`, read via `SqliteCache::layer_catalog() -> Vec<crate::search::LayerInfo>`). **E6 (diagnostics) should build its ruleset/marker/conflict output from these + `LayerMap` (via `VaultIndex::build(...).layers`), not from scratch.** The Group-A note stands: E6 can reuse `LayerMap::named_markers()`/`layer_names()`/`description()`/`marker_paths()`.
+- **`LayerSelection`** (`src/search/layer_selection.rs`): selector semantics (omitted ≡ default only; `["x"]` ≡ x; `["default","x"]` ≡ both; `["all"]` ≡ everything; unknown name degrades to default with a warning). `parse(tokens, known_layers)`, `sql_filter(column)`, `is_all()`, `named_layers()`, `includes_default()`. E5 (`demo_mode`) must reject any layer-selecting parameter; note the web routes never accept one (B2), so most of E5 is enforced by construction — MCP is already blocked under `demo_mode` (`src/server.rs:64`).
+- **Write-layer-reporting pattern** (for E4): `src/mcp/tools/write.rs::finalize_note_write` reads the note's `layer` back from the just-refreshed cache via `read_note_by_slug` and reports it in `write_success`. E4's attachment/asset layer reporting and the `archive_note` promotion-to-default signal should follow the same read-after-refresh shape. `refuse_marker_write` already exists in that file (basename-normalized, case-insensitive) — reuse it if E4 needs more marker guards.
+- **Response `layer` field** already lands on `Note`/`NoteSummary`/`ModifiedNote`/`SearchResult`/`NoteLink` (`src/vault/types.rs`, `src/search/mod.rs`) with the `notes.layer` column threaded through every read query. E4's asset/attachment responses should carry `layer` the same additive way (serialize as string-or-null, no `skip_serializing_if`).
+- **AppState** gained `mcp_tools_changed: broadcast::Sender<()>` (D2). There are **7 `AppState { … }` construction sites** (1 real in `server.rs`, the rest test helpers in `server.rs`/`app_state.rs`/`mcp/routes.rs`); if E adds another field, expect to touch all 7.
+
+### D2 design decision E should be aware of
+`capabilities.tools.listChanged` is advertised **true** but there is **no live delivery** over the current stateless POST-only MCP transport (GET → 405, no SSE). `run_reindex` fires `AppState.mcp_tools_changed` on a marker-set-hash change and `protocol::tools_list_changed_notification()` builds the message, but nothing consumes the broadcast yet. Left as-is deliberately (plan-mandated + MCP-spec-permitted). If E adds any streaming transport, that broadcast is the seam to wire.
+
+### Test scaffolding to copy
+- Layered MCP tests: `mcp/routes.rs` has `layered_test_state()` (a `sources/` demoted layer + a default note) and a `call_tool(...)` helper — reuse for any E MCP-facing test.
+- Cache-level layer tests: `cache/queries/metadata.rs` has `build_layered_cache()`; populate tests use `demoted_vault_with_flag()`. `StubEmbedder::new(384)` + `SqliteCache::in_memory(384)` + `VaultIndex::build(dir)` is the standard fixture.
+
+### Group E carried items to close (from the list above, still open)
+5 (`HATCHDOOR_EXCLUDE` env not wired + seeder config), 6 (unrecoverable startup on a malformed marker — confirmed live), 7 (`HATCHDOOR_EMBED_LAYERS` read from env, not surfaced in AppConfig/startup log — fold into E1's effective-config logging), 8 (Group A's WARN tells the operator to "clear the persisted marker set" but no clear path exists — E adds one or rewords). Then run the **final live test** in the section above on a fresh cache.
