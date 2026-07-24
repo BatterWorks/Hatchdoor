@@ -210,6 +210,18 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
         let _ = state.mcp_tools_changed.send(());
     }
 
+    // A successful reindex after a failed startup — e.g. the watcher picking up a
+    // corrected `.hatchdoor-layer` marker — clears the failed state and brings
+    // the vault routes back online. When run_reindex is reached, startup is
+    // either Ready (normal writes/refresh) or Failed (recovery); the read routes
+    // are gated behind readiness, so a refresh can only arrive in those two
+    // states. Git sync, if configured, still requires a restart after a failed
+    // startup: it is started only on the clean-startup path.
+    if !state.startup.is_ready() {
+        info!("Vault reindex succeeded; clearing failed startup state");
+        state.startup.set_ready();
+    }
+
     broadcast_vault_revision(state);
     Ok(())
 }
@@ -367,6 +379,49 @@ mod tests {
         assert!(
             tools_changed.try_recv().is_ok(),
             "adding a layer marker must signal a tools/list change"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_reindex_clears_a_failed_startup_state() {
+        // Mirrors E3's recovery path: a startup that failed (e.g. a malformed
+        // .hatchdoor-layer marker) leaves the tracker Failed; the watcher's next
+        // successful reindex must bring the server back to Ready.
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+        let state = state_with_vault(vault_path);
+        state.startup.set_failed();
+        assert!(!state.startup.is_ready(), "precondition: startup is failed");
+
+        refresh_now(&state).await.expect("recovery refresh");
+
+        assert!(
+            state.startup.is_ready(),
+            "a successful reindex must clear the failed startup state"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reindex_leaves_startup_failed() {
+        // The inverse: while the vault is still broken (here, a missing vault
+        // path standing in for an un-buildable index), the reindex errors and the
+        // failed state must persist rather than flip to Ready.
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+        let mut state = state_with_vault(vault_path);
+        state.startup.set_failed();
+        state.vault_path = dir.path().join("missing-vault");
+
+        let result = refresh_now(&state).await;
+
+        assert!(result.is_err(), "reindex over a missing vault must error");
+        assert!(
+            !state.startup.is_ready(),
+            "a failed reindex must not clear the failed startup state"
         );
     }
 

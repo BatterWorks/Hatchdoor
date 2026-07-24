@@ -433,10 +433,19 @@ pub async fn run_server() {
             Ok(Err(e)) => {
                 tracker.set_failed();
                 error!(
-                    "Failed to index vault at {} into SQLite cache {}: {e}",
+                    "Failed to index vault at {} into SQLite cache {}: {e}. The vault watcher \
+                     will retry on the next change — correct the error (e.g. a malformed \
+                     .hatchdoor-layer marker) to recover without a restart. Git sync, if \
+                     configured, was not started and requires a restart.",
                     vault_path.display(),
                     cache_db_path.display()
                 );
+                // Spawn the watcher even though the first index failed, so a
+                // corrected vault triggers a recovering reindex (run_reindex
+                // clears the failed startup state on success). git_sync_config is
+                // intentionally dropped here: git sync begins only after a clean
+                // startup index.
+                spawn_vault_watcher(indexing_state, vault_path, cache_db_path);
             }
             Err(e) => {
                 tracker.set_failed();
