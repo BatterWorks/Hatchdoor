@@ -18,6 +18,9 @@
   `HATCHDOOR_MAX_ATTACHMENT_BYTES`** (it caps the web UI and HTTP uploads, not
   just MCP). **Action:** rename it in your `.env` if you set it; otherwise the
   old name is ignored and the default (10 MiB) applies.
+- **The cache schema is upgraded from 7 to 8 for vault layers.** The generated
+  SQLite cache is rebuilt on the first startup after upgrade. Source Markdown is
+  unchanged, but the initial indexing run re-embeds the vault.
 
 ### Added
 - Direct attachment upload for agents: the `import_attachment` MCP tool accepts
@@ -25,6 +28,14 @@
   new `HATCHDOOR_MCP_MAX_BASE64_BYTES` (default 5 MiB, measured on the decoded
   file). `get_attachment_import_config` now enumerates both upload methods, their
   size limits, and which to use.
+- Vault layers: add a `.hatchdoor-layer` marker to a folder to place its notes
+  on a named, demoted surface. Browser routes remain default-surface only; MCP
+  clients can explicitly select named layers.
+- `HATCHDOOR_EXCLUDE` for comma-separated gitignore-style noise patterns,
+  `HATCHDOOR_EMBED_LAYERS` to opt demoted layers out of vector embedding, and
+  diagnostics via `GET /api/diagnostics` or the `layer_diagnostics` MCP tool.
+- Layer-aware note-write and attachment responses, so automation can tell which
+  surface a created, moved, archived, or uploaded item belongs to.
 
 ### Changed
 - The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
@@ -35,6 +46,11 @@
   provisioned separately. The rest of the web API is unaffected — this route
   was pulled out of the shared protected-routes group so the MCP token is not
   granted any broader access.
+- Built-in noise exclusions now omit `.obsidian/`, `.trash/`,
+  `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, and `*.sync-conflict-*` from the
+  index. In particular, Markdown under `.obsidian/` or `.trash/` and Syncthing
+  conflict copies are no longer searchable unless a deployment negates the
+  relevant default with `HATCHDOOR_EXCLUDE`.
 
 ## v2.3.0 - 2026-07-19
 

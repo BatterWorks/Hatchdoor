@@ -323,6 +323,8 @@ reverse proxy (e.g. nginx `limit_req`, Caddy `rate_limit`, or Traefik
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | Vault-relative folder prefix used by archive actions and archived-link styling |
+| `HATCHDOOR_EXCLUDE` | empty | Comma-separated gitignore-style paths to omit from indexing, appended after the built-in noise rules |
+| `HATCHDOOR_EMBED_LAYERS` | `true` | Set to `false` to keep demoted layers keyword-searchable but skip their vector embeddings |
 
 ## Using Hatchdoor
 
@@ -331,6 +333,63 @@ reverse proxy (e.g. nginx `limit_req`, Caddy `rate_limit`, or Traefik
 Hatchdoor builds a folder explorer from your vault folders and Markdown files.
 The UI root is named `Vault`. Folder names come directly from your filesystem;
 Hatchdoor does not require a PARA, Zettelkasten, or numbered folder scheme.
+
+### Vault Layers And Exclusions
+
+A folder can place its notes on a named, demoted layer by adding a
+`.hatchdoor-layer` file. The smallest useful marker is a YAML scalar:
+
+```text
+# sources/.hatchdoor-layer
+sources
+```
+
+Every Markdown note below `sources/` is then assigned to the `sources` layer.
+It is absent from the browser tree, browser search, and other default-surface
+results, while remaining available to trusted MCP clients that explicitly select
+that layer. A mapping marker can add an operator-facing description:
+
+```yaml
+name: sources
+description: Ground-truth clips and reference material.
+```
+
+Nested markers override their parent. Use `name: default` in a nested folder to
+bring that subtree back to the default surface. Named markers cannot live at the
+vault root, and `default`, `all`, `noise`, and `none` cannot be layer names.
+
+MCP read and search tools default to the default surface. Pass
+`layers: ["sources"]` to select one named layer, `layers: ["default",
+"sources"]` to include both, or `layers: ["all"]` for every layer. `get_note`
+can fetch a known note by slug or vault-relative path regardless of its layer.
+The browser intentionally has no layer selector.
+
+Noise patterns prevent files from entering the index. Hatchdoor always excludes
+`.obsidian/`, `.trash/`, `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, and
+`*.sync-conflict-*`; `.hatchdoor-layer` files are always read even if a broad
+pattern would otherwise match them. Add deployment-specific patterns with a
+comma-separated environment value:
+
+```env
+HATCHDOOR_EXCLUDE=imports/,*.bak
+```
+
+Patterns use gitignore syntax and are applied after the built-ins, so a leading
+`!` can reinstate a default pattern when needed:
+
+```env
+HATCHDOOR_EXCLUDE=!*.sync-conflict-*
+```
+
+Writes to an excluded target are refused rather than creating a file that the
+index would hide. Marker changes trigger a full reindex; if a malformed marker
+causes startup indexing to fail, correcting it lets the vault watcher recover
+without restarting the server.
+
+To inspect the active rules, markers, layer counts, and conflicts, call
+`GET /api/diagnostics` (optionally `?path=sources/Clip.md`) or the MCP
+`layer_diagnostics` tool. Diagnostics are disabled in demo mode because they can
+reveal demoted paths.
 
 ### Note URLs And Links
 
