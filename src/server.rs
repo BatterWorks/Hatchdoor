@@ -1457,6 +1457,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_api_rejects_create_to_a_noise_path() {
+        // A note written to a built-in noise path (*.tmp) would be indexed away;
+        // the HTTP create route must refuse it, matching the MCP write path.
+        let (app, tmp) = app_for_tests();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r##"{"relative_path":"Notes/scratch.tmp","content":"# Ignored\n"}"##,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!tmp.path().join("vault/Notes/scratch.tmp").exists());
+    }
+
+    #[tokio::test]
     async fn write_api_rejects_create_path_traversal() {
         let (app, _tmp) = app_for_tests();
 

@@ -608,6 +608,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_tools_refuse_a_noise_matched_target_path() {
+        // A note or attachment written to a noise path would be indexed away —
+        // invisible after the write. The write tools must refuse it up front.
+        let (state, _tmp) = layered_test_state();
+
+        let create = call_tool(
+            state.clone(),
+            "create_note",
+            json!({"relative_path": "notes/scratch.tmp", "content": "ignore me"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(create["error"]["code"], -32602);
+        assert!(
+            create["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("noise-exclusion"),
+            "the refusal must explain the noise match"
+        );
+        assert!(!state.vault_path.join("notes/scratch.tmp").exists());
+
+        let import = call_tool(
+            state,
+            "import_attachment",
+            json!({"content": b64(b"x"), "target_relative_path": ".obsidian/pasted.png"}),
+            write_config(),
+        )
+        .await;
+        assert_eq!(import["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn archiving_a_demoted_note_promotes_it_to_the_default_surface() {
+        let (state, _tmp) = layered_test_state();
+        // The demoted note starts on the `sources` layer.
+        let before = call_tool(
+            state.clone(),
+            "get_note",
+            json!({"slug": "clip"}),
+            enabled_config(),
+        )
+        .await;
+        let note = &before["result"]["structuredContent"]["note"];
+        assert_eq!(note["layer"], "sources");
+        let hash = note["content_hash"].as_str().expect("content hash");
+
+        let archived = call_tool(
+            state,
+            "archive_note",
+            json!({"slug": "clip", "expected_content_hash": hash}),
+            write_config(),
+        )
+        .await;
+        let content = &archived["result"]["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(
+            content["relative_path"], "90-archive/Clip",
+            "the note moves under the archive prefix"
+        );
+        assert_eq!(
+            content["layer"],
+            Value::Null,
+            "archiving promotes the demoted note to the default surface"
+        );
+    }
+
+    #[tokio::test]
     async fn search_combines_a_note_filter_with_a_named_layer() {
         // Group C deferred this: the note-filter (slow) path scoped to a named
         // layer must return the demoted note and only it.
