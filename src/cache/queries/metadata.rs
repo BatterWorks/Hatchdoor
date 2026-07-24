@@ -110,16 +110,17 @@ impl SqliteCache {
         }
     }
 
-    /// If every note under `path_prefix` sits in a single demoted layer,
-    /// returns that layer name; otherwise `None`. Used to turn a `path_prefix`
-    /// that points wholly inside an unselected demoted layer into an actionable
-    /// error rather than a silently empty result. A prefix that also covers
-    /// default-surface notes (or spans two layers, or matches nothing) returns
-    /// `None`, so a mixed or ordinary prefix never errors.
-    pub fn demoted_only_layer_under_prefix(
+    /// If every note under `path_prefix` sits in demoted layers (no
+    /// default-surface note among them), returns those layer names, sorted;
+    /// otherwise `None`. Used to turn a `path_prefix` that points wholly inside
+    /// unselected demoted layers into an actionable error rather than a silently
+    /// empty result. A prefix that also covers a default-surface note, or that
+    /// matches nothing, returns `None`, so a mixed or ordinary prefix never
+    /// errors — even when it spans more than one demoted layer.
+    pub fn demoted_layers_under_prefix(
         &self,
         path_prefix: &str,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<Vec<String>>, String> {
         let needle = path_prefix.trim().trim_matches('/').to_lowercase();
         if needle.is_empty() {
             return Ok(None);
@@ -136,10 +137,14 @@ impl SqliteCache {
             .map_err(|e| format!("query prefix layers: {e}"))?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e| format!("read prefix layers: {e}"))?;
-        match layers.as_slice() {
-            [Some(single)] => Ok(Some(single.clone())),
-            _ => Ok(None),
+        // A default-surface note under the prefix (or no match at all) means the
+        // prefix is not wholly inside demoted space: no error.
+        if layers.is_empty() || layers.iter().any(Option::is_none) {
+            return Ok(None);
         }
+        let mut names: Vec<String> = layers.into_iter().flatten().collect();
+        names.sort();
+        Ok(Some(names))
     }
 
     pub fn note_summaries(&self, selection: &LayerSelection) -> Result<Vec<NoteSummary>, String> {
@@ -753,6 +758,49 @@ mod tests {
             .replace_from_index_with_embedder(&index, embedder.as_ref())
             .expect("populate");
         cache
+    }
+
+    #[test]
+    fn demoted_layers_under_prefix_reports_all_demoted_layers_and_skips_mixed_prefixes() {
+        // Two demoted layers share the `20-` path prefix; a default note lives
+        // elsewhere.
+        let dir = tempdir().expect("temp dir");
+        for (folder, layer) in [("20-sources", "sources"), ("20-archive", "archive")] {
+            fs::create_dir_all(dir.path().join(folder)).expect("dir");
+            fs::write(dir.path().join(folder).join(".hatchdoor-layer"), layer).expect("marker");
+            fs::write(dir.path().join(folder).join("N.md"), "# N").expect("note");
+        }
+        fs::create_dir_all(dir.path().join("wiki")).expect("wiki dir");
+        fs::write(dir.path().join("wiki/Page.md"), "# Page").expect("page");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+
+        // A prefix spanning two demoted layers (no default note) reports both,
+        // sorted — so the precedence check can name them instead of returning
+        // a silent empty result.
+        assert_eq!(
+            cache.demoted_layers_under_prefix("20").expect("query"),
+            Some(vec!["archive".to_string(), "sources".to_string()])
+        );
+        // A single demoted layer still reported.
+        assert_eq!(
+            cache
+                .demoted_layers_under_prefix("20-sources")
+                .expect("query"),
+            Some(vec!["sources".to_string()])
+        );
+        // A default-surface prefix never errors.
+        assert_eq!(
+            cache.demoted_layers_under_prefix("wiki").expect("query"),
+            None
+        );
+        // An empty prefix (matches everything, incl. default) never errors.
+        assert_eq!(cache.demoted_layers_under_prefix("").expect("query"), None);
     }
 
     fn tree_slugs(folder: &crate::vault::ExplorerFolder, out: &mut Vec<String>) {
