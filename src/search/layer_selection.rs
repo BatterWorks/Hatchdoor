@@ -8,6 +8,19 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
+/// One layer as advertised to the MCP surface: its name and, when the marker
+/// declared one, a sanitized description. Persisted in the cache `metadata`
+/// table at populate time (the in-memory `LayerMap` is gone by request time) so
+/// the tool-list builder can generate the `layers` enum and its per-value docs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerInfo {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// Reserved selector tokens. Neither is ever a layer name (both are rejected as
 /// marker names at startup), so they never collide with a real layer.
 pub const TOKEN_DEFAULT: &str = "default";

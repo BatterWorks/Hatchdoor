@@ -37,6 +37,7 @@ pub(super) async fn search_notes_tool(
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
     let embedder = state.embedder.as_ref();
 
+    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
     let req = SearchRequest {
         query,
         mode,
@@ -44,9 +45,7 @@ pub(super) async fn search_notes_tool(
         per_note_cap,
         filters: args.filters,
         include_properties: args.include_properties,
-        // Group D threads the MCP `layers` parameter through here; until then MCP
-        // search targets the default surface only.
-        layers: crate::search::LayerSelection::default_surface(),
+        layers,
     };
     let response =
         crate::search::run(cache.as_ref(), embedder, req).map_err(JsonRpcFailure::internal)?;
@@ -72,11 +71,13 @@ pub(super) async fn query_notes_tool(
     let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
+    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
     let notes = crate::search::query_notes(
         cache.as_ref(),
         &args.filters,
         &args.include_properties,
         args.limit.unwrap_or(50).clamp(1, 200),
+        &layers,
     )
     .map_err(JsonRpcFailure::internal)?;
     Ok(tool_success(json!({ "notes": notes })))
@@ -107,7 +108,7 @@ pub(super) async fn get_note_links_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
+    let args: LinksArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid get_note_links arguments: {error}"))
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
@@ -115,10 +116,12 @@ pub(super) async fn get_note_links_tool(
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
 
-    // Group D threads a `layers` selector here; until then get_note_links uses
-    // the default surface (forward links still resolve across the boundary).
+    // The selection scopes which backlinks are visible; forward links always
+    // resolve across the boundary regardless (a default-surface note may point
+    // into a demoted one).
+    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
     match cache
-        .note_links(&slug, &crate::search::LayerSelection::default_surface())
+        .note_links(&slug, &layers)
         .map_err(JsonRpcFailure::internal)?
     {
         Some(links) => Ok(tool_success(json!({ "links": links }))),
@@ -148,14 +151,15 @@ pub(super) async fn get_tree_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    reject_non_empty_arguments("get_tree", &arguments)?;
+    let args: LayersOnlyArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid get_tree arguments: {error}"))
+    })?;
     let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    // Group D threads a `layers` selector here; until then get_tree serves the
-    // default surface, matching the omitted-selection semantics.
+    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
     let tree = cache
-        .explorer_tree(&crate::search::LayerSelection::default_surface())
+        .explorer_tree(&layers)
         .map_err(JsonRpcFailure::internal)?;
 
     Ok(tool_success(json!({ "tree": tree })))
@@ -254,7 +258,66 @@ fn reject_non_empty_arguments(tool_name: &str, arguments: &Value) -> Result<(), 
     )))
 }
 
-pub(super) fn read_tools_list() -> Vec<Value> {
+/// Tools whose queries accept a `layers` selector. Kept in one place so the
+/// schema injection below and any future per-tool logic agree on the set.
+const LAYER_AWARE_READ_TOOLS: [&str; 4] =
+    ["search_notes", "query_notes", "get_note_links", "get_tree"];
+
+/// The JSON-schema fragment for the `layers` array parameter, or `None` for a
+/// vault with no layers (in which case the parameter is omitted entirely). The
+/// enum is `default`/`all` plus every discovered layer name; each named layer's
+/// marker description (already sanitized in phase 1) is folded into the
+/// parameter description, since JSON Schema has no per-enum-value docs.
+fn layers_param_schema(layers: &[crate::search::LayerInfo]) -> Option<Value> {
+    if layers.is_empty() {
+        return None;
+    }
+    let mut enum_values = vec![json!("default"), json!("all")];
+    let mut described = Vec::new();
+    for layer in layers {
+        enum_values.push(json!(layer.name));
+        match &layer.description {
+            Some(description) => described.push(format!("'{}' — {}", layer.name, description)),
+            None => described.push(format!("'{}'", layer.name)),
+        }
+    }
+    Some(json!({
+        "type": "array",
+        "items": {"type": "string", "enum": enum_values},
+        "default": [],
+        "description": format!(
+            "Which vault layers to include. Omit for the default surface only. \
+             'default' adds the default surface; 'all' selects every layer. \
+             Named demoted layers: {}.",
+            described.join("; ")
+        )
+    }))
+}
+
+pub(super) fn read_tools_list(layers: &[crate::search::LayerInfo]) -> Vec<Value> {
+    let mut tools = read_tools_list_base();
+    if let Some(schema) = layers_param_schema(layers) {
+        for tool in tools.iter_mut() {
+            let is_layer_aware = tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| LAYER_AWARE_READ_TOOLS.contains(&name));
+            if !is_layer_aware {
+                continue;
+            }
+            if let Some(properties) = tool
+                .get_mut("inputSchema")
+                .and_then(|schema| schema.get_mut("properties"))
+                .and_then(Value::as_object_mut)
+            {
+                properties.insert("layers".to_string(), schema.clone());
+            }
+        }
+    }
+    tools
+}
+
+fn read_tools_list_base() -> Vec<Value> {
     vec![
         json!({
             "name": "search_notes",
@@ -433,6 +496,8 @@ struct SearchNotesArgs {
     filters: crate::search::NoteFilters,
     #[serde(default)]
     include_properties: Vec<String>,
+    #[serde(default)]
+    layers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,6 +508,46 @@ struct QueryNotesArgs {
     include_properties: Vec<String>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    layers: Vec<String>,
+}
+
+/// A note slug plus an optional `layers` selector (get_note_links).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinksArgs {
+    slug: String,
+    #[serde(default)]
+    layers: Vec<String>,
+}
+
+/// Only a `layers` selector (get_tree, recently_modified).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayersOnlyArgs {
+    #[serde(default)]
+    layers: Vec<String>,
+}
+
+/// Parse the MCP `layers` tokens against the vault's persisted layer catalog,
+/// logging any degrade warnings. An unknown layer name is not a hard error: it
+/// degrades to the default surface (see [`crate::search::LayerSelection::parse`]),
+/// so a stale client holding a since-removed layer name keeps working.
+fn parse_layer_selection(
+    cache: &crate::cache::SqliteCache,
+    tokens: &[String],
+) -> Result<crate::search::LayerSelection, JsonRpcFailure> {
+    let known: Vec<String> = cache
+        .layer_catalog()
+        .map_err(JsonRpcFailure::internal)?
+        .into_iter()
+        .map(|layer| layer.name)
+        .collect();
+    let (selection, warnings) = crate::search::LayerSelection::parse(tokens, &known);
+    for warning in warnings {
+        tracing::warn!(%warning, "MCP layers selector degraded to the default surface");
+    }
+    Ok(selection)
 }
 
 fn note_filters_schema() -> Value {

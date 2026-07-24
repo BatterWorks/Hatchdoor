@@ -28,7 +28,7 @@ pub fn retrieve(
         return Ok(Vec::new());
     }
 
-    let eligible = matching_note_slugs(cache, &req.filters)?;
+    let eligible = matching_note_slugs(cache, &req.filters, &req.layers)?;
     let raw_hits: Vec<ChunkHit> = match req.mode {
         SearchMode::Semantic => semantic(
             cache,

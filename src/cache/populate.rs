@@ -306,6 +306,24 @@ impl SqliteCache {
         // demoted-layer re-embed / vector drop above.
         self.set_metadata("embed_layers", embed_layers_value)?;
 
+        // Persist the layer catalog (names + descriptions) so the MCP tool-list
+        // builder can generate the `layers` enum and its per-value docs at
+        // request time, when only the SQLite cache is reachable and the
+        // in-memory LayerMap is gone. Uses the freshly discovered markers, so a
+        // vanished-and-retained marker's layer is not advertised for selection.
+        let layer_catalog: Vec<crate::search::LayerInfo> = index
+            .layers
+            .layer_names()
+            .into_iter()
+            .map(|name| {
+                let description = index.layers.description(&name).map(str::to_string);
+                crate::search::LayerInfo { name, description }
+            })
+            .collect();
+        let layer_catalog_json = serde_json::to_string(&layer_catalog)
+            .map_err(|e| format!("failed serializing layer catalog: {e}"))?;
+        self.set_metadata("layer_catalog", &layer_catalog_json)?;
+
         let elapsed = started_at.elapsed();
         let failure_summary = if per_note_failures == 0 {
             String::new()
@@ -1675,6 +1693,64 @@ mod tests {
         let (selection, _) =
             LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
         selection
+    }
+
+    #[test]
+    fn populate_persists_layer_catalog_with_names_and_descriptions() {
+        // The MCP surface (Group D) generates its `layers` enum and per-value
+        // docs at request time, when only the SQLite cache is reachable — the
+        // in-memory LayerMap is long gone. So populate must persist the vault's
+        // layer names and descriptions for the tool-list builder to read back.
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        std::fs::create_dir_all(dir.path().join("archive")).expect("archive dir");
+        std::fs::write(
+            dir.path().join("sources/.hatchdoor-layer"),
+            "name: sources\ndescription: Raw captured clippings.\n",
+        )
+        .expect("sources marker");
+        // A second layer with no description exercises the None case.
+        std::fs::write(dir.path().join("archive/.hatchdoor-layer"), "archive").expect("marker");
+        std::fs::write(dir.path().join("sources/Clip.md"), "# Clip\n\nbody").expect("note");
+
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+
+        let catalog = cache.layer_catalog().expect("layer catalog");
+        assert_eq!(
+            catalog,
+            vec![
+                crate::search::LayerInfo {
+                    name: "archive".to_string(),
+                    description: None,
+                },
+                crate::search::LayerInfo {
+                    name: "sources".to_string(),
+                    description: Some("Raw captured clippings.".to_string()),
+                },
+            ],
+            "catalog must carry every discovered layer, sorted, with its description"
+        );
+    }
+
+    #[test]
+    fn layer_catalog_is_empty_for_a_vault_with_no_markers() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("Home.md"), "# Home").expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("index");
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+        assert!(
+            cache.layer_catalog().expect("catalog").is_empty(),
+            "a vault with no layer markers advertises no layers"
+        );
     }
 
     #[test]

@@ -238,6 +238,19 @@ impl SqliteCache {
             .map_err(|e| format!("get_metadata({key}): {e}"))?;
         Ok(v)
     }
+
+    /// The vault's layers (name + optional description), as persisted at the last
+    /// populate. Drives the MCP `layers` enum and its per-value docs, which are
+    /// built at request time when the in-memory `LayerMap` is no longer around.
+    /// A vault with no markers (or a cache from before this key was written)
+    /// returns an empty list, so the MCP surface simply advertises no layers.
+    pub fn layer_catalog(&self) -> Result<Vec<crate::search::LayerInfo>, String> {
+        match self.get_metadata("layer_catalog")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| format!("failed parsing persisted layer_catalog: {e}")),
+            None => Ok(Vec::new()),
+        }
+    }
 }
 
 #[cfg(test)]
