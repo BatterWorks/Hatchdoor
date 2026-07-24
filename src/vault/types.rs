@@ -20,6 +20,9 @@ pub struct Note {
     pub relative_path: String,
     pub content: String,
     pub content_hash: String,
+    /// The note's layer (`None` = default surface). Reachable by slug or path
+    /// regardless of layer; the field tells the caller which surface it is on.
+    pub layer: Option<String>,
     pub metadata: NoteMetadata,
 }
 
@@ -35,6 +38,8 @@ pub struct NoteSummary {
     pub title: String,
     pub slug: String,
     pub relative_path: String,
+    /// The note's layer (`None` = default surface).
+    pub layer: Option<String>,
     pub metadata: NoteMetadata,
 }
 
@@ -70,6 +75,8 @@ pub struct ModifiedNote {
     pub slug: String,
     pub relative_path: String,
     pub mtime_ns: i64,
+    /// The note's layer (`None` = default surface).
+    pub layer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

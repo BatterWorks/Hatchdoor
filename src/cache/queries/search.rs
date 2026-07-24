@@ -608,7 +608,7 @@ impl SqliteCache {
     }
 }
 
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
     let mut escaped = String::with_capacity(input.len());
     for ch in input.chars() {
         if matches!(ch, '%' | '_' | '\\') {

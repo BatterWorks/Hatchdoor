@@ -24,7 +24,7 @@ impl SqliteCache {
             .query_row(
                 r#"
             SELECT title, slug, relative_path, content, content_hash,
-                   aliases_json, frontmatter_json
+                   layer, aliases_json, frontmatter_json
             FROM notes
             WHERE slug = ?1
             "#,
@@ -36,8 +36,9 @@ impl SqliteCache {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -49,6 +50,7 @@ impl SqliteCache {
             relative_path,
             content,
             content_hash,
+            layer,
             aliases_json,
             properties_json,
         )) = row
@@ -74,12 +76,70 @@ impl SqliteCache {
             relative_path,
             content,
             content_hash,
+            layer,
             metadata: NoteMetadata {
                 tags,
                 aliases,
                 properties,
             },
         }))
+    }
+
+    /// Fetch a note by its vault-relative path (with or without a `.md`
+    /// extension), reaching any layer. The path is normalized the same way a
+    /// wikilink target is, so `sources/Clip`, `sources/Clip.md` and
+    /// `Sources/clip` all resolve to the same note. A demoted note stays
+    /// reachable by this stable address regardless of the default surface.
+    pub fn read_note_by_path(&self, path: &str) -> Result<Option<Note>, String> {
+        use crate::vault::{normalize_link_target, normalize_title};
+        let normalized = normalize_title(&normalize_link_target(path));
+        let conn = self.read()?;
+        let slug: Option<String> = conn
+            .query_row(
+                "SELECT slug FROM notes WHERE normalized_relative_path = ?1 \
+                 ORDER BY (layer IS NOT NULL), relative_path LIMIT 1",
+                params![normalized],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("failed to resolve note by path '{path}': {error}"))?;
+        drop(conn);
+        match slug {
+            Some(slug) => self.read_note_by_slug(&slug),
+            None => Ok(None),
+        }
+    }
+
+    /// If every note under `path_prefix` sits in a single demoted layer,
+    /// returns that layer name; otherwise `None`. Used to turn a `path_prefix`
+    /// that points wholly inside an unselected demoted layer into an actionable
+    /// error rather than a silently empty result. A prefix that also covers
+    /// default-surface notes (or spans two layers, or matches nothing) returns
+    /// `None`, so a mixed or ordinary prefix never errors.
+    pub fn demoted_only_layer_under_prefix(
+        &self,
+        path_prefix: &str,
+    ) -> Result<Option<String>, String> {
+        let needle = path_prefix.trim().trim_matches('/').to_lowercase();
+        if needle.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.read()?;
+        let like = format!("{}%", super::search::escape_like(&needle));
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT layer FROM notes WHERE LOWER(relative_path) LIKE ?1 ESCAPE '\\'",
+            )
+            .map_err(|e| format!("prepare prefix-layer query: {e}"))?;
+        let layers: Vec<Option<String>> = stmt
+            .query_map(params![like], |row| row.get::<_, Option<String>>(0))
+            .map_err(|e| format!("query prefix layers: {e}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("read prefix layers: {e}"))?;
+        match layers.as_slice() {
+            [Some(single)] => Ok(Some(single.clone())),
+            _ => Ok(None),
+        }
     }
 
     pub fn note_summaries(&self, selection: &LayerSelection) -> Result<Vec<NoteSummary>, String> {
@@ -101,7 +161,7 @@ impl SqliteCache {
         drop(tags_stmt);
 
         let sql = format!(
-            "SELECT title, slug, relative_path, aliases_json, frontmatter_json \
+            "SELECT title, slug, relative_path, layer, aliases_json, frontmatter_json \
              FROM notes WHERE {} ORDER BY relative_path",
             selection.sql_filter("layer"),
         );
@@ -114,14 +174,15 @@ impl SqliteCache {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|error| format!("failed querying note metadata: {error}"))?;
         let mut notes = Vec::new();
         for row in rows {
-            let (title, slug, relative_path, aliases_json, properties_json) =
+            let (title, slug, relative_path, layer, aliases_json, properties_json) =
                 row.map_err(|error| format!("failed reading note metadata: {error}"))?;
             notes.push(NoteSummary {
                 title,
@@ -135,6 +196,7 @@ impl SqliteCache {
                 },
                 slug,
                 relative_path,
+                layer,
             });
         }
         Ok(notes)
@@ -174,7 +236,7 @@ impl SqliteCache {
         let conn = self.read()?;
         let sql = format!(
             r#"
-                SELECT title, slug, relative_path, mtime_ns
+                SELECT title, slug, relative_path, mtime_ns, layer
                 FROM notes
                 WHERE {}
                 ORDER BY mtime_ns DESC, relative_path ASC
@@ -192,6 +254,7 @@ impl SqliteCache {
                     slug: row.get(1)?,
                     relative_path: row.get(2)?,
                     mtime_ns: row.get(3)?,
+                    layer: row.get(4)?,
                 })
             })
             .map_err(|error| format!("failed to query recently modified notes: {error}"))?;

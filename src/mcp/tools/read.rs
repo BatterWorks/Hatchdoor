@@ -11,7 +11,7 @@ use crate::vault::allowed_attachment_extensions;
 
 use super::super::config::McpConfig;
 use super::super::protocol::{JsonRpcFailure, tool_error, tool_success};
-use super::{SlugArgs, non_empty_argument, read_only_tool_annotations, refresh_tool_annotations};
+use super::{non_empty_argument, read_only_tool_annotations, refresh_tool_annotations};
 
 pub(super) async fn search_notes_tool(
     state: AppState,
@@ -38,6 +38,7 @@ pub(super) async fn search_notes_tool(
     let embedder = state.embedder.as_ref();
 
     let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
+    check_path_prefix_precedence(cache.as_ref(), &args.filters, &layers)?;
     let req = SearchRequest {
         query,
         mode,
@@ -72,6 +73,7 @@ pub(super) async fn query_notes_tool(
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
     let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
+    check_path_prefix_precedence(cache.as_ref(), &args.filters, &layers)?;
     let notes = crate::search::query_notes(
         cache.as_ref(),
         &args.filters,
@@ -87,20 +89,45 @@ pub(super) async fn get_note_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: SlugArgs = serde_json::from_value(arguments).map_err(|error| {
+    let args: GetNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid get_note arguments: {error}"))
     })?;
-    let slug = non_empty_argument("slug", args.slug)?;
     let cache = sqlite_cache(&state)
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let note = cache
-        .read_note_by_slug(&slug)
-        .map_err(JsonRpcFailure::internal)?;
+
+    // Exactly one of `slug` or `path` addresses the note. Both reach any layer;
+    // the response carries the note's `layer` so the caller knows its surface.
+    let (note, address) = match (args.slug, args.path) {
+        (Some(slug), None) => {
+            let slug = non_empty_argument("slug", slug)?;
+            let note = cache
+                .read_note_by_slug(&slug)
+                .map_err(JsonRpcFailure::internal)?;
+            (note, slug)
+        }
+        (None, Some(path)) => {
+            let path = non_empty_argument("path", path)?;
+            let note = cache
+                .read_note_by_path(&path)
+                .map_err(JsonRpcFailure::internal)?;
+            (note, path)
+        }
+        (Some(_), Some(_)) => {
+            return Err(JsonRpcFailure::invalid_params(
+                "get_note takes exactly one of slug or path, not both",
+            ));
+        }
+        (None, None) => {
+            return Err(JsonRpcFailure::invalid_params(
+                "get_note requires either slug or path",
+            ));
+        }
+    };
 
     match note {
         Some(note) => Ok(tool_success(json!({ "note": note }))),
-        None => Ok(tool_error(format!("Note not found: {slug}"))),
+        None => Ok(tool_error(format!("Note not found: {address}"))),
     }
 }
 
@@ -163,6 +190,25 @@ pub(super) async fn get_tree_tool(
         .map_err(JsonRpcFailure::internal)?;
 
     Ok(tool_success(json!({ "tree": tree })))
+}
+
+pub(super) async fn recently_modified_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: RecentlyModifiedArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid recently_modified arguments: {error}"))
+    })?;
+    let limit = args.limit.unwrap_or(20).clamp(1, 100);
+    let cache = sqlite_cache(&state)
+        .await
+        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
+    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
+    let notes = cache
+        .recently_modified_notes(limit, &layers)
+        .map_err(JsonRpcFailure::internal)?;
+
+    Ok(tool_success(json!({ "notes": notes })))
 }
 
 pub(super) async fn refresh_index_tool(
@@ -260,8 +306,13 @@ fn reject_non_empty_arguments(tool_name: &str, arguments: &Value) -> Result<(), 
 
 /// Tools whose queries accept a `layers` selector. Kept in one place so the
 /// schema injection below and any future per-tool logic agree on the set.
-const LAYER_AWARE_READ_TOOLS: [&str; 4] =
-    ["search_notes", "query_notes", "get_note_links", "get_tree"];
+const LAYER_AWARE_READ_TOOLS: [&str; 5] = [
+    "search_notes",
+    "query_notes",
+    "get_note_links",
+    "get_tree",
+    "recently_modified",
+];
 
 /// The JSON-schema fragment for the `layers` array parameter, or `None` for a
 /// vault with no layers (in which case the parameter is omitted entirely). The
@@ -390,17 +441,21 @@ fn read_tools_list_base() -> Vec<Value> {
         }),
         json!({
             "name": "get_note",
-            "description": "Fetch full Markdown content for one known slug. Use only after search_notes or resolve_wikilink identifies the slug; avoid fetching many full notes.",
+            "description": "Fetch full Markdown content for one note, addressed by exactly one of `slug` or `path` (a vault-relative path, with or without .md). Both reach any layer; the response carries the note's `layer`. Use only after search_notes or resolve_wikilink identifies the note; avoid fetching many full notes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "slug": {
                         "type": "string",
                         "minLength": 1,
-                        "description": "Hatchdoor note slug."
+                        "description": "Hatchdoor note slug. Provide slug or path, not both."
+                    },
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Vault-relative path (e.g. 'sources/Clip.md'). Reaches demoted notes by a stable address. Provide slug or path, not both."
                     }
                 },
-                "required": ["slug"],
                 "additionalProperties": false
             },
             "annotations": read_only_tool_annotations()
@@ -445,6 +500,23 @@ fn read_tools_list_base() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {},
+                "additionalProperties": false
+            },
+            "annotations": read_only_tool_annotations()
+        }),
+        json!({
+            "name": "recently_modified",
+            "description": "List the most recently modified notes, newest first. The agent's ingest-discovery path: use it to find notes changed since a checkpoint. Returns title, slug, relative_path, mtime_ns and layer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "default": 20
+                    }
+                },
                 "additionalProperties": false
             },
             "annotations": read_only_tool_annotations()
@@ -512,11 +584,31 @@ struct QueryNotesArgs {
     layers: Vec<String>,
 }
 
+/// get_note addresses a note by exactly one of `slug` or `path`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetNoteArgs {
+    #[serde(default)]
+    slug: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+}
+
 /// A note slug plus an optional `layers` selector (get_note_links).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LinksArgs {
     slug: String,
+    #[serde(default)]
+    layers: Vec<String>,
+}
+
+/// recently_modified: a result cap plus an optional `layers` selector.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecentlyModifiedArgs {
+    #[serde(default)]
+    limit: Option<usize>,
     #[serde(default)]
     layers: Vec<String>,
 }
@@ -527,6 +619,35 @@ struct LinksArgs {
 struct LayersOnlyArgs {
     #[serde(default)]
     layers: Vec<String>,
+}
+
+/// Reject a `path_prefix` that points wholly inside a demoted layer the current
+/// selection does not include, with an error naming the layer and the parameter
+/// to pass — never a silently empty result (spec "Addressing"/precedence).
+fn check_path_prefix_precedence(
+    cache: &crate::cache::SqliteCache,
+    filters: &crate::search::NoteFilters,
+    selection: &crate::search::LayerSelection,
+) -> Result<(), JsonRpcFailure> {
+    let Some(prefix) = filters.path_prefix.as_deref() else {
+        return Ok(());
+    };
+    if prefix.trim().is_empty() || selection.is_all() {
+        return Ok(());
+    }
+    let Some(layer) = cache
+        .demoted_only_layer_under_prefix(prefix)
+        .map_err(JsonRpcFailure::internal)?
+    else {
+        return Ok(());
+    };
+    if selection.named_layers().iter().any(|name| name == &layer) {
+        return Ok(());
+    }
+    Err(JsonRpcFailure::invalid_params(format!(
+        "path_prefix '{prefix}' is inside the demoted layer '{layer}', which is not selected. \
+         Pass layers: [\"{layer}\"] (or [\"all\"]) to include it."
+    )))
 }
 
 /// Parse the MCP `layers` tokens against the vault's persisted layer catalog,
