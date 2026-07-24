@@ -1526,6 +1526,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn demo_mode_404s_demoted_notes_on_fetch_and_download() {
+        // In demo mode demotion becomes exclusion: a demoted note is a 404 on the
+        // note and download routes, while a default-surface note stays reachable.
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("sources dir");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources").expect("marker");
+        std::fs::write(vault_root.join("sources/Clip.md"), "# Clip\n").expect("clip");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("home");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let state = AppState {
+            vault_path: vault_root,
+            cache: Arc::new(RwLock::new(cache)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            mcp_tools_changed,
+            embedder,
+            web_auth_enabled: false,
+            demo_mode: true,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: Arc::new(OnceLock::new()),
+            mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
+            archive_prefix: Arc::from("90-archive/"),
+            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            startup: StartupTracker::ready(),
+        };
+        let app = build_router(state, None);
+
+        let demoted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/clip")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demoted.status(), StatusCode::NOT_FOUND);
+
+        let demoted_download = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/clip/download")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demoted_download.status(), StatusCode::NOT_FOUND);
+
+        let default = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/note/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            default.status(),
+            StatusCode::OK,
+            "a default-surface note stays reachable in demo mode"
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
     async fn vault_assets_are_served_with_private_cache_control() {
         // Assets must be browser-cacheable (they re-render on every note view)
         // but never shared-cacheable: authenticated deployments put
