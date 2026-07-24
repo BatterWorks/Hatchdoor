@@ -59,7 +59,7 @@ After each clean group: append a line to `.superpowers/sdd/progress.md`, and `gi
 ## Groups remaining
 
 - **Group D (MCP surface): DONE** (`98370b7 3475870 076b416` + review fix `0f45b28`). Closed carried items 1–4. See the addendum.
-- **Group E (config/ops/attachments/demo/diagnostics):** E1 `HATCHDOOR_EXCLUDE` + startup log + seeder config; E2 watcher noise filtering + marker-triggered full reindex; E3 startup recovery; E4 attachments/assets layer + noise handling + `archive_prefix` interaction; E5 `demo_mode` server-side rejection + 404 demoted paths; E6 diagnostics surface (route + MCP tool, disabled in demo_mode). Closes carried items 5–8.
+- **Group E (config/ops/attachments/demo/diagnostics): IMPLEMENTED — review + live test pending.** See the "Group E implemented" addendum at the very end of this file. E1–E6 all landed (`3eeebed 760ef33 8a85d56 6402f85 7cc85ab 46377bf`), each per-task TDD + per-task commit; gates green at the boundary (392 lib tests, clippy `-D warnings`, fmt). Carried items 5–8 closed. What remains: the adversarial boundary review, the final live test, release notes, and `git push`.
 
 ## Final live test (after E, before calling it done)
 
@@ -110,3 +110,74 @@ Group D was implemented **inline** (not via a per-group implementer subagent) wi
 
 ### Group E carried items to close (from the list above, still open)
 5 (`HATCHDOOR_EXCLUDE` env not wired + seeder config), 6 (unrecoverable startup on a malformed marker — confirmed live), 7 (`HATCHDOOR_EMBED_LAYERS` read from env, not surfaced in AppConfig/startup log — fold into E1's effective-config logging), 8 (Group A's WARN tells the operator to "clear the persisted marker set" but no clear path exists — E adds one or rewords). Then run the **final live test** in the section above on a fresh cache.
+
+---
+
+## Addendum (2026-07-24) — Group E implemented, review + live test pending
+
+Group E was implemented **inline** (per-task TDD, per-task commit), stopped by the
+user **before** the adversarial review and live test. HEAD is `46377bf` (base was
+`c4d28ee`). Gates at the boundary: `cargo test --lib` 392 pass, `cargo clippy
+--all-targets -- -D warnings` clean, `cargo fmt --check` clean. Nothing pushed yet.
+
+### What each task delivered (commit → change)
+- **E1 `3eeebed`** — `HATCHDOOR_EXCLUDE` (comma-separated gitignore patterns) +
+  `HATCHDOOR_EMBED_LAYERS` read into `AppConfig`. `AppState` gained
+  `scan_config: Arc<VaultScanConfig>` (built once at startup, fails fast on a bad
+  pattern), threaded through `build_cache_with_sqlite_and_progress`, `run_reindex`
+  (both now `VaultIndex::build_with_config`), and `seed_empty_vault(root, &exclude)`.
+  Startup logs the effective patterns with provenance + `embed_layers`. **Adding
+  `scan_config` touched the AppState construction sites — there are now 8** (was 7):
+  1 real in `server.rs`, the rest test helpers; if you add another field expect all 8.
+- **E2 `760ef33`** — `should_refresh_for_event(event, cache, vault_path, exclude)`
+  runs the noise matcher; the marker is exempt so a `.hatchdoor-layer` change still
+  full-reindexes (every refresh here IS a full reindex). Matcher threaded from
+  `state.scan_config` into both the watch loop and the debounce loop.
+- **E3 `8a85d56`** — the `Ok(Err(_))` startup arm now `spawn_vault_watcher`s;
+  `run_reindex` clears `Failed`→`Ready` on any successful reindex (only ever a
+  recovery — read routes are gated behind readiness). **Git sync is NOT started on
+  recovery** (needs a restart), stated in the startup-failure log. Carried item 6 closed.
+- **E4 `6402f85`** — `AttachmentInfo.layer` (containing folder's layer via
+  `layer_for`; `list_note_attachments(vault_root, &index.layers, entry)` now takes
+  the LayerMap; `import_attachment_bytes` builds its own since it has no caller
+  index). Noise never gates `/vault-assets/` serving; a write whose target is noise
+  is refused (`refuse_noise_write` in `mcp/tools/write.rs` at create/note-move/
+  rename/move_rename + attachment import/move/rename targets; `reject_noise_write`
+  in `handlers/write_api.rs` for the HTTP create + upload). `archive_note` warns +
+  promotes a demoted note to default (layer resolved on the destination path, before
+  the archived flag; the resolve archived-flag path already runs layer-aware
+  `resolve_wikilink` first).
+- **E5 `7cc85ab`** — `note_handler` + `note_download_handler` 404 a demoted note
+  under `demo_mode`. Layer-param rejection is by construction (web routes never take
+  a selector; MCP is off in demo per `check_demo_mode_posture`).
+- **E6 `46377bf`** — diagnostics surface: `GET /api/diagnostics` +
+  MCP `layer_diagnostics`, disabled in `demo_mode`. Shared pure
+  `handlers::diagnostics::build_layer_diagnostics(vault_path, scan_config, cache,
+  path?)`: (1) classify a raw path by re-running the matchers, (2) ruleset with
+  provenance + discovered markers, (3) per-layer counts (`SqliteCache::
+  layer_note_counts`) + conflicts (noise-excluded marker dir / vanished marker
+  [addresses D followup **M-2**] / disagreeing descriptions [`LayerMap::
+  description_conflicts`]).
+
+### To finish the branch (the paused work)
+1. **Adversarial boundary review** on the FULL feature diff. Use the review-package
+   script with BASE = `06bd3c0` (feature base on `development`) or at least the
+   Group A base, HEAD = `46377bf`. Specific risks to probe: E4's noise-write guard
+   is at the tool/handler layer, NOT the core write fns (verify no core write path
+   bypasses it); E3's `is_ready()`-gated promotion (confirm no non-recovery state
+   reaches `run_reindex` while not-ready); E6's two extra vault walks per diagnostics
+   call (`LayerMap::collect` + `description_conflicts`) — fine for a personal vault,
+   note if it matters. Still-open D followups M-3/M-4/M-5 remain out of scope.
+2. **Final live test** — see the "Final live test" section above; run it on a FRESH
+   cache dir. Also new to verify this group: a `HATCHDOOR_EXCLUDE` pattern excludes a
+   note end-to-end; a create to a noise path 400s (HTTP) / errors (MCP);
+   `/api/diagnostics?path=sources/Clip.md` classifies into `sources`; a demoted note
+   404s under `demo_mode`.
+3. **Release notes** — the section above; add the new `HATCHDOOR_EXCLUDE` env var,
+   the `/api/diagnostics` route + `layer_diagnostics` MCP tool, and the
+   attachment-response `layer` field.
+4. **`git push origin feature/vault-layers`** (both remotes), then update the ledger.
+
+### Ledger note
+`.superpowers/sdd/progress.md` has a full "GROUP E IMPLEMENTED" block, but it is
+git-ignored — this addendum is the durable record if it is `git clean`ed away.
