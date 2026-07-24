@@ -676,6 +676,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn layer_diagnostics_tool_reports_markers_and_classifies_a_path() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            state,
+            "layer_diagnostics",
+            json!({"path": "sources/Clip.md"}),
+            enabled_config(),
+        )
+        .await;
+        let diag = &body["result"]["structuredContent"];
+        assert_eq!(diag["classification"]["layer"], "sources");
+        assert!(
+            diag["markers"]
+                .as_array()
+                .expect("markers")
+                .iter()
+                .any(|m| m["directory"] == "sources"),
+            "the discovered sources marker must be reported"
+        );
+        assert!(
+            diag["noise_patterns"]
+                .as_array()
+                .expect("noise_patterns")
+                .iter()
+                .any(|p| p["source"] == "built-in"),
+            "the built-in ruleset must be reported"
+        );
+    }
+
+    #[tokio::test]
     async fn search_combines_a_note_filter_with_a_named_layer() {
         // Group C deferred this: the note-filter (slow) path scoped to a named
         // layer must return the demoted note and only it.
@@ -940,7 +970,8 @@ mod tests {
                 "recently_modified",
                 "refresh_index",
                 "get_attachment_import_config",
-                "get_git_sync_status"
+                "get_git_sync_status",
+                "layer_diagnostics"
             ]
         );
         assert!(

@@ -23,12 +23,12 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
-    archive_note_handler, create_note_handler, delete_note_handler, graph_handler, health_handler,
-    move_note_handler, move_rename_note_handler, note_download_handler, note_handler,
-    note_links_handler, recently_modified_handler, refresh_handler, rename_note_handler,
-    resolve_batch_handler, resolve_handler, search_handler, spa_index_handler, stats_handler,
-    tree_handler, update_note_handler, upload_attachment_handler, vault_asset_handler,
-    vault_events_handler, write_capabilities_handler,
+    archive_note_handler, create_note_handler, delete_note_handler, diagnostics_handler,
+    graph_handler, health_handler, move_note_handler, move_rename_note_handler,
+    note_download_handler, note_handler, note_links_handler, recently_modified_handler,
+    refresh_handler, rename_note_handler, resolve_batch_handler, resolve_handler, search_handler,
+    spa_index_handler, stats_handler, tree_handler, update_note_handler, upload_attachment_handler,
+    vault_asset_handler, vault_events_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::startup::StartupTracker;
@@ -136,6 +136,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/api/resolve-batch", post(resolve_batch_handler))
         .route("/api/search", get(search_handler))
         .route("/api/stats", get(stats_handler))
+        .route("/api/diagnostics", get(diagnostics_handler))
         .route("/api/graph", get(graph_handler))
         .route("/api/refresh", post(refresh_handler))
         .route("/api/write-capabilities", get(write_capabilities_handler))
@@ -1523,6 +1524,47 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         assert!(!blocked_path.exists());
         drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_route_serves_ruleset_and_is_disabled_in_demo_mode() {
+        // Non-demo: the route returns the active noise ruleset.
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            payload["noise_patterns"]
+                .as_array()
+                .expect("noise_patterns")
+                .iter()
+                .any(|p| p["source"] == "built-in"),
+            "the ruleset dump must list the built-in noise patterns"
+        );
+
+        // Demo mode: the surface is disabled entirely (it would reveal demoted paths).
+        let (demo_app, _demo_tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let demo = demo_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/diagnostics")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demo.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

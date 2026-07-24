@@ -40,6 +40,7 @@ pub async fn handle_tools_call(
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
         "refresh_index" => read::refresh_index_tool(state, arguments).await,
         "get_git_sync_status" => read::get_git_sync_status_tool(state).await,
+        "layer_diagnostics" => read::layer_diagnostics_tool(state, arguments).await,
         "get_attachment_import_config" => read::get_attachment_import_config_tool(config),
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
         | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
