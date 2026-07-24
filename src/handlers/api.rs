@@ -58,7 +58,17 @@ pub async fn note_handler(
 
     let lookup_slug = slug.clone();
     match run_blocking(move || cache.read_note_by_slug(&lookup_slug)).await {
-        Ok(Some(note)) => (StatusCode::OK, Json(NoteResponse { note })).into_response(),
+        Ok(Some(note)) => {
+            // In demo mode, demotion becomes exclusion: a demoted note is a 404,
+            // not merely absent from the default tree/search. Every other mode
+            // keeps it reachable by direct address (the deliberate no-reveal-UI
+            // design); only the public demo hides it outright.
+            if state.demo_mode && note.layer.is_some() {
+                warn!(slug = %slug, "Demoted note hidden under demo mode");
+                return note_not_found_response(&slug);
+            }
+            (StatusCode::OK, Json(NoteResponse { note })).into_response()
+        }
         Ok(None) => {
             warn!(slug = %slug, "Note not found");
             note_not_found_response(&slug)
