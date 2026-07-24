@@ -69,6 +69,11 @@ pub fn import_attachment_bytes(
         )));
     }
 
+    // Resolve markers before mutating the filesystem. A malformed marker must
+    // fail this request atomically rather than leaving a persisted attachment
+    // behind after the response reports an error.
+    let layers = LayerMap::collect(vault_root).map_err(WriteError::Io)?;
+
     fs::write(&target_path, bytes).map_err(|error| {
         WriteError::Io(format!(
             "failed to write attachment '{}': {error}",
@@ -76,9 +81,8 @@ pub fn import_attachment_bytes(
         ))
     })?;
 
-    // No caller-supplied index here (imports do not rebuild one), so collect the
-    // markers directly to report the new asset's layer.
-    let layers = LayerMap::collect(vault_root).map_err(WriteError::Io)?;
+    // No caller-supplied index here (imports do not rebuild one), so use the
+    // marker snapshot collected before the write to report the new asset's layer.
     Ok(AttachmentOutcome {
         attachment: attachment_info(vault_root, &target_path, &layers)?,
         rewritten_notes: 0,
@@ -255,4 +259,28 @@ fn bytes_hash(bytes: &[u8]) -> String {
     }
 
     format!("fnv1a64:{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn import_attachment_rejects_a_malformed_marker_before_writing() {
+        let vault = tempdir().expect("vault");
+        let sources = vault.path().join("sources");
+        fs::create_dir_all(&sources).expect("sources directory");
+        fs::write(sources.join(".hatchdoor-layer"), "name: all\n").expect("marker");
+
+        let target = "sources/image.png";
+        let error = import_attachment_bytes(vault.path(), target, b"image", 1024, false)
+            .expect_err("malformed marker must reject the import");
+
+        assert!(matches!(error, WriteError::Io(_)));
+        assert!(
+            !vault.path().join(target).exists(),
+            "a failed import must not leave an attachment on disk"
+        );
+    }
 }
