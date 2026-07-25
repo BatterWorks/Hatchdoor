@@ -22,6 +22,29 @@ use super::parse::{
     file_snapshot, parse_frontmatter_metadata,
 };
 
+/// Build-time variables the benchmark can sweep. Production uses `Default`
+/// (800/50 chunks, contextual documents); the eval harness overrides them per
+/// cache to compare configurations. Model choice and vector dimension are
+/// carried by the embedder itself (see the Matryoshka decorator), not here.
+#[derive(Debug, Clone)]
+pub struct BuildOptions {
+    pub chunk: ChunkOptions,
+    /// When true, each chunk embeds with its title + heading-path header (and
+    /// hashes over that). When false, the pre-context behaviour: raw body only,
+    /// body-only reuse hash — kept so the benchmark can measure the header's
+    /// contribution in isolation.
+    pub context: bool,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            chunk: ChunkOptions::default(),
+            context: true,
+        }
+    }
+}
+
 pub enum UpsertOutcome {
     /// The note row was written; `content` is the file text already read (and
     /// hashed) during the upsert, threaded on so chunking reuses it instead of
@@ -52,7 +75,24 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     ) -> Result<(), String> {
-        self.replace_with_options(index, embedder, on_progress, embed_layers_enabled())
+        self.replace_with_options(
+            index,
+            embedder,
+            on_progress,
+            embed_layers_enabled(),
+            &BuildOptions::default(),
+        )
+    }
+
+    /// Populate with explicit [`BuildOptions`] (chunk size, context toggle). The
+    /// benchmark entry point; production paths use the defaulting wrappers.
+    pub fn replace_from_index_with_options(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        opts: &BuildOptions,
+    ) -> Result<(), String> {
+        self.replace_with_options(index, embedder, None, embed_layers_enabled(), opts)
     }
 
     /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
@@ -66,6 +106,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
         embed_layers: bool,
+        opts: &BuildOptions,
     ) -> Result<(), String> {
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
@@ -192,6 +233,7 @@ impl SqliteCache {
                         entry.layer.clone(),
                         embed_this_note,
                         embedder,
+                        opts,
                     ) {
                         Ok(prepared) => prepared_notes.push(prepared),
                         Err(error) => {
@@ -366,8 +408,26 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         embedder_id: &str,
     ) -> Result<(), String> {
+        self.replace_from_index_with_options_stamped(
+            index,
+            embedder,
+            embedder_id,
+            &BuildOptions::default(),
+        )
+    }
+
+    /// Stamped populate with explicit [`BuildOptions`]. Records the model id and
+    /// build duration alongside the vectors so a benchmark cache is
+    /// self-describing.
+    pub fn replace_from_index_with_options_stamped(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        embedder_id: &str,
+        opts: &BuildOptions,
+    ) -> Result<(), String> {
         let started = std::time::Instant::now();
-        self.replace_from_index_with_embedder(index, embedder)?;
+        self.replace_from_index_with_options(index, embedder, opts)?;
         let secs = started.elapsed().as_secs_f64();
         self.set_metadata("embedder_id", embedder_id)?;
         self.set_metadata("build_duration_secs", &format!("{secs:.3}"))?;
@@ -1326,6 +1386,39 @@ fn embedding_reuse_hash(title: &str, heading_path: Option<&str>, body: &str) -> 
     blake3::hash(doc.as_bytes()).to_hex().to_string()
 }
 
+/// Vector-reuse key for a chunk under the active build options: header-inclusive
+/// when contextual embedding is on, body-only when off. The two representations
+/// must never collide in a shared cache, so they hash different inputs.
+fn chunk_reuse_hash(context: bool, title: &str, heading_path: Option<&str>, body: &str) -> String {
+    if context {
+        embedding_reuse_hash(title, heading_path, body)
+    } else {
+        blake3::hash(body.as_bytes()).to_hex().to_string()
+    }
+}
+
+/// The document text embedded for a chunk under the active build options.
+fn chunk_embed_input(
+    context: bool,
+    doc_prefix: &str,
+    title: &str,
+    heading_path: Option<&str>,
+    body: &str,
+) -> String {
+    if context {
+        format!(
+            "{doc_prefix}{}",
+            crate::embed::contextual_document(title, heading_path, body)
+        )
+    } else {
+        format!("{doc_prefix}{body}")
+    }
+}
+
+// Each parameter is a distinct, independently-sourced input (transaction, note
+// identity fields, the embedder, and the build options); bundling them into a
+// struct purely to satisfy the lint would add ceremony without clarity.
+#[allow(clippy::too_many_arguments)]
 fn prepare_note_for_embedding(
     tx: &Transaction<'_>,
     slug: String,
@@ -1334,16 +1427,22 @@ fn prepare_note_for_embedding(
     layer: Option<String>,
     embed: bool,
     embedder: &dyn Embedder,
+    opts: &BuildOptions,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
-    let mut chunking = chunk_note(&content, embedder, ChunkOptions::default());
-    // Rehash each chunk over its *embedded input* (title + heading path + body),
-    // not just its body. This is the vector-reuse key, so a heading edit — which
-    // changes a downstream chunk's heading path without touching its body — now
-    // invalidates the cached vector instead of silently reusing a stale one.
+    let mut chunking = chunk_note(&content, embedder, opts.chunk);
+    // Rehash each chunk over its *embedded input* (title + heading path + body
+    // when contextual), not just its body. This is the vector-reuse key, so a
+    // heading edit — which changes a downstream chunk's heading path without
+    // touching its body — invalidates the cached vector instead of silently
+    // reusing a stale one.
     for chunk in &mut chunking.chunks {
-        chunk.content_hash =
-            embedding_reuse_hash(title, chunk.heading_path.as_deref(), &chunk.content);
+        chunk.content_hash = chunk_reuse_hash(
+            opts.context,
+            title,
+            chunk.heading_path.as_deref(),
+            &chunk.content,
+        );
     }
     let chunking_elapsed = chunking_started.elapsed();
 
@@ -1377,13 +1476,12 @@ fn prepare_note_for_embedding(
         .chunks
         .iter()
         .map(|chunk| {
-            let input = format!(
-                "{doc_prefix}{}",
-                crate::embed::contextual_document(
-                    title,
-                    chunk.heading_path.as_deref(),
-                    &chunk.content
-                )
+            let input = chunk_embed_input(
+                opts.context,
+                doc_prefix,
+                title,
+                chunk.heading_path.as_deref(),
+                &chunk.content,
             );
             let input_tokens = embedder
                 .token_count(input.as_str(), true)
@@ -1399,13 +1497,12 @@ fn prepare_note_for_embedding(
     let mut indices_needing_embed: Vec<usize> = Vec::new();
     for (idx, chunk) in chunking.chunks.iter().enumerate() {
         if !preserved.contains_key(&chunk.content_hash) {
-            texts_to_embed.push(format!(
-                "{doc_prefix}{}",
-                crate::embed::contextual_document(
-                    title,
-                    chunk.heading_path.as_deref(),
-                    &chunk.content
-                )
+            texts_to_embed.push(chunk_embed_input(
+                opts.context,
+                doc_prefix,
+                title,
+                chunk.heading_path.as_deref(),
+                &chunk.content,
             ));
             indices_needing_embed.push(idx);
         }
@@ -1720,7 +1817,13 @@ mod tests {
         let embedder = StubEmbedder::new(384);
         let index = VaultIndex::build(dir.path()).expect("index");
         cache
-            .replace_with_options(&index, &embedder, None, embed_layers)
+            .replace_with_options(
+                &index,
+                &embedder,
+                None,
+                embed_layers,
+                &BuildOptions::default(),
+            )
             .expect("populate");
         (dir, cache, embedder)
     }
@@ -1840,7 +1943,7 @@ mod tests {
         // Reindex the SAME vault (no content change) with the flag now true.
         let index = VaultIndex::build(dir.path()).expect("reindex");
         cache
-            .replace_with_options(&index, &embedder, None, true)
+            .replace_with_options(&index, &embedder, None, true, &BuildOptions::default())
             .expect("re-embed");
 
         let semantic = cache
@@ -2196,10 +2299,11 @@ mod chunk_integration_tests {
     use tempfile::TempDir;
 
     use super::{
-        embedding_reuse_hash, estimated_remaining, format_count, format_elapsed, format_eta,
-        format_note_count, indexing_progress_message, progress_log_delay,
+        BuildOptions, embedding_reuse_hash, estimated_remaining, format_count, format_elapsed,
+        format_eta, format_note_count, indexing_progress_message, progress_log_delay,
     };
     use crate::cache::SqliteCache;
+    use crate::chunk::ChunkOptions;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
 
@@ -2630,6 +2734,83 @@ mod chunk_integration_tests {
                 .any(|t| t.starts_with("Postgres runbook > Backups\n\n")),
             "embedded input should carry title + heading context, got: {recorded:?}"
         );
+    }
+
+    #[test]
+    fn build_options_chunk_size_controls_chunk_count() {
+        // A note that fits one default 800-token chunk splits into several under
+        // a small max_tokens, proving chunk options thread through the build.
+        let body = "word ".repeat(300);
+        let note = format!("# Note\n\n{body}");
+        let dir = make_vault(&[("Note.md", note.as_str())]);
+        let embedder = StubEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        let default_cache = SqliteCache::in_memory(384).expect("open");
+        default_cache
+            .replace_from_index_with_options(&index, &embedder, &BuildOptions::default())
+            .expect("default build");
+        let default_chunks = note_chunk_count(&default_cache, "note");
+
+        let small_cache = SqliteCache::in_memory(384).expect("open");
+        let opts = BuildOptions {
+            chunk: ChunkOptions {
+                max_tokens: 60,
+                overlap_tokens: 5,
+            },
+            context: true,
+        };
+        small_cache
+            .replace_from_index_with_options(&index, &embedder, &opts)
+            .expect("small build");
+        let small_chunks = note_chunk_count(&small_cache, "note");
+
+        assert_eq!(default_chunks, 1, "300 tokens fit one default chunk");
+        assert!(
+            small_chunks > default_chunks,
+            "60-token chunks must split the note: {small_chunks} vs {default_chunks}"
+        );
+    }
+
+    #[test]
+    fn build_options_context_off_embeds_raw_body_with_body_only_hash() {
+        let dir = make_vault(&[("Runbook.md", "# Backups\n\nrestore steps")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder = RecordingEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("build");
+        let opts = BuildOptions {
+            chunk: ChunkOptions::default(),
+            context: false,
+        };
+        cache
+            .replace_from_index_with_options(&index, &embedder, &opts)
+            .expect("populate");
+
+        let recorded = embedder.recorded();
+        assert!(
+            recorded.iter().any(|t| t == "# Backups\n\nrestore steps"),
+            "context off must embed the raw body, got: {recorded:?}"
+        );
+        assert!(
+            !recorded.iter().any(|t| t.contains("Runbook > Backups")),
+            "context off must not prepend the title/heading header: {recorded:?}"
+        );
+
+        // The stored reuse hash must be body-only when context is off, so the two
+        // representations never collide in a shared cache and reuse stays correct.
+        let stored: String = cache
+            .connection()
+            .expect("conn")
+            .query_row(
+                "SELECT content_hash FROM chunks WHERE note_slug = ?1",
+                ["runbook"],
+                |r| r.get(0),
+            )
+            .expect("hash");
+        let body_only = blake3::hash("# Backups\n\nrestore steps".as_bytes())
+            .to_hex()
+            .to_string();
+        assert_eq!(stored, body_only);
     }
 
     #[test]
