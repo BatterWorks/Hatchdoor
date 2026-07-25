@@ -9,6 +9,14 @@ pub struct Query {
     pub expected_heading_path: Option<String>,
     #[serde(default)]
     pub anti_expected: Vec<String>,
+    /// Optional grouping label (e.g. "exact-name", "conceptual", "heading").
+    /// When present, the report breaks metrics out per category.
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Optional language tag. Dormant on a single-language set; when present,
+    /// the report breaks metrics out per language.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 pub fn load_jsonl(path: &std::path::Path) -> Result<Vec<Query>, String> {
@@ -54,6 +62,24 @@ mod tests {
         assert_eq!(qs[0].expected_notes, vec!["n1", "n2"]);
         assert!(qs[0].anti_expected.is_empty());
         assert_eq!(qs[1].anti_expected, vec!["x"]);
+        // category and language default to None when absent.
+        assert!(qs[0].category.is_none());
+        assert!(qs[0].language.is_none());
+    }
+
+    #[test]
+    fn loads_optional_category_and_language() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("q.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            r#"{{"id":"U1","query":"a","expected_notes":["n1"],"category":"exact-name","language":"en"}}"#
+        )
+        .unwrap();
+        let qs = load_jsonl(&path).expect("load");
+        assert_eq!(qs[0].category.as_deref(), Some("exact-name"));
+        assert_eq!(qs[0].language.as_deref(), Some("en"));
     }
 
     #[test]

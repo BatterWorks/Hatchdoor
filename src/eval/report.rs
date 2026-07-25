@@ -2,7 +2,36 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::eval::compare_runner::{CompareQueryResult, CompareSummary};
-use crate::eval::metrics::Report;
+use crate::eval::metrics::{GroupReport, Report};
+
+/// Write a markdown table for one grouping dimension (category or language),
+/// or nothing when no query carried that tag.
+fn write_group_table(f: &mut impl Write, title: &str, groups: &[GroupReport]) {
+    if groups.is_empty() {
+        return;
+    }
+    writeln!(f, "### {title}").ok();
+    writeln!(f).ok();
+    writeln!(
+        f,
+        "| Group | N | Recall@5 | Recall@10 | MRR | Correct-heading |"
+    )
+    .ok();
+    writeln!(f, "|---|---|---|---|---|---|").ok();
+    for g in groups {
+        let heading = g
+            .correct_heading_rate
+            .map(|r| format!("{r:.3}"))
+            .unwrap_or_else(|| "n/a".to_string());
+        writeln!(
+            f,
+            "| {} | {} | {:.3} | {:.3} | {:.3} | {heading} |",
+            g.label, g.n, g.recall_at_5_any, g.recall_at_10_any, g.mrr
+        )
+        .ok();
+    }
+    writeln!(f).ok();
+}
 
 pub fn append_section(
     path: &Path,
@@ -37,7 +66,13 @@ pub fn append_section(
     writeln!(f, "| Recall@10 (all) | {:.3} |", report.recall_at_10_all).ok();
     writeln!(f, "| MRR | {:.3} |", report.mrr).ok();
     writeln!(f, "| FP-rate@5 | {:.3} |", report.fp_rate_at_5).ok();
+    match report.correct_heading_rate {
+        Some(rate) => writeln!(f, "| Correct-heading | {rate:.3} |").ok(),
+        None => writeln!(f, "| Correct-heading | n/a |").ok(),
+    };
     writeln!(f).ok();
+    write_group_table(&mut f, "Per-category", &report.per_category);
+    write_group_table(&mut f, "Per-language", &report.per_language);
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
     writeln!(
@@ -361,6 +396,9 @@ mod tests {
             recall_at_10_all: 0.78,
             mrr: 0.61,
             fp_rate_at_5: 0.20,
+            correct_heading_rate: Some(0.5),
+            per_category: Vec::new(),
+            per_language: Vec::new(),
             per_query: vec![PerQueryMetrics {
                 id: "U1".to_string(),
                 query: "Where does my Plex media live?".to_string(),
@@ -412,6 +450,9 @@ mod tests {
             recall_at_10_all: 0.99,
             mrr: 0.95,
             fp_rate_at_5: 0.0,
+            correct_heading_rate: None,
+            per_category: Vec::new(),
+            per_language: Vec::new(),
             per_query: vec![
                 PerQueryMetrics {
                     id: "U5".to_string(),
