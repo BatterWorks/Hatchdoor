@@ -98,14 +98,7 @@ impl Embedder for FastembedEmbedder {
     }
 
     fn identity(&self) -> String {
-        // Sequence length and the FastEmbed/ONNX Runtime generation affect
-        // embeddings, so both are part of the persisted cache identity.
-        // Bumping FastEmbed must never leave vectors from the prior runtime in
-        // the same SQLite index.
-        format!(
-            "{}-{}-max{}-fastembed-v5",
-            self.id, self.dim, self.max_length
-        )
+        embedder_identity(self.id, self.dim, self.max_length)
     }
 
     fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
@@ -124,6 +117,34 @@ impl Embedder for FastembedEmbedder {
 
     fn query_prefix(&self) -> &'static str {
         self.query_prefix
+    }
+}
+
+/// Persisted cache identity for a FastEmbed model. Every field that changes the
+/// produced vectors is encoded so a mismatch forces a full rebuild rather than
+/// mixing incompatible embeddings in one index:
+/// - model id and dimension: the embedding space itself;
+/// - max sequence length: truncation point;
+/// - `fastembed-v5`: the FastEmbed/ONNX Runtime generation;
+/// - `ctx1`: the document contract (title + heading header, see
+///   `contextual_document` in the cache populate path).
+fn embedder_identity(id: &str, dim: usize, max_length: usize) -> String {
+    format!("{id}-{dim}-max{max_length}-fastembed-v5-ctx1")
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::embedder_identity;
+
+    #[test]
+    fn identity_marks_the_contextual_embedding_contract() {
+        // The `-ctx1` marker records that documents are embedded with a
+        // title/heading header. Bumping it forces a one-time cache rebuild so
+        // vectors from the pre-context contract are never reused.
+        assert_eq!(
+            embedder_identity("NomicEmbedTextV15", 768, 2048),
+            "NomicEmbedTextV15-768-max2048-fastembed-v5-ctx1"
+        );
     }
 }
 
