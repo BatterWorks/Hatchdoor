@@ -133,6 +133,7 @@ mod tests {
             expected_heading_path: None,
             category: None,
             language: None,
+            tier: None,
             anti_expected: vec![],
         }];
 
@@ -177,6 +178,7 @@ mod tests {
             expected_heading_path: None,
             category: None,
             language: None,
+            tier: None,
             anti_expected: vec![],
         }];
         let out = run_hybrid_eval(&cache, embedder.as_ref(), &queries, 5, 60, 10).expect("run");

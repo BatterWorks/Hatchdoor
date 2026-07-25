@@ -27,6 +27,10 @@ pub struct Report {
     pub correct_heading_rate: Option<f64>,
     /// Metrics broken out per `category` (empty when no query is tagged).
     pub per_category: Vec<GroupReport>,
+    /// Metrics broken out per `tier` (empty when no query is tagged). The
+    /// "diagnostic" tier is shown here as its own row even though it is excluded
+    /// from the headline numbers above.
+    pub per_tier: Vec<GroupReport>,
     /// Metrics broken out per `language` (empty when no query is tagged).
     pub per_language: Vec<GroupReport>,
     pub per_query: Vec<PerQueryMetrics>,
@@ -107,9 +111,10 @@ pub fn heading_hit(
     Some(hit)
 }
 
-/// Per-query scored data retained for grouping into category/language reports.
+/// Per-query scored data retained for grouping into category/tier/language reports.
 struct GroupRow {
     category: Option<String>,
+    tier: Option<String>,
     language: Option<String>,
     hit5: bool,
     hit10: bool,
@@ -167,6 +172,7 @@ pub fn aggregate(model_id: &str, queries: &[Query], results: &[QueryResult]) -> 
     let mut sum_mrr = 0.0;
     let mut anti_denom = 0usize;
     let mut anti_num = 0usize;
+    let mut headline_n = 0usize;
     let mut per_query = Vec::with_capacity(queries.len());
     let mut rows: Vec<GroupRow> = Vec::with_capacity(queries.len());
 
@@ -182,36 +188,41 @@ pub fn aggregate(model_id: &str, queries: &[Query], results: &[QueryResult]) -> 
 
         let hit5 = recall_at_k_any(&q.expected_notes, &top_5);
         let hit10 = recall_at_k_any(&q.expected_notes, &top_10);
-        if hit5 {
-            sum_any_5 += 1.0;
-        }
-        if hit10 {
-            sum_any_10 += 1.0;
-        }
-        sum_all_5 += recall_at_k_all(&q.expected_notes, &top_5);
-        sum_all_10 += recall_at_k_all(&q.expected_notes, &top_10);
-
         let rank = first_expected_rank(&q.expected_notes, &top_10);
         let rr = rank.map(|r| 1.0 / r as f64).unwrap_or(0.0);
-        sum_mrr += rr;
-
         let heading = heading_hit(
             &q.expected_notes,
             q.expected_heading_path.as_deref(),
             &top_10,
             &top_10_headings,
         );
+        // Whether a plausible-wrong note landed in top-5 (for the per-query
+        // display); folded into the headline FP rate only for non-diagnostic
+        // queries below.
+        let anti_hit = (!q.anti_expected.is_empty())
+            .then(|| any_anti_expected_in_top_k(&q.anti_expected, &top_5));
 
-        let anti_hit = if q.anti_expected.is_empty() {
-            None
-        } else {
-            anti_denom += 1;
-            let hit = any_anti_expected_in_top_k(&q.anti_expected, &top_5);
-            if hit {
-                anti_num += 1;
+        // Diagnostic queries (the staleness slice) are reported apart in
+        // per_tier / per_category but excluded from every headline number.
+        let is_diagnostic = q.tier.as_deref() == Some("diagnostic");
+        if !is_diagnostic {
+            headline_n += 1;
+            if hit5 {
+                sum_any_5 += 1.0;
             }
-            Some(hit)
-        };
+            if hit10 {
+                sum_any_10 += 1.0;
+            }
+            sum_all_5 += recall_at_k_all(&q.expected_notes, &top_5);
+            sum_all_10 += recall_at_k_all(&q.expected_notes, &top_10);
+            sum_mrr += rr;
+            if let Some(hit) = anti_hit {
+                anti_denom += 1;
+                if hit {
+                    anti_num += 1;
+                }
+            }
+        }
 
         per_query.push(PerQueryMetrics {
             id: q.id.clone(),
@@ -223,6 +234,7 @@ pub fn aggregate(model_id: &str, queries: &[Query], results: &[QueryResult]) -> 
         });
         rows.push(GroupRow {
             category: q.category.clone(),
+            tier: q.tier.clone(),
             language: q.language.clone(),
             hit5,
             hit10,
@@ -231,15 +243,21 @@ pub fn aggregate(model_id: &str, queries: &[Query], results: &[QueryResult]) -> 
         });
     }
 
-    let n = queries.len().max(1) as f64;
+    let n = headline_n.max(1) as f64;
     let fp_rate_at_5 = if anti_denom == 0 {
         0.0
     } else {
         anti_num as f64 / anti_denom as f64
     };
-    let all_rows: Vec<&GroupRow> = rows.iter().collect();
-    let correct_heading_rate = heading_rate(&all_rows);
+    // Headline correct-heading rate excludes the diagnostic slice, matching the
+    // other headline metrics; per_tier still surfaces the diagnostic row.
+    let headline_rows: Vec<&GroupRow> = rows
+        .iter()
+        .filter(|r| r.tier.as_deref() != Some("diagnostic"))
+        .collect();
+    let correct_heading_rate = heading_rate(&headline_rows);
     let per_category = group_reports(&rows, |r| r.category.as_deref());
+    let per_tier = group_reports(&rows, |r| r.tier.as_deref());
     let per_language = group_reports(&rows, |r| r.language.as_deref());
 
     Report {
@@ -253,6 +271,7 @@ pub fn aggregate(model_id: &str, queries: &[Query], results: &[QueryResult]) -> 
         fp_rate_at_5,
         correct_heading_rate,
         per_category,
+        per_tier,
         per_language,
         per_query,
         rerank_latency_ms: None,
@@ -315,6 +334,7 @@ pub fn aggregate_rerank(
     let mut sum_mrr = 0.0;
     let mut anti_denom = 0usize;
     let mut anti_num = 0usize;
+    let mut headline_n = 0usize;
     let mut per_query = Vec::with_capacity(queries.len());
 
     for q in queries {
@@ -324,33 +344,36 @@ pub fn aggregate_rerank(
             .unwrap_or_default();
         let top_5_post: Vec<String> = top_10_post.iter().take(5).cloned().collect();
 
-        if recall_at_k_any(&q.expected_notes, &top_5_post) {
-            sum_any_5 += 1.0;
-        }
-        if recall_at_k_any(&q.expected_notes, &top_10_post) {
-            sum_any_10 += 1.0;
-        }
-        sum_all_5 += recall_at_k_all(&q.expected_notes, &top_5_post);
-        sum_all_10 += recall_at_k_all(&q.expected_notes, &top_10_post);
-
         let rank_post = first_expected_rank(&q.expected_notes, &top_10_post);
-        if let Some(r) = rank_post {
-            sum_mrr += 1.0 / r as f64;
-        }
         let rank_pre = result
             .map(|r| first_expected_rank(&q.expected_notes, &r.top_k_pre))
             .unwrap_or(None);
+        let anti_hit = (!q.anti_expected.is_empty())
+            .then(|| any_anti_expected_in_top_k(&q.anti_expected, &top_5_post));
 
-        let anti_hit = if q.anti_expected.is_empty() {
-            None
-        } else {
-            anti_denom += 1;
-            let hit = any_anti_expected_in_top_k(&q.anti_expected, &top_5_post);
-            if hit {
-                anti_num += 1;
+        // Diagnostic queries are excluded from headline numbers, same as the
+        // pure-retrieval path, so the two runs stay comparable.
+        let is_diagnostic = q.tier.as_deref() == Some("diagnostic");
+        if !is_diagnostic {
+            headline_n += 1;
+            if recall_at_k_any(&q.expected_notes, &top_5_post) {
+                sum_any_5 += 1.0;
             }
-            Some(hit)
-        };
+            if recall_at_k_any(&q.expected_notes, &top_10_post) {
+                sum_any_10 += 1.0;
+            }
+            sum_all_5 += recall_at_k_all(&q.expected_notes, &top_5_post);
+            sum_all_10 += recall_at_k_all(&q.expected_notes, &top_10_post);
+            if let Some(r) = rank_post {
+                sum_mrr += 1.0 / r as f64;
+            }
+            if let Some(hit) = anti_hit {
+                anti_denom += 1;
+                if hit {
+                    anti_num += 1;
+                }
+            }
+        }
 
         per_query.push(PerQueryMetrics {
             id: q.id.clone(),
@@ -362,7 +385,7 @@ pub fn aggregate_rerank(
         });
     }
 
-    let n = queries.len().max(1) as f64;
+    let n = headline_n.max(1) as f64;
     let fp_rate_at_5 = if anti_denom == 0 {
         0.0
     } else {
@@ -389,6 +412,7 @@ pub fn aggregate_rerank(
         // heading and per-group breakdowns don't apply here.
         correct_heading_rate: None,
         per_category: Vec::new(),
+        per_tier: Vec::new(),
         per_language: Vec::new(),
         per_query,
         rerank_latency_ms,
@@ -410,6 +434,21 @@ mod aggregate_tests {
             anti_expected: anti.iter().map(|s| s.to_string()).collect(),
             category: None,
             language: None,
+            tier: None,
+        }
+    }
+
+    /// Query with explicit category and tier, for the per-group / diagnostic tests.
+    fn q_full(id: &str, expected: &[&str], category: Option<&str>, tier: Option<&str>) -> Query {
+        Query {
+            id: id.to_string(),
+            query: format!("q-{id}"),
+            expected_notes: expected.iter().map(|s| s.to_string()).collect(),
+            expected_heading_path: None,
+            anti_expected: Vec::new(),
+            category: category.map(str::to_string),
+            language: None,
+            tier: tier.map(str::to_string),
         }
     }
 
@@ -464,6 +503,7 @@ mod aggregate_tests {
             anti_expected: Vec::new(),
             category: Some(category.to_string()),
             language: None,
+            tier: None,
         }
     }
 
@@ -495,8 +535,42 @@ mod aggregate_tests {
         assert_eq!(rep.per_category[1].label, "exact-name");
         assert_eq!(rep.per_category[1].correct_heading_rate, None);
 
-        // No language tags → no per-language rows.
+        // No language or tier tags → no per-language / per-tier rows.
         assert!(rep.per_language.is_empty());
+        assert!(rep.per_tier.is_empty());
+    }
+
+    #[test]
+    fn diagnostic_tier_excluded_from_headline_but_reported_per_tier() {
+        let queries = vec![
+            q_full("a", &["n1"], Some("conceptual"), Some("hard")),
+            q_full("b", &["n2"], Some("conceptual"), Some("realistic")),
+            q_full("s", &["n3"], Some("staleness"), Some("diagnostic")),
+        ];
+        let results = vec![
+            r("a", &["n1"]),  // hit
+            r("b", &["n2"]),  // hit
+            r("s", &["zzz"]), // diagnostic MISS
+        ];
+        let rep = aggregate("test", &queries, &results);
+
+        // Headline is computed over the 2 non-diagnostic queries only (both hit
+        // → 1.0), not 2/3 that including the diagnostic miss would give.
+        assert_eq!(rep.recall_at_5_any, 1.0);
+        assert_eq!(rep.mrr, 1.0);
+
+        // The diagnostic slice is still visible as its own per_tier row.
+        let diag = rep
+            .per_tier
+            .iter()
+            .find(|g| g.label == "diagnostic")
+            .expect("diagnostic tier row present");
+        assert_eq!(diag.n, 1);
+        assert_eq!(diag.recall_at_5_any, 0.0);
+
+        // And the two headline tiers are broken out.
+        assert!(rep.per_tier.iter().any(|g| g.label == "hard"));
+        assert!(rep.per_tier.iter().any(|g| g.label == "realistic"));
     }
 }
 
@@ -593,6 +667,7 @@ mod rerank_tests {
             anti_expected: anti.iter().map(|s| s.to_string()).collect(),
             category: None,
             language: None,
+            tier: None,
         }
     }
 

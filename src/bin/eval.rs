@@ -406,6 +406,20 @@ fn main() -> ExitCode {
                         .unwrap_or_else(|| "n/a".to_string()),
                 );
             }
+            for group in &report.per_tier {
+                println!(
+                    "  [tier     {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3} heading={}",
+                    group.label,
+                    group.n,
+                    group.recall_at_5_any,
+                    group.recall_at_10_any,
+                    group.mrr,
+                    group
+                        .correct_heading_rate
+                        .map(|r| format!("{r:.3}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                );
+            }
             for group in &report.per_language {
                 println!(
                     "  [language {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3}",
