@@ -1,5 +1,8 @@
-use super::normalize::{extract_frontmatter_metadata, strip_code_fences, strip_frontmatter};
+use super::normalize::{
+    extract_frontmatter_metadata, in_fenced, strip_code_fences, strip_frontmatter,
+};
 use crate::embed::Embedder;
+use std::ops::Range;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -53,7 +56,7 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
     let body = strip_frontmatter(raw_content);
     let normalized = strip_code_fences(body);
 
-    if normalized.trim().is_empty() {
+    if normalized.text.trim().is_empty() {
         return NoteChunking {
             chunks: Vec::new(),
             tags: metadata.tags,
@@ -68,12 +71,13 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
     let splitter = MarkdownSplitter::new(config);
 
     let mut chunks = Vec::new();
-    for (ordinal, (byte_start, piece)) in splitter.chunk_indices(&normalized).enumerate() {
+    for (ordinal, (byte_start, piece)) in splitter.chunk_indices(&normalized.text).enumerate() {
         let byte_end = byte_start + piece.len();
         // Scan up to the start of the first non-heading content within this chunk
         // so that headings at the very beginning of a chunk are captured.
-        let heading_scan_end = heading_content_start(piece, byte_start);
-        let heading_path = derive_heading_path(&normalized, heading_scan_end);
+        let heading_scan_end = heading_content_start(piece, byte_start, &normalized.fenced);
+        let heading_path =
+            derive_heading_path(&normalized.text, heading_scan_end, &normalized.fenced);
         let content = piece.to_string();
         let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
         chunks.push(Chunk {
@@ -97,14 +101,18 @@ pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions
 /// Returns the byte offset (relative to `content` start) of the first non-heading
 /// line in `piece`, offset by `piece_start`. This allows headings that open a chunk
 /// to be included in the heading path scan.
-fn heading_content_start(piece: &str, piece_start: usize) -> usize {
+fn heading_content_start(piece: &str, piece_start: usize, fenced: &[Range<usize>]) -> usize {
     let mut offset = piece_start;
-    for line in piece.lines() {
-        let trimmed = line.trim_start();
+    for line in piece.split_inclusive('\n') {
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let trimmed = text.trim_start();
         let level = trimmed.chars().take_while(|c| *c == '#').count();
-        if level > 0 && level <= 3 && !trimmed[level..].trim().is_empty() {
-            // This is a heading line; advance past it (+ 1 for '\n')
-            offset += line.len() + 1;
+        let is_heading = level > 0 && level <= 3 && !trimmed[level..].trim().is_empty();
+        // A `#`-prefixed line inside a fenced code block is not a heading.
+        if is_heading && !in_fenced(fenced, offset) {
+            // This is a heading line; advance past it (the '\n' is included).
+            offset += line.len();
         } else {
             // First non-heading content; stop here
             break;
@@ -114,11 +122,24 @@ fn heading_content_start(piece: &str, piece_start: usize) -> usize {
 }
 
 #[allow(dead_code)]
-fn derive_heading_path(content: &str, byte_offset: usize) -> Option<String> {
+fn derive_heading_path(
+    content: &str,
+    byte_offset: usize,
+    fenced: &[Range<usize>],
+) -> Option<String> {
     let prefix = &content[..byte_offset.min(content.len())];
     let mut stack: [Option<String>; 3] = [None, None, None];
-    for line in prefix.lines() {
-        let trimmed = line.trim_start();
+    let mut pos = 0usize;
+    for line in prefix.split_inclusive('\n') {
+        let line_start = pos;
+        pos += line.len();
+        // A `#`-prefixed line inside a fenced code block is not a heading.
+        if in_fenced(fenced, line_start) {
+            continue;
+        }
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let trimmed = text.trim_start();
         let level = trimmed.chars().take_while(|c| *c == '#').count();
         if level == 0 || level > 3 {
             continue;
@@ -219,6 +240,49 @@ mod tests {
         let joined: String = result.chunks.iter().map(|c| c.content.clone()).collect();
         assert!(joined.contains("fn foo()"));
         assert!(!joined.contains("```"));
+    }
+
+    #[test]
+    fn shebang_and_comments_inside_code_fences_are_not_headings() {
+        // A `#!/...` shebang and a `# comment` inside a fenced block must not be
+        // parsed as ATX headings and pollute the heading path of later chunks.
+        let content = "\
+# Real Title
+
+```bash
+#!/usr/bin/env bash
+# not a heading
+echo one
+echo two
+```
+
+## Ownership handling
+
+body content that lands in a separate later chunk";
+        let opts = ChunkOptions {
+            max_tokens: 8,
+            overlap_tokens: 0,
+        };
+        let result = chunk(content, opts);
+        assert!(result.chunks.len() >= 2, "expected multiple chunks");
+        for c in &result.chunks {
+            let path = c.heading_path.as_deref().unwrap_or("");
+            assert!(
+                !path.contains("/usr/bin/env"),
+                "fenced shebang leaked into heading path: {path:?}"
+            );
+            assert!(
+                !path.contains("not a heading"),
+                "fenced comment leaked into heading path: {path:?}"
+            );
+        }
+        // The real heading after the fence is still derived correctly.
+        let last = result.chunks.last().expect("chunk");
+        let path = last.heading_path.as_deref().unwrap_or("");
+        assert!(
+            path.contains("Ownership handling"),
+            "real heading lost after fence: {path:?}"
+        );
     }
 
     #[test]
