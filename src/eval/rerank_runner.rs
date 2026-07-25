@@ -90,6 +90,7 @@ mod tests {
             expected_heading_path: None,
             category: None,
             language: None,
+            tier: None,
             anti_expected: vec![],
         }];
         let out = run_rerank_eval(&cache, embedder.as_ref(), &reranker, &queries, 5).expect("run");

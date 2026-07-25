@@ -17,6 +17,11 @@ pub struct Query {
     /// the report breaks metrics out per language.
     #[serde(default)]
     pub language: Option<String>,
+    /// Difficulty tier ("realistic" | "hard" | "diagnostic"). When present, the
+    /// report breaks metrics out per tier alongside the per-category cut.
+    /// Queries tagged "diagnostic" are excluded from the headline numbers.
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 pub fn load_jsonl(path: &std::path::Path) -> Result<Vec<Query>, String> {

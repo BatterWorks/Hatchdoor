@@ -12,3 +12,15 @@ frontend/dist
 .superpowers/
 # CodeGraph local index (machine-local, do not commit)
 .codegraph/
+
+# Private eval query set + review sheet (names hosts, people, IPs — never commit)
+eval/queries.local.jsonl
+eval/review-sheet.md
+# Authoring tooling for the private query set (hardcodes local vault paths)
+eval/*.local.py
+
+# Python bytecode from the eval authoring tooling
+__pycache__/
+
+# Eval query-set design handbook (names hosts, people, IPs — keep local only)
+docs/superpowers/specs/2026-07-25-eval-query-set-design.md

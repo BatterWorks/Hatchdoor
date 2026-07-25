@@ -72,6 +72,7 @@ pub fn append_section(
     };
     writeln!(f).ok();
     write_group_table(&mut f, "Per-category", &report.per_category);
+    write_group_table(&mut f, "Per-tier", &report.per_tier);
     write_group_table(&mut f, "Per-language", &report.per_language);
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
@@ -398,6 +399,7 @@ mod tests {
             fp_rate_at_5: 0.20,
             correct_heading_rate: Some(0.5),
             per_category: Vec::new(),
+            per_tier: Vec::new(),
             per_language: Vec::new(),
             per_query: vec![PerQueryMetrics {
                 id: "U1".to_string(),
@@ -452,6 +454,7 @@ mod tests {
             fp_rate_at_5: 0.0,
             correct_heading_rate: None,
             per_category: Vec::new(),
+            per_tier: Vec::new(),
             per_language: Vec::new(),
             per_query: vec![
                 PerQueryMetrics {
