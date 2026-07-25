@@ -4,6 +4,7 @@ mod populate;
 mod queries;
 mod schema;
 
+pub use populate::BuildOptions;
 pub use queries::SemanticHit;
 
 use std::fs;

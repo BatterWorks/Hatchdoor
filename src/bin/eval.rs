@@ -1,15 +1,22 @@
-use hatchdoor::embed::{Embedder, FastembedEmbedder};
+use hatchdoor::embed::{Embedder, FastembedEmbedder, MatryoshkaEmbedder};
 use hatchdoor::rerank::{FastembedReranker, Reranker};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-fn load_embedder(id: &str) -> Result<Arc<dyn Embedder>, String> {
-    match id {
-        "BGESmallENV15" => Ok(Arc::new(FastembedEmbedder::bge_small()?)),
-        "NomicEmbedTextV15" => Ok(Arc::new(FastembedEmbedder::nomic_v1_5()?)),
-        "MxbaiEmbedLargeV1" => Ok(Arc::new(FastembedEmbedder::mxbai_large()?)),
-        other => Err(format!("unknown model id: {other}")),
+/// Load a model by id, optionally reduced to `dim` dimensions via Matryoshka
+/// truncation. `dim` must be applied identically at build and query time, so it
+/// is threaded through every subcommand.
+fn load_embedder(id: &str, dim: Option<usize>) -> Result<Arc<dyn Embedder>, String> {
+    let base: Arc<dyn Embedder> = match id {
+        "BGESmallENV15" => Arc::new(FastembedEmbedder::bge_small()?),
+        "NomicEmbedTextV15" => Arc::new(FastembedEmbedder::nomic_v1_5()?),
+        "MxbaiEmbedLargeV1" => Arc::new(FastembedEmbedder::mxbai_large()?),
+        other => return Err(format!("unknown model id: {other}")),
+    };
+    match dim {
+        Some(d) => Ok(Arc::new(MatryoshkaEmbedder::new(base, d)?)),
+        None => Ok(base),
     }
 }
 
@@ -26,11 +33,14 @@ fn load_reranker(id: &str) -> Result<Arc<dyn Reranker>, String> {
 fn print_usage() {
     eprintln!(
         "usage:
-  eval build --model <id> --cache <path>
+  eval build --model <id> --cache <path> [--max-tokens <n>] [--overlap <n>] [--no-context]
   eval run --model <id> --cache <path> --queries <path>
   eval rerank --model <id> --cache <path> --reranker <id> --queries <path> [--initial-k <n>]
   eval hybrid --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
   eval compare --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
+
+--dim <n> (any subcommand): reduce vectors to n dims via Matryoshka truncation.
+          Must match between build and query runs on the same cache.
 
 models:    BGESmallENV15 | NomicEmbedTextV15 | MxbaiEmbedLargeV1
 rerankers: JINARerankerV1TurboEn | JINARerankerV2BaseMultilingual"
@@ -42,6 +52,7 @@ enum Cmd {
     Build {
         model: String,
         cache: PathBuf,
+        opts: hatchdoor::cache::BuildOptions,
     },
     Run {
         model: String,
@@ -71,7 +82,7 @@ enum Cmd {
     },
 }
 
-fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
+fn parse_args(argv: Vec<String>) -> Result<(Cmd, Option<usize>), String> {
     let mut it = argv.into_iter().skip(1);
     let sub = it.next().ok_or_else(|| "missing subcommand".to_string())?;
     let mut model: Option<String> = None;
@@ -80,10 +91,36 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
     let mut reranker: Option<String> = None;
     let mut initial_k: Option<usize> = None;
     let mut rrf_k: Option<usize> = None;
+    let mut max_tokens: Option<usize> = None;
+    let mut overlap: Option<usize> = None;
+    let mut no_context = false;
+    let mut dim: Option<usize> = None;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--model" => model = Some(it.next().ok_or("missing value for --model")?),
             "--cache" => cache = Some(PathBuf::from(it.next().ok_or("missing value for --cache")?)),
+            "--max-tokens" => {
+                let raw = it.next().ok_or("missing value for --max-tokens")?;
+                max_tokens = Some(
+                    raw.parse::<usize>()
+                        .map_err(|e| format!("invalid --max-tokens {raw}: {e}"))?,
+                );
+            }
+            "--overlap" => {
+                let raw = it.next().ok_or("missing value for --overlap")?;
+                overlap = Some(
+                    raw.parse::<usize>()
+                        .map_err(|e| format!("invalid --overlap {raw}: {e}"))?,
+                );
+            }
+            "--no-context" => no_context = true,
+            "--dim" => {
+                let raw = it.next().ok_or("missing value for --dim")?;
+                dim = Some(
+                    raw.parse::<usize>()
+                        .map_err(|e| format!("invalid --dim {raw}: {e}"))?,
+                );
+            }
             "--queries" => {
                 queries = Some(PathBuf::from(
                     it.next().ok_or("missing value for --queries")?,
@@ -109,8 +146,24 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
     }
     let model = model.ok_or("missing --model")?;
     let cache = cache.ok_or("missing --cache")?;
-    match sub.as_str() {
-        "build" => Ok(Cmd::Build { model, cache }),
+    let cmd = match sub.as_str() {
+        "build" => {
+            let mut opts = hatchdoor::cache::BuildOptions::default();
+            if let Some(m) = max_tokens {
+                opts.chunk.max_tokens = m;
+            }
+            if let Some(o) = overlap {
+                opts.chunk.overlap_tokens = o;
+            }
+            opts.context = !no_context;
+            if opts.chunk.overlap_tokens >= opts.chunk.max_tokens {
+                return Err(format!(
+                    "--overlap ({}) must be smaller than --max-tokens ({})",
+                    opts.chunk.overlap_tokens, opts.chunk.max_tokens
+                ));
+            }
+            Ok(Cmd::Build { model, cache, opts })
+        }
         "run" => {
             let queries = queries.ok_or("missing --queries")?;
             Ok(Cmd::Run {
@@ -156,12 +209,13 @@ fn parse_args(argv: Vec<String>) -> Result<Cmd, String> {
             })
         }
         other => Err(format!("unknown subcommand: {other}")),
-    }
+    }?;
+    Ok((cmd, dim))
 }
 
 fn main() -> ExitCode {
     dotenvy::dotenv().ok();
-    let cmd = match parse_args(std::env::args().collect()) {
+    let (cmd, dim) = match parse_args(std::env::args().collect()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -170,7 +224,7 @@ fn main() -> ExitCode {
         }
     };
     match cmd {
-        Cmd::Build { model, cache } => {
+        Cmd::Build { model, cache, opts } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
@@ -181,7 +235,7 @@ fn main() -> ExitCode {
             let vault_path = std::env::var("VAULT_PATH").unwrap_or_else(|_| "./vault".to_string());
             let vault_path = std::path::PathBuf::from(vault_path);
 
-            let embedder = match load_embedder(&model) {
+            let embedder = match load_embedder(&model, dim) {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -215,13 +269,20 @@ fn main() -> ExitCode {
             };
 
             let started = std::time::Instant::now();
-            if let Err(e) =
-                sqlite.replace_from_index_with_embedder_stamped(&index, embedder.as_ref(), &model)
-            {
+            if let Err(e) = sqlite.replace_from_index_with_options_stamped(
+                &index,
+                embedder.as_ref(),
+                &model,
+                &opts,
+            ) {
                 eprintln!("error populating cache: {e}");
                 return ExitCode::from(1);
             }
             let elapsed = started.elapsed();
+            println!(
+                "build config: max_tokens={} overlap={} context={}",
+                opts.chunk.max_tokens, opts.chunk.overlap_tokens, opts.context
+            );
             println!(
                 "build complete: model={model} cache={} elapsed={:.1}s",
                 cache.display(),
@@ -234,7 +295,7 @@ fn main() -> ExitCode {
             cache,
             queries,
         } => {
-            let embedder = match load_embedder(&model) {
+            let embedder = match load_embedder(&model, dim) {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -348,7 +409,7 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(1);
             }
-            let embedder = match load_embedder(&model) {
+            let embedder = match load_embedder(&model, dim) {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("error loading embedder: {e}");
@@ -444,7 +505,7 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(1);
             }
-            let embedder = match load_embedder(&model) {
+            let embedder = match load_embedder(&model, dim) {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("error loading embedder: {e}");
@@ -585,7 +646,7 @@ fn main() -> ExitCode {
                 );
                 return ExitCode::from(1);
             }
-            let embedder = match load_embedder(&model) {
+            let embedder = match load_embedder(&model, dim) {
                 Ok(e) => e,
                 Err(e) => {
                     eprintln!("error loading embedder: {e}");
@@ -675,7 +736,7 @@ mod tests {
 
     #[test]
     fn parses_build_command() {
-        let cmd = parse_args(argv(&[
+        let (cmd, _dim) = parse_args(argv(&[
             "eval",
             "build",
             "--model",
@@ -685,9 +746,15 @@ mod tests {
         ]))
         .expect("parse");
         match cmd {
-            Cmd::Build { model, cache } => {
+            Cmd::Build {
+                model, cache, opts, ..
+            } => {
                 assert_eq!(model, "BGESmallENV15");
                 assert_eq!(cache, PathBuf::from("/tmp/x.db"));
+                // Defaults when no build flags are passed.
+                assert_eq!(opts.chunk.max_tokens, 800);
+                assert_eq!(opts.chunk.overlap_tokens, 50);
+                assert!(opts.context);
             }
             _ => panic!("wrong variant"),
         }
@@ -695,7 +762,7 @@ mod tests {
 
     #[test]
     fn parses_run_command_with_queries() {
-        let cmd = parse_args(argv(&[
+        let (cmd, _dim) = parse_args(argv(&[
             "eval",
             "run",
             "--model",
@@ -722,7 +789,7 @@ mod tests {
 
     #[test]
     fn parses_compare_command() {
-        let cmd = parse_args(argv(&[
+        let (cmd, _dim) = parse_args(argv(&[
             "eval",
             "compare",
             "--model",
@@ -757,7 +824,7 @@ mod tests {
 
     #[test]
     fn parses_compare_command_defaults() {
-        let cmd = parse_args(argv(&[
+        let (cmd, _dim) = parse_args(argv(&[
             "eval",
             "compare",
             "--model",
@@ -787,7 +854,7 @@ mod tests {
 
     #[test]
     fn parses_rerank_command() {
-        let cmd = parse_args(argv(&[
+        let (cmd, _dim) = parse_args(argv(&[
             "eval",
             "rerank",
             "--model",
@@ -822,7 +889,7 @@ mod tests {
 
     #[test]
     fn parses_rerank_command_default_initial_k() {
-        let cmd = parse_args(argv(&[
+        let (cmd, _dim) = parse_args(argv(&[
             "eval",
             "rerank",
             "--model",
