@@ -354,10 +354,13 @@ fn main() -> ExitCode {
             for q in &qs {
                 match sqlite.semantic_search(embedder.as_ref(), &q.query, 10) {
                     Ok(hits) => {
-                        let top_k: Vec<String> = hits.into_iter().map(|h| h.note_slug).collect();
+                        let top_k: Vec<String> = hits.iter().map(|h| h.note_slug.clone()).collect();
+                        let top_k_headings: Vec<Option<String>> =
+                            hits.iter().map(|h| h.heading_path.clone()).collect();
                         results.push(hatchdoor::eval::metrics::QueryResult {
                             query_id: q.id.clone(),
                             top_k,
+                            top_k_headings,
                         });
                     }
                     Err(e) => {
@@ -365,6 +368,7 @@ fn main() -> ExitCode {
                         results.push(hatchdoor::eval::metrics::QueryResult {
                             query_id: q.id.clone(),
                             top_k: Vec::new(),
+                            top_k_headings: Vec::new(),
                         });
                     }
                 }
@@ -384,6 +388,30 @@ fn main() -> ExitCode {
             );
             println!("MRR:                 {:.3}", report.mrr);
             println!("FP-rate@5:           {:.3}", report.fp_rate_at_5);
+            match report.correct_heading_rate {
+                Some(rate) => println!("Correct-heading:     {rate:.3}"),
+                None => println!("Correct-heading:     n/a (no heading-scoped queries)"),
+            }
+            for group in &report.per_category {
+                println!(
+                    "  [category {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3} heading={}",
+                    group.label,
+                    group.n,
+                    group.recall_at_5_any,
+                    group.recall_at_10_any,
+                    group.mrr,
+                    group
+                        .correct_heading_rate
+                        .map(|r| format!("{r:.3}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                );
+            }
+            for group in &report.per_language {
+                println!(
+                    "  [language {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3}",
+                    group.label, group.n, group.recall_at_5_any, group.recall_at_10_any, group.mrr,
+                );
+            }
 
             let report_path = std::path::PathBuf::from("eval/results.md");
             if let Err(e) =
