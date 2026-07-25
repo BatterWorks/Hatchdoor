@@ -1314,23 +1314,6 @@ struct PreparedNote {
     vector_reuse_elapsed: Duration,
 }
 
-/// Document-side embedding input: the note's contextual header (its title and
-/// the chunk's heading path) followed by the chunk body. Anchoring each chunk
-/// to its note and section keeps mid-note chunks from embedding as anonymous
-/// fragments. The model's `doc_prefix` is applied around this; queries are
-/// unchanged (asymmetric embedding, richer document side only).
-fn contextual_document(title: &str, heading_path: Option<&str>, body: &str) -> String {
-    let header = match heading_path {
-        Some(path) if !path.is_empty() => format!("{title} > {path}"),
-        _ => title.to_string(),
-    };
-    if header.is_empty() {
-        body.to_string()
-    } else {
-        format!("{header}\n\n{body}")
-    }
-}
-
 /// Reuse/change-detection hash for a chunk's *embedded input*, not just its
 /// body. Folding in the contextual header means a heading edit — which changes
 /// a downstream chunk's `heading_path` without touching its body — invalidates
@@ -1339,7 +1322,7 @@ fn contextual_document(title: &str, heading_path: Option<&str>, body: &str) -> S
 /// given model and any model change already forces a full rebuild via
 /// `Embedder::identity()`.
 fn embedding_reuse_hash(title: &str, heading_path: Option<&str>, body: &str) -> String {
-    let doc = contextual_document(title, heading_path, body);
+    let doc = crate::embed::contextual_document(title, heading_path, body);
     blake3::hash(doc.as_bytes()).to_hex().to_string()
 }
 
@@ -1396,7 +1379,11 @@ fn prepare_note_for_embedding(
         .map(|chunk| {
             let input = format!(
                 "{doc_prefix}{}",
-                contextual_document(title, chunk.heading_path.as_deref(), &chunk.content)
+                crate::embed::contextual_document(
+                    title,
+                    chunk.heading_path.as_deref(),
+                    &chunk.content
+                )
             );
             let input_tokens = embedder
                 .token_count(input.as_str(), true)
@@ -1414,7 +1401,11 @@ fn prepare_note_for_embedding(
         if !preserved.contains_key(&chunk.content_hash) {
             texts_to_embed.push(format!(
                 "{doc_prefix}{}",
-                contextual_document(title, chunk.heading_path.as_deref(), &chunk.content)
+                crate::embed::contextual_document(
+                    title,
+                    chunk.heading_path.as_deref(),
+                    &chunk.content
+                )
             ));
             indices_needing_embed.push(idx);
         }
@@ -2205,9 +2196,8 @@ mod chunk_integration_tests {
     use tempfile::TempDir;
 
     use super::{
-        contextual_document, embedding_reuse_hash, estimated_remaining, format_count,
-        format_elapsed, format_eta, format_note_count, indexing_progress_message,
-        progress_log_delay,
+        embedding_reuse_hash, estimated_remaining, format_count, format_elapsed, format_eta,
+        format_note_count, indexing_progress_message, progress_log_delay,
     };
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
@@ -2569,25 +2559,6 @@ mod chunk_integration_tests {
             "about 3 minutes remaining"
         );
         assert_eq!(format_elapsed(Duration::from_secs(166)), "2m 46s");
-    }
-
-    #[test]
-    fn contextual_document_prepends_title_and_heading_path() {
-        let doc = contextual_document(
-            "Postgres runbook",
-            Some("Backups > Restoring"),
-            "Stop the service first.",
-        );
-        assert_eq!(
-            doc,
-            "Postgres runbook > Backups > Restoring\n\nStop the service first."
-        );
-    }
-
-    #[test]
-    fn contextual_document_without_heading_uses_title_only() {
-        let doc = contextual_document("Postgres runbook", None, "Stop the service first.");
-        assert_eq!(doc, "Postgres runbook\n\nStop the service first.");
     }
 
     #[test]
