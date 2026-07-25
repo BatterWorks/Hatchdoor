@@ -1,9 +1,14 @@
+use std::sync::Mutex;
+
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 
 use super::Embedder;
 
 pub struct FastembedEmbedder {
-    model: TextEmbedding,
+    // FastEmbed 5 dropped Rayon; `TextEmbedding::embed` now takes `&mut self`.
+    // The `Embedder` contract is `&self` behind a shared `Arc`, so serialize
+    // inference through a Mutex rather than leaking `&mut` up the trait.
+    model: Mutex<TextEmbedding>,
     dim: usize,
     max_length: usize,
     id: &'static str,
@@ -27,7 +32,7 @@ impl FastembedEmbedder {
         )
         .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
         Ok(Self {
-            model,
+            model: Mutex::new(model),
             dim,
             max_length,
             id,
@@ -82,7 +87,9 @@ impl Embedder for FastembedEmbedder {
             return Ok(Vec::new());
         }
         self.model
-            .embed(texts.to_vec(), None)
+            .lock()
+            .map_err(|e| format!("embedder mutex poisoned: {e}"))?
+            .embed(texts, None)
             .map_err(|e| format!("embed call failed: {e}"))
     }
 
@@ -96,13 +103,15 @@ impl Embedder for FastembedEmbedder {
         // Bumping FastEmbed must never leave vectors from the prior runtime in
         // the same SQLite index.
         format!(
-            "{}-{}-max{}-fastembed-v4",
+            "{}-{}-max{}-fastembed-v5",
             self.id, self.dim, self.max_length
         )
     }
 
     fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
         self.model
+            .lock()
+            .map_err(|e| format!("embedder mutex poisoned: {e}"))?
             .tokenizer
             .encode(text, add_special_tokens)
             .map(|encoding| encoding.get_ids().len())

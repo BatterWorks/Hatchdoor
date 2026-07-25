@@ -18,7 +18,7 @@ blake3 = "1"
 bytemuck = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
-fastembed = "4"
+fastembed = "5"
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 ignore = "0.4"
 libc = "0.2"
@@ -30,10 +30,11 @@ serde_yaml = "0.9"
 sqlite-vec = "0.1"
 text-splitter = { version = "0.32", features = ["markdown", "tokenizers"] }
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
-# FastEmbed 4 currently exposes its tokenizer through tokenizers 0.21. Keep
-# this alias for the read-only index microbenchmark, which inspects that model
-# tokenizer directly. Application chunking uses the model through Embedder.
-tokenizers-v21 = { package = "tokenizers", version = "0.21", default-features = false, features = ["onig"] }
+# FastEmbed 5 exposes its model tokenizer through tokenizers 0.22, while
+# text-splitter (application chunking) uses 0.23. Keep this version-matched
+# alias for the read-only index microbenchmark, which inspects the FastEmbed
+# model tokenizer directly and must speak its exact API version.
+tokenizers-fe = { package = "tokenizers", version = "0.22", default-features = false, features = ["onig"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }

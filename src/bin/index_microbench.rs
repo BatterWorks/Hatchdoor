@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use rusqlite::{Connection, OpenFlags};
-use tokenizers_v21::Tokenizer;
+use tokenizers_fe::Tokenizer;
 
 const DOC_PREFIX: &str = "search_document: ";
 const DEFAULT_CACHE: &str = "data/cache/hatchdoor-cache.sqlite3";
