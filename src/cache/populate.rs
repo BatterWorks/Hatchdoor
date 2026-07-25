@@ -187,6 +187,7 @@ impl SqliteCache {
                     match prepare_note_for_embedding(
                         &tx,
                         slug,
+                        &entry.title,
                         content,
                         entry.layer.clone(),
                         embed_this_note,
@@ -1313,16 +1314,54 @@ struct PreparedNote {
     vector_reuse_elapsed: Duration,
 }
 
+/// Document-side embedding input: the note's contextual header (its title and
+/// the chunk's heading path) followed by the chunk body. Anchoring each chunk
+/// to its note and section keeps mid-note chunks from embedding as anonymous
+/// fragments. The model's `doc_prefix` is applied around this; queries are
+/// unchanged (asymmetric embedding, richer document side only).
+fn contextual_document(title: &str, heading_path: Option<&str>, body: &str) -> String {
+    let header = match heading_path {
+        Some(path) if !path.is_empty() => format!("{title} > {path}"),
+        _ => title.to_string(),
+    };
+    if header.is_empty() {
+        body.to_string()
+    } else {
+        format!("{header}\n\n{body}")
+    }
+}
+
+/// Reuse/change-detection hash for a chunk's *embedded input*, not just its
+/// body. Folding in the contextual header means a heading edit — which changes
+/// a downstream chunk's `heading_path` without touching its body — invalidates
+/// the cached vector instead of silently reusing one that no longer matches its
+/// input. The model `doc_prefix` is deliberately excluded: it is constant for a
+/// given model and any model change already forces a full rebuild via
+/// `Embedder::identity()`.
+fn embedding_reuse_hash(title: &str, heading_path: Option<&str>, body: &str) -> String {
+    let doc = contextual_document(title, heading_path, body);
+    blake3::hash(doc.as_bytes()).to_hex().to_string()
+}
+
 fn prepare_note_for_embedding(
     tx: &Transaction<'_>,
     slug: String,
+    title: &str,
     content: String,
     layer: Option<String>,
     embed: bool,
     embedder: &dyn Embedder,
 ) -> Result<PreparedNote, String> {
     let chunking_started = Instant::now();
-    let chunking = chunk_note(&content, embedder, ChunkOptions::default());
+    let mut chunking = chunk_note(&content, embedder, ChunkOptions::default());
+    // Rehash each chunk over its *embedded input* (title + heading path + body),
+    // not just its body. This is the vector-reuse key, so a heading edit — which
+    // changes a downstream chunk's heading path without touching its body — now
+    // invalidates the cached vector instead of silently reusing a stale one.
+    for chunk in &mut chunking.chunks {
+        chunk.content_hash =
+            embedding_reuse_hash(title, chunk.heading_path.as_deref(), &chunk.content);
+    }
     let chunking_elapsed = chunking_started.elapsed();
 
     // A note we are not embedding still gets chunk rows (keyword search) but no
@@ -1355,7 +1394,10 @@ fn prepare_note_for_embedding(
         .chunks
         .iter()
         .map(|chunk| {
-            let input = format!("{doc_prefix}{}", chunk.content);
+            let input = format!(
+                "{doc_prefix}{}",
+                contextual_document(title, chunk.heading_path.as_deref(), &chunk.content)
+            );
             let input_tokens = embedder
                 .token_count(input.as_str(), true)
                 .map_err(|error| format!("failed measuring tokens for '{slug}': {error}"))?;
@@ -1370,7 +1412,10 @@ fn prepare_note_for_embedding(
     let mut indices_needing_embed: Vec<usize> = Vec::new();
     for (idx, chunk) in chunking.chunks.iter().enumerate() {
         if !preserved.contains_key(&chunk.content_hash) {
-            texts_to_embed.push(format!("{doc_prefix}{}", chunk.content));
+            texts_to_embed.push(format!(
+                "{doc_prefix}{}",
+                contextual_document(title, chunk.heading_path.as_deref(), &chunk.content)
+            ));
             indices_needing_embed.push(idx);
         }
     }
@@ -2160,8 +2205,9 @@ mod chunk_integration_tests {
     use tempfile::TempDir;
 
     use super::{
-        estimated_remaining, format_count, format_elapsed, format_eta, format_note_count,
-        indexing_progress_message, progress_log_delay,
+        contextual_document, embedding_reuse_hash, estimated_remaining, format_count,
+        format_elapsed, format_eta, format_note_count, indexing_progress_message,
+        progress_log_delay,
     };
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
@@ -2523,5 +2569,179 @@ mod chunk_integration_tests {
             "about 3 minutes remaining"
         );
         assert_eq!(format_elapsed(Duration::from_secs(166)), "2m 46s");
+    }
+
+    #[test]
+    fn contextual_document_prepends_title_and_heading_path() {
+        let doc = contextual_document(
+            "Postgres runbook",
+            Some("Backups > Restoring"),
+            "Stop the service first.",
+        );
+        assert_eq!(
+            doc,
+            "Postgres runbook > Backups > Restoring\n\nStop the service first."
+        );
+    }
+
+    #[test]
+    fn contextual_document_without_heading_uses_title_only() {
+        let doc = contextual_document("Postgres runbook", None, "Stop the service first.");
+        assert_eq!(doc, "Postgres runbook\n\nStop the service first.");
+    }
+
+    #[test]
+    fn reuse_hash_changes_when_heading_changes_but_body_does_not() {
+        // A downstream chunk keeps its body when the heading above it is edited,
+        // but its embedded input (which now carries the heading path) changes,
+        // so its cached vector must be invalidated rather than reused.
+        let before = embedding_reuse_hash("Note", Some("Old heading"), "shared body");
+        let after = embedding_reuse_hash("Note", Some("New heading"), "shared body");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn reuse_hash_changes_when_title_changes_but_body_does_not() {
+        let before = embedding_reuse_hash("Alpha", None, "shared body");
+        let after = embedding_reuse_hash("Bravo", None, "shared body");
+        assert_ne!(before, after);
+    }
+
+    /// Records every text handed to `embed` so a test can assert the exact
+    /// document-side input, delegating the vectors to a deterministic stub.
+    struct RecordingEmbedder {
+        inner: StubEmbedder,
+        inputs: std::sync::Mutex<Vec<String>>,
+    }
+    impl RecordingEmbedder {
+        fn new(dim: usize) -> Self {
+            Self {
+                inner: StubEmbedder::new(dim),
+                inputs: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn recorded(&self) -> Vec<String> {
+            self.inputs.lock().expect("recording mutex").clone()
+        }
+    }
+    impl Embedder for RecordingEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.inputs
+                .lock()
+                .expect("recording mutex")
+                .extend(texts.iter().cloned());
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            self.inner.embedding_dim()
+        }
+        fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add_special_tokens)
+        }
+    }
+
+    #[test]
+    fn indexing_embeds_chunk_with_title_and_heading_context() {
+        let dir = make_vault(&[(
+            "Postgres runbook.md",
+            "# Backups\n\nStop the service first.",
+        )]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        let embedder = RecordingEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+        let recorded = embedder.recorded();
+        assert!(
+            recorded
+                .iter()
+                .any(|t| t.starts_with("Postgres runbook > Backups\n\n")),
+            "embedded input should carry title + heading context, got: {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn editing_a_heading_re_embeds_downstream_chunks_but_reuses_untouched_sections() {
+        // Section Alpha is large enough to span multiple chunks: its heading
+        // lives only in the first chunk, so later Alpha chunks keep their body
+        // verbatim while their heading path points at "Alpha". Section Beta is a
+        // separate, untouched section. Renaming the Alpha heading must re-embed
+        // ALL Alpha chunks (including the downstream body-unchanged ones, whose
+        // heading path changed) while Beta's chunk is reused. Under a body-only
+        // reuse key the downstream Alpha chunks would be wrongly reused.
+        let big_alpha_body = "alpha ".repeat(1200);
+        let note = format!("# Alpha\n\n{big_alpha_body}\n\n# Beta\n\nbeta body");
+        let dir = make_vault(&[("Runbook.md", note.as_str())]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+
+        let first = RecordingEmbedder::new(384);
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_from_index_with_embedder(&index, &first)
+            .expect("first populate");
+        let first_inputs = first.recorded();
+        let alpha_chunks = first_inputs
+            .iter()
+            .filter(|t| t.starts_with("Runbook > Alpha\n\n"))
+            .count();
+        assert!(
+            alpha_chunks >= 2,
+            "test needs Alpha to span multiple chunks, got {alpha_chunks}: {first_inputs:?}"
+        );
+
+        // Rename only the Alpha heading; every byte of body text is untouched.
+        std::fs::write(
+            dir.path().join("Runbook.md"),
+            note.replace("# Alpha", "# Alpha Prime"),
+        )
+        .expect("rewrite");
+
+        let second = RecordingEmbedder::new(384);
+        let reindex = VaultIndex::build(dir.path()).expect("rebuild");
+        cache
+            .replace_from_index_with_embedder(&reindex, &second)
+            .expect("second populate");
+        let second_inputs = second.recorded();
+
+        let re_embedded_alpha = second_inputs
+            .iter()
+            .filter(|t| t.starts_with("Runbook > Alpha Prime\n\n"))
+            .count();
+        assert_eq!(
+            re_embedded_alpha, alpha_chunks,
+            "every Alpha chunk must re-embed under the renamed heading, including \
+             downstream chunks whose body did not change; got {second_inputs:?}"
+        );
+        assert!(
+            !second_inputs.iter().any(|t| t.contains("> Beta\n\n")),
+            "the untouched Beta section must be reused, not re-embedded; got {second_inputs:?}"
+        );
+    }
+
+    #[test]
+    fn indexing_stores_header_inclusive_reuse_hash() {
+        let dir = make_vault(&[("Runbook.md", "# Backups\n\nrestore steps")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("populate");
+        let (content, heading_path, stored_hash): (String, Option<String>, String) = cache
+            .connection()
+            .expect("conn")
+            .query_row(
+                "SELECT content, heading_path, content_hash FROM chunks WHERE note_slug = ?1",
+                ["runbook"],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("chunk row");
+        let expected = embedding_reuse_hash("Runbook", heading_path.as_deref(), &content);
+        assert_eq!(
+            stored_hash, expected,
+            "stored chunk hash must be over the contextual document, so a heading \
+             edit invalidates the cached vector instead of reusing a stale one"
+        );
     }
 }

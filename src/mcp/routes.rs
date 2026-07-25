@@ -1559,11 +1559,21 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
-        let result = &body["result"]["structuredContent"]["results"][0];
-        assert_eq!(result["note_slug"], "home");
-        assert!(result.get("chunk_id").is_some());
-        assert!(result.get("content").is_some());
-        assert!(result.get("score").is_some());
+        let results = body["result"]["structuredContent"]["results"]
+            .as_array()
+            .expect("results array");
+        // Ranking is not asserted: the test embedder hashes inputs to vectors, so
+        // semantic order is arbitrary. What matters is that search surfaces the
+        // matching note and every hit carries the compact chunk shape.
+        assert!(
+            results.iter().any(|r| r["note_slug"] == "home"),
+            "search should surface the home note, got: {results:?}"
+        );
+        let first = &results[0];
+        assert!(first.get("note_slug").is_some());
+        assert!(first.get("chunk_id").is_some());
+        assert!(first.get("content").is_some());
+        assert!(first.get("score").is_some());
     }
 
     #[tokio::test]
