@@ -74,6 +74,19 @@ and [#14 — Live editing content](https://github.com/BattermanZ/Hatchdoor/issue
 
 _Horizon: **v2.5.0**._
 
+### PDF preview engine
+
+**Problem:** PDFs kept alongside Markdown notes currently interrupt the reading
+flow: people must leave Hatchdoor or download the attachment merely to inspect
+it.
+
+Direction: provide an in-app, local PDF preview for vault attachments, with
+page navigation, zoom, and a clear route to download or open the original file.
+The preview is for reading existing files; creating or editing PDFs is out of
+scope.
+
+_Horizon: **v2.5.0**._
+
 ### Agent-driven ingestion
 
 **Problem:** agents can edit notes but cannot bring new material into the vault.
