@@ -16,9 +16,11 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 blake3 = "1"
 bytemuck = "1"
+candle-core = "0.11"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
-fastembed = "5"
+fastembed = { version = "5", features = ["qwen3", "nomic-v2-moe"] }
+hf-hub = { version = "0.5", default-features = false, features = ["ureq", "native-tls"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 ignore = "0.4"
 libc = "0.2"

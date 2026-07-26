@@ -36,6 +36,18 @@ pub trait Embedder: Send + Sync {
     fn query_prefix(&self) -> &'static str {
         ""
     }
+
+    /// Complete document-side input for contextual embeddings. Most models use
+    /// Hatchdoor's canonical title + heading + body representation with an
+    /// optional task prefix; models with a trained document template can
+    /// override this method.
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        format!(
+            "{}{}",
+            self.doc_prefix(),
+            crate::embed::contextual_document(title, heading_path, body)
+        )
+    }
 }
 
 /// Deterministic test embedder. Hashes each input to a fixed-dim vector so

@@ -1,8 +1,17 @@
 use std::sync::Mutex;
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{
+    EmbeddingModel, InitOptions, InitOptionsUserDefined, Pooling, TextEmbedding, TokenizerFiles,
+    UserDefinedEmbeddingModel,
+};
 
 use super::Embedder;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentFormat {
+    HatchdoorContextual,
+    GemmaRetrievalV1,
+}
 
 pub struct FastembedEmbedder {
     // FastEmbed 5 dropped Rayon; `TextEmbedding::embed` now takes `&mut self`.
@@ -14,6 +23,8 @@ pub struct FastembedEmbedder {
     id: &'static str,
     doc_prefix: &'static str,
     query_prefix: &'static str,
+    document_format: DocumentFormat,
+    identity_suffix: &'static str,
 }
 
 impl FastembedEmbedder {
@@ -38,6 +49,8 @@ impl FastembedEmbedder {
             id,
             doc_prefix,
             query_prefix,
+            document_format: DocumentFormat::HatchdoorContextual,
+            identity_suffix: "",
         })
     }
 
@@ -79,6 +92,101 @@ impl FastembedEmbedder {
             "",
         )
     }
+
+    /// GTE Base English v1.5 — native ONNX. English-only floor for the
+    /// multilingual benchmark. No task-instruction prefixes. `max_length` is set
+    /// to 1024 so the 800-token chunk sweep (plus context header) is not
+    /// truncated.
+    pub fn gte_base_en() -> Result<Self, String> {
+        Self::load(
+            EmbeddingModel::GTEBaseENV15,
+            768,
+            1024,
+            "GTEBaseENV15",
+            "",
+            "",
+        )
+    }
+
+    /// EmbeddingGemma 300M Q4 — multilingual 4-bit ONNX model. It has a
+    /// 2,048-token input limit and supports Matryoshka truncation for the
+    /// storage-efficient 256-dimensional evaluation variant.
+    pub fn embedding_gemma_300m_q4() -> Result<Self, String> {
+        let mut embedder = Self::load(
+            EmbeddingModel::EmbeddingGemma300MQ4,
+            768,
+            2048,
+            "EmbeddingGemma300MQ4",
+            "",
+            "task: search result | query: ",
+        )?;
+        // EmbeddingGemma's retrieval training uses different query and document
+        // templates. This is intentionally a model-specific document format,
+        // not merely a prefix, because the note title has its own field.
+        embedder.document_format = DocumentFormat::GemmaRetrievalV1;
+        // The cached vectors are incompatible with the earlier plain-context
+        // Gemma experiment, even though the weights and output dimensions match.
+        embedder.identity_suffix = "-gemma-retrieval-v1";
+        Ok(embedder)
+    }
+
+    /// Wrap an already-constructed `TextEmbedding` (e.g. a user-defined ONNX
+    /// model) so it reuses the same embed / token_count / identity path as the
+    /// enum-based models.
+    fn from_text_embedding(
+        model: TextEmbedding,
+        dim: usize,
+        max_length: usize,
+        id: &'static str,
+        doc_prefix: &'static str,
+        query_prefix: &'static str,
+    ) -> Self {
+        Self {
+            model: Mutex::new(model),
+            dim,
+            max_length,
+            id,
+            doc_prefix,
+            query_prefix,
+            document_format: DocumentFormat::HatchdoorContextual,
+            identity_suffix: "",
+        }
+    }
+
+    /// Snowflake Arctic Embed M v2.0 — midsize multilingual, a retrieval
+    /// fine-tune of gte-multilingual-base. Not a native FastEmbed enum model, so
+    /// it is loaded as a user-defined ONNX model: the fp32 `onnx/model.onnx` with
+    /// CLS pooling (per the repo's `1_Pooling/config.json`). The model card
+    /// specifies a `"query: "` prefix for queries and no document prefix.
+    /// Downloads ~1.2 GB on first use.
+    pub fn arctic_m_v2() -> Result<Self, String> {
+        const REPO: &str = "Snowflake/snowflake-arctic-embed-m-v2.0";
+        const MAX_LENGTH: usize = 1024;
+
+        let onnx_file = super::hub::fetch_bytes(REPO, "onnx/model.onnx")?;
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: super::hub::fetch_bytes(REPO, "tokenizer.json")?,
+            config_file: super::hub::fetch_bytes(REPO, "config.json")?,
+            special_tokens_map_file: super::hub::fetch_bytes(REPO, "special_tokens_map.json")?,
+            tokenizer_config_file: super::hub::fetch_bytes(REPO, "tokenizer_config.json")?,
+        };
+        let user_model =
+            UserDefinedEmbeddingModel::new(onnx_file, tokenizer_files).with_pooling(Pooling::Cls);
+        let model = TextEmbedding::try_new_from_user_defined(
+            user_model,
+            InitOptionsUserDefined::new().with_max_length(MAX_LENGTH),
+        )
+        .map_err(|e| format!("failed to load Arctic M v2.0 user-defined model: {e}"))?;
+
+        Ok(Self::from_text_embedding(
+            model,
+            768,
+            MAX_LENGTH,
+            "SnowflakeArcticEmbedMV2",
+            "",
+            "query: ",
+        ))
+    }
 }
 
 impl Embedder for FastembedEmbedder {
@@ -98,7 +206,11 @@ impl Embedder for FastembedEmbedder {
     }
 
     fn identity(&self) -> String {
-        embedder_identity(self.id, self.dim, self.max_length)
+        format!(
+            "{}{}",
+            embedder_identity(self.id, self.dim, self.max_length),
+            self.identity_suffix
+        )
     }
 
     fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
@@ -118,6 +230,30 @@ impl Embedder for FastembedEmbedder {
     fn query_prefix(&self) -> &'static str {
         self.query_prefix
     }
+
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        match self.document_format {
+            DocumentFormat::HatchdoorContextual => format!(
+                "{}{}",
+                self.doc_prefix,
+                crate::embed::contextual_document(title, heading_path, body)
+            ),
+            DocumentFormat::GemmaRetrievalV1 => gemma_retrieval_document(title, heading_path, body),
+        }
+    }
+}
+
+fn gemma_retrieval_document(title: &str, heading_path: Option<&str>, body: &str) -> String {
+    let title = if title.trim().is_empty() {
+        "none"
+    } else {
+        title
+    };
+    let text = match heading_path {
+        Some(path) if !path.is_empty() => format!("Section: {path}\n\n{body}"),
+        _ => body.to_string(),
+    };
+    format!("title: {title} | text: {text}")
 }
 
 /// Persisted cache identity for a FastEmbed model. Every field that changes the
@@ -134,7 +270,7 @@ fn embedder_identity(id: &str, dim: usize, max_length: usize) -> String {
 
 #[cfg(test)]
 mod identity_tests {
-    use super::embedder_identity;
+    use super::{embedder_identity, gemma_retrieval_document};
 
     #[test]
     fn identity_marks_the_contextual_embedding_contract() {
@@ -144,6 +280,14 @@ mod identity_tests {
         assert_eq!(
             embedder_identity("NomicEmbedTextV15", 768, 2048),
             "NomicEmbedTextV15-768-max2048-fastembed-v5-ctx1"
+        );
+    }
+
+    #[test]
+    fn gemma_retrieval_document_uses_official_title_text_template() {
+        assert_eq!(
+            gemma_retrieval_document("Runbook", Some("Backups > Restore"), "Stop first."),
+            "title: Runbook | text: Section: Backups > Restore\n\nStop first."
         );
     }
 }

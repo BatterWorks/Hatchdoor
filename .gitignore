@@ -18,6 +18,8 @@ eval/queries.local.jsonl
 eval/review-sheet.md
 # Authoring tooling for the private query set (hardcodes local vault paths)
 eval/*.local.py
+# Sweep driver (drives the private query set)
+eval/*.local.sh
 
 # Python bytecode from the eval authoring tooling
 __pycache__/

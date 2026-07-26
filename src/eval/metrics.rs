@@ -313,7 +313,9 @@ impl LatencyStats {
 pub struct RerankQueryResult {
     pub query_id: String,
     pub top_k_pre: Vec<String>,
+    pub top_k_pre_headings: Vec<Option<String>>,
     pub top_k_post: Vec<String>,
+    pub top_k_post_headings: Vec<Option<String>>,
     pub rerank_latency_ms: f64,
     pub e2e_latency_ms: f64,
 }
@@ -336,11 +338,15 @@ pub fn aggregate_rerank(
     let mut anti_num = 0usize;
     let mut headline_n = 0usize;
     let mut per_query = Vec::with_capacity(queries.len());
+    let mut rows: Vec<GroupRow> = Vec::with_capacity(queries.len());
 
     for q in queries {
         let result = by_id.get(q.id.as_str());
         let top_10_post: Vec<String> = result
             .map(|r| r.top_k_post.iter().take(10).cloned().collect())
+            .unwrap_or_default();
+        let top_10_post_headings: Vec<Option<String>> = result
+            .map(|r| r.top_k_post_headings.iter().take(10).cloned().collect())
             .unwrap_or_default();
         let top_5_post: Vec<String> = top_10_post.iter().take(5).cloned().collect();
 
@@ -350,6 +356,12 @@ pub fn aggregate_rerank(
             .unwrap_or(None);
         let anti_hit = (!q.anti_expected.is_empty())
             .then(|| any_anti_expected_in_top_k(&q.anti_expected, &top_5_post));
+        let heading = heading_hit(
+            &q.expected_notes,
+            q.expected_heading_path.as_deref(),
+            &top_10_post,
+            &top_10_post_headings,
+        );
 
         // Diagnostic queries are excluded from headline numbers, same as the
         // pure-retrieval path, so the two runs stay comparable.
@@ -383,6 +395,15 @@ pub fn aggregate_rerank(
             rank_pre_rerank: rank_pre,
             rank_post_rerank: rank_post,
         });
+        rows.push(GroupRow {
+            category: q.category.clone(),
+            tier: q.tier.clone(),
+            language: q.language.clone(),
+            hit5: recall_at_k_any(&q.expected_notes, &top_5_post),
+            hit10: recall_at_k_any(&q.expected_notes, &top_10_post),
+            rr: rank_post.map(|rank| 1.0 / rank as f64).unwrap_or(0.0),
+            heading,
+        });
     }
 
     let n = headline_n.max(1) as f64;
@@ -398,6 +419,10 @@ pub fn aggregate_rerank(
         (!rerank_samples.is_empty()).then(|| LatencyStats::from_samples(&rerank_samples));
     let e2e_latency_ms =
         (!e2e_samples.is_empty()).then(|| LatencyStats::from_samples(&e2e_samples));
+    let headline_rows: Vec<&GroupRow> = rows
+        .iter()
+        .filter(|r| r.tier.as_deref() != Some("diagnostic"))
+        .collect();
 
     Report {
         model_id: run_id.to_string(),
@@ -408,12 +433,10 @@ pub fn aggregate_rerank(
         recall_at_10_all: sum_all_10 / n,
         mrr: sum_mrr / n,
         fp_rate_at_5,
-        // The rerank path collapses to note slugs and carries no query tags, so
-        // heading and per-group breakdowns don't apply here.
-        correct_heading_rate: None,
-        per_category: Vec::new(),
-        per_tier: Vec::new(),
-        per_language: Vec::new(),
+        correct_heading_rate: heading_rate(&headline_rows),
+        per_category: group_reports(&rows, |r| r.category.as_deref()),
+        per_tier: group_reports(&rows, |r| r.tier.as_deref()),
+        per_language: group_reports(&rows, |r| r.language.as_deref()),
         per_query,
         rerank_latency_ms,
         e2e_latency_ms,
@@ -681,7 +704,9 @@ mod rerank_tests {
         let pre = vec![RerankQueryResult {
             query_id: "Q1".to_string(),
             top_k_pre: top(&["a", "b", "x"]), // expected at rank 3 pre
+            top_k_pre_headings: vec![None; 3],
             top_k_post: top(&["x", "a", "b"]), // expected at rank 1 post
+            top_k_post_headings: vec![None; 3],
             rerank_latency_ms: 12.0,
             e2e_latency_ms: 25.0,
         }];
@@ -722,7 +747,9 @@ mod rerank_tests {
         RerankQueryResult {
             query_id: id.to_string(),
             top_k_pre: top(&["x"]),
+            top_k_pre_headings: vec![None],
             top_k_post: top(&["x"]),
+            top_k_post_headings: vec![None],
             rerank_latency_ms: rerank_ms,
             e2e_latency_ms: e2e_ms,
         }

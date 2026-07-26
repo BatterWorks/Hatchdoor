@@ -19,18 +19,24 @@ pub fn run_rerank_eval(
         let e2e_start = Instant::now();
         let candidates = cache.semantic_search(embedder, &q.query, initial_k)?;
         let top_k_pre: Vec<String> = candidates.iter().map(|c| c.note_slug.clone()).collect();
+        let top_k_pre_headings: Vec<Option<String>> =
+            candidates.iter().map(|c| c.heading_path.clone()).collect();
 
         let rerank_start = Instant::now();
         let reranked = reranker.rerank(&q.query, candidates)?;
         let rerank_latency_ms = rerank_start.elapsed().as_secs_f64() * 1000.0;
 
         let top_k_post: Vec<String> = reranked.iter().map(|c| c.note_slug.clone()).collect();
+        let top_k_post_headings: Vec<Option<String>> =
+            reranked.iter().map(|c| c.heading_path.clone()).collect();
         let e2e_latency_ms = e2e_start.elapsed().as_secs_f64() * 1000.0;
 
         out.push(RerankQueryResult {
             query_id: q.id.clone(),
             top_k_pre,
+            top_k_pre_headings,
             top_k_post,
+            top_k_post_headings,
             rerank_latency_ms,
             e2e_latency_ms,
         });
