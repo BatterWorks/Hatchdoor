@@ -88,6 +88,9 @@ mod tests {
             query: "flying baby plane".to_string(),
             expected_notes: vec!["gamma".to_string()],
             expected_heading_path: None,
+            category: None,
+            language: None,
+            tier: None,
             anti_expected: vec![],
         }];
         let out = run_rerank_eval(&cache, embedder.as_ref(), &reranker, &queries, 5).expect("run");

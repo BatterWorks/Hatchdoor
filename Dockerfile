@@ -18,16 +18,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY docs/starter-vault ./docs/starter-vault
 RUN cargo build --release --bin hatchdoor
-ENV FASTEMBED_CACHE_DIR=/opt/fastembed
-# The release binary depends on application source, so this layer is rebuilt
-# whenever that source changes. Keep the downloaded model in a BuildKit cache
-# mount and copy it into the image on every build; later builds reuse the mount
-# instead of downloading the model again.
-RUN --mount=type=cache,target=/var/cache/fastembed \
-    FASTEMBED_CACHE_DIR=/var/cache/fastembed \
-    ./target/release/hatchdoor --prefetch-embedder \
- && mkdir -p "$FASTEMBED_CACHE_DIR" \
- && cp -a /var/cache/fastembed/. "$FASTEMBED_CACHE_DIR"/
 
 FROM docker.io/library/node:26-slim AS frontend-builder
 WORKDIR /app/frontend
@@ -42,11 +32,9 @@ WORKDIR /app
 ENV HOST=0.0.0.0 \
     PORT=42824 \
     VAULT_PATH=/data/vault \
-    FASTEMBED_CACHE_DIR=/opt/fastembed \
     RUST_LOG=hatchdoor=info,tower_http=info,axum::rejection=warn
 
 COPY --from=rust-builder /app/target/release/hatchdoor /app/hatchdoor
-COPY --from=rust-builder /opt/fastembed /opt/fastembed
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist
 
 EXPOSE 42824

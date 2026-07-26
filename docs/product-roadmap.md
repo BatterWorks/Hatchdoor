@@ -72,7 +72,7 @@ experience to a publishable bar. Tracked issues:
 Related but broader than pure UI polish: [#13 — Global Settings](https://github.com/BattermanZ/Hatchdoor/issues/13)
 and [#14 — Live editing content](https://github.com/BattermanZ/Hatchdoor/issues/14).
 
-_Horizon: **v2.4** (next feature line)._
+_Horizon: **v2.5.0**._
 
 ### Agent-driven ingestion
 

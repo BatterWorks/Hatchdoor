@@ -152,6 +152,7 @@ Edit `.env` and set at least these values:
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 HOST_CACHE_PATH=./data/cache
+HOST_MODELS_PATH=./models
 HATCHDOOR_WEB_BEARER_TOKEN=choose-a-long-random-token
 ```
 
@@ -159,6 +160,7 @@ What these mean:
 
 - `HOST_VAULT_PATH` is your Markdown vault on the host machine.
 - `HOST_CACHE_PATH` stores Hatchdoor's generated SQLite cache.
+- `HOST_MODELS_PATH` stores downloaded search models and the local Gemma terms receipt.
 - `HATCHDOOR_WEB_BEARER_TOKEN` protects your notes in the browser.
 
 Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so the
@@ -179,7 +181,29 @@ http://localhost:42824
 
 Enter the web bearer token when prompted.
 
-### 4. Container Image And Paths
+### 4. Choose Your Search Model
+
+Hatchdoor images include no model weights. On the first launch, Hatchdoor asks
+you to choose how semantic search is set up before it downloads anything.
+
+- **Set up Gemma** is the default. EmbeddingGemma is multilingual and provides
+  the best search quality. Read and accept the Gemma terms in the web UI (or
+  through the first-run MCP setup tools); Hatchdoor then downloads the model,
+  scans the vault, and builds the index automatically.
+- **Use Nomic instead** declines Gemma and starts the same setup with Nomic
+  Embed Text v1.5. It needs no Gemma acceptance, but it is English-only and is
+  less suitable for multilingual vaults.
+
+Accepting the Gemma terms only permits Hatchdoor to download and use that model.
+It does not change ownership of your vault or its content, and Hatchdoor does
+not send vault content anywhere. The downloaded model and the local acceptance
+receipt stay in `HOST_MODELS_PATH`, so they persist across container restarts.
+
+The UI and logs show download and indexing progress. Vault features remain
+unavailable until setup is ready; if a model download fails, Hatchdoor presents
+a retry action instead of silently changing models.
+
+### 5. Container Image And Paths
 
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
@@ -200,6 +224,7 @@ Docker Compose mounts:
 | --- | --- |
 | `/data/vault` | Markdown vault, source of truth |
 | `/data/cache` | Generated SQLite cache |
+| `/models` | Downloaded search model and local Gemma terms receipt |
 
 ## Data And Safety Model
 
@@ -250,6 +275,8 @@ For read-only browsing:
 
 - Mount the vault read-only if you want.
 - Keep the cache directory writable.
+- Keep the models directory writable. The supplied Compose file prepares it for
+  Hatchdoor's unprivileged runtime user automatically.
 
 For browser writes, MCP writes, attachment uploads, or git sync:
 
@@ -270,6 +297,7 @@ Copy `.env.example` to `.env` and adjust values.
 | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | Host-side vault path for Docker Compose |
 | `HOST_CACHE_PATH` | `./data/cache` | Host-side cache directory for Docker Compose |
+| `HOST_MODELS_PATH` | `./models` | Persistent downloaded-model directory for Docker Compose |
 | `VAULT_PATH` | `/data/vault` | Runtime vault path read by Hatchdoor |
 | `HATCHDOOR_CACHE_DB` | `/data/cache/hatchdoor-cache.sqlite3` | Runtime SQLite cache file |
 | `HOST` | `127.0.0.1` | Bind host for local `cargo run` |
@@ -581,11 +609,8 @@ cd frontend
 npm run dev
 ```
 
-Optional: prefetch the embedder model used by semantic search:
-
-```bash
-cargo run -- --prefetch-embedder
-```
+The first-run model choice also applies to local development. Hatchdoor stores
+models in `./models` by default, so no model-prefetch command is required.
 
 ## Troubleshooting
 

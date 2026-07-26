@@ -2,6 +2,7 @@
 //! checks, and the `serve` run loop. Kept in the library (rather than the binary
 //! root) so the HTTP surface is reachable from integration tests.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::DefaultBodyLimit;
@@ -14,13 +15,13 @@ use axum::{Json, Router};
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::app_state::{AppState, VaultCache, build_cache_with_sqlite_and_progress};
 use crate::auth::{WebOrMcpToken, WebToken, require_web_or_mcp_token, require_web_token};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
-use crate::embed::{Embedder, FastembedEmbedder};
+use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
     archive_note_handler, create_note_handler, delete_note_handler, diagnostics_handler,
@@ -31,6 +32,7 @@ use crate::handlers::{
     vault_asset_handler, vault_events_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
+use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::startup::StartupTracker;
 use crate::vault_watcher::spawn_vault_watcher;
 
@@ -82,6 +84,17 @@ pub fn check_demo_mode_posture(
         );
     }
     Ok(())
+}
+
+fn initial_model_for_startup(demo_mode: bool, selected: SelectedModel) -> SelectedModel {
+    // A public, read-only demo has no person available to accept Gemma's terms.
+    // It may use an already-selected model, otherwise use the no-terms Nomic
+    // fallback without persisting that choice for a later normal deployment.
+    if demo_mode && selected == SelectedModel::TermsRequired {
+        SelectedModel::Nomic
+    } else {
+        selected
+    }
 }
 
 /// Multipart framing (boundary lines, field headers, the small
@@ -184,18 +197,33 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         require_vault_ready,
     ));
 
+    let model_setup = Router::new()
+        .route("/api/model/accept-gemma", post(accept_gemma_handler))
+        .route("/api/model/decline-gemma", post(decline_gemma_handler))
+        .route("/api/model/retry", post(retry_model_setup_handler));
+    let model_setup = match web_bearer_token.clone() {
+        Some(token) => model_setup.layer(axum::middleware::from_fn_with_state(
+            WebToken(token),
+            require_web_token,
+        )),
+        None => model_setup,
+    };
+    let model_setup = model_setup.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        reject_demo_model_setup,
+    ));
+
+    // MCP remains reachable during initial setup: it exposes only the three
+    // model-setup tools until the vault is ready (enforced in tools::dispatch).
     let mcp = Router::new()
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
-        .layer(DefaultBodyLimit::max(mcp_body_limit))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            require_vault_ready,
-        ));
+        .layer(DefaultBodyLimit::max(mcp_body_limit));
 
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
+        .merge(model_setup)
         .merge(mcp)
         .merge(protected)
         .merge(attachment)
@@ -255,6 +283,193 @@ async fn readiness_handler(State(state): State<AppState>) -> Response {
     }
 }
 
+async fn accept_gemma_handler(State(state): State<AppState>) -> Response {
+    match state.model_setup.accept_gemma() {
+        Ok(()) => {
+            spawn_model_startup(state, SelectedModel::Gemma);
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(error) => model_setup_error(error),
+    }
+}
+
+async fn decline_gemma_handler(State(state): State<AppState>) -> Response {
+    match state.model_setup.decline_gemma() {
+        Ok(()) => {
+            spawn_model_startup(state, SelectedModel::Nomic);
+            StatusCode::ACCEPTED.into_response()
+        }
+        Err(error) => model_setup_error(error),
+    }
+}
+
+async fn retry_model_setup_handler(State(state): State<AppState>) -> Response {
+    match state.model_setup.selected() {
+        Ok(selected @ (SelectedModel::Gemma | SelectedModel::Nomic)) => {
+            spawn_model_startup(state, selected);
+            StatusCode::ACCEPTED.into_response()
+        }
+        Ok(SelectedModel::TermsRequired) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "Gemma terms must be accepted or declined first." })),
+        )
+            .into_response(),
+        Err(error) => model_setup_error(error),
+    }
+}
+
+fn model_setup_error(error: String) -> Response {
+    error!("Model setup error: {error}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "Model setup could not be started." })),
+    )
+        .into_response()
+}
+
+pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
+    if state.model_setup_started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let tracker = state.startup.clone();
+    let model_name = selected.id().unwrap_or("search model");
+    tracker.set_downloading(model_name, None, None);
+    info!(
+        model = model_name,
+        "Downloading and loading startup embedding model"
+    );
+
+    tokio::spawn(async move {
+        let model_dir = state.model_setup.model_cache_dir(selected);
+        let runtime = state.runtime_embedder.clone();
+        let model_setup = state.model_setup.clone();
+        let download_tracker = tracker.clone();
+        let load_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            model_setup.prepare_download(selected)?;
+            for attempt in 0..=1 {
+                let loaded = (|| -> Result<Arc<dyn Embedder>, String> {
+                    if selected == SelectedModel::Gemma {
+                        let progress = {
+                            let download_tracker = download_tracker.clone();
+                            Arc::new(move |downloaded, total| {
+                                download_tracker.set_downloading(
+                                    model_name,
+                                    Some(downloaded),
+                                    Some(total),
+                                );
+                            })
+                        };
+                        model_setup.fetch_gemma_at_pinned_revision(progress)?;
+                    }
+                    match selected {
+                        SelectedModel::Gemma => Ok(Arc::new(
+                            FastembedEmbedder::embedding_gemma_300m_q4_in(model_dir.clone())?,
+                        )),
+                        SelectedModel::Nomic => Ok(Arc::new(FastembedEmbedder::nomic_v1_5_in(
+                            model_dir.clone(),
+                        )?)),
+                        SelectedModel::TermsRequired => {
+                            Err("model terms have not been accepted".to_string())
+                        }
+                    }
+                })();
+                match loaded.and_then(|embedder| {
+                    model_setup.record_integrity(selected)?;
+                    Ok(embedder)
+                }) {
+                    Ok(embedder) => {
+                        runtime.set(embedder, selected == SelectedModel::Gemma);
+                        return Ok(());
+                    }
+                    Err(error) if attempt == 0 => {
+                        warn!(
+                            model = model_name,
+                            "Model setup attempt failed; retrying once: {error}"
+                        );
+                        model_setup.reset_download_cache(selected)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("the retry loop always returns")
+        })
+        .await;
+
+        match load_result {
+            Ok(Ok(())) => {
+                tracker.set_scanning();
+                let progress_tracker = tracker.clone();
+                let on_progress = Arc::new(move |progress| progress_tracker.set_indexing(progress));
+                let index_state = state.clone();
+                let index_result = tokio::task::spawn_blocking(move || {
+                    let sqlite = index_state.cache.blocking_read().sqlite.clone();
+                    build_cache_with_sqlite_and_progress(
+                        &index_state.vault_path,
+                        sqlite,
+                        index_state.embedder.as_ref(),
+                        Some(on_progress),
+                        &index_state.scan_config,
+                    )
+                })
+                .await;
+                match index_result {
+                    Ok(Ok(_)) => {
+                        tracker.set_ready();
+                        info!(
+                            model = model_name,
+                            "Model setup and vault indexing complete"
+                        );
+                        if let Some(git_config) = state.startup_git_config.as_ref().clone() {
+                            let handle = git::spawn_sync_task(
+                                git_config,
+                                state.vault_write_lock.clone(),
+                                git::SyncOps {
+                                    commit: Box::new(git::commit_local),
+                                    fetch: Box::new(git::fetch_remote),
+                                    integrate: Box::new(git::integrate_fetched),
+                                    push: Box::new(git::push_branch),
+                                },
+                            );
+                            let _ = state.git_sync.set(handle);
+                            info!("Git sync enabled");
+                        }
+                        spawn_vault_watcher(
+                            state.clone(),
+                            state.vault_path.clone(),
+                            state.cache_db_path.clone(),
+                        );
+                    }
+                    Ok(Err(error)) => {
+                        state.model_setup_started.store(false, Ordering::Release);
+                        tracker.set_failed();
+                        error!("Failed to index vault after model setup: {error}");
+                        spawn_vault_watcher(
+                            state.clone(),
+                            state.vault_path.clone(),
+                            state.cache_db_path.clone(),
+                        );
+                    }
+                    Err(error) => {
+                        state.model_setup_started.store(false, Ordering::Release);
+                        tracker.set_failed();
+                        error!("Vault indexing task failed: {error}");
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                state.model_setup_started.store(false, Ordering::Release);
+                tracker.set_model_setup_failed();
+                error!(model = model_name, "Model download/load failed: {error}");
+            }
+            Err(error) => {
+                state.model_setup_started.store(false, Ordering::Release);
+                tracker.set_model_setup_failed();
+                error!(model = model_name, "Model setup task failed: {error}");
+            }
+        }
+    });
+}
+
 async fn require_vault_ready(
     State(state): State<AppState>,
     request: Request,
@@ -271,6 +486,17 @@ async fn require_vault_ready(
         })),
     )
         .into_response()
+}
+
+async fn reject_demo_model_setup(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.demo_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
 }
 
 /// The HTTP surface is intentionally default-only. In demo mode reject an
@@ -343,11 +569,14 @@ pub async fn run_server() {
         }),
     );
 
-    let embedder: Arc<dyn Embedder> =
-        Arc::new(FastembedEmbedder::nomic_v1_5().unwrap_or_else(|e| {
-            error!("Failed to load embedder: {e}");
-            std::process::exit(1);
-        }));
+    let model_setup = Arc::new(ModelSetup::new(ModelSetup::default_models_dir()));
+    let selected_model = model_setup.selected().unwrap_or_else(|error| {
+        error!("Model setup state is invalid: {error}");
+        std::process::exit(1);
+    });
+    let selected_model = initial_model_for_startup(config.demo_mode, selected_model);
+    let runtime_embedder = Arc::new(RuntimeEmbedder::new());
+    let embedder: Arc<dyn Embedder> = runtime_embedder.clone();
 
     let scan_config = Arc::new(crate::vault::VaultScanConfig {
         exclude: crate::vault::ExcludeMatcher::new(&config.exclude_patterns).unwrap_or_else(|e| {
@@ -373,9 +602,14 @@ pub async fn run_server() {
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-    let startup = StartupTracker::scanning();
+    let startup = if selected_model == SelectedModel::TermsRequired {
+        StartupTracker::terms_required()
+    } else {
+        StartupTracker::scanning()
+    };
     let state = AppState {
         vault_path: config.vault_path.clone(),
+        cache_db_path: config.cache_db_path.clone(),
         cache: Arc::new(RwLock::new(VaultCache {
             sqlite: sqlite.clone(),
         })),
@@ -383,6 +617,10 @@ pub async fn run_server() {
         vault_events,
         mcp_tools_changed,
         embedder,
+        runtime_embedder,
+        model_setup,
+        model_setup_started: Arc::new(AtomicBool::new(false)),
+        startup_git_config: Arc::new(git_sync_config.clone()),
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
         vault_write_lock,
@@ -417,73 +655,9 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
-    let indexing_state = state.clone();
-    let vault_path = config.vault_path.clone();
-    let cache_db_path = config.cache_db_path.clone();
-    let indexing_sqlite = sqlite.clone();
-    let indexing_embedder = state.embedder.clone();
-    tokio::spawn(async move {
-        let tracker = indexing_state.startup.clone();
-        let progress_tracker = tracker.clone();
-        let on_progress = Arc::new(move |progress| {
-            progress_tracker.set_indexing(progress);
-        });
-        let indexing_vault_path = vault_path.clone();
-        let indexing_scan_config = indexing_state.scan_config.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            build_cache_with_sqlite_and_progress(
-                &indexing_vault_path,
-                indexing_sqlite,
-                indexing_embedder.as_ref(),
-                Some(on_progress),
-                &indexing_scan_config,
-            )
-        })
-        .await;
-
-        match result {
-            Ok(Ok(_)) => {
-                tracker.set_ready();
-                if let Some(git_config) = git_sync_config {
-                    // Start sync only after the first consistent index is committed.
-                    let handle = git::spawn_sync_task(
-                        git_config,
-                        indexing_state.vault_write_lock.clone(),
-                        git::SyncOps {
-                            commit: Box::new(git::commit_local),
-                            fetch: Box::new(git::fetch_remote),
-                            integrate: Box::new(git::integrate_fetched),
-                            push: Box::new(git::push_branch),
-                        },
-                    );
-                    let _ = indexing_state.git_sync.set(handle);
-                    info!("Git sync enabled");
-                }
-                spawn_vault_watcher(indexing_state, vault_path, cache_db_path);
-            }
-            Ok(Err(e)) => {
-                tracker.set_failed();
-                error!(
-                    "Failed to index vault at {} into SQLite cache {}: {e}. The vault watcher \
-                     will retry on the next change — correct the error (e.g. a malformed \
-                     .hatchdoor-layer marker) to recover without a restart. Git sync, if \
-                     configured, was not started and requires a restart.",
-                    vault_path.display(),
-                    cache_db_path.display()
-                );
-                // Spawn the watcher even though the first index failed, so a
-                // corrected vault triggers a recovering reindex (run_reindex
-                // clears the failed startup state on success). git_sync_config is
-                // intentionally dropped here: git sync begins only after a clean
-                // startup index.
-                spawn_vault_watcher(indexing_state, vault_path, cache_db_path);
-            }
-            Err(e) => {
-                tracker.set_failed();
-                error!("Vault indexing task failed: {e}");
-            }
-        }
-    });
+    if selected_model != SelectedModel::TermsRequired {
+        spawn_model_startup(state.clone(), selected_model);
+    }
 
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         error!("Server error: {e}");
@@ -527,6 +701,22 @@ mod tests {
         assert!(git_error.contains("HATCHDOOR_GIT_SYNC_ENABLED"));
     }
 
+    #[test]
+    fn demo_mode_uses_nomic_when_gemma_terms_have_not_been_accepted() {
+        assert_eq!(
+            initial_model_for_startup(true, SelectedModel::TermsRequired),
+            SelectedModel::Nomic
+        );
+        assert_eq!(
+            initial_model_for_startup(true, SelectedModel::Gemma),
+            SelectedModel::Gemma
+        );
+        assert_eq!(
+            initial_model_for_startup(false, SelectedModel::TermsRequired),
+            SelectedModel::TermsRequired
+        );
+    }
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use std::sync::atomic::Ordering;
@@ -564,11 +754,16 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
+            cache_db_path: tmp.path().join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(RuntimeEmbedder::new()),
+            model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
+            model_setup_started: Arc::new(AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -603,11 +798,16 @@ mod tests {
         mcp_config.bearer_token = mcp_bearer_token;
         let state = AppState {
             vault_path: vault_root,
+            cache_db_path: tmp.path().join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(RuntimeEmbedder::new()),
+            model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
+            model_setup_started: Arc::new(AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -792,7 +992,7 @@ mod tests {
             .expect("response");
         assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
 
-        for path in ["/api/tree", "/mcp"] {
+        for path in ["/api/tree"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -952,11 +1152,16 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
+            cache_db_path: tmp.path().join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(RuntimeEmbedder::new()),
+            model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
+            model_setup_started: Arc::new(AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1020,6 +1225,19 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
+
+        let model_setup_without_token = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(model_setup_without_token.status(), StatusCode::UNAUTHORIZED);
 
         let with_header = app
             .clone()
@@ -1218,6 +1436,22 @@ mod tests {
                 .iter()
                 .any(|warning| warning.as_str().unwrap_or("").contains("demo mode"))
         );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_hides_model_selection_endpoints() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1700,11 +1934,16 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
+            cache_db_path: tmp.path().join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(RuntimeEmbedder::new()),
+            model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
+            model_setup_started: Arc::new(AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: true,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
