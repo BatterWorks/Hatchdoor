@@ -234,3 +234,19 @@ measurement—while the attempts to raise Gemma CPU use made it about 20% slower
 An ONNX Runtime operator profile would be required to attribute the remaining
 idle CPU to specific kernels; there is no current evidence that pursuing it
 will improve indexing time.
+
+## Reranking: rejected for the local CPU deployment
+
+The proposed multilingual reranker follow-up was stopped during its first
+cell: BGE Reranker v2 M3, using the locked Gemma retrieval cache, an initial
+candidate set of 20, and a 512-token query-document limit. After about 16
+minutes of wall time it was still evaluating the 125-query set, using roughly
+three CPU cores and 3.5 GB of resident memory. It had accumulated about 49
+minutes of CPU time.
+
+This is a performance-gate result, not a retrieval-quality result: the cell
+was intentionally stopped before it produced metrics. It is sufficient to
+reject cross-encoder reranking from Hatchdoor's local CPU search path. The
+added BGE/GTE test wiring and local Phase-1 harness were removed rather than
+continuing a model sweep whose resource profile cannot meet the interactive
+deployment target.
