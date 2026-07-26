@@ -23,6 +23,13 @@
   unchanged, but the initial indexing run re-embeds the vault.
 
 ### Added
+- First-run semantic-search setup. Hatchdoor now asks the single user to accept
+  the Gemma terms before downloading the default multilingual EmbeddingGemma
+  model, shows model-download and indexing progress in the UI and logs, and
+  keeps a local acceptance receipt with the persistent model files. Declining
+  Gemma removes its partial files and starts the Nomic Embed Text v1.5 fallback;
+  Nomic is explicitly identified as English-only and lower quality for
+  multilingual vaults. Public images ship neither model.
 - Direct attachment upload for agents: the `import_attachment` MCP tool accepts
   base64 file bytes inline (universal fallback for any MCP client), capped by the
   new `HATCHDOOR_MCP_MAX_BASE64_BYTES` (default 5 MiB, measured on the decoded
@@ -38,6 +45,9 @@
   surface a created, moved, archived, or uploaded item belongs to.
 
 ### Changed
+- Docker Compose now prepares the persistent `/models` bind mount for the
+  rootless runtime user. Set `HOST_MODELS_PATH` to retain downloaded models and
+  the local Gemma terms receipt across container replacement.
 - The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
   legitimately sized upload is not rejected before the tool's own size check.
 - `POST /api/attachment` now accepts the MCP bearer token as an alternative to

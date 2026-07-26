@@ -71,6 +71,9 @@ pub fn run_hybrid_eval(
             query_result: QueryResult {
                 query_id: q.id.clone(),
                 top_k,
+                // Hybrid fusion collapses to note slugs; heading paths aren't
+                // tracked here, so this path scores no correct-heading hits.
+                top_k_headings: Vec::new(),
             },
             latency_ms,
         });
@@ -128,6 +131,9 @@ mod tests {
             query: "flying baby plane".to_string(),
             expected_notes: vec!["gamma".to_string()],
             expected_heading_path: None,
+            category: None,
+            language: None,
+            tier: None,
             anti_expected: vec![],
         }];
 
@@ -170,6 +176,9 @@ mod tests {
             query: "storage pool layout archive server".to_string(),
             expected_notes: vec!["gamma".to_string()],
             expected_heading_path: None,
+            category: None,
+            language: None,
+            tier: None,
             anti_expected: vec![],
         }];
         let out = run_hybrid_eval(&cache, embedder.as_ref(), &queries, 5, 60, 10).expect("run");

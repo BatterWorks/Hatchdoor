@@ -32,16 +32,49 @@ pub fn strip_frontmatter(content: &str) -> &str {
     content
 }
 
+/// Result of [`strip_code_fences`]: the normalized body with fence marker lines
+/// removed but fence *contents* preserved, plus the byte ranges within `text`
+/// that fall inside fenced code blocks.
 #[allow(dead_code)]
-pub fn strip_code_fences(content: &str) -> String {
+pub struct Normalized {
+    pub text: String,
+    /// Byte ranges in `text` that lie inside fenced code blocks (marker lines
+    /// excluded). Sorted ascending and non-overlapping. Heading derivation must
+    /// skip lines whose start falls inside one of these, otherwise a
+    /// `#!/usr/bin/env bash` shebang or `#` comment inside a fence is mistaken
+    /// for an ATX heading.
+    pub fenced: Vec<std::ops::Range<usize>>,
+}
+
+/// Returns true if `pos` (a byte offset into `Normalized::text`) lies inside a
+/// fenced code block.
+#[allow(dead_code)]
+pub fn in_fenced(fenced: &[std::ops::Range<usize>], pos: usize) -> bool {
+    fenced.iter().any(|r| r.contains(&pos))
+}
+
+#[allow(dead_code)]
+pub fn strip_code_fences(content: &str) -> Normalized {
     let mut out = String::with_capacity(content.len());
+    let mut fenced = Vec::new();
+    // `Some(start)` while inside a fence; `start` is the offset in `out` of the
+    // first content byte after the opening marker.
+    let mut fence_start: Option<usize> = None;
     for line in content.split_inclusive('\n') {
         if line.trim_start().starts_with("```") {
+            match fence_start.take() {
+                Some(start) => fenced.push(start..out.len()),
+                None => fence_start = Some(out.len()),
+            }
             continue;
         }
         out.push_str(line);
     }
-    out
+    if let Some(start) = fence_start {
+        // Unterminated fence: treat the remainder as fenced.
+        fenced.push(start..out.len());
+    }
+    Normalized { text: out, fenced }
 }
 
 #[allow(dead_code)]
@@ -135,7 +168,30 @@ mod tests {
     #[test]
     fn strip_code_fences_removes_fence_lines_keeps_contents() {
         let input = "before\n```rust\nfn foo() {}\n```\nafter";
-        assert_eq!(strip_code_fences(input), "before\nfn foo() {}\nafter");
+        let result = strip_code_fences(input);
+        assert_eq!(result.text, "before\nfn foo() {}\nafter");
+    }
+
+    #[test]
+    fn strip_code_fences_reports_fenced_content_ranges() {
+        let input = "before\n```rust\nfn foo() {}\n```\nafter";
+        let result = strip_code_fences(input);
+        // The fenced range covers exactly "fn foo() {}\n" within the output.
+        assert_eq!(result.fenced.len(), 1);
+        let r = result.fenced[0].clone();
+        assert_eq!(&result.text[r], "fn foo() {}\n");
+    }
+
+    #[test]
+    fn strip_code_fences_handles_unterminated_fence() {
+        let input = "before\n```rust\nfn foo() {}\n";
+        let result = strip_code_fences(input);
+        assert_eq!(result.text, "before\nfn foo() {}\n");
+        assert_eq!(result.fenced.len(), 1);
+        assert!(in_fenced(
+            &result.fenced,
+            result.text.find("fn foo").unwrap()
+        ));
     }
 
     #[test]

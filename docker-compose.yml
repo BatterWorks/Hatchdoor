@@ -1,4 +1,14 @@
 services:
+  model-permissions:
+    # Docker creates a missing bind-mount directory as root. Give the unprivileged
+    # Hatchdoor process ownership before it writes its local acceptance receipt
+    # or downloads model artifacts.
+    image: alpine:3.21
+    volumes:
+      - ${HOST_MODELS_PATH:-./models}:/models
+    command: ["chown", "-R", "65532:65532", "/models"]
+    restart: "no"
+
   hatchdoor:
     image: battermanz/hatchdoor:latest
     container_name: hatchdoor
@@ -13,6 +23,12 @@ services:
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
       - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
+      # Model downloads and the local Gemma acceptance record persist across
+      # image upgrades. Bind-mount this directory to avoid re-downloading.
+      - ${HOST_MODELS_PATH:-./models}:/models
+    depends_on:
+      model-permissions:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
       # Distroless runtime has no shell/curl, so the binary probes its own

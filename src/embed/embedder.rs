@@ -1,3 +1,5 @@
+use std::sync::{Arc, RwLock};
+
 use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
 /// In-process text embedder. Loaded once at startup, shared via Arc.
@@ -35,6 +37,98 @@ pub trait Embedder: Send + Sync {
     /// Task-instruction prefix prepended to queries before embedding.
     fn query_prefix(&self) -> &'static str {
         ""
+    }
+
+    /// Complete document-side input for contextual embeddings. Most models use
+    /// Hatchdoor's canonical title + heading + body representation with an
+    /// optional task prefix; models with a trained document template can
+    /// override this method.
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        format!(
+            "{}{}",
+            self.doc_prefix(),
+            crate::embed::contextual_document(title, heading_path, body)
+        )
+    }
+}
+
+/// A startup-safe embedder slot. The HTTP server can expose the terms/download
+/// gate before a real model is loaded; protected vault routes stay unavailable
+/// until [`RuntimeEmbedder::set`] installs the selected model.
+pub struct RuntimeEmbedder {
+    inner: RwLock<Option<Arc<dyn Embedder>>>,
+    kind: std::sync::atomic::AtomicU8,
+}
+
+impl RuntimeEmbedder {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(None),
+            kind: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    pub fn set(&self, embedder: Arc<dyn Embedder>, gemma: bool) {
+        *self.inner.write().expect("runtime embedder poisoned") = Some(embedder);
+        self.kind.store(
+            if gemma { 2 } else { 1 },
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    fn active(&self) -> Result<Arc<dyn Embedder>, String> {
+        self.inner
+            .read()
+            .expect("runtime embedder poisoned")
+            .clone()
+            .ok_or_else(|| "embedding model setup is not complete".to_string())
+    }
+}
+
+impl Default for RuntimeEmbedder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Embedder for RuntimeEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.active()?.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        768
+    }
+
+    fn identity(&self) -> String {
+        self.active()
+            .map(|embedder| embedder.identity())
+            .unwrap_or_else(|_| "model-setup-pending-768".to_string())
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.active()?.token_count(text, add_special_tokens)
+    }
+
+    fn doc_prefix(&self) -> &'static str {
+        match self.kind.load(std::sync::atomic::Ordering::Acquire) {
+            1 => "search_document: ",
+            _ => "",
+        }
+    }
+
+    fn query_prefix(&self) -> &'static str {
+        match self.kind.load(std::sync::atomic::Ordering::Acquire) {
+            1 => "search_query: ",
+            2 => "task: search result | query: ",
+            _ => "",
+        }
+    }
+
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        self.active()
+            .map(|embedder| embedder.document_input(title, heading_path, body))
+            .unwrap_or_else(|_| crate::embed::contextual_document(title, heading_path, body))
     }
 }
 
@@ -151,5 +245,14 @@ mod tests {
                 .expect("encode"),
             3
         );
+    }
+
+    #[test]
+    fn runtime_embedder_refuses_work_until_a_model_is_selected() {
+        let runtime = RuntimeEmbedder::new();
+        assert!(runtime.embed(&["hello".to_string()]).is_err());
+        runtime.set(Arc::new(StubEmbedder::new(768)), false);
+        assert_eq!(runtime.embed(&["hello".to_string()]).unwrap()[0].len(), 768);
+        assert_eq!(runtime.query_prefix(), "search_query: ");
     }
 }
