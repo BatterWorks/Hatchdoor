@@ -84,6 +84,21 @@ describe("StartupGate", () => {
       await screen.findByRole("heading", { name: "Set up multilingual search" }),
     ).toBeVisible();
     expect(screen.getByText(/does not change ownership of your vault/i)).toBeVisible();
+    expect(
+      screen.getByText(
+        /Nomic is the fallback if you decline Gemma\. It supports English only\./,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        /It still provides solid search, but Gemma performed better in our tests, including English searches\./,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        /Nomic uses about 1\.3 GB of RAM while indexing; Gemma uses about 0\.5 GB\./,
+      ),
+    ).toBeVisible();
     expect(screen.getByRole("link", { name: "Read Gemma Terms" })).toHaveAttribute(
       "href",
       "https://ai.google.dev/gemma/terms",
