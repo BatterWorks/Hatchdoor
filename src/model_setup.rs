@@ -182,11 +182,13 @@ impl ModelSetup {
             .with_progress(false)
             .build()
             .map_err(|error| format!("create Hugging Face download client: {error}"))?;
-        let pinned = api.repo(Repo::with_revision(
+        let pinned_repo = Repo::with_revision(
             GEMMA_REPOSITORY.to_string(),
             RepoType::Model,
             GEMMA_REVISION.to_string(),
-        ));
+        );
+        let cached = Cache::new(cache_dir.clone()).repo(pinned_repo.clone());
+        let pinned = api.repo(pinned_repo);
         for file in [
             "onnx/model_q4.onnx",
             "onnx/model_q4.onnx_data",
@@ -195,12 +197,11 @@ impl ModelSetup {
             "tokenizer.json",
             "tokenizer_config.json",
         ] {
-            pinned
-                .get(file)
-                .or_else(|_| {
-                    pinned.download_with_progress(file, ModelDownloadProgress::new(report.clone()))
-                })
-                .map_err(|error| format!("download Gemma artifact {file}: {error}"))?;
+            if cached.get(file).is_none() {
+                pinned
+                    .download_with_progress(file, ModelDownloadProgress::new(report.clone()))
+                    .map_err(|error| format!("download Gemma artifact {file}: {error}"))?;
+            }
         }
         // FastEmbed uses Repo::model (revision "main"). Its cache supports a
         // local ref, so write `main -> <pinned commit>` only after every needed

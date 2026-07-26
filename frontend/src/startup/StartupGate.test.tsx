@@ -1,12 +1,14 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { clearToken, setToken } from "../api/api";
 import { StartupGate } from "./StartupGate";
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  clearToken();
 });
 
 function statusResponse(body: object) {
@@ -66,6 +68,7 @@ describe("StartupGate", () => {
   });
 
   it("explains Gemma terms before any model download and can accept them", async () => {
+    setToken("setup-token");
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(statusResponse({ state: "terms_required" }))
@@ -89,9 +92,15 @@ describe("StartupGate", () => {
     await act(async () => {
       screen.getByRole("button", { name: "Accept terms and set up Gemma" }).click();
     });
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/model/accept-gemma", {
-      method: "POST",
-    });
+    const [path, init] = fetchMock.mock.calls.at(-1) ?? [];
+    expect(path).toBe("/api/model/accept-gemma");
+    expect(init).toEqual(
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.any(Headers),
+      }),
+    );
+    expect((init?.headers as Headers).get("Authorization")).toBe("Bearer setup-token");
   });
 
   it("polls until the backend becomes ready", async () => {
@@ -157,8 +166,8 @@ describe("StartupGate", () => {
     await act(async () => {
       screen.getByRole("button", { name: "Retry setup" }).click();
     });
-    expect(fetchMock).toHaveBeenLastCalledWith("/api/model/retry", {
-      method: "POST",
-    });
+    const [path, init] = fetchMock.mock.calls.at(-1) ?? [];
+    expect(path).toBe("/api/model/retry");
+    expect(init).toEqual(expect.objectContaining({ method: "POST" }));
   });
 });
