@@ -68,7 +68,6 @@ export function VaultApp() {
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
   );
-  const [authRequired, setAuthRequired] = useState(false);
   const [editRequestId, setEditRequestId] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
@@ -129,11 +128,6 @@ export function VaultApp() {
   const explorerPaneRef = useRef<HTMLElement | null>(null);
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
-
-  useEffect(() => {
-    onUnauthorized(() => setAuthRequired(true));
-    return () => onUnauthorized(null);
-  }, []);
 
   useEffect(() => {
     // Drafts only bridge an interrupted edit; drop ones older than a week.
@@ -387,15 +381,6 @@ export function VaultApp() {
         } as CSSProperties
       }
     >
-      {authRequired && (
-        <TokenPrompt
-          onSubmit={(token) => {
-            setToken(token);
-            setAuthRequired(false);
-            window.location.reload();
-          }}
-        />
-      )}
       <AppTopbar
         activeNote={activeNote}
         writeEnabled={writeEnabled}
@@ -587,11 +572,29 @@ export function VaultApp() {
   );
 }
 
-function App() {
+export function App() {
+  const [authRequired, setAuthRequired] = useState(false);
+
+  useEffect(() => {
+    onUnauthorized(() => setAuthRequired(true));
+    return () => onUnauthorized(null);
+  }, []);
+
   return (
-    <StartupGate>
-      <VaultApp />
-    </StartupGate>
+    <>
+      {authRequired ? (
+        <TokenPrompt
+          onSubmit={(token) => {
+            setToken(token);
+            setAuthRequired(false);
+            window.location.reload();
+          }}
+        />
+      ) : null}
+      <StartupGate>
+        <VaultApp />
+      </StartupGate>
+    </>
   );
 }
 

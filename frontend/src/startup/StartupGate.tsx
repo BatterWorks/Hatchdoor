@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 
 import { useTheme } from "../hooks/useTheme";
+import { apiFetch } from "../api/api";
 
 type StartupStatus =
   | { state: "terms_required" }
@@ -70,21 +71,21 @@ export function StartupGate({ children }: { children: ReactNode }) {
   }, []);
 
   const acceptGemma = async () => {
-    const response = await fetch("/api/model/accept-gemma", { method: "POST" });
+    const response = await apiFetch("/api/model/accept-gemma", { method: "POST" });
     if (response.ok) {
       setStatus({ state: "downloading", model: "EmbeddingGemma 300M Q4" });
     }
   };
 
   const declineGemma = async () => {
-    const response = await fetch("/api/model/decline-gemma", { method: "POST" });
+    const response = await apiFetch("/api/model/decline-gemma", { method: "POST" });
     if (response.ok) {
       setStatus({ state: "downloading", model: "Nomic Embed Text v1.5" });
     }
   };
 
   const retryModelSetup = async () => {
-    const response = await fetch("/api/model/retry", { method: "POST" });
+    const response = await apiFetch("/api/model/retry", { method: "POST" });
     if (response.ok) {
       setStatus({ state: "downloading" });
     }

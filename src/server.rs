@@ -86,6 +86,17 @@ pub fn check_demo_mode_posture(
     Ok(())
 }
 
+fn initial_model_for_startup(demo_mode: bool, selected: SelectedModel) -> SelectedModel {
+    // A public, read-only demo has no person available to accept Gemma's terms.
+    // It may use an already-selected model, otherwise use the no-terms Nomic
+    // fallback without persisting that choice for a later normal deployment.
+    if demo_mode && selected == SelectedModel::TermsRequired {
+        SelectedModel::Nomic
+    } else {
+        selected
+    }
+}
+
 /// Multipart framing (boundary lines, field headers, the small
 /// `target_relative_path` text field) wrapped around the uploaded file. The
 /// attachment body limit is the configured max file size plus this slack, so a
@@ -197,6 +208,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         )),
         None => model_setup,
     };
+    let model_setup = model_setup.layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        reject_demo_model_setup,
+    ));
 
     // MCP remains reachable during initial setup: it exposes only the three
     // model-setup tools until the vault is ready (enforced in tools::dispatch).
@@ -425,6 +440,7 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                         );
                     }
                     Ok(Err(error)) => {
+                        state.model_setup_started.store(false, Ordering::Release);
                         tracker.set_failed();
                         error!("Failed to index vault after model setup: {error}");
                         spawn_vault_watcher(
@@ -434,6 +450,7 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                         );
                     }
                     Err(error) => {
+                        state.model_setup_started.store(false, Ordering::Release);
                         tracker.set_failed();
                         error!("Vault indexing task failed: {error}");
                     }
@@ -469,6 +486,17 @@ async fn require_vault_ready(
         })),
     )
         .into_response()
+}
+
+async fn reject_demo_model_setup(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.demo_mode {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
 }
 
 /// The HTTP surface is intentionally default-only. In demo mode reject an
@@ -546,6 +574,7 @@ pub async fn run_server() {
         error!("Model setup state is invalid: {error}");
         std::process::exit(1);
     });
+    let selected_model = initial_model_for_startup(config.demo_mode, selected_model);
     let runtime_embedder = Arc::new(RuntimeEmbedder::new());
     let embedder: Arc<dyn Embedder> = runtime_embedder.clone();
 
@@ -670,6 +699,22 @@ mod tests {
 
         let git_error = check_demo_mode_posture(true, false, true).expect_err("git rejected");
         assert!(git_error.contains("HATCHDOOR_GIT_SYNC_ENABLED"));
+    }
+
+    #[test]
+    fn demo_mode_uses_nomic_when_gemma_terms_have_not_been_accepted() {
+        assert_eq!(
+            initial_model_for_startup(true, SelectedModel::TermsRequired),
+            SelectedModel::Nomic
+        );
+        assert_eq!(
+            initial_model_for_startup(true, SelectedModel::Gemma),
+            SelectedModel::Gemma
+        );
+        assert_eq!(
+            initial_model_for_startup(false, SelectedModel::TermsRequired),
+            SelectedModel::TermsRequired
+        );
     }
 
     use axum::body::{Body, to_bytes};
@@ -1391,6 +1436,22 @@ mod tests {
                 .iter()
                 .any(|warning| warning.as_str().unwrap_or("").contains("demo mode"))
         );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_hides_model_selection_endpoints() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

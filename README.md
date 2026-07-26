@@ -152,6 +152,7 @@ Edit `.env` and set at least these values:
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 HOST_CACHE_PATH=./data/cache
+HOST_MODELS_PATH=./models
 HATCHDOOR_WEB_BEARER_TOKEN=choose-a-long-random-token
 ```
 
@@ -159,6 +160,7 @@ What these mean:
 
 - `HOST_VAULT_PATH` is your Markdown vault on the host machine.
 - `HOST_CACHE_PATH` stores Hatchdoor's generated SQLite cache.
+- `HOST_MODELS_PATH` stores downloaded search models and the local Gemma terms receipt.
 - `HATCHDOOR_WEB_BEARER_TOKEN` protects your notes in the browser.
 
 Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so the
@@ -250,6 +252,8 @@ For read-only browsing:
 
 - Mount the vault read-only if you want.
 - Keep the cache directory writable.
+- Keep the models directory writable. The supplied Compose file prepares it for
+  Hatchdoor's unprivileged runtime user automatically.
 
 For browser writes, MCP writes, attachment uploads, or git sync:
 
@@ -270,6 +274,7 @@ Copy `.env.example` to `.env` and adjust values.
 | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | Host-side vault path for Docker Compose |
 | `HOST_CACHE_PATH` | `./data/cache` | Host-side cache directory for Docker Compose |
+| `HOST_MODELS_PATH` | `./models` | Persistent downloaded-model directory for Docker Compose |
 | `VAULT_PATH` | `/data/vault` | Runtime vault path read by Hatchdoor |
 | `HATCHDOOR_CACHE_DB` | `/data/cache/hatchdoor-cache.sqlite3` | Runtime SQLite cache file |
 | `HOST` | `127.0.0.1` | Bind host for local `cargo run` |
