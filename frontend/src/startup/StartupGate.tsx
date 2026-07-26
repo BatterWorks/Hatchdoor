@@ -173,8 +173,10 @@ export function StartupGate({ children }: { children: ReactNode }) {
               </button>
             </div>
             <p className="startup-fallback-note">
-              Nomic is the no-extra-terms fallback. It is English-only and not
-              as good as Gemma for multilingual search.
+              Nomic is the fallback if you decline Gemma. It supports English
+              only. It still provides solid search, but Gemma performed better
+              in our tests, including English searches. Nomic uses about 1.3 GB
+              of RAM while indexing; Gemma uses about 0.5 GB.
             </p>
           </section>
         ) : (

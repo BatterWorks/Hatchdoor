@@ -373,6 +373,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_setup_status_explains_the_nomic_fallback() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":67,"method":"tools/call",
+                "params": {"name":"get_model_setup_status","arguments":{}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(
+            body["result"]["structuredContent"]["fallback"]["notice"],
+            "Nomic is the fallback if you decline Gemma. It supports English only and still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches. Nomic uses about 1.3 GB of RAM while indexing; Gemma uses about 0.5 GB."
+        );
+    }
+
+    #[tokio::test]
     async fn first_run_initialize_prompts_model_setup() {
         let (state, _tmp) = test_state();
         state.startup.set_terms_required();

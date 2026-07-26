@@ -48,7 +48,7 @@ pub async fn handle_tools_call(
                 },
                 "fallback": {
                     "model": crate::model_setup::NOMIC_MODEL_ID,
-                    "notice": "Nomic is English-only and provides lower retrieval quality for multilingual vaults."
+                    "notice": "Nomic is the fallback if you decline Gemma. It supports English only and still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches. Nomic uses about 1.3 GB of RAM while indexing; Gemma uses about 0.5 GB."
                 }
             }))),
             "accept_gemma_terms" => {
@@ -178,7 +178,7 @@ pub fn setup_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "decline_gemma_terms",
-            "description": "Decline Gemma terms, remove any Gemma download/cache, then download Nomic Embed Text v1.5 and begin indexing. Nomic is English-only and lower quality for multilingual vaults.",
+            "description": "Decline Gemma terms, remove any Gemma download/cache, then download Nomic Embed Text v1.5 and begin indexing. Nomic supports English only. It still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches, and uses less RAM while indexing.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": write_tool_annotations(true, true),
         }),
