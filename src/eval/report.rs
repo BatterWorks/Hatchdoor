@@ -120,12 +120,7 @@ pub fn append_section(path: &Path, report: &Report, build: &BuildInfo) -> Result
     Ok(())
 }
 
-pub fn append_rerank_section(
-    path: &Path,
-    report: &Report,
-    initial_k: usize,
-    max_pair_tokens: usize,
-) -> Result<(), String> {
+pub fn append_rerank_section(path: &Path, report: &Report, initial_k: usize) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
     }
@@ -142,7 +137,6 @@ pub fn append_rerank_section(
     writeln!(f).ok();
     writeln!(f, "- Run timestamp: {now}").ok();
     writeln!(f, "- Initial K: {initial_k}").ok();
-    writeln!(f, "- Max query-document pair tokens: {max_pair_tokens}").ok();
     if let Some(stats) = report.rerank_latency_ms {
         writeln!(
             f,
@@ -168,10 +162,6 @@ pub fn append_rerank_section(
     writeln!(f, "| Recall@10 (all) | {:.3} |", report.recall_at_10_all).ok();
     writeln!(f, "| MRR | {:.3} |", report.mrr).ok();
     writeln!(f, "| FP-rate@5 | {:.3} |", report.fp_rate_at_5).ok();
-    match report.correct_heading_rate {
-        Some(rate) => writeln!(f, "| Correct-heading | {rate:.3} |").ok(),
-        None => writeln!(f, "| Correct-heading | n/a |").ok(),
-    };
     writeln!(f).ok();
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
@@ -525,7 +515,7 @@ mod tests {
     fn append_rerank_section_writes_expected_markdown() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("results.md");
-        append_rerank_section(&path, &fake_rerank_report(), 20, 512).expect("append");
+        append_rerank_section(&path, &fake_rerank_report(), 20).expect("append");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("## Rerank — NomicEmbedTextV15 + JINARerankerV2BaseMultilingual"));
         assert!(text.contains("Initial K: 20"));

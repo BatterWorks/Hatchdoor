@@ -31,20 +31,12 @@ fn load_embedder(id: &str, dim: Option<usize>) -> Result<Arc<dyn Embedder>, Stri
     }
 }
 
-fn load_reranker(id: &str, max_pair_tokens: usize) -> Result<Arc<dyn Reranker>, String> {
+fn load_reranker(id: &str) -> Result<Arc<dyn Reranker>, String> {
     match id {
-        "JINARerankerV1TurboEn" => Ok(Arc::new(
-            FastembedReranker::jina_v1_turbo_with_max_pair_tokens(max_pair_tokens)?,
-        )),
-        "JINARerankerV2BaseMultilingual" => Ok(Arc::new(
-            FastembedReranker::jina_v2_multilingual_with_max_pair_tokens(max_pair_tokens)?,
-        )),
-        "BGERerankerV2M3" => Ok(Arc::new(
-            FastembedReranker::bge_reranker_v2_m3_with_max_pair_tokens(max_pair_tokens)?,
-        )),
-        "GTEMultilingualRerankerBase" => Ok(Arc::new(
-            FastembedReranker::gte_multilingual_base_with_max_pair_tokens(max_pair_tokens)?,
-        )),
+        "JINARerankerV1TurboEn" => Ok(Arc::new(FastembedReranker::jina_v1_turbo()?)),
+        "JINARerankerV2BaseMultilingual" => {
+            Ok(Arc::new(FastembedReranker::jina_v2_multilingual()?))
+        }
         other => Err(format!("unknown reranker id: {other}")),
     }
 }
@@ -65,7 +57,7 @@ fn print_usage() {
         "usage:
   eval build --model <id> --cache <path> [--max-tokens <n>] [--overlap <n>] [--batch-size <n>] [--no-context]
   eval run --model <id> --cache <path> --queries <path>
-  eval rerank --model <id> --cache <path> --reranker <id> --queries <path> [--initial-k <n>] [--max-pair-tokens <n>]
+  eval rerank --model <id> --cache <path> --reranker <id> --queries <path> [--initial-k <n>]
   eval hybrid --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
   eval compare --model <id> --cache <path> --queries <path> [--initial-k <n>] [--rrf-k <n>]
   eval prefetch   (loads every sweep model + smoke-tests one embedding each)
@@ -76,7 +68,6 @@ fn print_usage() {
 models:    NomicEmbedTextV15 (control) | GTEBaseENV15 | NomicEmbedTextV2Moe
 	           | Qwen3Embedding0_6B | EmbeddingGemma300MQ4 | SnowflakeArcticEmbedMV2
 rerankers: JINARerankerV1TurboEn | JINARerankerV2BaseMultilingual
-	   | BGERerankerV2M3 | GTEMultilingualRerankerBase
 
 --dim per model in the sweep: Nomic v2 & Arctic at 768/256; Qwen3 (native 1024) at 512."
     );
@@ -100,7 +91,6 @@ enum Cmd {
         reranker: String,
         queries: PathBuf,
         initial_k: usize,
-        max_pair_tokens: usize,
     },
     Hybrid {
         model: String,
@@ -140,7 +130,6 @@ fn parse_args(argv: Vec<String>) -> Result<(Cmd, Option<usize>), String> {
     let mut queries: Option<PathBuf> = None;
     let mut reranker: Option<String> = None;
     let mut initial_k: Option<usize> = None;
-    let mut max_pair_tokens: Option<usize> = None;
     let mut rrf_k: Option<usize> = None;
     let mut max_tokens: Option<usize> = None;
     let mut overlap: Option<usize> = None;
@@ -196,16 +185,6 @@ fn parse_args(argv: Vec<String>) -> Result<(Cmd, Option<usize>), String> {
                         .map_err(|e| format!("invalid --initial-k {raw}: {e}"))?,
                 );
             }
-            "--max-pair-tokens" => {
-                let raw = it.next().ok_or("missing value for --max-pair-tokens")?;
-                let parsed = raw
-                    .parse::<usize>()
-                    .map_err(|e| format!("invalid --max-pair-tokens {raw}: {e}"))?;
-                if parsed == 0 {
-                    return Err("--max-pair-tokens must be at least 1".to_string());
-                }
-                max_pair_tokens = Some(parsed);
-            }
             "--rrf-k" => {
                 let raw = it.next().ok_or("missing value for --rrf-k")?;
                 rrf_k = Some(
@@ -255,14 +234,12 @@ fn parse_args(argv: Vec<String>) -> Result<(Cmd, Option<usize>), String> {
             let queries = queries.ok_or("missing --queries")?;
             let reranker = reranker.ok_or("missing --reranker")?;
             let initial_k = initial_k.unwrap_or(20);
-            let max_pair_tokens = max_pair_tokens.unwrap_or(512);
             Ok(Cmd::Rerank {
                 model,
                 cache,
                 reranker,
                 queries,
                 initial_k,
-                max_pair_tokens,
             })
         }
         "hybrid" => {
@@ -583,7 +560,6 @@ fn main() -> ExitCode {
             reranker: reranker_id,
             queries,
             initial_k,
-            max_pair_tokens,
         } => {
             if !cache.exists() {
                 eprintln!(
@@ -599,7 +575,7 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
-            let reranker = match load_reranker(&reranker_id, max_pair_tokens) {
+            let reranker = match load_reranker(&reranker_id) {
                 Ok(r) => r,
                 Err(e) => {
                     eprintln!("error loading reranker: {e}");
@@ -636,18 +612,13 @@ fn main() -> ExitCode {
                 }
             };
 
-            let run_id = format!(
-                "{} + {} · pair max {}",
-                model,
-                reranker.id(),
-                max_pair_tokens
-            );
+            let run_id = format!("{} + {}", model, reranker.id());
             let report =
                 hatchdoor::eval::metrics::aggregate_rerank(&run_id, reranker.id(), &qs, &results);
 
             println!(
-                "rerank complete: model={model} reranker={} initial_k={initial_k} max_pair_tokens={max_pair_tokens}",
-                reranker.id(),
+                "rerank complete: model={model} reranker={} initial_k={initial_k}",
+                reranker.id()
             );
             println!("  Recall@5  (any): {:.3}", report.recall_at_5_any);
             println!("  Recall@5  (all): {:.3}", report.recall_at_5_all);
@@ -669,12 +640,9 @@ fn main() -> ExitCode {
             }
 
             let results_md = std::path::PathBuf::from("eval/results.md");
-            if let Err(e) = hatchdoor::eval::report::append_rerank_section(
-                &results_md,
-                &report,
-                initial_k,
-                max_pair_tokens,
-            ) {
+            if let Err(e) =
+                hatchdoor::eval::report::append_rerank_section(&results_md, &report, initial_k)
+            {
                 eprintln!(
                     "warning: failed to append section to {}: {e}",
                     results_md.display()
@@ -1119,14 +1087,12 @@ mod tests {
                 reranker,
                 queries,
                 initial_k,
-                max_pair_tokens,
             } => {
                 assert_eq!(model, "NomicEmbedTextV15");
                 assert_eq!(cache, PathBuf::from("/c.db"));
                 assert_eq!(reranker, "JINARerankerV1TurboEn");
                 assert_eq!(queries, PathBuf::from("/q.jsonl"));
                 assert_eq!(initial_k, 30);
-                assert_eq!(max_pair_tokens, 512);
             }
             _ => panic!("wrong variant"),
         }
@@ -1148,14 +1114,7 @@ mod tests {
         ]))
         .expect("parse");
         match cmd {
-            Cmd::Rerank {
-                initial_k,
-                max_pair_tokens,
-                ..
-            } => {
-                assert_eq!(initial_k, 20);
-                assert_eq!(max_pair_tokens, 512);
-            }
+            Cmd::Rerank { initial_k, .. } => assert_eq!(initial_k, 20),
             _ => panic!("wrong variant"),
         }
     }
