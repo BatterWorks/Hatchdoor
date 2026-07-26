@@ -174,15 +174,9 @@ Suggested flow:
 5. Hatchdoor records the accepted terms version, model revision and timestamp.
 6. Subsequent use is fully local and offline.
 
-For unattended installations, an explicit environment variable could be
-supported, for example:
-
-```text
-HATCHDOOR_ACCEPT_GEMMA_TERMS=1
-```
-
-The acceptance record should still include the terms version in application
-state or logs.
+The acceptance record belongs next to the model files, rather than in logs or
+an environment variable. This keeps the model and the record of the terms that
+govern it together when the persistent model directory is moved or restored.
 
 Important boundaries:
 
@@ -295,3 +289,105 @@ a user-installed option.
 - `Cargo.toml`
 - `Cargo.lock`
 - `LICENSE`
+
+## Approved implementation decisions
+
+This section records the agreed product contract for implementation. It takes
+precedence over the options above where they differ.
+
+### Distribution and storage
+
+- Hatchdoor's public images ship **neither** EmbeddingGemma nor the Nomic v1.5
+  fallback weights. The Docker build must not prefetch either model or leave a
+  model-cache layer behind.
+- Models live only in a persistent `models/` directory. In Docker this is the
+  fixed path `/models`, with the supplied Compose configuration bind-mounting
+  `./models` to it. A direct local run uses `./models`. There is no model-path
+  environment setting.
+- Model versions use separate subdirectories, so a complete, verified version
+  is never overwritten by a partial replacement.
+- EmbeddingGemma is fetched directly, without a Hugging Face account or token,
+  from the benchmarked Q4 ONNX source:
+  `onnx-community/embeddinggemma-300m-ONNX`. Hatchdoor pins its exact revision
+  and verifies every required artifact against recorded hashes before loading
+  it.
+
+### First startup and fallback
+
+EmbeddingGemma 300M Q4 is the default model and has no manual “start setup”
+button. On a fresh installation, the startup flow is:
+
+```text
+Show Gemma terms → accept → download Gemma → scan vault → build index → ready
+```
+
+Acceptance must precede the download. Downloading creates a local copy of the
+model, so it is a reproduction governed by the Gemma terms—not merely a later
+inference/use concern.
+
+If the user declines, Hatchdoor deletes any partial Gemma model files and any
+Gemma cache/index, then automatically downloads **Nomic Embed Text v1.5** and
+indexes with it. Nomic is presented as the fallback: it has no Gemma acceptance
+step, but is English-only and lower quality than multilingual Gemma.
+
+If the user accepts Gemma but its download fails, Hatchdoor must not silently
+fall back to Nomic. It stops at a clear retry error, since an automatic switch
+would unexpectedly change search quality and language coverage.
+
+There is no ongoing model-settings screen and no model-switching flow after
+initial setup in this implementation. A user who declines Gemma stays on Nomic
+until a later feature deliberately adds a change path.
+
+### Terms acknowledgement and privacy copy
+
+The single Hatchdoor user may accept the terms either in the Web UI or through
+MCP. In MCP, a setup-required response presents the same notice and links; an
+explicit acceptance call starts the automatic download and indexing process.
+
+The Web UI notice is intentionally short and links to the complete Gemma Terms
+and Gemma Prohibited Use Policy. It must include this substance:
+
+> Accepting these terms only allows Hatchdoor to download and use the Gemma
+> model. It does not change ownership of your vault or its contents. Hatchdoor
+> does not send your notes to Google when indexing or searching. Once installed,
+> the model runs locally on this machine. Downloading the model contacts its
+> upstream host, but does not upload your vault contents.
+
+The acknowledgement is written only to an `acceptance.json` file beside the
+selected Gemma version. It records the terms version, terms URLs, acceptance
+time, pinned model revision, artifact manifest/hash set, and Hatchdoor version.
+It contains no vault data and is never sent to Hatchdoor, Google, or any other
+service.
+
+When a future Hatchdoor release knows of newer Gemma terms, it compares that
+version with the receipt. A mismatch requires fresh acceptance before Gemma is
+used again.
+
+### Startup progress and failure safety
+
+Hatchdoor already has a whole-app startup gate: the Web UI polls
+`/api/startup-status` once per second and blocks vault features until the index
+is ready. It already displays indexing percentage, ETA, notes, and chunks; logs
+emit the same indexing progress after ten seconds and then every minute.
+
+Gemma setup extends that existing state machine rather than creating a second
+setup interface:
+
+```text
+terms required → model downloading → existing scanning → existing indexing → ready
+```
+
+The existing indexing view and logs continue to provide their current detailed
+progress. The new terms and download states add only their state-specific copy
+and download progress. Until startup reaches `ready`, all vault features remain
+unavailable.
+
+Before downloading, Hatchdoor checks that there is enough free space for the
+model and a fresh index. Interrupted downloads resume and are hash-verified;
+if verification fails, Hatchdoor deletes the bad copy and retries once. A
+partially built index is never searched: it is discarded and rebuilt safely.
+
+Future model upgrades are not automatic. If an upgrade flow is later added, it
+must download and verify the new version, rebuild the index, and only then
+remove the previous model and index. A changed terms version requires fresh
+acceptance before that switch.
