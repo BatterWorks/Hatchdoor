@@ -65,6 +65,35 @@ describe("StartupGate", () => {
     expect(await screen.findByText("Private vault")).toBeVisible();
   });
 
+  it("explains Gemma terms before any model download and can accept them", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(statusResponse({ state: "terms_required" }))
+      .mockResolvedValueOnce(statusResponse({ state: "downloading" }));
+
+    render(
+      <StartupGate>
+        <div>Private vault</div>
+      </StartupGate>,
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Set up multilingual search" }),
+    ).toBeVisible();
+    expect(screen.getByText(/does not change ownership of your vault/i)).toBeVisible();
+    expect(screen.getByRole("link", { name: "Read Gemma Terms" })).toHaveAttribute(
+      "href",
+      "https://ai.google.dev/gemma/terms",
+    );
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Accept terms and set up Gemma" }).click();
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/model/accept-gemma", {
+      method: "POST",
+    });
+  });
+
   it("polls until the backend becomes ready", async () => {
     vi.useFakeTimers();
     const fetchMock = vi
@@ -101,12 +130,15 @@ describe("StartupGate", () => {
   });
 
   it("shows a safe error when indexing fails", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      statusResponse({
-        state: "failed",
-        message: "Indexing could not be completed.",
-      }),
-    );
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        statusResponse({
+          state: "failed",
+          message: "The search model could not be downloaded or loaded.",
+        }),
+      )
+      .mockResolvedValueOnce(statusResponse({ state: "downloading" }));
 
     render(
       <StartupGate>
@@ -118,5 +150,15 @@ describe("StartupGate", () => {
       await screen.findByRole("heading", { name: "Vault unavailable" }),
     ).toBeVisible();
     expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("The search model could not be downloaded or loaded."),
+    ).toBeVisible();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Retry setup" }).click();
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/model/retry", {
+      method: "POST",
+    });
   });
 });

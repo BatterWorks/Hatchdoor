@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use crate::app_state::AppState;
 
 use super::config::McpConfig;
-use super::protocol::{JsonRpcFailure, tool_error};
+use super::protocol::{JsonRpcFailure, tool_error, tool_success};
 
 pub async fn handle_tools_call(
     state: AppState,
@@ -29,6 +29,53 @@ pub async fn handle_tools_call(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    // Before the first index exists, MCP is deliberately a tiny setup surface.
+    // This lets a headless user make the same explicit Gemma terms choice as the
+    // web UI without exposing any vault operation early.
+    if !state.startup.is_ready() {
+        return match name {
+            "get_model_setup_status" => Ok(tool_success(json!({
+                "state": state.startup.status(),
+                "gemma": {
+                    "model": crate::model_setup::GEMMA_MODEL_ID,
+                    "terms_url": crate::model_setup::GEMMA_TERMS_URL,
+                    "policy_url": crate::model_setup::GEMMA_POLICY_URL,
+                    "terms_version": crate::model_setup::GEMMA_TERMS_VERSION,
+                    "repository": crate::model_setup::GEMMA_REPOSITORY,
+                    "revision": crate::model_setup::GEMMA_REVISION,
+                    "data_notice": "Accepting the terms does not change ownership of your vault data. The acceptance record stays on this machine and is not sent anywhere."
+                },
+                "fallback": {
+                    "model": crate::model_setup::NOMIC_MODEL_ID,
+                    "notice": "Nomic is English-only and provides lower retrieval quality for multilingual vaults."
+                }
+            }))),
+            "accept_gemma_terms" => {
+                state
+                    .model_setup
+                    .accept_gemma()
+                    .map_err(JsonRpcFailure::internal)?;
+                crate::server::spawn_model_startup(state, crate::model_setup::SelectedModel::Gemma);
+                Ok(tool_success(
+                    json!({ "accepted": true, "model": crate::model_setup::GEMMA_MODEL_ID }),
+                ))
+            }
+            "decline_gemma_terms" => {
+                state
+                    .model_setup
+                    .decline_gemma()
+                    .map_err(JsonRpcFailure::internal)?;
+                crate::server::spawn_model_startup(state, crate::model_setup::SelectedModel::Nomic);
+                Ok(tool_success(
+                    json!({ "accepted": false, "model": crate::model_setup::NOMIC_MODEL_ID }),
+                ))
+            }
+            _ => Ok(tool_error(
+                "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
+            )),
+        };
+    }
 
     let outcome = match name {
         "search_notes" => read::search_notes_tool(state, arguments).await,
@@ -110,6 +157,32 @@ pub fn tools_list(config: &McpConfig, layers: &[crate::search::LayerInfo]) -> Ve
         tools.extend(write::write_tools_list());
     }
     tools
+}
+
+/// Tools exposed before a model is selected and the initial vault index is
+/// ready. Keep these schemas dependency-free so any MCP client can complete
+/// first-run setup.
+pub fn setup_tools_list() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "get_model_setup_status",
+            "description": "Show Hatchdoor's first-run embedding model setup status, Gemma terms links, and the local-data privacy notice.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": read_only_tool_annotations(),
+        }),
+        json!({
+            "name": "accept_gemma_terms",
+            "description": "Accept the Gemma terms for this local Hatchdoor instance, then download the multilingual default model and begin indexing. The acceptance record stays local and does not change ownership of vault data.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": write_tool_annotations(false, true),
+        }),
+        json!({
+            "name": "decline_gemma_terms",
+            "description": "Decline Gemma terms, remove any Gemma download/cache, then download Nomic Embed Text v1.5 and begin indexing. Nomic is English-only and lower quality for multilingual vaults.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+            "annotations": write_tool_annotations(true, true),
+        }),
+    ]
 }
 
 /// Arguments for the several tools keyed only by a note slug (read and write).

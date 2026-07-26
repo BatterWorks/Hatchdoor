@@ -9,6 +9,7 @@ pub mod eval;
 pub mod git;
 pub mod handlers;
 pub mod mcp;
+pub mod model_setup;
 pub mod rerank;
 pub mod search;
 pub mod server;
