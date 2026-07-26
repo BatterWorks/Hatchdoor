@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
-use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
+use fastembed::{
+    OnnxSource, RerankInitOptions, RerankInitOptionsUserDefined, RerankerModel, TextRerank,
+    TokenizerFiles, UserDefinedRerankingModel,
+};
 
 use crate::cache::SemanticHit;
 
@@ -16,10 +19,17 @@ pub struct FastembedReranker {
 }
 
 impl FastembedReranker {
-    fn load(model: RerankerModel, id: &'static str) -> Result<Self, String> {
-        let model =
-            TextRerank::try_new(RerankInitOptions::new(model).with_show_download_progress(false))
-                .map_err(|e| format!("failed to load reranker {id}: {e}"))?;
+    fn load(
+        model: RerankerModel,
+        id: &'static str,
+        max_pair_tokens: usize,
+    ) -> Result<Self, String> {
+        let model = TextRerank::try_new(
+            RerankInitOptions::new(model)
+                .with_max_length(max_pair_tokens)
+                .with_show_download_progress(false),
+        )
+        .map_err(|e| format!("failed to load reranker {id}: {e}"))?;
         Ok(Self {
             model: Mutex::new(model),
             id,
@@ -31,9 +41,14 @@ impl FastembedReranker {
     }
 
     pub fn jina_v1_turbo() -> Result<Self, String> {
+        Self::jina_v1_turbo_with_max_pair_tokens(512)
+    }
+
+    pub fn jina_v1_turbo_with_max_pair_tokens(max_pair_tokens: usize) -> Result<Self, String> {
         Self::load(
             RerankerModel::JINARerankerV1TurboEn,
             "JINARerankerV1TurboEn",
+            max_pair_tokens,
         )
     }
 
@@ -41,10 +56,59 @@ impl FastembedReranker {
     /// "Multiligual". We re-expose it under the corrected spelling
     /// for our own callers.
     pub fn jina_v2_multilingual() -> Result<Self, String> {
+        Self::jina_v2_multilingual_with_max_pair_tokens(512)
+    }
+
+    pub fn jina_v2_multilingual_with_max_pair_tokens(
+        max_pair_tokens: usize,
+    ) -> Result<Self, String> {
         Self::load(
             RerankerModel::JINARerankerV2BaseMultiligual,
             "JINARerankerV2BaseMultilingual",
+            max_pair_tokens,
         )
+    }
+
+    /// BGE's Apache-2.0 multilingual cross-encoder. FastEmbed supplies a
+    /// maintained ONNX package for this model, so it follows the native path.
+    pub fn bge_reranker_v2_m3_with_max_pair_tokens(max_pair_tokens: usize) -> Result<Self, String> {
+        Self::load(
+            RerankerModel::BGERerankerV2M3,
+            "BGERerankerV2M3",
+            max_pair_tokens,
+        )
+    }
+
+    /// Apache-2.0 GTE multilingual cross-encoder, loaded from the ONNX
+    /// Community export of Alibaba's official model. The original repository
+    /// does not publish ONNX assets; the export is needed for Hatchdoor's local
+    /// ONNX Runtime backend.
+    pub fn gte_multilingual_base_with_max_pair_tokens(
+        max_pair_tokens: usize,
+    ) -> Result<Self, String> {
+        const REPO: &str = "onnx-community/gte-multilingual-reranker-base";
+
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: crate::embed::hub::fetch_bytes(REPO, "tokenizer.json")?,
+            config_file: crate::embed::hub::fetch_bytes(REPO, "config.json")?,
+            special_tokens_map_file: crate::embed::hub::fetch_bytes(
+                REPO,
+                "special_tokens_map.json",
+            )?,
+            tokenizer_config_file: crate::embed::hub::fetch_bytes(REPO, "tokenizer_config.json")?,
+        };
+        let onnx_path = crate::embed::hub::fetch_path(REPO, "onnx/model.onnx")?;
+        let user_model =
+            UserDefinedRerankingModel::new(OnnxSource::File(onnx_path), tokenizer_files);
+        let model = TextRerank::try_new_from_user_defined(
+            user_model,
+            RerankInitOptionsUserDefined::new().with_max_length(max_pair_tokens),
+        )
+        .map_err(|e| format!("failed to load reranker GTEMultilingualRerankerBase: {e}"))?;
+        Ok(Self {
+            model: Mutex::new(model),
+            id: "GTEMultilingualRerankerBase",
+        })
     }
 }
 

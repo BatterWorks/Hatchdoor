@@ -33,11 +33,17 @@ fn write_group_table(f: &mut impl Write, title: &str, groups: &[GroupReport]) {
     writeln!(f).ok();
 }
 
-pub fn append_section(
-    path: &Path,
-    report: &Report,
-    build_duration_secs: Option<f64>,
-) -> Result<(), String> {
+/// Build-phase telemetry read back from cache metadata, reported alongside the
+/// retrieval metrics so each results section records how the index was produced.
+#[derive(Debug, Default, Clone)]
+pub struct BuildInfo {
+    pub duration_secs: Option<f64>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub peak_rss_mb: Option<f64>,
+}
+
+pub fn append_section(path: &Path, report: &Report, build: &BuildInfo) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
     }
@@ -48,7 +54,8 @@ pub fn append_section(
         .map_err(|e| format!("open {}: {e}", path.display()))?;
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let dur = build_duration_secs
+    let dur = build
+        .duration_secs
         .map(|s| format!("{s:.1} s"))
         .unwrap_or_else(|| "(unknown)".to_string());
 
@@ -57,6 +64,12 @@ pub fn append_section(
     writeln!(f).ok();
     writeln!(f, "- Run timestamp: {now}").ok();
     writeln!(f, "- Build duration: {dur}").ok();
+    if let (Some(start), Some(end)) = (&build.started_at, &build.finished_at) {
+        writeln!(f, "- Build window: {start} → {end}").ok();
+    }
+    if let Some(rss) = build.peak_rss_mb {
+        writeln!(f, "- Build peak RSS: {rss:.1} MB").ok();
+    }
     writeln!(f).ok();
     writeln!(f, "| Metric | Value |").ok();
     writeln!(f, "|---|---|").ok();
@@ -107,7 +120,12 @@ pub fn append_section(
     Ok(())
 }
 
-pub fn append_rerank_section(path: &Path, report: &Report, initial_k: usize) -> Result<(), String> {
+pub fn append_rerank_section(
+    path: &Path,
+    report: &Report,
+    initial_k: usize,
+    max_pair_tokens: usize,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create parent: {e}"))?;
     }
@@ -124,6 +142,7 @@ pub fn append_rerank_section(path: &Path, report: &Report, initial_k: usize) -> 
     writeln!(f).ok();
     writeln!(f, "- Run timestamp: {now}").ok();
     writeln!(f, "- Initial K: {initial_k}").ok();
+    writeln!(f, "- Max query-document pair tokens: {max_pair_tokens}").ok();
     if let Some(stats) = report.rerank_latency_ms {
         writeln!(
             f,
@@ -149,6 +168,10 @@ pub fn append_rerank_section(path: &Path, report: &Report, initial_k: usize) -> 
     writeln!(f, "| Recall@10 (all) | {:.3} |", report.recall_at_10_all).ok();
     writeln!(f, "| MRR | {:.3} |", report.mrr).ok();
     writeln!(f, "| FP-rate@5 | {:.3} |", report.fp_rate_at_5).ok();
+    match report.correct_heading_rate {
+        Some(rate) => writeln!(f, "| Correct-heading | {rate:.3} |").ok(),
+        None => writeln!(f, "| Correct-heading | n/a |").ok(),
+    };
     writeln!(f).ok();
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
@@ -418,12 +441,23 @@ mod tests {
     fn append_section_writes_expected_markdown() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("results.md");
-        append_section(&path, &fake_report(), Some(612.5)).expect("append");
+        let build = BuildInfo {
+            duration_secs: Some(612.5),
+            started_at: Some("2026-07-25T20:00:00Z".to_string()),
+            finished_at: Some("2026-07-25T20:10:12Z".to_string()),
+            peak_rss_mb: Some(2048.0),
+        };
+        append_section(&path, &fake_report(), &build).expect("append");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("## BGESmallENV15"), "header missing");
         assert!(text.contains("Recall@5 (any)"), "metrics table missing");
         assert!(text.contains("0.840"), "recall_at_5_any value missing");
         assert!(text.contains("612.5"), "build duration missing");
+        assert!(
+            text.contains("2026-07-25T20:10:12Z"),
+            "build window missing"
+        );
+        assert!(text.contains("2048.0 MB"), "peak RSS missing");
         assert!(text.contains("U1"), "per-query row missing");
         assert!(
             text.contains("Where does my Plex media live?"),
@@ -435,8 +469,8 @@ mod tests {
     fn append_section_appends_to_existing_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("results.md");
-        append_section(&path, &fake_report(), None).expect("first");
-        append_section(&path, &fake_report(), None).expect("second");
+        append_section(&path, &fake_report(), &BuildInfo::default()).expect("first");
+        append_section(&path, &fake_report(), &BuildInfo::default()).expect("second");
         let text = std::fs::read_to_string(&path).expect("read");
         let occurrences = text.matches("## BGESmallENV15").count();
         assert_eq!(occurrences, 2);
@@ -491,7 +525,7 @@ mod tests {
     fn append_rerank_section_writes_expected_markdown() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("results.md");
-        append_rerank_section(&path, &fake_rerank_report(), 20).expect("append");
+        append_rerank_section(&path, &fake_rerank_report(), 20, 512).expect("append");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("## Rerank — NomicEmbedTextV15 + JINARerankerV2BaseMultilingual"));
         assert!(text.contains("Initial K: 20"));

@@ -68,6 +68,10 @@ impl Embedder for MatryoshkaEmbedder {
     fn query_prefix(&self) -> &'static str {
         self.inner.query_prefix()
     }
+
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        self.inner.document_input(title, heading_path, body)
+    }
 }
 
 #[cfg(test)]
