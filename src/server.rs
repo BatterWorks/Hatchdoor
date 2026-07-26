@@ -213,8 +213,8 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         reject_demo_model_setup,
     ));
 
-    // MCP remains reachable during initial setup: it exposes only the three
-    // model-setup tools until the vault is ready (enforced in tools::dispatch).
+    // MCP remains reachable during initial setup. It advertises the full stable
+    // tool list, while tools::dispatch blocks vault operations until ready.
     let mcp = Router::new()
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .layer(DefaultBodyLimit::max(mcp_body_limit));

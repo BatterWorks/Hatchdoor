@@ -98,12 +98,10 @@ async fn handle_mcp_post(
         }
         "ping" => Ok(json!({})),
         "tools/list" => {
-            if state.startup.is_ready() {
-                let layers = layer_catalog_for(&state).await;
-                Ok(json!({ "tools": tools_list(config, &layers) }))
-            } else {
-                Ok(json!({ "tools": setup_tools_list() }))
-            }
+            let layers = layer_catalog_for(&state).await;
+            let mut tools = setup_tools_list();
+            tools.extend(tools_list(config, &layers));
+            Ok(json!({ "tools": tools }))
         }
         "tools/call" => handle_tools_call(state, request.params, config).await,
         method => Err(JsonRpcFailure::method_not_found(format!(
@@ -181,7 +179,7 @@ fn handle_setup_initialize(params: Option<&Value>) -> Value {
         "protocolVersion": protocol_version,
         "capabilities": { "tools": { "listChanged": true } },
         "serverInfo": { "name": "hatchdoor", "version": env!("CARGO_PKG_VERSION") },
-        "instructions": "Hatchdoor needs first-run search-model setup before vault tools are available. Call get_model_setup_status, then either accept_gemma_terms for the multilingual default or decline_gemma_terms to use the English-only Nomic fallback. Acceptance stays local and does not change ownership of vault data."
+        "instructions": "Hatchdoor needs first-run search-model setup before vault tools can be used. Call get_model_setup_status, then either accept_gemma_terms for the multilingual default or decline_gemma_terms to use the English-only Nomic fallback. Acceptance stays local and does not change ownership of vault data."
     })
 }
 
@@ -342,18 +340,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_run_mcp_exposes_only_model_setup_tools() {
+    async fn first_run_mcp_advertises_setup_and_vault_tools_but_blocks_vault_access() {
         let (state, _tmp) = test_state();
         state.startup.set_terms_required();
         let response = post_json(
-            state,
+            state.clone(),
             json!({"jsonrpc":"2.0","id":69,"method":"tools/list"}),
             enabled_config(),
         )
         .await;
         let body = response_json(response).await;
         let tools = body["result"]["tools"].as_array().expect("tools");
-        assert_eq!(tools.len(), 3);
         assert!(
             tools
                 .iter()
@@ -369,7 +366,76 @@ mod tests {
                 .iter()
                 .any(|tool| tool["name"] == "decline_gemma_terms")
         );
-        assert!(!tools.iter().any(|tool| tool["name"] == "search_notes"));
+        assert!(tools.iter().any(|tool| tool["name"] == "search_notes"));
+
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":68,"method":"tools/call",
+                "params": {"name":"search_notes","arguments":{"query":"alpha"}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["content"][0]["text"],
+            "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first."
+        );
+    }
+
+    #[tokio::test]
+    async fn first_run_tool_list_stays_usable_after_setup_completes() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+        let response = post_json(
+            state.clone(),
+            json!({"jsonrpc":"2.0","id":67,"method":"tools/list"}),
+            enabled_config(),
+        )
+        .await;
+        let before_ready = response_json(response).await;
+
+        state.startup.set_ready();
+        let response = post_json(
+            state.clone(),
+            json!({"jsonrpc":"2.0","id":66,"method":"tools/list"}),
+            enabled_config(),
+        )
+        .await;
+        let after_ready = response_json(response).await;
+        assert_eq!(
+            before_ready["result"]["tools"],
+            after_ready["result"]["tools"]
+        );
+
+        let response = post_json(
+            state.clone(),
+            json!({
+                "jsonrpc":"2.0","id":65,"method":"tools/call",
+                "params": {"name":"get_model_setup_status","arguments":{}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(
+            body["result"]["structuredContent"]["state"]["state"],
+            "ready"
+        );
+
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":64,"method":"tools/call",
+                "params": {"name":"search_notes","arguments":{"query":"alpha"}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["isError"], false);
     }
 
     #[tokio::test]
@@ -1068,6 +1134,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "get_model_setup_status",
+                "accept_gemma_terms",
+                "decline_gemma_terms",
                 "search_notes",
                 "query_notes",
                 "get_note",
@@ -1087,7 +1156,7 @@ mod tests {
                 .any(|name| name.contains("write") || name.contains("delete"))
         );
 
-        for tool in tools.iter().take(5) {
+        for tool in tools.iter().skip(3).take(5) {
             assert_eq!(tool["annotations"]["readOnlyHint"], true);
             assert_eq!(tool["annotations"]["destructiveHint"], false);
             assert_eq!(tool["annotations"]["idempotentHint"], true);

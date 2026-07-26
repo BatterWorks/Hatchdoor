@@ -30,27 +30,15 @@ pub async fn handle_tools_call(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    // Before the first index exists, MCP is deliberately a tiny setup surface.
-    // This lets a headless user make the same explicit Gemma terms choice as the
-    // web UI without exposing any vault operation early.
+    if name == "get_model_setup_status" {
+        return Ok(tool_success(model_setup_status_payload(&state)));
+    }
+
+    // Before the first index exists, only the explicit model-setup calls may
+    // run. The full tool catalogue is still advertised so MCP clients that cache
+    // tools at connection time need no restart once setup completes.
     if !state.startup.is_ready() {
         return match name {
-            "get_model_setup_status" => Ok(tool_success(json!({
-                "state": state.startup.status(),
-                "gemma": {
-                    "model": crate::model_setup::GEMMA_MODEL_ID,
-                    "terms_url": crate::model_setup::GEMMA_TERMS_URL,
-                    "policy_url": crate::model_setup::GEMMA_POLICY_URL,
-                    "terms_version": crate::model_setup::GEMMA_TERMS_VERSION,
-                    "repository": crate::model_setup::GEMMA_REPOSITORY,
-                    "revision": crate::model_setup::GEMMA_REVISION,
-                    "data_notice": "Accepting the terms does not change ownership of your vault data. The acceptance record stays on this machine and is not sent anywhere."
-                },
-                "fallback": {
-                    "model": crate::model_setup::NOMIC_MODEL_ID,
-                    "notice": "Nomic is the fallback if you decline Gemma. It supports English only and still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches. Nomic uses about 1.3 GB of RAM while indexing; Gemma uses about 0.5 GB."
-                }
-            }))),
             "accept_gemma_terms" => {
                 state
                     .model_setup
@@ -75,6 +63,13 @@ pub async fn handle_tools_call(
                 "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
             )),
         };
+    }
+
+    if matches!(name, "accept_gemma_terms" | "decline_gemma_terms") {
+        return Ok(tool_error(
+            "A search model is already set up. Changing models after setup is not supported."
+                .to_string(),
+        ));
     }
 
     let outcome = match name {
@@ -151,6 +146,25 @@ pub async fn handle_tools_call(
     }
 }
 
+fn model_setup_status_payload(state: &AppState) -> Value {
+    json!({
+        "state": state.startup.status(),
+        "gemma": {
+            "model": crate::model_setup::GEMMA_MODEL_ID,
+            "terms_url": crate::model_setup::GEMMA_TERMS_URL,
+            "policy_url": crate::model_setup::GEMMA_POLICY_URL,
+            "terms_version": crate::model_setup::GEMMA_TERMS_VERSION,
+            "repository": crate::model_setup::GEMMA_REPOSITORY,
+            "revision": crate::model_setup::GEMMA_REVISION,
+            "data_notice": "Accepting the terms does not change ownership of your vault data. The acceptance record stays on this machine and is not sent anywhere."
+        },
+        "fallback": {
+            "model": crate::model_setup::NOMIC_MODEL_ID,
+            "notice": "Nomic is the fallback if you decline Gemma. It supports English only and still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches. Nomic uses about 1.3 GB of RAM while indexing; Gemma uses about 0.5 GB."
+        }
+    })
+}
+
 pub fn tools_list(config: &McpConfig, layers: &[crate::search::LayerInfo]) -> Vec<Value> {
     let mut tools = read::read_tools_list(layers);
     if config.write_enabled {
@@ -159,9 +173,9 @@ pub fn tools_list(config: &McpConfig, layers: &[crate::search::LayerInfo]) -> Ve
     tools
 }
 
-/// Tools exposed before a model is selected and the initial vault index is
-/// ready. Keep these schemas dependency-free so any MCP client can complete
-/// first-run setup.
+/// Setup tools are always advertised alongside the vault tools so clients that
+/// cache their tool list on connection can complete first-run setup and then use
+/// the vault without reconnecting.
 pub fn setup_tools_list() -> Vec<Value> {
     vec![
         json!({
