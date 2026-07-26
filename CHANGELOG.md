@@ -45,9 +45,6 @@
   surface a created, moved, archived, or uploaded item belongs to.
 
 ### Changed
-- Docker Compose now prepares the persistent `/models` bind mount for the
-  rootless runtime user. Set `HOST_MODELS_PATH` to retain downloaded models and
-  the local Gemma terms receipt across container replacement.
 - The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
   legitimately sized upload is not rejected before the tool's own size check.
 - `POST /api/attachment` now accepts the MCP bearer token as an alternative to
