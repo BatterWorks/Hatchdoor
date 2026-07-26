@@ -12,7 +12,7 @@ use super::config::{McpConfig, SERVER_INSTRUCTIONS, negotiate_protocol_version};
 use super::protocol::{
     JsonRpcFailure, JsonRpcRequest, jsonrpc_error_response, jsonrpc_success_response,
 };
-use super::tools::{handle_tools_call, tools_list};
+use super::tools::{handle_tools_call, setup_tools_list, tools_list};
 
 pub async fn mcp_get_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let config = state.mcp_config.clone();
@@ -89,13 +89,21 @@ async fn handle_mcp_post(
 
     let result = match request.method.as_str() {
         "initialize" => {
-            let layers = layer_catalog_for(&state).await;
-            Ok(handle_initialize(request.params.as_ref(), &layers))
+            if state.startup.is_ready() {
+                let layers = layer_catalog_for(&state).await;
+                Ok(handle_initialize(request.params.as_ref(), &layers))
+            } else {
+                Ok(handle_setup_initialize(request.params.as_ref()))
+            }
         }
         "ping" => Ok(json!({})),
         "tools/list" => {
-            let layers = layer_catalog_for(&state).await;
-            Ok(json!({ "tools": tools_list(config, &layers) }))
+            if state.startup.is_ready() {
+                let layers = layer_catalog_for(&state).await;
+                Ok(json!({ "tools": tools_list(config, &layers) }))
+            } else {
+                Ok(json!({ "tools": setup_tools_list() }))
+            }
         }
         "tools/call" => handle_tools_call(state, request.params, config).await,
         method => Err(JsonRpcFailure::method_not_found(format!(
@@ -164,6 +172,19 @@ fn handle_initialize(params: Option<&Value>, layers: &[LayerInfo]) -> Value {
     })
 }
 
+fn handle_setup_initialize(params: Option<&Value>) -> Value {
+    let requested = params
+        .and_then(|params| params.get("protocolVersion"))
+        .and_then(Value::as_str);
+    let protocol_version = negotiate_protocol_version(requested);
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": { "tools": { "listChanged": true } },
+        "serverInfo": { "name": "hatchdoor", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": "Hatchdoor needs first-run search-model setup before vault tools are available. Call get_model_setup_status, then either accept_gemma_terms for the multilingual default or decline_gemma_terms to use the English-only Nomic fallback. Acceptance stays local and does not change ownership of vault data."
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,11 +237,18 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
+            cache_db_path: tmp.path().join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
+            model_setup: Arc::new(crate::model_setup::ModelSetup::new(
+                tmp.path().join("models"),
+            )),
+            model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -262,11 +290,18 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             vault_path: vault_root,
+            cache_db_path: tmp.path().join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
+            model_setup: Arc::new(crate::model_setup::ModelSetup::new(
+                tmp.path().join("models"),
+            )),
+            model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -304,6 +339,58 @@ mod tests {
             search["inputSchema"]["properties"].get("layers").is_none(),
             "a vault with no layers must not advertise a layers parameter"
         );
+    }
+
+    #[tokio::test]
+    async fn first_run_mcp_exposes_only_model_setup_tools() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+        let response = post_json(
+            state,
+            json!({"jsonrpc":"2.0","id":69,"method":"tools/list"}),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        let tools = body["result"]["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 3);
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "get_model_setup_status")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "accept_gemma_terms")
+        );
+        assert!(
+            tools
+                .iter()
+                .any(|tool| tool["name"] == "decline_gemma_terms")
+        );
+        assert!(!tools.iter().any(|tool| tool["name"] == "search_notes"));
+    }
+
+    #[tokio::test]
+    async fn first_run_initialize_prompts_model_setup() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":68,"method":"initialize",
+                "params": {"protocolVersion":"2025-11-25","capabilities":{}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        let instructions = body["result"]["instructions"]
+            .as_str()
+            .expect("instructions");
+        assert!(instructions.contains("accept_gemma_terms"));
+        assert!(instructions.contains("does not change ownership of vault data"));
     }
 
     #[tokio::test]

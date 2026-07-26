@@ -7,6 +7,6 @@ pub mod matryoshka;
 
 pub use candle_embedder::{NomicV2Embedder, Qwen3Embedder};
 pub use context::contextual_document;
-pub use embedder::{Embedder, StubEmbedder};
+pub use embedder::{Embedder, RuntimeEmbedder, StubEmbedder};
 pub use fastembed_embedder::FastembedEmbedder;
 pub use matryoshka::MatryoshkaEmbedder;

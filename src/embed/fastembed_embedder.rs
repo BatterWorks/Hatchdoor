@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use fastembed::{
@@ -36,9 +37,30 @@ impl FastembedEmbedder {
         doc_prefix: &'static str,
         query_prefix: &'static str,
     ) -> Result<Self, String> {
+        Self::load_in(
+            model,
+            dim,
+            max_length,
+            id,
+            doc_prefix,
+            query_prefix,
+            fastembed::get_cache_dir().into(),
+        )
+    }
+
+    fn load_in(
+        model: EmbeddingModel,
+        dim: usize,
+        max_length: usize,
+        id: &'static str,
+        doc_prefix: &'static str,
+        query_prefix: &'static str,
+        cache_dir: PathBuf,
+    ) -> Result<Self, String> {
         let model = TextEmbedding::try_new(
             InitOptions::new(model)
                 .with_max_length(max_length)
+                .with_cache_dir(cache_dir)
                 .with_show_download_progress(false),
         )
         .map_err(|e| format!("failed to load embedding model {id}: {e}"))?;
@@ -82,6 +104,18 @@ impl FastembedEmbedder {
         )
     }
 
+    pub fn nomic_v1_5_in(cache_dir: PathBuf) -> Result<Self, String> {
+        Self::load_in(
+            EmbeddingModel::NomicEmbedTextV15,
+            768,
+            1024,
+            "NomicEmbedTextV15",
+            "search_document: ",
+            "search_query: ",
+            cache_dir,
+        )
+    }
+
     pub fn mxbai_large() -> Result<Self, String> {
         Self::load(
             EmbeddingModel::MxbaiEmbedLargeV1,
@@ -112,13 +146,18 @@ impl FastembedEmbedder {
     /// 2,048-token input limit and supports Matryoshka truncation for the
     /// storage-efficient 256-dimensional evaluation variant.
     pub fn embedding_gemma_300m_q4() -> Result<Self, String> {
-        let mut embedder = Self::load(
+        Self::embedding_gemma_300m_q4_in(fastembed::get_cache_dir().into())
+    }
+
+    pub fn embedding_gemma_300m_q4_in(cache_dir: PathBuf) -> Result<Self, String> {
+        let mut embedder = Self::load_in(
             EmbeddingModel::EmbeddingGemma300MQ4,
             768,
             2048,
             "EmbeddingGemma300MQ4",
             "",
             "task: search result | query: ",
+            cache_dir,
         )?;
         // EmbeddingGemma's retrieval training uses different query and document
         // templates. This is intentionally a model-specific document format,

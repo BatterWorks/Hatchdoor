@@ -17,6 +17,7 @@ use crate::vault::{VaultIndex, VaultScanConfig, seed_empty_vault};
 #[derive(Clone)]
 pub struct AppState {
     pub vault_path: PathBuf,
+    pub cache_db_path: PathBuf,
     pub cache: Arc<RwLock<VaultCache>>,
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
@@ -27,6 +28,12 @@ pub struct AppState {
     /// backs the advertised `tools.listChanged` capability.
     pub mcp_tools_changed: broadcast::Sender<()>,
     pub embedder: Arc<dyn Embedder>,
+    /// Concrete startup slot behind `embedder`; populated only after a model is
+    /// selected and downloaded.
+    pub runtime_embedder: Arc<crate::embed::RuntimeEmbedder>,
+    pub model_setup: Arc<crate::model_setup::ModelSetup>,
+    pub model_setup_started: Arc<std::sync::atomic::AtomicBool>,
+    pub startup_git_config: Arc<Option<crate::git::GitConfig>>,
     /// True when the web API is protected by `HATCHDOOR_WEB_BEARER_TOKEN`.
     pub web_auth_enabled: bool,
     /// True when public demo browsing is enabled and app-level writes are blocked.
@@ -303,16 +310,24 @@ mod tests {
 
     fn state_with_vault(vault_path: PathBuf) -> AppState {
         let embedder = test_embedder();
+        let state_root = vault_path.parent().expect("vault parent").to_path_buf();
         let cache = build_cache(&vault_path, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = broadcast::channel(64);
         let (mcp_tools_changed, _) = broadcast::channel(16);
         AppState {
             vault_path,
+            cache_db_path: state_root.join("cache.sqlite3"),
             cache: Arc::new(RwLock::new(cache)),
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
             embedder,
+            runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
+            model_setup: Arc::new(crate::model_setup::ModelSetup::new(
+                state_root.join("models"),
+            )),
+            model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
