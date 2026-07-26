@@ -275,8 +275,6 @@ For read-only browsing:
 
 - Mount the vault read-only if you want.
 - Keep the cache directory writable.
-- Keep the models directory writable. The supplied Compose file prepares it for
-  Hatchdoor's unprivileged runtime user automatically.
 
 For browser writes, MCP writes, attachment uploads, or git sync:
 
