@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
+import { UiButton } from "../ui";
+
 type PdfDocument = {
   numPages: number;
   getPage: (pageNumber: number) => Promise<PdfPage>;
@@ -158,7 +160,12 @@ export function PdfPreview({ src, label }: { src: string; label: string }) {
     <div className="pdf-preview" ref={containerRef}>
       <div className="pdf-preview-toolbar">
         <span className="pdf-preview-title">{label || "PDF"}</span>
-        <a href={src} target="_blank" rel="noopener noreferrer">
+        <a
+          className="ui-button pdf-preview-open"
+          href={src}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           Open PDF
         </a>
       </div>
@@ -173,23 +180,25 @@ export function PdfPreview({ src, label }: { src: string; label: string }) {
             aria-label={`${label || "PDF"}, page ${pageNumber}`}
           />
           <div className="pdf-preview-controls" aria-label="PDF page controls">
-            <button
+            <UiButton
+              className="pdf-preview-page-action"
               type="button"
               onClick={() => setPageNumber((current) => current - 1)}
               disabled={pageNumber === 1}
             >
               Previous
-            </button>
-            <span>
+            </UiButton>
+            <span className="pdf-preview-page-count" aria-live="polite">
               Page {pageNumber} of {totalPages}
             </span>
-            <button
+            <UiButton
+              className="pdf-preview-page-action"
               type="button"
               onClick={() => setPageNumber((current) => current + 1)}
               disabled={pageNumber === totalPages}
             >
               Next
-            </button>
+            </UiButton>
           </div>
         </>
       ) : (
