@@ -9,7 +9,7 @@ use crate::app_state::{AppState, refresh_now};
 use crate::vault::VaultIndex;
 use crate::vault::{
     AttachmentOutcome, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
-    create_note, delete_attachment, delete_note, edit_note, import_attachment,
+    create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
     list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
     replace_section, update_note,
 };
@@ -26,6 +26,8 @@ pub(super) async fn create_note_tool(
         JsonRpcFailure::invalid_params(format!("Invalid create_note arguments: {error}"))
     })?;
     let relative_path = non_empty_argument("relative_path", args.relative_path)?;
+    refuse_marker_write(&relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
@@ -128,6 +130,7 @@ pub(super) async fn rename_note_tool(
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let target = replace_filename(&entry.relative_path, &new_title);
+    refuse_noise_write(&state.scan_config.exclude, &target)?;
     let outcome = move_or_rename_note(
         &state.vault_path,
         &index,
@@ -159,6 +162,7 @@ pub(super) async fn move_note_tool(
     } else {
         format!("{target_folder}/{file_name}")
     };
+    refuse_noise_write(&state.scan_config.exclude, &target)?;
     let outcome = move_or_rename_note(
         &state.vault_path,
         &index,
@@ -179,6 +183,7 @@ pub(super) async fn move_rename_note_tool(
     })?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = move_or_rename_note(
@@ -201,6 +206,14 @@ pub(super) async fn archive_note_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
+    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let file_name = entry
+        .relative_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.relative_path);
+    let target = format!("{archive_folder}/{file_name}");
+    refuse_noise_write(&state.scan_config.exclude, &target)?;
     let outcome = archive_note(
         &state.vault_path,
         &index,
@@ -236,22 +249,51 @@ pub(super) async fn import_attachment_tool(
     arguments: Value,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
+    use base64::Engine as _;
+
     let args: ImportAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid import_attachment arguments: {error}"))
     })?;
-    let staging_path = config.attachment_staging_path.as_ref().ok_or_else(|| {
-        JsonRpcFailure::invalid_params("HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH is not configured")
-    })?;
-    let staged_filename = non_empty_argument("staged_filename", args.staged_filename)?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
+    refuse_marker_write(&target_relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
-    let outcome = import_attachment(
+
+    // Whitespace-tolerant so line-wrapped base64 still decodes.
+    let content: String = args
+        .content
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+
+    // Guard the encoded payload before decoding: base64 inflates bytes by ~4/3,
+    // so anything longer than that for the cap cannot decode to an allowed size.
+    // Rejecting up front avoids decoding a deliberately oversized payload; the
+    // authoritative check on the decoded length runs in import_attachment_bytes.
+    let max_encoded = config
+        .max_base64_bytes
+        .saturating_mul(4)
+        .div_ceil(3)
+        .saturating_add(4);
+    if content.len() as u64 > max_encoded {
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "attachment exceeds max size: base64 content is larger than the {}-byte base64 limit allows",
+            config.max_base64_bytes
+        )));
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content.as_bytes())
+        .map_err(|error| {
+            JsonRpcFailure::invalid_params(format!("content is not valid base64: {error}"))
+        })?;
+
+    let outcome = import_attachment_bytes(
         &state.vault_path,
-        staging_path,
-        &staged_filename,
         &target_relative_path,
-        config.max_attachment_bytes,
+        &bytes,
+        config.max_base64_bytes,
         overwrite,
     )
     .map_err(write_error_to_jsonrpc)?;
@@ -271,6 +313,9 @@ pub(super) async fn move_attachment_tool(
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
+    refuse_marker_write(&source_relative_path)?;
+    refuse_marker_write(&target_relative_path)?;
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let index = current_index(&state).await?;
     let outcome = move_attachment(
         &state.vault_path,
@@ -295,6 +340,10 @@ pub(super) async fn rename_attachment_tool(
     let source_relative_path =
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let new_filename = non_empty_argument("new_filename", args.new_filename)?;
+    refuse_marker_write(&source_relative_path)?;
+    refuse_marker_write(&new_filename)?;
+    let target_relative_path = replace_filename(&source_relative_path, &new_filename);
+    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
     let index = current_index(&state).await?;
     let outcome = rename_attachment(
         &state.vault_path,
@@ -336,8 +385,8 @@ pub(super) async fn list_note_attachments_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
-    let attachments =
-        list_note_attachments(&state.vault_path, &entry).map_err(write_error_to_jsonrpc)?;
+    let attachments = list_note_attachments(&state.vault_path, &index.layers, &entry)
+        .map_err(write_error_to_jsonrpc)?;
     Ok(tool_success(json!({ "attachments": attachments })))
 }
 
@@ -346,7 +395,12 @@ pub(super) async fn list_note_attachments_tool(
 /// tokio worker.
 async fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
     let vault_path = state.vault_path.clone();
-    match tokio::task::spawn_blocking(move || VaultIndex::build(&vault_path)).await {
+    let scan_config = state.scan_config.clone();
+    match tokio::task::spawn_blocking(move || {
+        VaultIndex::build_with_config(&vault_path, &scan_config)
+    })
+    .await
+    {
         Ok(Ok(index)) => Ok(index),
         Ok(Err(error)) => Err(JsonRpcFailure::internal(format!(
             "failed to index vault at '{}': {error}",
@@ -397,7 +451,22 @@ async fn finalize_note_write(
     }
     record_note_write(state, op, &outcome, commit_summary);
     let warning = git_sync_warning(state).await;
-    Ok(write_success(outcome, warning))
+    // Report the note's resulting layer (None = default surface) so a caller
+    // sees which surface a create/move/rename/archive landed on. Read from the
+    // just-refreshed cache; a delete leaves no note, so the layer is None.
+    let layer = match &outcome.slug {
+        Some(slug) => state
+            .cache
+            .read()
+            .await
+            .sqlite
+            .read_note_by_slug(slug)
+            .ok()
+            .flatten()
+            .and_then(|note| note.layer),
+        None => None,
+    };
+    Ok(write_success(outcome, warning, layer))
 }
 
 fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<String> {
@@ -423,6 +492,46 @@ async fn git_sync_warning(state: &AppState) -> Option<String> {
     }
 }
 
+/// Hard-refuse any write whose target basename is the layer marker file. A
+/// marker demotes its whole folder, so letting a write tool create or rename
+/// one would let an agent silently reclassify a subtree; markers are edited in
+/// the vault directly, never through the API.
+fn refuse_marker_write(path: &str) -> Result<(), JsonRpcFailure> {
+    // Take the last non-empty path segment so trailing separators or a bare `.`
+    // component can't hide the marker basename, and compare case-insensitively
+    // so a case-folding filesystem can't smuggle one in either.
+    let basename = path
+        .split(['/', '\\'])
+        .rfind(|segment| !segment.is_empty() && *segment != ".")
+        .unwrap_or(path);
+    if basename.eq_ignore_ascii_case(crate::vault::MARKER_FILE_NAME) {
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "'{}' is a reserved Hatchdoor layer marker and cannot be written through the API; \
+             edit it directly in the vault.",
+            crate::vault::MARKER_FILE_NAME
+        )));
+    }
+    Ok(())
+}
+
+/// Hard-refuse a write whose target path matches a noise-exclusion pattern. The
+/// index applies the same matcher, so such a note or attachment would be written
+/// to disk yet silently absent from every read surface — an invisible write. The
+/// `.hatchdoor-layer` marker is exempt from exclusion, so this never fires on a
+/// marker (which `refuse_marker_write` handles separately).
+fn refuse_noise_write(
+    exclude: &crate::vault::ExcludeMatcher,
+    path: &str,
+) -> Result<(), JsonRpcFailure> {
+    if exclude.is_excluded(std::path::Path::new(path.trim()), false) {
+        return Err(JsonRpcFailure::invalid_params(format!(
+            "'{path}' matches a Hatchdoor noise-exclusion pattern and would be ignored by the \
+             index; choose a path outside the excluded set."
+        )));
+    }
+    Ok(())
+}
+
 fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     match error {
         WriteError::InvalidInput(message) => JsonRpcFailure::invalid_params(message),
@@ -431,12 +540,17 @@ fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
     }
 }
 
-fn write_success(outcome: WriteOutcome, git_sync_warning: Option<String>) -> Value {
+fn write_success(
+    outcome: WriteOutcome,
+    git_sync_warning: Option<String>,
+    layer: Option<String>,
+) -> Value {
     tool_success(json!({
         "ok": true,
         "slug": outcome.slug,
         "relative_path": outcome.relative_path,
         "content_hash": outcome.content_hash,
+        "layer": layer,
         "quality_warnings": outcome.quality_warnings,
         "rewritten_notes": outcome.rewritten_notes,
         "moved_assets": outcome.moved_assets,
@@ -665,16 +779,16 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "import_attachment",
-            "description": "Import an attachment from the configured staging folder into the vault. staged_filename must be a filename only. Returns compact metadata for the imported file.",
+            "description": "Upload an attachment into the vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (see get_attachment_import_config for the limit). Prefer the HTTP upload endpoint (POST /api/attachment) by default. Returns compact metadata for the imported file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "staged_filename": {"type": "string", "minLength": 1},
-                    "target_relative_path": {"type": "string", "minLength": 1},
+                    "content": {"type": "string", "minLength": 1, "description": "Base64-encoded file bytes."},
+                    "target_relative_path": {"type": "string", "minLength": 1, "description": "Vault-relative destination path, e.g. Assets/diagram.png."},
                     "overwrite": {"type": "boolean", "default": false},
                     "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
                 },
-                "required": ["staged_filename", "target_relative_path"],
+                "required": ["content", "target_relative_path"],
                 "additionalProperties": false
             },
             "annotations": write_tool_annotations(true, false)
@@ -846,7 +960,7 @@ struct DeleteNoteArgs {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportAttachmentArgs {
-    staged_filename: String,
+    content: String,
     target_relative_path: String,
     #[serde(default)]
     overwrite: Option<bool>,

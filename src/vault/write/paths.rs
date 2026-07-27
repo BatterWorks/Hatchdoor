@@ -166,22 +166,6 @@ pub(super) fn resolve_existing_attachment_path(
     Ok(path)
 }
 
-pub(super) fn resolve_staged_attachment_path(
-    staging_root: &Path,
-    staged_filename: &str,
-) -> Result<PathBuf, WriteError> {
-    let filename = normalize_staged_filename(staged_filename)?;
-    let staging_root = canonical_root(staging_root)?;
-    let path = staging_root.join(filename);
-    if !path.exists() || !path.is_file() {
-        return Err(WriteError::InvalidInput(format!(
-            "Staged attachment not found: {staged_filename}"
-        )));
-    }
-    ensure_existing_path_inside_root(&staging_root, &path)?;
-    Ok(path)
-}
-
 pub(super) fn ensure_allowed_attachment_path(path: &Path) -> Result<(), WriteError> {
     let extension = path
         .extension()

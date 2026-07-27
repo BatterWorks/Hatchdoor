@@ -4,6 +4,7 @@ mod populate;
 mod queries;
 mod schema;
 
+pub use populate::BuildOptions;
 pub use queries::SemanticHit;
 
 use std::fs;
@@ -237,6 +238,39 @@ impl SqliteCache {
             .optional()
             .map_err(|e| format!("get_metadata({key}): {e}"))?;
         Ok(v)
+    }
+
+    /// The vault's layers (name + optional description), as persisted at the last
+    /// populate. Drives the MCP `layers` enum and its per-value docs, which are
+    /// built at request time when the in-memory `LayerMap` is no longer around.
+    /// A vault with no markers (or a cache from before this key was written)
+    /// returns an empty list, so the MCP surface simply advertises no layers.
+    pub fn layer_catalog(&self) -> Result<Vec<crate::search::LayerInfo>, String> {
+        match self.get_metadata("layer_catalog")? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| format!("failed parsing persisted layer_catalog: {e}")),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Note counts grouped by layer (`None` = the default surface), reflecting
+    /// the last populate. Drives the diagnostics surface's per-layer tally and
+    /// its vanished-marker detection (a layer with notes but no live marker).
+    pub fn layer_note_counts(&self) -> Result<Vec<(Option<String>, i64)>, String> {
+        let conn = self.connection()?;
+        let mut stmt = conn
+            .prepare("SELECT layer, COUNT(*) FROM notes GROUP BY layer ORDER BY layer IS NOT NULL, layer")
+            .map_err(|e| format!("prepare layer_note_counts: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| format!("query layer_note_counts: {e}"))?;
+        let mut counts = Vec::new();
+        for row in rows {
+            counts.push(row.map_err(|e| format!("row layer_note_counts: {e}"))?);
+        }
+        Ok(counts)
     }
 }
 

@@ -12,6 +12,43 @@ fn build(root: &Path) -> VaultIndex {
 }
 
 #[test]
+fn list_note_attachments_reports_the_containing_folders_layer() {
+    let dir = TempDir::new().expect("temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join("sources")).expect("sources dir");
+    fs::write(
+        root.join("sources/.hatchdoor-layer"),
+        "name: sources\ndescription: Raw clippings.\n",
+    )
+    .expect("marker");
+    fs::write(root.join("sources/Clip.md"), "# Clip\n![](diagram.png)").expect("clip");
+    fs::write(root.join("sources/diagram.png"), "png").expect("asset");
+    fs::write(root.join("Wiki.md"), "# Wiki\n![](wiki.png)").expect("wiki");
+    fs::write(root.join("wiki.png"), "png").expect("default asset");
+
+    let index = build(root);
+
+    let clip = index.find_by_slug("clip").expect("clip entry").clone();
+    let clip_assets =
+        list_note_attachments(root, &index.layers, &clip).expect("list clip attachments");
+    assert_eq!(clip_assets.len(), 1);
+    assert_eq!(
+        clip_assets[0].layer.as_deref(),
+        Some("sources"),
+        "an asset in a demoted folder must report that folder's layer"
+    );
+
+    let wiki = index.find_by_slug("wiki").expect("wiki entry").clone();
+    let wiki_assets =
+        list_note_attachments(root, &index.layers, &wiki).expect("list wiki attachments");
+    assert_eq!(wiki_assets.len(), 1);
+    assert_eq!(
+        wiki_assets[0].layer, None,
+        "a default-surface asset reports a null layer"
+    );
+}
+
+#[test]
 fn create_note_rejects_traversal_and_writes_markdown() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();

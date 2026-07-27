@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 
-import type { SearchResult, SearchSelection } from "../types";
-import { UiButton, UiPanel } from "./ui";
+import { UiButton, UiPanel } from "../../components/ui";
+import type { SearchResult, SearchSelection } from "./types";
 
 type NoteGroup = {
   note_slug: string;

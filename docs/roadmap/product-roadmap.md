@@ -6,7 +6,7 @@
   ordering and intent, not committed release dates.
 - Scope: The overall product direction and the workstreams it breaks into. Each
   workstream is a problem to solve; some are detailed in their own document under
-  [`docs/roadmap/`](roadmap/), the rest are stated here to set direction.
+  [`docs/roadmap/`](./), the rest are stated here to set direction.
 
 ## Vision
 
@@ -72,7 +72,20 @@ experience to a publishable bar. Tracked issues:
 Related but broader than pure UI polish: [#13 — Global Settings](https://github.com/BattermanZ/Hatchdoor/issues/13)
 and [#14 — Live editing content](https://github.com/BattermanZ/Hatchdoor/issues/14).
 
-_Horizon: **v2.4** (next feature line)._
+_Horizon: **v2.5.0**._
+
+### PDF preview engine
+
+**Problem:** PDFs kept alongside Markdown notes currently interrupt the reading
+flow: people must leave Hatchdoor or download the attachment merely to inspect
+it.
+
+Direction: provide an in-app, local PDF preview for vault attachments, with
+page navigation, zoom, and a clear route to download or open the original file.
+The preview is for reading existing files; creating or editing PDFs is out of
+scope.
+
+_Horizon: **v2.5.0**._
 
 ### Agent-driven ingestion
 
@@ -90,7 +103,7 @@ single instance serves only one folder. Users need to connect, configure, sync,
 and manage vaults from the product, and eventually run several at once.
 
 Direction: detailed in the
-[vault lifecycle & multi-vault roadmap](roadmap/vault-lifecycle.md). Also includes
+[vault lifecycle & multi-vault roadmap](vault-lifecycle.md). Also includes
 **excluding sub-folders from indexing**
 ([#22](https://github.com/BattermanZ/Hatchdoor/issues/22)) when Hatchdoor points at
 a directory, so parts of a vault can be kept out of the index.

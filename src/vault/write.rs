@@ -10,8 +10,8 @@ mod types;
 mod tests;
 
 pub use attachments::{
-    delete_attachment, import_attachment, import_attachment_bytes, list_note_attachments,
-    move_attachment, rename_attachment,
+    delete_attachment, import_attachment_bytes, list_note_attachments, move_attachment,
+    rename_attachment,
 };
 pub use notes::{
     SectionMode, append_note, archive_note, create_note, delete_note, edit_note,

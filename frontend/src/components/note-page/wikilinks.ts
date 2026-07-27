@@ -22,7 +22,10 @@ export function useResolvedWikilinks(
     void (async () => {
       const matches = [...markdown.matchAll(/(!?)\[\[([^\]]+)\]\]/g)];
       const rawTargets = matches
-        .filter((m) => m[1] !== "!")
+        .filter(
+          (m) =>
+            m[1] !== "!" && !isPdfAssetTarget(parseWikilinkTarget(m[2]).target),
+        )
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
@@ -63,6 +66,11 @@ export function useResolvedWikilinks(
           if (bang === "!") {
             const source = resolveAssetHref(parsed.target, noteRelativePath);
             return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
+          }
+
+          if (isPdfAssetTarget(parsed.target)) {
+            const source = resolveAssetHref(parsed.target, noteRelativePath);
+            return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
           }
 
           const resolved = map.get(parsed.target) ?? null;
@@ -112,6 +120,10 @@ export function resolveAssetHref(
 
   const encoded = normalized.split("/").map(encodeURIComponent).join("/");
   return withAccessToken(`/vault-assets/${encoded}${suffix}`);
+}
+
+function isPdfAssetTarget(target: string): boolean {
+  return splitPathSuffix(target)[0].toLowerCase().endsWith(".pdf");
 }
 
 function splitPathSuffix(input: string): [string, string] {

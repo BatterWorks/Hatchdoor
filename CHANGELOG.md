@@ -1,5 +1,69 @@
 # Changelog
 
+## v2.4.0 - 2026-07-27
+
+### ⚠️ Breaking changes — action required on upgrade
+- **The MCP attachment staging folder is removed.** Agents no longer import
+  attachments by dropping a file into a shared, mounted inbox and calling
+  `import_attachment` with a `staged_filename`. Instead, `import_attachment` now
+  takes the file bytes directly as base64 (`content` + `target_relative_path`),
+  and larger files use the existing multipart `POST /api/attachment`.
+  **Action:** remove the `HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH`,
+  `HOST_ATTACHMENT_STAGING_PATH`, and `HATCHDOOR_MCP_ADVERTISE_HOST_PATHS`
+  variables from your `.env`, and delete the attachments-inbox volume mount from
+  your Docker Compose file. Any agent workflow that placed files in the inbox
+  must switch to sending base64 via `import_attachment` (call
+  `get_attachment_import_config` to see the methods and limits).
+- **`HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES` is renamed to
+  `HATCHDOOR_MAX_ATTACHMENT_BYTES`** (it caps the web UI and HTTP uploads, not
+  just MCP). **Action:** rename it in your `.env` if you set it; otherwise the
+  old name is ignored and the default (10 MiB) applies.
+- **The cache schema is upgraded from 7 to 8 for vault layers.** The generated
+  SQLite cache is rebuilt on the first startup after upgrade. Source Markdown is
+  unchanged, but the initial indexing run re-embeds the vault.
+
+### Added
+- First-run semantic-search setup. Hatchdoor now asks the single user to accept
+  the Gemma terms before downloading the default multilingual EmbeddingGemma
+  model, shows model-download and indexing progress in the UI and logs, and
+  keeps a local acceptance receipt with the persistent model files. Declining
+  Gemma removes its partial files and starts the Nomic Embed Text v1.5 fallback;
+  Nomic is explicitly identified as English-only and lower quality for
+  multilingual vaults. Public images ship neither model.
+- Direct attachment upload for agents: the `import_attachment` MCP tool accepts
+  base64 file bytes inline (universal fallback for any MCP client), capped by the
+  new `HATCHDOOR_MCP_MAX_BASE64_BYTES` (default 5 MiB, measured on the decoded
+  file). `get_attachment_import_config` now enumerates both upload methods, their
+  size limits, and which to use.
+- Vault layers: add a `.hatchdoor-layer` marker to a folder to place its notes
+  on a named, demoted surface. Browser routes remain default-surface only; MCP
+  clients can explicitly select named layers.
+- `HATCHDOOR_EXCLUDE` for comma-separated gitignore-style noise patterns,
+  `HATCHDOOR_EMBED_LAYERS` to opt demoted layers out of vector embedding, and
+  diagnostics via `GET /api/diagnostics` or the `layer_diagnostics` MCP tool.
+- Layer-aware note-write and attachment responses, so automation can tell which
+  surface a created, moved, archived, or uploaded item belongs to.
+- Cross-platform inline previews for linked PDF vault assets, with internal PDF
+  links resolving as vault assets rather than ordinary note links.
+
+### Changed
+- The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
+  legitimately sized upload is not rejected before the tool's own size check.
+- `POST /api/attachment` now accepts the MCP bearer token as an alternative to
+  the web bearer token, so an agent uploading larger files over HTTP can reuse
+  its existing MCP credential instead of needing `HATCHDOOR_WEB_BEARER_TOKEN`
+  provisioned separately. The rest of the web API is unaffected — this route
+  was pulled out of the shared protected-routes group so the MCP token is not
+  granted any broader access.
+- Built-in noise exclusions now omit `.obsidian/`, `.trash/`,
+  `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, and `*.sync-conflict-*` from the
+  index. In particular, Markdown under `.obsidian/` or `.trash/` and Syncthing
+  conflict copies are no longer searchable unless a deployment negates the
+  relevant default with `HATCHDOOR_EXCLUDE`.
+- FastEmbed is upgraded from v4 to v5. Each chunk is now embedded with its note
+  title and heading path as context, improving retrieval relevance while
+  preserving chunk-level search results.
+
 ## v2.3.0 - 2026-07-19
 
 ### Added

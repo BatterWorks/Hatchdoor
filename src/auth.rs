@@ -75,6 +75,51 @@ pub fn redact_query_token(query: &str) -> String {
         .join("&")
 }
 
+/// Either token accepted, shared into the auth layer for routes (like
+/// attachment upload) that an MCP agent needs to reach without provisioning a
+/// second, web-only credential just for that one route.
+#[derive(Clone)]
+pub struct WebOrMcpToken {
+    pub web: Option<Arc<str>>,
+    pub mcp: Option<Arc<str>>,
+}
+
+/// Middleware enforcing either the web bearer token or the MCP bearer token.
+/// Unlike [`require_web_token`], this does not fall back to an `access_token`
+/// query parameter — the routes it guards are hit by out-of-band HTTP clients
+/// (e.g. `curl`), not `<img>`/download navigations, so there is no need to
+/// carry the token in the URL.
+pub async fn require_web_or_mcp_token(
+    State(tokens): State<WebOrMcpToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    let authorized = match presented {
+        Some(presented) => {
+            let matches_web = tokens.web.as_deref().is_some_and(|expected| {
+                constant_time_eq(presented.as_bytes(), expected.as_bytes())
+            });
+            let matches_mcp = tokens.mcp.as_deref().is_some_and(|expected| {
+                constant_time_eq(presented.as_bytes(), expected.as_bytes())
+            });
+            matches_web || matches_mcp
+        }
+        None => false,
+    };
+
+    if authorized {
+        next.run(request).await
+    } else {
+        unauthorized()
+    }
+}
+
 fn access_token_from_query(query: &str) -> Option<String> {
     query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=')?;

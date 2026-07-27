@@ -28,10 +28,17 @@ pub fn retrieve(
         return Ok(Vec::new());
     }
 
-    let eligible = matching_note_slugs(cache, &req.filters)?;
+    let eligible = matching_note_slugs(cache, &req.filters, &req.layers)?;
     let raw_hits: Vec<ChunkHit> = match req.mode {
-        SearchMode::Semantic => semantic(cache, embedder, &req.query, raw_k, eligible.as_ref())?,
-        SearchMode::Keyword => keyword(cache, &req.query, raw_k, eligible.as_ref())?,
+        SearchMode::Semantic => semantic(
+            cache,
+            embedder,
+            &req.query,
+            raw_k,
+            &req.layers,
+            eligible.as_ref(),
+        )?,
+        SearchMode::Keyword => keyword(cache, &req.query, raw_k, &req.layers, eligible.as_ref())?,
     };
 
     Ok(apply_per_note_cap(raw_hits, req.per_note_cap, req.limit))
@@ -42,11 +49,16 @@ fn semantic(
     embedder: &dyn Embedder,
     query: &str,
     k: usize,
+    selection: &crate::search::LayerSelection,
     eligible_slugs: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<ChunkHit>, String> {
     let hits = match eligible_slugs {
-        Some(slugs) => cache.semantic_search_filtered(embedder, query, k, slugs)?,
-        None => cache.semantic_search(embedder, query, k)?,
+        // Note filters present: the accepted slow scan, scoped to the selected
+        // layer tables. Never entered for plain layer separation.
+        Some(slugs) => cache.semantic_search_filtered(embedder, query, k, selection, slugs)?,
+        // No note filters: the fast vec0 KNN path, routed by layer. For the
+        // default surface this is the unfiltered KNN against `chunk_vectors`.
+        None => cache.semantic_search_layered(embedder, query, k, selection)?,
     };
     Ok(hits
         .into_iter()
@@ -64,11 +76,12 @@ fn keyword(
     cache: &SqliteCache,
     query: &str,
     k: usize,
+    selection: &crate::search::LayerSelection,
     eligible_slugs: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<ChunkHit>, String> {
     let hits = match eligible_slugs {
-        Some(slugs) => cache.fts_search_chunks_filtered(query, k, slugs)?,
-        None => cache.fts_search_chunks(query, k)?,
+        Some(slugs) => cache.fts_search_chunks_filtered(query, k, selection, slugs)?,
+        None => cache.fts_search_chunks_layered(query, k, selection)?,
     };
     if hits.is_empty() {
         return Ok(Vec::new());
@@ -155,6 +168,7 @@ mod tests {
             per_note_cap: 2,
             filters: Default::default(),
             include_properties: Vec::new(),
+            layers: crate::search::LayerSelection::default_surface(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(!hits.is_empty());
@@ -181,6 +195,7 @@ mod tests {
             per_note_cap: 2,
             filters: Default::default(),
             include_properties: Vec::new(),
+            layers: crate::search::LayerSelection::default_surface(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(hits.is_empty());
@@ -200,6 +215,7 @@ mod tests {
             per_note_cap: 2,
             filters: Default::default(),
             include_properties: Vec::new(),
+            layers: crate::search::LayerSelection::default_surface(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(!hits.is_empty());
@@ -227,6 +243,7 @@ mod tests {
             per_note_cap: 2,
             filters: Default::default(),
             include_properties: Vec::new(),
+            layers: crate::search::LayerSelection::default_surface(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert!(hits.is_empty());
@@ -246,6 +263,7 @@ mod tests {
             per_note_cap: 1,
             filters: Default::default(),
             include_properties: Vec::new(),
+            layers: crate::search::LayerSelection::default_surface(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert_eq!(hits.len(), 3);
@@ -278,6 +296,7 @@ mod tests {
             per_note_cap: 2,
             filters: Default::default(),
             include_properties: Vec::new(),
+            layers: crate::search::LayerSelection::default_surface(),
         };
         let hits = retrieve(&cache, embedder.as_ref(), &req).expect("retrieve");
         assert_eq!(hits.len(), 1);

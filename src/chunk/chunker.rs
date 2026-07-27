@@ -1,8 +1,8 @@
-use std::sync::Arc;
-
-use tokenizers::Tokenizer;
-
-use super::normalize::{extract_frontmatter_metadata, strip_code_fences, strip_frontmatter};
+use super::normalize::{
+    extract_frontmatter_metadata, in_fenced, strip_code_fences, strip_frontmatter,
+};
+use crate::embed::Embedder;
+use std::ops::Range;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -39,18 +39,24 @@ pub struct NoteChunking {
 }
 
 #[allow(dead_code)]
-pub fn chunk_note(
-    raw_content: &str,
-    tokenizer: Arc<Tokenizer>,
-    opts: ChunkOptions,
-) -> NoteChunking {
-    use text_splitter::{ChunkConfig, MarkdownSplitter};
+pub fn chunk_note(raw_content: &str, embedder: &dyn Embedder, opts: ChunkOptions) -> NoteChunking {
+    use text_splitter::{ChunkConfig, ChunkSizer, MarkdownSplitter};
+
+    struct EmbedderSizer<'a>(&'a dyn Embedder);
+
+    impl ChunkSizer for EmbedderSizer<'_> {
+        fn size(&self, chunk: &str) -> usize {
+            self.0
+                .token_count(chunk, false)
+                .expect("embedder tokenizer must be able to count chunk tokens")
+        }
+    }
 
     let metadata = extract_frontmatter_metadata(raw_content);
     let body = strip_frontmatter(raw_content);
     let normalized = strip_code_fences(body);
 
-    if normalized.trim().is_empty() {
+    if normalized.text.trim().is_empty() {
         return NoteChunking {
             chunks: Vec::new(),
             tags: metadata.tags,
@@ -59,18 +65,19 @@ pub fn chunk_note(
     }
 
     let config = ChunkConfig::new(opts.max_tokens)
-        .with_sizer((*tokenizer).clone())
+        .with_sizer(EmbedderSizer(embedder))
         .with_overlap(opts.overlap_tokens)
         .expect("overlap must be < max_tokens");
     let splitter = MarkdownSplitter::new(config);
 
     let mut chunks = Vec::new();
-    for (ordinal, (byte_start, piece)) in splitter.chunk_indices(&normalized).enumerate() {
+    for (ordinal, (byte_start, piece)) in splitter.chunk_indices(&normalized.text).enumerate() {
         let byte_end = byte_start + piece.len();
         // Scan up to the start of the first non-heading content within this chunk
         // so that headings at the very beginning of a chunk are captured.
-        let heading_scan_end = heading_content_start(piece, byte_start);
-        let heading_path = derive_heading_path(&normalized, heading_scan_end);
+        let heading_scan_end = heading_content_start(piece, byte_start, &normalized.fenced);
+        let heading_path =
+            derive_heading_path(&normalized.text, heading_scan_end, &normalized.fenced);
         let content = piece.to_string();
         let content_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
         chunks.push(Chunk {
@@ -94,14 +101,18 @@ pub fn chunk_note(
 /// Returns the byte offset (relative to `content` start) of the first non-heading
 /// line in `piece`, offset by `piece_start`. This allows headings that open a chunk
 /// to be included in the heading path scan.
-fn heading_content_start(piece: &str, piece_start: usize) -> usize {
+fn heading_content_start(piece: &str, piece_start: usize, fenced: &[Range<usize>]) -> usize {
     let mut offset = piece_start;
-    for line in piece.lines() {
-        let trimmed = line.trim_start();
+    for line in piece.split_inclusive('\n') {
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let trimmed = text.trim_start();
         let level = trimmed.chars().take_while(|c| *c == '#').count();
-        if level > 0 && level <= 3 && !trimmed[level..].trim().is_empty() {
-            // This is a heading line; advance past it (+ 1 for '\n')
-            offset += line.len() + 1;
+        let is_heading = level > 0 && level <= 3 && !trimmed[level..].trim().is_empty();
+        // A `#`-prefixed line inside a fenced code block is not a heading.
+        if is_heading && !in_fenced(fenced, offset) {
+            // This is a heading line; advance past it (the '\n' is included).
+            offset += line.len();
         } else {
             // First non-heading content; stop here
             break;
@@ -111,11 +122,24 @@ fn heading_content_start(piece: &str, piece_start: usize) -> usize {
 }
 
 #[allow(dead_code)]
-fn derive_heading_path(content: &str, byte_offset: usize) -> Option<String> {
+fn derive_heading_path(
+    content: &str,
+    byte_offset: usize,
+    fenced: &[Range<usize>],
+) -> Option<String> {
     let prefix = &content[..byte_offset.min(content.len())];
     let mut stack: [Option<String>; 3] = [None, None, None];
-    for line in prefix.lines() {
-        let trimmed = line.trim_start();
+    let mut pos = 0usize;
+    for line in prefix.split_inclusive('\n') {
+        let line_start = pos;
+        pos += line.len();
+        // A `#`-prefixed line inside a fenced code block is not a heading.
+        if in_fenced(fenced, line_start) {
+            continue;
+        }
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let trimmed = text.trim_start();
         let level = trimmed.chars().take_while(|c| *c == '#').count();
         if level == 0 || level > 3 {
             continue;
@@ -142,20 +166,21 @@ mod tests {
     use super::*;
     use crate::embed::{Embedder, StubEmbedder};
 
-    fn stub_tokenizer() -> Arc<Tokenizer> {
-        StubEmbedder::new(384).tokenizer()
+    fn chunk(content: &str, opts: ChunkOptions) -> NoteChunking {
+        let embedder = StubEmbedder::new(384);
+        chunk_note(content, &embedder, opts)
     }
 
     #[test]
     fn empty_input_produces_no_chunks() {
-        let result = chunk_note("", stub_tokenizer(), ChunkOptions::default());
+        let result = chunk("", ChunkOptions::default());
         assert!(result.chunks.is_empty());
     }
 
     #[test]
     fn small_single_section_produces_one_chunk() {
         let content = "# Heading\n\nA short paragraph.";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         assert_eq!(result.chunks.len(), 1);
         assert_eq!(result.chunks[0].ordinal, 0);
         assert!(result.chunks[0].content.contains("short paragraph"));
@@ -164,8 +189,8 @@ mod tests {
     #[test]
     fn chunks_have_deterministic_blake3_hashes() {
         let content = "# A\n\nbody";
-        let a = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
-        let b = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let a = chunk(content, ChunkOptions::default());
+        let b = chunk(content, ChunkOptions::default());
         assert_eq!(a.chunks, b.chunks);
         assert_eq!(a.chunks[0].content_hash.len(), 64);
     }
@@ -173,9 +198,8 @@ mod tests {
     #[test]
     fn ordinals_are_sequential_from_zero() {
         let content = "# A\nfirst\n\n# B\nsecond\n\n# C\nthird";
-        let result = chunk_note(
+        let result = chunk(
             content,
-            stub_tokenizer(),
             ChunkOptions {
                 max_tokens: 5,
                 overlap_tokens: 0,
@@ -190,7 +214,7 @@ mod tests {
     #[test]
     fn heading_path_reflects_nested_headings() {
         let content = "# Top\n\n## Sub\n\ndeep body";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         let last = result.chunks.last().expect("chunk");
         let path = last.heading_path.as_deref().unwrap_or("");
         assert!(path.contains("Top") || path.contains("Sub"));
@@ -199,7 +223,7 @@ mod tests {
     #[test]
     fn frontmatter_is_stripped_before_chunking() {
         let content = "---\ntags: [x, y]\n---\n\n# A\n\nbody";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         assert!(
             result
                 .chunks
@@ -212,16 +236,59 @@ mod tests {
     #[test]
     fn code_fences_are_stripped_but_code_contents_remain() {
         let content = "# A\n\n```rust\nfn foo() {}\n```\n";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         let joined: String = result.chunks.iter().map(|c| c.content.clone()).collect();
         assert!(joined.contains("fn foo()"));
         assert!(!joined.contains("```"));
     }
 
     #[test]
+    fn shebang_and_comments_inside_code_fences_are_not_headings() {
+        // A `#!/...` shebang and a `# comment` inside a fenced block must not be
+        // parsed as ATX headings and pollute the heading path of later chunks.
+        let content = "\
+# Real Title
+
+```bash
+#!/usr/bin/env bash
+# not a heading
+echo one
+echo two
+```
+
+## Ownership handling
+
+body content that lands in a separate later chunk";
+        let opts = ChunkOptions {
+            max_tokens: 8,
+            overlap_tokens: 0,
+        };
+        let result = chunk(content, opts);
+        assert!(result.chunks.len() >= 2, "expected multiple chunks");
+        for c in &result.chunks {
+            let path = c.heading_path.as_deref().unwrap_or("");
+            assert!(
+                !path.contains("/usr/bin/env"),
+                "fenced shebang leaked into heading path: {path:?}"
+            );
+            assert!(
+                !path.contains("not a heading"),
+                "fenced comment leaked into heading path: {path:?}"
+            );
+        }
+        // The real heading after the fence is still derived correctly.
+        let last = result.chunks.last().expect("chunk");
+        let path = last.heading_path.as_deref().unwrap_or("");
+        assert!(
+            path.contains("Ownership handling"),
+            "real heading lost after fence: {path:?}"
+        );
+    }
+
+    #[test]
     fn wikilinks_are_preserved_literally() {
         let content = "# A\n\nsee [[Other Note]] for context";
-        let result = chunk_note(content, stub_tokenizer(), ChunkOptions::default());
+        let result = chunk(content, ChunkOptions::default());
         let joined: String = result.chunks.iter().map(|c| c.content.clone()).collect();
         assert!(joined.contains("[[Other Note]]"));
     }
@@ -234,13 +301,15 @@ mod tests {
             max_tokens: 50,
             overlap_tokens: 5,
         };
-        let result = chunk_note(&content, stub_tokenizer(), opts);
-        let tokenizer = stub_tokenizer();
+        let embedder = StubEmbedder::new(384);
+        let result = chunk_note(&content, &embedder, opts);
         for chunk in &result.chunks {
-            let encoding = tokenizer
-                .encode(chunk.content.as_str(), false)
-                .expect("encode");
-            assert!(encoding.get_ids().len() <= opts.max_tokens + opts.overlap_tokens);
+            assert!(
+                embedder
+                    .token_count(chunk.content.as_str(), false)
+                    .expect("encode")
+                    <= opts.max_tokens + opts.overlap_tokens
+            );
         }
     }
 }
