@@ -65,6 +65,14 @@ export function createNoteMarkdownComponents(
           </a>
         );
       }
+      if (typeof href === "string" && isPdfHref(href)) {
+        const source = resolveAssetHref(href, noteRelativePath);
+        return (
+          <a href={source} target="_blank" rel="noopener noreferrer">
+            {children}
+          </a>
+        );
+      }
       return <a href={href}>{children}</a>;
     },
     img(props: { src?: string; alt?: string }) {

@@ -18,6 +18,57 @@ afterEach(() => {
 });
 
 describe("App links/download", () => {
+  it("renders a relative Markdown PDF link as a vault asset instead of a note route", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Reports/Home",
+                content:
+                  "Read [the report](vve-energy-saving-scenarios-july-2026.pdf)",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    const link = await screen.findByRole("link", { name: "the report" });
+    expect(link).toHaveAttribute(
+      "href",
+      "/vault-assets/Reports/vve-energy-saving-scenarios-july-2026.pdf",
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/api/resolve-batch"),
+      expect.anything(),
+    );
+  });
+
   it("renders unresolved wikilinks as broken links", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
