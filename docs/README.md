@@ -34,6 +34,8 @@ historical records.
 
 - [`maintenance/dependency-update-plan.md`](maintenance/dependency-update-plan.md)
   — completed dependency-update plan and retained upgrade context.
+- [`maintenance/release-runbook.md`](maintenance/release-runbook.md) — release
+  PR squash-merge and post-merge branch-realignment procedure.
 
 ## Research
 
