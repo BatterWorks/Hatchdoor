@@ -1,5 +1,7 @@
 # Dependency update plan
 
+> Maintenance record.
+
 Status: all seven steps complete. FastEmbed 5 is deferred because it would
 impose an AVX requirement on x86_64 users.
 

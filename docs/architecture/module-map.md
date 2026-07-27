@@ -7,7 +7,7 @@ describes the repository as it exists today; it does not imply that every
 listed boundary should become a package, crate, or feature directory.
 
 Use this map together with
-[`docs/domain-collaboration-plan.md`](../domain-collaboration-plan.md). A work
+[`domain-collaboration-plan.md`](domain-collaboration-plan.md). A work
 packet narrows this catalog to one task and declares any exceptions before work
 starts.
 

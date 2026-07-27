@@ -741,9 +741,11 @@ docker push battermanz/hatchdoor:latest
 
 ## Project Docs
 
-- [Product roadmap](docs/product-roadmap.md): draft overall product direction
+- [Documentation index](docs/README.md): architecture, collaboration, roadmap,
+  research, maintenance, and historical records.
+- [Product roadmap](docs/roadmap/product-roadmap.md): draft overall product direction
   and the workstreams it breaks into.
-- [Design system](docs/design-system.html): visual tokens, component patterns,
+- [Design system](docs/design/design-system.html): visual tokens, component patterns,
   layout rules, and interaction states used by the frontend.
 - [Semantic search strategy](docs/adr/semantic-search-strategy.md): decision
   record for shipping pure semantic search instead of hybrid retrieval or a

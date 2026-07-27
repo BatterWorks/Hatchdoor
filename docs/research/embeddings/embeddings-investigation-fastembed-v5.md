@@ -1,5 +1,7 @@
 # Hatchdoor Embedding & Model Investigation
 
+> Research record.
+>
 > Updated for **FastEmbed v5** and current model options as of **24 July 2026**.
 
 ## Executive recommendation
