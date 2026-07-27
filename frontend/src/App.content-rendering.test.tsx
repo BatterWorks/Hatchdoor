@@ -171,9 +171,7 @@ const x = 1
       );
     });
 
-    fireEvent.click(
-      document.querySelector(".callout-collapsible > summary")!,
-    );
+    fireEvent.click(document.querySelector(".callout-collapsible > summary")!);
     expect(document.querySelector(".callout-collapsible")).toHaveAttribute(
       "open",
     );

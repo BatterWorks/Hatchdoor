@@ -1,7 +1,10 @@
 # Embedding sweep decisions — 2026-07-26
 
+> Research record.
+
 This records the decisions taken while the embedding evaluation was in progress.
-The raw, per-query measurements are in [`eval/results.md`](../eval/results.md).
+The raw, per-query measurements are in
+[`eval/results.md`](../../../eval/results.md).
 
 ## What was completed
 

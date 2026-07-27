@@ -355,7 +355,7 @@ fn available_bytes(path: &Path) -> Result<u64, String> {
         }
         // SAFETY: successful statvfs initializes the output structure.
         let stat = unsafe { stat.assume_init() };
-        return Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64));
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
     }
     #[cfg(not(unix))]
     {
