@@ -78,7 +78,8 @@ under close human review, with tests and a documented safety model.
 - Keyword search and semantic search.
 - Recent notes, backlinks, outbound links, stats, and graph views.
 - Browser write support when the vault mount is writable.
-- Attachment uploads and local asset serving.
+- Attachment uploads, local asset serving, and inline previews for linked PDF
+  vault assets.
 - A first-class MCP server so AI agents can read, search, create, edit, and link
   notes with the same safety as the UI.
 - Optional automatic git commits and pushes for Hatchdoor writes.
@@ -133,11 +134,6 @@ You need:
 - Docker and Docker Compose (Podman and `podman compose` also work)
 - A Markdown vault folder, or an empty folder if you want Hatchdoor to create a
   starter vault
-
-Compatibility note: Hatchdoor intentionally remains on FastEmbed 4. FastEmbed
-5 bundles an ONNX Runtime build that requires AVX on x86_64, so upgrading to it
-would exclude older CPUs. Do not upgrade FastEmbed past v4 until a non-AVX
-runtime path is available and validated.
 
 ### 2. Create Your Config
 
@@ -208,7 +204,7 @@ a retry action instead of silently changing models.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.3.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.4.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -234,7 +230,8 @@ truth.
 - Markdown files live in `VAULT_PATH`.
 - SQLite is a generated cache and can be rebuilt.
 - The SQLite cache should live outside the vault.
-- Hatchdoor scans `.md` files under the vault, excluding `.hatchdoor-trash`.
+- Hatchdoor scans `.md` files under the vault while excluding built-in and
+  configured noise paths (including `.hatchdoor-trash`).
 - Delete actions move notes and referenced assets into `.hatchdoor-trash`.
 - Archive actions move notes under `HATCHDOOR_ARCHIVE_PREFIX`.
 - Browser write actions are available only when the vault is writable.
@@ -683,6 +680,7 @@ Common routes:
 | `GET` | `/api/search?q=...` | Search notes |
 | `GET` | `/api/stats` | Vault stats |
 | `GET` | `/api/graph` | Graph data |
+| `GET` | `/api/diagnostics` | Inspect layer and noise-exclusion diagnostics |
 | `POST` | `/api/refresh` | Trigger cache refresh |
 | `GET` | `/api/vault-events` | Server-sent vault revision events |
 | `GET` | `/api/write-capabilities` | Check write availability |
@@ -734,8 +732,8 @@ Build and publish the Docker image:
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
-docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.3.0
-docker push battermanz/hatchdoor:2.3.0
+docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.4.0
+docker push battermanz/hatchdoor:2.4.0
 docker push battermanz/hatchdoor:latest
 ```
 
