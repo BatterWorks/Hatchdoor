@@ -7,10 +7,23 @@ has passed review and the user has explicitly authorized its merge.
 release branch. Merge `development` into `main` with a squash merge unless the
 user explicitly selects a different strategy.
 
+## Pre-merge release checklist
+
+Before approving or merging the release PR, verify:
+
+- The intended release version is identical in `Cargo.toml`, `Cargo.lock`,
+  `frontend/package.json`, and `frontend/package-lock.json`.
+- `README.md` reflects the release: Docker image-tag examples use the intended
+  version and its documented capabilities, configuration, and API references
+  do not contradict the release changes.
+- `CHANGELOG.md` has an entry for the intended version and records any required
+  upgrade action, including a cache rebuild or reindex when applicable.
+
 ## Merge and realignment
 
-1. Confirm the release PR targets `main`, has the expected `development` head,
-   and has passed its required checks.
+1. Complete the pre-merge release checklist. Confirm the release PR targets
+   `main`, has the expected `development` head, and has passed its required
+   checks.
 2. Squash-merge the PR only after explicit user authorization.
 3. Fetch the remotes and confirm the squash commit is present on remote `main`.
 4. Warn and stop if the local working tree is dirty.
