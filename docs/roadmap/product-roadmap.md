@@ -6,7 +6,7 @@
   ordering and intent, not committed release dates.
 - Scope: The overall product direction and the workstreams it breaks into. Each
   workstream is a problem to solve; some are detailed in their own document under
-  [`docs/roadmap/`](roadmap/), the rest are stated here to set direction.
+  [`docs/roadmap/`](./), the rest are stated here to set direction.
 
 ## Vision
 
@@ -103,7 +103,7 @@ single instance serves only one folder. Users need to connect, configure, sync,
 and manage vaults from the product, and eventually run several at once.
 
 Direction: detailed in the
-[vault lifecycle & multi-vault roadmap](roadmap/vault-lifecycle.md). Also includes
+[vault lifecycle & multi-vault roadmap](vault-lifecycle.md). Also includes
 **excluding sub-folders from indexing**
 ([#22](https://github.com/BattermanZ/Hatchdoor/issues/22)) when Hatchdoor points at
 a directory, so parts of a vault can be kept out of the index.

@@ -4,7 +4,7 @@
 
 Implemented and validated. The durable results and remaining evidence gaps are
 recorded in
-[`docs/architecture/collaboration-pilot-assessment.md`](architecture/collaboration-pilot-assessment.md).
+[`collaboration-pilot-assessment.md`](collaboration-pilot-assessment.md).
 
 ## Goal
 
