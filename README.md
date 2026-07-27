@@ -52,6 +52,7 @@ under close human review, with tests and a documented safety model.
 - [Who It Is For](#who-it-is-for)
 - [Quick Start With Docker](#quick-start-with-docker)
 - [Data And Safety Model](#data-and-safety-model)
+- [Organizing a Vault for an LLM Wiki](#organizing-a-vault-for-an-llm-wiki)
 - [Permissions](#permissions)
 - [Configuration](#configuration)
 - [Using Hatchdoor](#using-hatchdoor)
@@ -263,6 +264,64 @@ These are ordinary notes you can edit, move, or delete like any other. The
 reference notes double as onboarding docs, including a ready-to-use **agent
 skill** template (see [MCP Agent Access](#mcp-agent-access)) for wiring an AI
 agent to the vault through MCP.
+
+## Organizing a Vault for an LLM Wiki
+
+Hatchdoor works well with the [LLM Wiki pattern described by Andrej
+Karpathy](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f):
+keep original source material separate from the Markdown wiki that an LLM
+maintains.
+
+A simple vault layout looks like this:
+
+```text
+vault/
+├── raw/                    # Original articles, clips, transcripts, PDFs, etc.
+│   └── .hatchdoor-layer     # Places raw files on their own Hatchdoor layer
+├── wiki/                   # Markdown pages maintained by you or an LLM
+└── AGENTS.md               # Optional instructions for the agent maintaining the wiki
+```
+
+### Put raw sources on a separate layer
+
+Create this file inside the folder containing your raw source material:
+
+```text
+# raw/.hatchdoor-layer
+raw
+```
+
+The file contents are the layer name. In this example, every Markdown note
+under `raw/` belongs to the `raw` layer. It stays out of Hatchdoor's browser
+interface and default search results, while MCP clients can explicitly select
+it with `layers: ["raw"]`. Use a different name if you prefer, such as
+`sources`, `research`, or `evidence`.
+
+A layer is a visibility and search boundary; it does **not** make files
+read-only. If raw sources must remain unchanged, state that rule in your agent
+instructions (for example, `AGENTS.md` or `CLAUDE.md`).
+
+### Do not confuse layers with exclusions
+
+Use a layer when agents should still be able to read the files separately. Use
+`HATCHDOOR_EXCLUDE` only when Hatchdoor should ignore a path completely:
+
+```env
+HATCHDOOR_EXCLUDE=imports/,*.bak
+```
+
+Do **not** set `HATCHDOOR_EXCLUDE=raw/` if agents need to search or read
+`raw/`: excluded files are absent from Hatchdoor's index.
+
+If your raw layer is large and you want to avoid creating vector embeddings for
+it, set:
+
+```env
+HATCHDOOR_EMBED_LAYERS=false
+```
+
+The raw layer remains available for keyword lookup when an MCP client selects
+it, without using vector-indexing resources.
 
 ## Permissions
 
