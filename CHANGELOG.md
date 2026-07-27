@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.4.0 - 2026-07-27
 
 ### ⚠️ Breaking changes — action required on upgrade
 - **The MCP attachment staging folder is removed.** Agents no longer import
@@ -43,6 +43,8 @@
   diagnostics via `GET /api/diagnostics` or the `layer_diagnostics` MCP tool.
 - Layer-aware note-write and attachment responses, so automation can tell which
   surface a created, moved, archived, or uploaded item belongs to.
+- Cross-platform inline previews for linked PDF vault assets, with internal PDF
+  links resolving as vault assets rather than ordinary note links.
 
 ### Changed
 - The `/mcp` request-body limit is raised to fit base64 attachment inflation so a
@@ -58,6 +60,9 @@
   index. In particular, Markdown under `.obsidian/` or `.trash/` and Syncthing
   conflict copies are no longer searchable unless a deployment negates the
   relevant default with `HATCHDOOR_EXCLUDE`.
+- FastEmbed is upgraded from v4 to v5. Each chunk is now embedded with its note
+  title and heading path as context, improving retrieval relevance while
+  preserving chunk-level search results.
 
 ## v2.3.0 - 2026-07-19
 
