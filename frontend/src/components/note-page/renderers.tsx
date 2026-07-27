@@ -6,6 +6,7 @@ import {
   CodeBlock,
   MermaidDiagram,
 } from "./RendererComponents";
+import { PdfPreview } from "./PdfPreview";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 
@@ -71,6 +72,9 @@ export function createNoteMarkdownComponents(
         typeof props.src === "string"
           ? resolveAssetHref(props.src, noteRelativePath)
           : props.src;
+      if (typeof source === "string" && isPdfHref(source)) {
+        return <PdfPreview src={source} label={props.alt ?? "PDF"} />;
+      }
       return (
         <img
           src={source}
@@ -117,6 +121,10 @@ export function createNoteMarkdownComponents(
       return renderHeading("h6", props.children, headingCounts);
     },
   };
+}
+
+function isPdfHref(href: string): boolean {
+  return href.split(/[?#]/, 1)[0].toLowerCase().endsWith(".pdf");
 }
 
 function renderHeading(
