@@ -5,6 +5,7 @@ frontend/node_modules
 frontend/dist
 /tmp
 /data
+/models
 /vault
 /demo-vault
 /.fastembed_cache

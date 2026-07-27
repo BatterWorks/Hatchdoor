@@ -309,13 +309,18 @@ export function NotePage({
     () => [rehypeKatex, createSearchHighlightPlugin(searchQuery)],
     [searchQuery],
   );
-  const markdownComponents = useMemo(() => {
-    const headingCounts = new Map<string, number>();
-    return createNoteMarkdownComponents(
-      note?.relative_path ?? "",
-      headingCounts,
-    );
-  }, [note?.relative_path]);
+  const headingIdsBySourceLine = useMemo(
+    () => new Map(tocHeadings.map(({ sourceLine, id }) => [sourceLine, id])),
+    [tocHeadings],
+  );
+  const markdownComponents = useMemo(
+    () =>
+      createNoteMarkdownComponents(
+        note?.relative_path ?? "",
+        headingIdsBySourceLine,
+      ),
+    [note?.relative_path, headingIdsBySourceLine],
+  );
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;

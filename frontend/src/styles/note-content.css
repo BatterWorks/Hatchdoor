@@ -23,6 +23,9 @@
 /* Article wrapper */
 .note-content {
   min-width: 0;
+  /* Keep enough trailing scroll range for headings near the end of a note to
+     land at the same top position as headings earlier in the document. */
+  padding-bottom: max(3rem, calc(100dvh - 7rem));
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -162,7 +165,7 @@
 }
 
 .note-body :is(h1, h2, h3, h4, h5, h6) {
-  scroll-margin-top: calc(60px + env(safe-area-inset-top));
+  scroll-margin-top: 1rem;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -871,6 +874,34 @@
   font-style: normal;
   font-size: 0.75em;
   opacity: 0.7;
+}
+
+.note-body a.pdf-link {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.14em;
+}
+
+.pdf-link-badge {
+  display: inline-block;
+  margin-inline-start: 0.36em;
+  padding: 0.08em 0.3em 0.1em;
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: 0.62em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.15;
+  text-decoration: none;
+  vertical-align: 0.12em;
+}
+
+.pdf-link-open {
+  display: inline-block;
+  margin-inline-start: 0.22em;
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  text-decoration: none;
+  vertical-align: 0.08em;
 }
 
 .note-body .mermaid p {

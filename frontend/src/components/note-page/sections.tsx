@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Link } from "react-router-dom";
 
 import { normalizeTags, type FrontmatterValue } from "../../lib/markdown";
@@ -220,12 +221,19 @@ export function NoteTocDesktop({ headings }: { headings: NoteHeading[] }) {
 }
 
 export function NoteTocMobile({ headings }: { headings: NoteHeading[] }) {
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+
   if (headings.length === 0) {
     return null;
   }
 
+  const jumpFromMobileToc = (id: string) => {
+    detailsRef.current?.removeAttribute("open");
+    window.requestAnimationFrame(() => jumpToHeading(id));
+  };
+
   return (
-    <details className="note-toc note-toc-mobile">
+    <details ref={detailsRef} className="note-toc note-toc-mobile">
       <summary>
         <span className="note-toc-mobile-label">On this page</span>
         <span className="note-toc-mobile-count">{headings.length}</span>
@@ -237,7 +245,7 @@ export function NoteTocMobile({ headings }: { headings: NoteHeading[] }) {
               type="button"
               className="note-toc-link"
               data-level={heading.level}
-              onClick={() => jumpToHeading(heading.id)}
+              onClick={() => jumpFromMobileToc(heading.id)}
             >
               {heading.text}
             </button>

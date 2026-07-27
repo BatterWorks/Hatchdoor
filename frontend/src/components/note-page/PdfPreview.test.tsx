@@ -1,5 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PdfPreview } from "./PdfPreview";
 
@@ -17,6 +17,11 @@ describe("PdfPreview", () => {
   beforeEach(() => {
     mocks.getDocument.mockReset();
     mocks.workerOptions.workerSrc = "";
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("shows an accessible loading state and retains a direct-open fallback", () => {
@@ -75,5 +80,48 @@ describe("PdfPreview", () => {
     );
 
     expect(firstTask.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("renders at 2x backing resolution on a 1x display", async () => {
+    const renderPage = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
+    const page = {
+      getViewport: ({ scale }: { scale: number }) => ({
+        width: 600 * scale,
+        height: 800 * scale,
+      }),
+      render: renderPage,
+      cleanup: vi.fn(),
+    };
+    mocks.getDocument.mockReturnValue({
+      promise: Promise.resolve({
+        numPages: 1,
+        getPage: vi.fn().mockResolvedValue(page),
+        destroy: vi.fn(),
+      }),
+      destroy: vi.fn(),
+    });
+    vi.stubGlobal("ResizeObserver", undefined);
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      {} as CanvasRenderingContext2D,
+    );
+    Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get() {
+        return this.classList.contains("pdf-preview") ? 300 : 0;
+      },
+    });
+    Object.defineProperty(window, "devicePixelRatio", {
+      configurable: true,
+      value: 1,
+    });
+
+    const { container } = render(<PdfPreview src="/vault-assets/sample.pdf" label="Sample" />);
+
+    await waitFor(() => expect(renderPage).toHaveBeenCalledOnce());
+
+    const canvas = container.querySelector("canvas");
+    expect(canvas).toHaveAttribute("style", expect.stringContaining("width: 300px"));
+    expect(canvas).toHaveProperty("width", 600);
+    expect(canvas).toHaveProperty("height", 800);
   });
 });

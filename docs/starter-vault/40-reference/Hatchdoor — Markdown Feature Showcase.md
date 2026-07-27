@@ -91,7 +91,7 @@ Tables scroll horizontally on small screens.
 > [!summary]+
 > A collapsible summary callout that starts open.
 
-> [!abstract]-
+> [!abstract]- Click to expand
 > A collapsible abstract callout that starts closed.
 
 ## Code blocks
@@ -146,6 +146,14 @@ Use local Markdown image syntax:
 ```
 
 Store images near the note when possible, and use safe filenames with lowercase ASCII letters, numbers, and hyphens.
+
+## PDFs
+
+An ordinary Markdown PDF link is marked as a document and opens in a new tab: [Open the PDF preview sample](pdf-preview-sample.pdf).
+
+The same local attachment can be embedded with Obsidian syntax. It renders an inline, responsive preview with page controls:
+
+![[pdf-preview-sample.pdf]]
 
 ## Wikilinks
 
