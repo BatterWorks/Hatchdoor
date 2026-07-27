@@ -121,7 +121,7 @@ export function PdfPreview({ src, label }: { src: string; label: string }) {
           return;
         }
         const naturalViewport = page.getViewport({ scale: 1 });
-        const deviceScale = window.devicePixelRatio || 1;
+        const deviceScale = Math.max(window.devicePixelRatio || 1, 2);
         const scale =
           (Math.min(width, 960) / naturalViewport.width) * deviceScale;
         const viewport = page.getViewport({ scale });

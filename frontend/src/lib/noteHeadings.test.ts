@@ -15,8 +15,8 @@ describe("noteHeadings", () => {
     );
 
     expect(headings).toEqual([
-      { level: 1, text: "Title", id: "title" },
-      { level: 2, text: "Overview", id: "overview" },
+      { level: 1, text: "Title", id: "title", sourceLine: 1 },
+      { level: 2, text: "Overview", id: "overview", sourceLine: 6 },
     ]);
   });
 
@@ -35,7 +35,7 @@ describe("noteHeadings", () => {
     const headings = extractMarkdownHeadings("## [[Project/Plan|Plan Home]]");
 
     expect(headings).toEqual([
-      { level: 2, text: "Plan Home", id: "plan-home" },
+      { level: 2, text: "Plan Home", id: "plan-home", sourceLine: 1 },
     ]);
   });
 });

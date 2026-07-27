@@ -15,5 +15,9 @@ export function scrollElementIntoView(
 
 export function jumpToHeading(id: string): void {
   const heading = document.getElementById(id);
-  scrollElementIntoView(heading, { block: "start", inline: "nearest" });
+  scrollElementIntoView(heading, {
+    behavior: "smooth",
+    block: "start",
+    inline: "nearest",
+  });
 }

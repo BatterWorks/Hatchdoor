@@ -58,11 +58,18 @@ describe("App links/download", () => {
       </MemoryRouter>,
     );
 
-    const link = await screen.findByRole("link", { name: "the report" });
+    const link = await screen.findByRole("link", {
+      name: "the report (PDF document, opens in a new tab)",
+    });
     expect(link).toHaveAttribute(
       "href",
       "/vault-assets/Reports/vve-energy-saving-scenarios-july-2026.pdf",
     );
+    expect(link).toHaveClass("pdf-link");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
+    expect(link.querySelector(".pdf-link-badge")).toHaveTextContent("PDF");
+    expect(link.querySelector(".pdf-link-open")).toHaveTextContent("↗");
     expect(fetchMock).not.toHaveBeenCalledWith(
       expect.stringContaining("/api/resolve-batch"),
       expect.anything(),
