@@ -10,7 +10,7 @@ import mainSource from "./main.tsx?raw";
 import graphCss from "./styles/graph.css?raw";
 import explorerCss from "./styles/layout-explorer.css?raw";
 import responsiveCss from "./styles/responsive.css?raw";
-import searchCss from "./styles/search.css?raw";
+import searchCss from "./features/search/search.css?raw";
 import topbarCss from "./styles/topbar.css?raw";
 import uiCss from "./styles/ui-common.css?raw";
 import indexHtml from "../index.html?raw";

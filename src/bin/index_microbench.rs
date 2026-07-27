@@ -3,8 +3,9 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use hatchdoor::embed::contextual_document;
 use rusqlite::{Connection, OpenFlags};
-use tokenizers::Tokenizer;
+use tokenizers_fe::Tokenizer;
 
 const DOC_PREFIX: &str = "search_document: ";
 const DEFAULT_CACHE: &str = "data/cache/hatchdoor-cache.sqlite3";
@@ -14,8 +15,23 @@ const SAMPLE_NOTES: usize = 16;
 struct CachedChunk {
     note_slug: String,
     ordinal: i64,
+    title: String,
+    heading_path: Option<String>,
     content: String,
     raw_tokens: usize,
+}
+
+impl CachedChunk {
+    /// The exact text the indexing pipeline embeds for this chunk: the model
+    /// document prefix wrapped around the shared contextual document (title +
+    /// heading path + body). Mirrors production so token counts and latency
+    /// stay representative.
+    fn embed_input(&self) -> String {
+        format!(
+            "{DOC_PREFIX}{}",
+            contextual_document(&self.title, self.heading_path.as_deref(), &self.content)
+        )
+    }
 }
 
 struct BenchResult {
@@ -35,7 +51,7 @@ fn main() -> Result<(), String> {
     println!("Index microbenchmark (read-only; cache will not be modified)");
     println!("cache={cache_path} chunks={}", rows.len());
 
-    let model_512 = load_model(512)?;
+    let mut model_512 = load_model(512)?;
     let raw_tokenizer = untruncated_tokenizer(&model_512.tokenizer)?;
     let chunks = measure_raw_tokens(rows, &raw_tokenizer)?;
     print_truncation_report(&chunks);
@@ -50,15 +66,15 @@ fn main() -> Result<(), String> {
         sample_raw_tokens
     );
 
-    warm_up(&model_512)?;
-    let current = bench_per_note(&model_512, &sample)?;
-    let no_padding_512 = bench_individual(&model_512, &sample)?;
+    warm_up(&mut model_512)?;
+    let current = bench_per_note(&mut model_512, &sample)?;
+    let no_padding_512 = bench_individual(&mut model_512, &sample)?;
     drop(model_512);
 
-    let model_1024 = load_model(1024)?;
-    warm_up(&model_1024)?;
-    let expanded = bench_per_note(&model_1024, &sample)?;
-    let no_padding_1024 = bench_individual(&model_1024, &sample)?;
+    let mut model_1024 = load_model(1024)?;
+    warm_up(&mut model_1024)?;
+    let expanded = bench_per_note(&mut model_1024, &sample)?;
+    let no_padding_1024 = bench_individual(&mut model_1024, &sample)?;
 
     println!();
     println!("Paired inference timings on the same sample:");
@@ -117,17 +133,31 @@ fn load_model(max_length: usize) -> Result<TextEmbedding, String> {
     .map_err(|error| format!("failed loading Nomic model at max_length={max_length}: {error}"))
 }
 
-fn read_chunks(path: &str) -> Result<Vec<(String, i64, String)>, String> {
+type ChunkRow = (String, i64, String, Option<String>, String);
+
+fn read_chunks(path: &str) -> Result<Vec<ChunkRow>, String> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| format!("failed opening cache read-only: {error}"))?;
     let mut statement = connection
-        .prepare("SELECT note_slug, ordinal, content FROM chunks ORDER BY note_slug, ordinal")
+        .prepare(
+            "SELECT c.note_slug, c.ordinal, n.title, c.heading_path, c.content \
+             FROM chunks c JOIN notes n ON n.slug = c.note_slug \
+             ORDER BY c.note_slug, c.ordinal",
+        )
         .map_err(|error| format!("failed preparing chunk query: {error}"))?;
     let rows = statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
         .map_err(|error| format!("failed querying chunks: {error}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed reading chunks: {error}"))
@@ -143,23 +173,30 @@ fn untruncated_tokenizer(tokenizer: &Tokenizer) -> Result<Tokenizer, String> {
 }
 
 fn measure_raw_tokens(
-    rows: Vec<(String, i64, String)>,
+    rows: Vec<ChunkRow>,
     tokenizer: &Tokenizer,
 ) -> Result<Vec<CachedChunk>, String> {
     rows.into_iter()
-        .map(|(note_slug, ordinal, content)| {
-            let input = format!("{DOC_PREFIX}{content}");
-            let raw_tokens = tokenizer
-                .encode(input, true)
-                .map_err(|error| format!("failed tokenizing {note_slug}#{ordinal}: {error}"))?
-                .get_ids()
-                .len();
-            Ok(CachedChunk {
+        .map(|(note_slug, ordinal, title, heading_path, content)| {
+            let mut chunk = CachedChunk {
                 note_slug,
                 ordinal,
+                title,
+                heading_path,
                 content,
-                raw_tokens,
-            })
+                raw_tokens: 0,
+            };
+            chunk.raw_tokens = tokenizer
+                .encode(chunk.embed_input(), true)
+                .map_err(|error| {
+                    format!(
+                        "failed tokenizing {}#{}: {error}",
+                        chunk.note_slug, chunk.ordinal
+                    )
+                })?
+                .get_ids()
+                .len();
+            Ok(chunk)
         })
         .collect()
 }
@@ -222,7 +259,7 @@ fn select_note_sample(chunks: &[CachedChunk], target_notes: usize) -> Vec<Vec<Ca
         .collect()
 }
 
-fn warm_up(model: &TextEmbedding) -> Result<(), String> {
+fn warm_up(model: &mut TextEmbedding) -> Result<(), String> {
     model
         .embed(vec![format!("{DOC_PREFIX}warm up")], None)
         .map(|_| ())
@@ -230,7 +267,7 @@ fn warm_up(model: &TextEmbedding) -> Result<(), String> {
 }
 
 fn bench_per_note(
-    model: &TextEmbedding,
+    model: &mut TextEmbedding,
     notes: &[Vec<CachedChunk>],
 ) -> Result<BenchResult, String> {
     let started = Instant::now();
@@ -238,7 +275,7 @@ fn bench_per_note(
     for note in notes {
         let inputs = note
             .iter()
-            .map(|chunk| format!("{DOC_PREFIX}{}", chunk.content))
+            .map(CachedChunk::embed_input)
             .collect::<Vec<_>>();
         vectors.extend(
             model
@@ -253,7 +290,7 @@ fn bench_per_note(
 }
 
 fn bench_individual(
-    model: &TextEmbedding,
+    model: &mut TextEmbedding,
     notes: &[Vec<CachedChunk>],
 ) -> Result<BenchResult, String> {
     let started = Instant::now();
@@ -261,7 +298,7 @@ fn bench_individual(
     for chunk in notes.iter().flatten() {
         vectors.extend(
             model
-                .embed(vec![format!("{DOC_PREFIX}{}", chunk.content)], None)
+                .embed(vec![chunk.embed_input()], None)
                 .map_err(|error| {
                     format!(
                         "individual benchmark embed failed for {}#{}: {error}",

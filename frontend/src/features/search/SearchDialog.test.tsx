@@ -2,8 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { SearchResult } from "../types";
-import { SearchDialog } from "./SearchDialog";
+import { SearchDialog, type SearchResult } from ".";
 
 function renderDialog(
   overrides?: Partial<ComponentProps<typeof SearchDialog>>,

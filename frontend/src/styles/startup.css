@@ -86,6 +86,71 @@
   line-height: 1.5;
 }
 
+.startup-terms {
+  max-width: 620px;
+  margin: var(--space-6) 0 var(--space-10);
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.55;
+}
+
+.startup-terms p {
+  margin: 0 0 var(--space-4);
+}
+
+.startup-terms a {
+  color: var(--ink);
+  text-decoration-color: var(--hot);
+  text-underline-offset: 0.2em;
+}
+
+.startup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+.startup-primary,
+.startup-secondary {
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  padding: 0.72rem 1rem;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease),
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.startup-primary {
+  background: var(--ink);
+  color: var(--bg);
+}
+.startup-secondary {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--rule-strong);
+}
+.startup-primary:hover {
+  background: var(--hot);
+  border-color: var(--hot);
+}
+.startup-secondary:hover {
+  border-color: var(--ink);
+}
+.startup-primary:active,
+.startup-secondary:active {
+  transform: translateY(1px);
+}
+
+.startup-fallback-note {
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
 .startup-progress {
   position: relative;
   height: 8px;

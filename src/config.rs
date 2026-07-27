@@ -21,6 +21,13 @@ pub struct AppConfig {
     pub demo_mode: bool,
     /// Folder prefix (with trailing slash) treated as archived in resolve results.
     pub archive_prefix: String,
+    /// Extra noise-exclusion patterns from `HATCHDOOR_EXCLUDE` (gitignore
+    /// syntax), appended to the built-in defaults. Empty when unset.
+    pub exclude_patterns: Vec<String>,
+    /// Whether demoted-layer vectors are embedded (`HATCHDOOR_EMBED_LAYERS`,
+    /// default true). Surfaced here only for the effective-config startup log;
+    /// the cache reads the same env var when it persists the value.
+    pub embed_layers: bool,
 }
 
 impl AppConfig {
@@ -42,6 +49,12 @@ impl AppConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "90-archive/".to_string());
+        let exclude_patterns = env::var("HATCHDOOR_EXCLUDE")
+            .map(|value| parse_exclude_patterns(&value))
+            .unwrap_or_default();
+        let embed_layers = env::var("HATCHDOOR_EMBED_LAYERS")
+            .map(|value| is_truthy(&value))
+            .unwrap_or(true);
 
         let port = parse_port(&port_raw)?;
 
@@ -53,6 +66,8 @@ impl AppConfig {
             web_bearer_token,
             demo_mode,
             archive_prefix,
+            exclude_patterns,
+            embed_layers,
         })
     }
 
@@ -67,6 +82,17 @@ pub fn parse_port(input: &str) -> Result<u16, String> {
     input
         .parse::<u16>()
         .map_err(|e| format!("invalid PORT '{input}': {e}"))
+}
+
+/// Split a comma-separated `HATCHDOOR_EXCLUDE` value into individual gitignore
+/// patterns, trimming surrounding whitespace and dropping empty entries so a
+/// trailing comma or accidental double comma does not produce a blank pattern.
+pub fn parse_exclude_patterns(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|pattern| pattern.trim())
+        .filter(|pattern| !pattern.is_empty())
+        .map(|pattern| pattern.to_string())
+        .collect()
 }
 
 fn is_truthy(value: &str) -> bool {
@@ -103,6 +129,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_exclude_patterns_trims_and_drops_blanks() {
+        assert_eq!(
+            parse_exclude_patterns("build/, *.log ,, !.DS_Store"),
+            vec![
+                "build/".to_string(),
+                "*.log".to_string(),
+                "!.DS_Store".to_string(),
+            ]
+        );
+        assert!(parse_exclude_patterns("   ").is_empty());
+        assert!(parse_exclude_patterns("").is_empty());
+    }
+
+    #[test]
     fn socket_addr_builds_expected_address() {
         let cfg = AppConfig {
             vault_path: PathBuf::from("./vault"),
@@ -112,6 +152,8 @@ mod tests {
             web_bearer_token: None,
             demo_mode: true,
             archive_prefix: "90-archive/".to_string(),
+            exclude_patterns: Vec::new(),
+            embed_layers: true,
         };
 
         let addr = cfg.socket_addr().expect("valid addr");

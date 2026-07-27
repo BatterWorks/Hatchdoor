@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 
 use crate::cache::SemanticHit;
@@ -6,7 +8,10 @@ use super::reranker::{RerankedHit, Reranker};
 
 /// fastembed-backed cross-encoder reranker.
 pub struct FastembedReranker {
-    model: TextRerank,
+    // FastEmbed 5's `TextRerank::rerank` takes `&mut self` (Rayon dropped);
+    // the `Reranker` trait is `&self` behind a shared `Arc`, so serialize
+    // scoring through a Mutex.
+    model: Mutex<TextRerank>,
     id: &'static str,
 }
 
@@ -15,7 +20,10 @@ impl FastembedReranker {
         let model =
             TextRerank::try_new(RerankInitOptions::new(model).with_show_download_progress(false))
                 .map_err(|e| format!("failed to load reranker {id}: {e}"))?;
-        Ok(Self { model, id })
+        Ok(Self {
+            model: Mutex::new(model),
+            id,
+        })
     }
 
     pub fn id(&self) -> &'static str {
@@ -53,6 +61,8 @@ impl Reranker for FastembedReranker {
         let documents: Vec<&str> = candidates.iter().map(|c| c.content.as_str()).collect();
         let scored = self
             .model
+            .lock()
+            .map_err(|e| format!("reranker mutex poisoned: {e}"))?
             .rerank(query, documents, false, None)
             .map_err(|e| format!("rerank call failed: {e}"))?;
 

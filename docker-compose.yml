@@ -13,7 +13,9 @@ services:
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
       - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
-      - ${HOST_ATTACHMENT_STAGING_PATH:-./data/attachments-inbox}:${HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH:-/data/attachments-inbox}
+      # Model downloads and the local Gemma acceptance record persist across
+      # image upgrades. Bind-mount this directory to avoid re-downloading.
+      - ${HOST_MODELS_PATH:-./models}:/models
     restart: unless-stopped
     healthcheck:
       # Distroless runtime has no shell/curl, so the binary probes its own

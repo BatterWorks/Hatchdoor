@@ -78,7 +78,8 @@ under close human review, with tests and a documented safety model.
 - Keyword search and semantic search.
 - Recent notes, backlinks, outbound links, stats, and graph views.
 - Browser write support when the vault mount is writable.
-- Attachment uploads and local asset serving.
+- Attachment uploads, local asset serving, and inline previews for linked PDF
+  vault assets.
 - A first-class MCP server so AI agents can read, search, create, edit, and link
   notes with the same safety as the UI.
 - Optional automatic git commits and pushes for Hatchdoor writes.
@@ -147,6 +148,7 @@ Edit `.env` and set at least these values:
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 HOST_CACHE_PATH=./data/cache
+HOST_MODELS_PATH=./models
 HATCHDOOR_WEB_BEARER_TOKEN=choose-a-long-random-token
 ```
 
@@ -154,6 +156,7 @@ What these mean:
 
 - `HOST_VAULT_PATH` is your Markdown vault on the host machine.
 - `HOST_CACHE_PATH` stores Hatchdoor's generated SQLite cache.
+- `HOST_MODELS_PATH` stores downloaded search models and the local Gemma terms receipt.
 - `HATCHDOOR_WEB_BEARER_TOKEN` protects your notes in the browser.
 
 Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so the
@@ -174,12 +177,34 @@ http://localhost:42824
 
 Enter the web bearer token when prompted.
 
-### 4. Container Image And Paths
+### 4. Choose Your Search Model
+
+Hatchdoor images include no model weights. On the first launch, Hatchdoor asks
+you to choose how semantic search is set up before it downloads anything.
+
+- **Set up Gemma** is the default. EmbeddingGemma is multilingual and provides
+  the best search quality. Read and accept the Gemma terms in the web UI (or
+  through the first-run MCP setup tools); Hatchdoor then downloads the model,
+  scans the vault, and builds the index automatically.
+- **Use Nomic instead** declines Gemma and starts the same setup with Nomic
+  Embed Text v1.5. It needs no Gemma acceptance, but it is English-only and is
+  less suitable for multilingual vaults.
+
+Accepting the Gemma terms only permits Hatchdoor to download and use that model.
+It does not change ownership of your vault or its content, and Hatchdoor does
+not send vault content anywhere. The downloaded model and the local acceptance
+receipt stay in `HOST_MODELS_PATH`, so they persist across container restarts.
+
+The UI and logs show download and indexing progress. Vault features remain
+unavailable until setup is ready; if a model download fails, Hatchdoor presents
+a retry action instead of silently changing models.
+
+### 5. Container Image And Paths
 
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.3.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.4.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -195,7 +220,7 @@ Docker Compose mounts:
 | --- | --- |
 | `/data/vault` | Markdown vault, source of truth |
 | `/data/cache` | Generated SQLite cache |
-| `/data/attachments-inbox` | Temporary staging folder for MCP attachment import |
+| `/models` | Downloaded search model and local Gemma terms receipt |
 
 ## Data And Safety Model
 
@@ -205,7 +230,8 @@ truth.
 - Markdown files live in `VAULT_PATH`.
 - SQLite is a generated cache and can be rebuilt.
 - The SQLite cache should live outside the vault.
-- Hatchdoor scans `.md` files under the vault, excluding `.hatchdoor-trash`.
+- Hatchdoor scans `.md` files under the vault while excluding built-in and
+  configured noise paths (including `.hatchdoor-trash`).
 - Delete actions move notes and referenced assets into `.hatchdoor-trash`.
 - Archive actions move notes under `HATCHDOOR_ARCHIVE_PREFIX`.
 - Browser write actions are available only when the vault is writable.
@@ -251,8 +277,6 @@ For browser writes, MCP writes, attachment uploads, or git sync:
 
 - The vault mount must be writable by the container runtime user.
 - The cache directory must be writable.
-- The attachment staging directory must be writable when MCP attachment import is
-  enabled.
 
 If Hatchdoor starts but write features are disabled, check the permissions on
 your vault mount and call `/api/write-capabilities` from an authenticated
@@ -268,6 +292,7 @@ Copy `.env.example` to `.env` and adjust values.
 | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | Host-side vault path for Docker Compose |
 | `HOST_CACHE_PATH` | `./data/cache` | Host-side cache directory for Docker Compose |
+| `HOST_MODELS_PATH` | `./models` | Persistent downloaded-model directory for Docker Compose |
 | `VAULT_PATH` | `/data/vault` | Runtime vault path read by Hatchdoor |
 | `HATCHDOOR_CACHE_DB` | `/data/cache/hatchdoor-cache.sqlite3` | Runtime SQLite cache file |
 | `HOST` | `127.0.0.1` | Bind host for local `cargo run` |
@@ -321,6 +346,8 @@ reverse proxy (e.g. nginx `limit_req`, Caddy `rate_limit`, or Traefik
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | Vault-relative folder prefix used by archive actions and archived-link styling |
+| `HATCHDOOR_EXCLUDE` | empty | Comma-separated gitignore-style paths to omit from indexing, appended after the built-in noise rules |
+| `HATCHDOOR_EMBED_LAYERS` | `true` | Set to `false` to keep demoted layers keyword-searchable but skip their vector embeddings |
 
 ## Using Hatchdoor
 
@@ -329,6 +356,63 @@ reverse proxy (e.g. nginx `limit_req`, Caddy `rate_limit`, or Traefik
 Hatchdoor builds a folder explorer from your vault folders and Markdown files.
 The UI root is named `Vault`. Folder names come directly from your filesystem;
 Hatchdoor does not require a PARA, Zettelkasten, or numbered folder scheme.
+
+### Vault Layers And Exclusions
+
+A folder can place its notes on a named, demoted layer by adding a
+`.hatchdoor-layer` file. The smallest useful marker is a YAML scalar:
+
+```text
+# sources/.hatchdoor-layer
+sources
+```
+
+Every Markdown note below `sources/` is then assigned to the `sources` layer.
+It is absent from the browser tree, browser search, and other default-surface
+results, while remaining available to trusted MCP clients that explicitly select
+that layer. A mapping marker can add an operator-facing description:
+
+```yaml
+name: sources
+description: Ground-truth clips and reference material.
+```
+
+Nested markers override their parent. Use `name: default` in a nested folder to
+bring that subtree back to the default surface. Named markers cannot live at the
+vault root, and `default`, `all`, `noise`, and `none` cannot be layer names.
+
+MCP read and search tools default to the default surface. Pass
+`layers: ["sources"]` to select one named layer, `layers: ["default",
+"sources"]` to include both, or `layers: ["all"]` for every layer. `get_note`
+can fetch a known note by slug or vault-relative path regardless of its layer.
+The browser intentionally has no layer selector.
+
+Noise patterns prevent files from entering the index. Hatchdoor always excludes
+`.obsidian/`, `.trash/`, `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, and
+`*.sync-conflict-*`; `.hatchdoor-layer` files are always read even if a broad
+pattern would otherwise match them. Add deployment-specific patterns with a
+comma-separated environment value:
+
+```env
+HATCHDOOR_EXCLUDE=imports/,*.bak
+```
+
+Patterns use gitignore syntax and are applied after the built-ins, so a leading
+`!` can reinstate a default pattern when needed:
+
+```env
+HATCHDOOR_EXCLUDE=!*.sync-conflict-*
+```
+
+Writes to an excluded target are refused rather than creating a file that the
+index would hide. Marker changes trigger a full reindex; if a malformed marker
+causes startup indexing to fail, correcting it lets the vault watcher recover
+without restarting the server.
+
+To inspect the active rules, markers, layer counts, and conflicts, call
+`GET /api/diagnostics` (optionally `?path=sources/Clip.md`) or the MCP
+`layer_diagnostics` tool. Diagnostics are disabled in demo mode because they can
+reveal demoted paths.
 
 ### Note URLs And Links
 
@@ -434,20 +518,29 @@ teach the agent Hatchdoor's conventions: search before editing, pass the
 returned content hash on writes, prefer small edits, and let Hatchdoor manage
 backlinks, moves, and git sync.
 
-### MCP Attachment Import
+### Attachment Upload
 
-Attachment import uses a staging folder outside the vault:
+Agents and the web UI upload attachments directly — no shared staging folder to
+mount. Two paths cover the size/compatibility trade-off:
+
+- **`POST /api/attachment`** (multipart) — the default. Used by the web UI and
+  by any agent that can make an HTTP request (e.g. shell out to `curl`).
+  Accepts either the web bearer token or the MCP bearer token, so an MCP agent
+  can reuse its existing credential. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES`
+  (default 10 MiB).
+- **`import_attachment` MCP tool** — the fallback, for MCP clients that cannot
+  make an out-of-band HTTP request. Sends the file bytes base64-encoded inline;
+  works with any MCP client, but base64 rides inside the JSON-RPC message and
+  gets unreliable as files grow. Capped by `HATCHDOOR_MCP_MAX_BASE64_BYTES`
+  (default 5 MiB), measured on the decoded file.
 
 ```env
-HOST_ATTACHMENT_STAGING_PATH=./data/attachments-inbox
-HATCHDOOR_MCP_ATTACHMENT_STAGING_PATH=/data/attachments-inbox
-HATCHDOOR_MCP_MAX_ATTACHMENT_BYTES=10485760
-HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=false
+HATCHDOOR_MCP_MAX_BASE64_BYTES=5242880
+HATCHDOOR_MAX_ATTACHMENT_BYTES=10485760
 ```
 
-Set `HATCHDOOR_MCP_ADVERTISE_HOST_PATHS=true` only for local/dev agents that
-need to see the host staging path. Keep it false for shared or remote
-deployments.
+Agents can call `get_attachment_import_config` to discover both methods, their
+size limits, and which to use.
 
 ## Git Sync
 
@@ -511,11 +604,8 @@ cd frontend
 npm run dev
 ```
 
-Optional: prefetch the embedder model used by semantic search:
-
-```bash
-cargo run -- --prefetch-embedder
-```
+The first-run model choice also applies to local development. Hatchdoor stores
+models in `./models` by default, so no model-prefetch command is required.
 
 ## Troubleshooting
 
@@ -590,6 +680,7 @@ Common routes:
 | `GET` | `/api/search?q=...` | Search notes |
 | `GET` | `/api/stats` | Vault stats |
 | `GET` | `/api/graph` | Graph data |
+| `GET` | `/api/diagnostics` | Inspect layer and noise-exclusion diagnostics |
 | `POST` | `/api/refresh` | Trigger cache refresh |
 | `GET` | `/api/vault-events` | Server-sent vault revision events |
 | `GET` | `/api/write-capabilities` | Check write availability |
@@ -641,16 +732,18 @@ Build and publish the Docker image:
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
-docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.3.0
-docker push battermanz/hatchdoor:2.3.0
+docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.4.0
+docker push battermanz/hatchdoor:2.4.0
 docker push battermanz/hatchdoor:latest
 ```
 
 ## Project Docs
 
-- [Product roadmap](docs/product-roadmap.md): draft overall product direction
+- [Documentation index](docs/README.md): architecture, collaboration, roadmap,
+  research, maintenance, and historical records.
+- [Product roadmap](docs/roadmap/product-roadmap.md): draft overall product direction
   and the workstreams it breaks into.
-- [Design system](docs/design-system.html): visual tokens, component patterns,
+- [Design system](docs/design/design-system.html): visual tokens, component patterns,
   layout rules, and interaction states used by the frontend.
 - [Semantic search strategy](docs/adr/semantic-search-strategy.md): decision
   record for shipping pure semantic search instead of hybrid retrieval or a

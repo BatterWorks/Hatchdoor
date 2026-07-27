@@ -5,6 +5,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -111,7 +112,7 @@ const x = 1
     expect(document.querySelector(".note-content > pre")).toBeNull();
   });
 
-  it("renders collapsible callouts from obsidian marker syntax", async () => {
+  it("expands a closed callout whose body follows its marker on the next line", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -133,9 +134,8 @@ const x = 1
                 title: "Home",
                 slug: "home",
                 relative_path: "Home",
-                content: `> [!warning]- Hidden details
->
-> Secret text`,
+                content: `> [!abstract]-
+> A collapsible callout that starts **closed** (\`[!abstract]-\`). Click to expand.`,
               },
             }),
             { status: 200 },
@@ -159,8 +159,100 @@ const x = 1
     await waitFor(() => {
       const collapsible = document.querySelector(".callout-collapsible");
       expect(collapsible).not.toBeNull();
-      expect(collapsible?.textContent).toContain("Hidden details");
+      expect(collapsible?.textContent).toContain(
+        "A collapsible callout that starts closed",
+      );
       expect(collapsible).not.toHaveAttribute("open");
+      expect(collapsible?.querySelector("summary")).toHaveTextContent(
+        "Abstract",
+      );
+      expect(collapsible?.querySelector(".callout-body")).toHaveTextContent(
+        "A collapsible callout that starts closed",
+      );
+    });
+
+    fireEvent.click(document.querySelector(".callout-collapsible > summary")!);
+    expect(document.querySelector(".callout-collapsible")).toHaveAttribute(
+      "open",
+    );
+  });
+
+  it("keeps table-of-contents targets stable after the note re-renders", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home/links")) {
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "# Home\n\n## Target section\n\nBody",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <StrictMode>
+        <MemoryRouter initialEntries={["/n/home"]}>
+          <App />
+        </MemoryRouter>
+      </StrictMode>,
+    );
+
+    await waitFor(() =>
+      expect(
+        document.querySelector(".note-toc-desktop .note-toc-link"),
+      ).not.toBeNull(),
+    );
+    const heading = document.getElementById("target-section");
+    expect(heading).toHaveTextContent("Target section");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(heading!, "scrollIntoView", {
+      value: scrollIntoView,
+      configurable: true,
+    });
+    const tocTarget = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        ".note-toc-desktop .note-toc-link",
+      ),
+    ).find((button) => button.textContent === "Target section");
+    expect(tocTarget).toBeDefined();
+    fireEvent.click(tocTarget!);
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "start",
+      inline: "nearest",
     });
   });
 
@@ -292,7 +384,9 @@ Body`,
     expect(includeContent).toBeChecked();
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
-        String(call[0]).includes("/api/search?q=%23type%2Freference&mode=keyword"),
+        String(call[0]).includes(
+          "/api/search?q=%23type%2Freference&mode=keyword",
+        ),
       );
       expect(called).toBe(true);
     });

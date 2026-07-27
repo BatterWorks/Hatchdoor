@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
@@ -20,9 +20,13 @@ pub trait Embedder: Send + Sync {
         format!("unknown-{}", self.embedding_dim())
     }
 
-    /// The exact tokenizer the embedder uses internally, so the chunker can
-    /// pre-compute token counts that match the embedder's accounting.
-    fn tokenizer(&self) -> Arc<Tokenizer>;
+    /// Count tokens using the exact tokenizer bundled with this embedder.
+    ///
+    /// Chunking calls this with `add_special_tokens` disabled; index telemetry
+    /// enables it so its measurements match model inference. Keeping this
+    /// behind the embedder avoids coupling application code to FastEmbed's
+    /// tokenizer crate version.
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String>;
 
     /// Task-instruction prefix prepended to documents before embedding.
     /// Empty for models that don't use prefixes; required by Nomic v1.5.
@@ -34,6 +38,98 @@ pub trait Embedder: Send + Sync {
     fn query_prefix(&self) -> &'static str {
         ""
     }
+
+    /// Complete document-side input for contextual embeddings. Most models use
+    /// Hatchdoor's canonical title + heading + body representation with an
+    /// optional task prefix; models with a trained document template can
+    /// override this method.
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        format!(
+            "{}{}",
+            self.doc_prefix(),
+            crate::embed::contextual_document(title, heading_path, body)
+        )
+    }
+}
+
+/// A startup-safe embedder slot. The HTTP server can expose the terms/download
+/// gate before a real model is loaded; protected vault routes stay unavailable
+/// until [`RuntimeEmbedder::set`] installs the selected model.
+pub struct RuntimeEmbedder {
+    inner: RwLock<Option<Arc<dyn Embedder>>>,
+    kind: std::sync::atomic::AtomicU8,
+}
+
+impl RuntimeEmbedder {
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(None),
+            kind: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    pub fn set(&self, embedder: Arc<dyn Embedder>, gemma: bool) {
+        *self.inner.write().expect("runtime embedder poisoned") = Some(embedder);
+        self.kind.store(
+            if gemma { 2 } else { 1 },
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    fn active(&self) -> Result<Arc<dyn Embedder>, String> {
+        self.inner
+            .read()
+            .expect("runtime embedder poisoned")
+            .clone()
+            .ok_or_else(|| "embedding model setup is not complete".to_string())
+    }
+}
+
+impl Default for RuntimeEmbedder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Embedder for RuntimeEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.active()?.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        768
+    }
+
+    fn identity(&self) -> String {
+        self.active()
+            .map(|embedder| embedder.identity())
+            .unwrap_or_else(|_| "model-setup-pending-768".to_string())
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.active()?.token_count(text, add_special_tokens)
+    }
+
+    fn doc_prefix(&self) -> &'static str {
+        match self.kind.load(std::sync::atomic::Ordering::Acquire) {
+            1 => "search_document: ",
+            _ => "",
+        }
+    }
+
+    fn query_prefix(&self) -> &'static str {
+        match self.kind.load(std::sync::atomic::Ordering::Acquire) {
+            1 => "search_query: ",
+            2 => "task: search result | query: ",
+            _ => "",
+        }
+    }
+
+    fn document_input(&self, title: &str, heading_path: Option<&str>, body: &str) -> String {
+        self.active()
+            .map(|embedder| embedder.document_input(title, heading_path, body))
+            .unwrap_or_else(|_| crate::embed::contextual_document(title, heading_path, body))
+    }
 }
 
 /// Deterministic test embedder. Hashes each input to a fixed-dim vector so
@@ -41,7 +137,7 @@ pub trait Embedder: Send + Sync {
 #[allow(dead_code)]
 pub struct StubEmbedder {
     dim: usize,
-    tokenizer: Arc<Tokenizer>,
+    tokenizer: Tokenizer,
 }
 
 impl StubEmbedder {
@@ -58,10 +154,7 @@ impl StubEmbedder {
             .expect("wordlevel model");
         let mut tokenizer = Tokenizer::new(model);
         tokenizer.with_pre_tokenizer(Some(Whitespace {}));
-        Self {
-            dim,
-            tokenizer: Arc::new(tokenizer),
-        }
+        Self { dim, tokenizer }
     }
 }
 
@@ -78,8 +171,11 @@ impl Embedder for StubEmbedder {
         format!("stub-{}", self.dim)
     }
 
-    fn tokenizer(&self) -> Arc<Tokenizer> {
-        self.tokenizer.clone()
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.tokenizer
+            .encode(text, add_special_tokens)
+            .map(|encoding| encoding.get_ids().len())
+            .map_err(|error| format!("failed tokenizing text: {error}"))
     }
 }
 
@@ -143,8 +239,20 @@ mod tests {
     #[test]
     fn stub_tokenizer_counts_whitespace_tokens() {
         let embedder = StubEmbedder::new(384);
-        let tokenizer = embedder.tokenizer();
-        let encoding = tokenizer.encode("hello world foo", false).expect("encode");
-        assert_eq!(encoding.get_ids().len(), 3);
+        assert_eq!(
+            embedder
+                .token_count("hello world foo", false)
+                .expect("encode"),
+            3
+        );
+    }
+
+    #[test]
+    fn runtime_embedder_refuses_work_until_a_model_is_selected() {
+        let runtime = RuntimeEmbedder::new();
+        assert!(runtime.embed(&["hello".to_string()]).is_err());
+        runtime.set(Arc::new(StubEmbedder::new(768)), false);
+        assert_eq!(runtime.embed(&["hello".to_string()]).unwrap()[0].len(), 768);
+        assert_eq!(runtime.query_prefix(), "search_query: ");
     }
 }

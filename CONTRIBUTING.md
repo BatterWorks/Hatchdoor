@@ -40,6 +40,62 @@ before the fix, and new behavior with tests that cover it.
 Do not commit real vault content, private eval queries, tokens, generated cache
 databases, or local model caches.
 
+## Claiming scoped work
+
+Hatchdoor uses documented module boundaries so a contributor or coding agent can
+work without taking implicit ownership of unrelated code.
+
+Before implementation:
+
+1. Find the relevant boundary in
+   [`docs/architecture/module-map.md`](docs/architecture/module-map.md).
+2. Read the applicable records in
+   [`docs/adr/`](docs/adr/README.md), including any linked record containing the
+   full decision.
+3. Define the task with the
+   [`work-packet template`](docs/architecture/work-packet-template.md).
+4. List owned paths, any shared coordination paths, stable contracts,
+   dependencies, invariants, and exact validation commands.
+
+A work packet narrows the requested outcome; it does not authorize unrelated
+cleanup or broader work. An import or dependency does not make another module
+writable.
+
+If implementation requires an undeclared path, stop expanding the diff and
+classify it as an internal, contract, or coordination change. A path necessary
+for the existing outcome may be declared before editing when it does not
+materially increase risk or authority. Ask the user before proceeding when it
+would materially broaden the outcome, risk, or required authority.
+
+Any supported contract that crosses its producing module boundary or is
+externally observable must follow the
+[`interface-change checklist`](docs/architecture/interface-change-checklist.md),
+even when one work packet owns the producer and every in-repository consumer.
+The checklist does not grant authority to edit undeclared consumers.
+
+Composition files such as `src/server.rs`, `src/app_state.rs`, and
+`frontend/src/App.tsx` are expected integration points, not feature-owned
+shortcuts. A task may change one when its work packet states the precise
+integration required.
+
+When adding, moving, deleting, or reclassifying production source files, update
+the module map and verify its structural coverage:
+
+```bash
+node scripts/check-module-map.mjs
+```
+
+Also update the map when supported contracts, invariants, cross-module
+dependencies or consumers, coordination paths, or focused validation change.
+The checker verifies path coverage, not whether those descriptions remain
+semantically accurate.
+
+When changing the checker itself, run its isolated regression tests:
+
+```bash
+node --test scripts/check-module-map.test.mjs
+```
+
 ## Architecture decisions
 
 Before a structural change, read [`docs/adr/`](docs/adr/README.md). Those records
@@ -52,11 +108,12 @@ quietly: propose a new ADR amending it (the file explains how).
 Do not open a public issue for a vulnerability. Follow the process in
 [`SECURITY.md`](SECURITY.md).
 
-## The tracked `vault/` fixtures
+## The local `vault/` directory
 
-`vault/Home.md` and `vault/Second Note.md` are intentionally committed: they are
-the minimal dev fixtures that let the app boot against a real vault out of the
-box (`VAULT_PATH` defaults to `./vault`). Keep this directory tiny and generic —
-it is a fixture, not a place for real notes. Everything else vault-shaped is
-gitignored: `demo-vault/` (read-only demo content), `data/` (generated cache),
-and `.fastembed_cache/` (downloaded model weights).
+`vault/` is the default vault path (`VAULT_PATH` defaults to `./vault`) and is
+gitignored — it is not committed. You do not need to create it: on first boot
+the app runs `seed_empty_vault`, which creates the directory and, if it has no
+Markdown yet, populates it with the starter vault from `docs/starter-vault/`.
+Everything else vault-shaped is gitignored too: `demo-vault/` (read-only demo
+content), `data/` (generated cache), and `.fastembed_cache/` (downloaded model
+weights).

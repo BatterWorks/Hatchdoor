@@ -35,18 +35,17 @@ import { onUnauthorized, setToken, withAccessToken } from "./api/api";
 import { copyText } from "./lib/clipboard";
 import { NoteActionsDialog } from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
-import { SearchDialog } from "./components/SearchDialog";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/graph/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
-import { useSearch } from "./hooks/useSearch";
 import { useVaultTree } from "./hooks/useVaultTree";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import type { ActiveNoteMeta, RecentNote } from "./types";
 import { StartupGate } from "./startup/StartupGate";
+import { SearchDialog, useSearch } from "./features/search";
 
 export function VaultApp() {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
@@ -68,7 +67,6 @@ export function VaultApp() {
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
   );
-  const [authRequired, setAuthRequired] = useState(false);
   const [editRequestId, setEditRequestId] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
@@ -131,11 +129,6 @@ export function VaultApp() {
   const restoredLastNoteRef = useRef(false);
 
   useEffect(() => {
-    onUnauthorized(() => setAuthRequired(true));
-    return () => onUnauthorized(null);
-  }, []);
-
-  useEffect(() => {
     // Drafts only bridge an interrupted edit; drop ones older than a week.
     pruneNoteDrafts(7 * 24 * 60 * 60 * 1000);
   }, []);
@@ -178,7 +171,6 @@ export function VaultApp() {
     // Reset transient shell UI on navigation — an accepted effect→setState
     // pattern (the state is not derivable from render inputs alone).
     if (isMobile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setDrawerOpen(false);
     }
     setActionsMenuOpen(false);
@@ -209,7 +201,6 @@ export function VaultApp() {
 
   useLayoutEffect(() => {
     if (!isMobile) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setMobileDrawerTop(0);
       return;
     }
@@ -241,7 +232,6 @@ export function VaultApp() {
 
   useEffect(() => {
     if (location.pathname === "/") {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveNote(null);
     }
   }, [location.pathname]);
@@ -251,7 +241,6 @@ export function VaultApp() {
       return;
     }
 
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRecentNotes((prev) => {
       const withoutCurrent = prev.filter(
         (item) => item.slug !== activeNote.slug,
@@ -391,15 +380,6 @@ export function VaultApp() {
         } as CSSProperties
       }
     >
-      {authRequired && (
-        <TokenPrompt
-          onSubmit={(token) => {
-            setToken(token);
-            setAuthRequired(false);
-            window.location.reload();
-          }}
-        />
-      )}
       <AppTopbar
         activeNote={activeNote}
         writeEnabled={writeEnabled}
@@ -591,11 +571,29 @@ export function VaultApp() {
   );
 }
 
-function App() {
+export function App() {
+  const [authRequired, setAuthRequired] = useState(false);
+
+  useEffect(() => {
+    onUnauthorized(() => setAuthRequired(true));
+    return () => onUnauthorized(null);
+  }, []);
+
   return (
-    <StartupGate>
-      <VaultApp />
-    </StartupGate>
+    <>
+      {authRequired ? (
+        <TokenPrompt
+          onSubmit={(token) => {
+            setToken(token);
+            setAuthRequired(false);
+            window.location.reload();
+          }}
+        />
+      ) : null}
+      <StartupGate>
+        <VaultApp />
+      </StartupGate>
+    </>
   );
 }
 
