@@ -19,8 +19,9 @@ afterEach(() => {
 
 describe("App links/download", () => {
   it("renders a relative Markdown PDF link as a vault asset instead of a note route", async () => {
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
-      async (input: RequestInfo | URL) => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/tree")) {
           return new Response(
@@ -49,8 +50,7 @@ describe("App links/download", () => {
         }
 
         return new Response("not found", { status: 404 });
-      },
-    );
+      });
 
     render(
       <MemoryRouter initialEntries={["/n/home"]}>
