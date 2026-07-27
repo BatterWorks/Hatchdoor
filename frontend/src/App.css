@@ -3,7 +3,7 @@
 @import "./styles/layout-explorer.css";
 @import "./styles/note-content.css";
 @import "./styles/ui-common.css";
-@import "./styles/search.css";
+@import "./features/search/search.css";
 @import "./styles/responsive.css";
 @import "./styles/stats.css";
 @import "./styles/graph.css";
