@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { apiFetch } from "../api/api";
-import { readErrorMessage } from "../api/apiError";
-import type { SearchResponse, SearchResult } from "../types";
+import { apiFetch } from "../../api/api";
+import { readErrorMessage } from "../../api/apiError";
+import type { SearchResponse, SearchResult } from "./types";
 
 /**
  * Command-palette search state: open/query/mode plus the debounced fetch and

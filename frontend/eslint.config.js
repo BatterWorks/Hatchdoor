@@ -27,4 +27,25 @@ export default defineConfig([
       "react-hooks/set-state-in-effect": "off",
     },
   },
+  {
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: [
+      "src/features/search/**/*.{ts,tsx}",
+      "src/clientAuditContracts.test.ts",
+    ],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["**/features/search/*", "**/features/search/**/*"],
+              message:
+                "Import Search through the public features/search entry point.",
+            },
+          ],
+        },
+      ],
+    },
+  },
 ]);

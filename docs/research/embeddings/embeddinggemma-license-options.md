@@ -1,5 +1,7 @@
 # EmbeddingGemma licensing and default-model options
 
+> Research record.
+>
 > Researched: 2026-07-26
 > Scope: Using EmbeddingGemma 300M Q4 as Hatchdoor's default embedding model
 > Status: Product-oriented licensing research, not formal legal advice

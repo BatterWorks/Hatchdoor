@@ -1,19 +1,23 @@
 # FastEmbed v5 Upgrade — Feasibility Findings
 
+> Research record.
+>
 > Investigation notes captured on 2026-07-24 on branch `feature/fastembed-v5-models`
 > (off `development`). This is the *platform/build feasibility* base for a later
 > v5 implementation. For the model-selection strategy, see the companion doc
-> [`embeddings-investigation-fastembed-v5.md`](./embeddings-investigation-fastembed-v5.md).
+> [`embeddings-investigation-fastembed-v5.md`](embeddings-investigation-fastembed-v5.md).
 
 ## Background: the v4 → v5 → v4 excursion
 
 During the dependency batch on `development` (commits `c7936e7`, `af80a79`,
 2026-07-21), FastEmbed 5 was attempted and reverted. The revert reason recorded
-in `docs/dependency-update-plan.md` was ONNX Runtime's AVX baseline requirement.
+in `docs/maintenance/dependency-update-plan.md` was ONNX Runtime's AVX baseline
+requirement.
 FastEmbed 5 was never committed — `git log -S 'fastembed = "5"'` on `Cargo.toml`
 is empty. The excursion left two residues:
 
-- `docs/dependency-update-plan.md` notes "FastEmbed 5 is deferred … requires AVX here".
+- `docs/maintenance/dependency-update-plan.md` notes "FastEmbed 5 is deferred …
+  requires AVX here".
 - `Cargo.toml` keeps a `tokenizers-v21` alias, because FastEmbed 4 pins tokenizers 0.21
   while the rest of the tree moved to tokenizers 0.23.
 
@@ -102,5 +106,5 @@ one-time full reindex everywhere, and a build-host AVX sanity check.
 
 - pykeio/ort platform matrix — `docs/core/platform.tsx` (`PLATFORMS_WITH_BINARIES`)
 - FastEmbed v5.0.0 release (ort 2.0.0-rc.10 upgrade, Rayon removal)
-- `docs/dependency-update-plan.md` (original v5 deferral rationale)
+- `docs/maintenance/dependency-update-plan.md` (original v5 deferral rationale)
 - Local: `Dockerfile:39`, `src/embed/fastembed_embedder.rs:99`, `src/cache/schema.rs:9,56-63`

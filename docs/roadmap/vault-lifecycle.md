@@ -3,7 +3,7 @@
 - Status: Draft for discussion
 - Audience: Hatchdoor maintainers, contributors, and product collaborators
 - Horizon: Product direction; no delivery dates are committed
-- Scope: One workstream of the [Hatchdoor product roadmap](../product-roadmap.md) —
+- Scope: One workstream of the [Hatchdoor product roadmap](product-roadmap.md) —
   how vaults are connected, configured, synchronized, indexed, and searched.
   User-facing outcomes and capabilities, not implementation design.
 
@@ -13,7 +13,7 @@ This document details the **vault lifecycle and multi-vault** workstream: how
 Hatchdoor can grow from a web interface connected to one preconfigured Markdown
 folder into an always-available workspace that manages several independent vaults
 from the product itself. It sits under the broader
-[product roadmap](../product-roadmap.md), which frames the other workstreams
+[product roadmap](product-roadmap.md), which frames the other workstreams
 (editing experience, search and discovery, graph and linking, agent/MCP
 capabilities) alongside this one.
 

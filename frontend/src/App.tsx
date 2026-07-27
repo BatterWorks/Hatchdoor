@@ -35,18 +35,17 @@ import { onUnauthorized, setToken, withAccessToken } from "./api/api";
 import { copyText } from "./lib/clipboard";
 import { NoteActionsDialog } from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
-import { SearchDialog } from "./components/SearchDialog";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/graph/GraphPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
-import { useSearch } from "./hooks/useSearch";
 import { useVaultTree } from "./hooks/useVaultTree";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import type { ActiveNoteMeta, RecentNote } from "./types";
 import { StartupGate } from "./startup/StartupGate";
+import { SearchDialog, useSearch } from "./features/search";
 
 export function VaultApp() {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {

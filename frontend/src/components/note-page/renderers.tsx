@@ -124,22 +124,52 @@ export function createNoteMarkdownComponents(
       );
     },
     h1(props: MarkdownHeadingProps) {
-      return renderHeading("h1", props.children, headingIdsBySourceLine, props.node);
+      return renderHeading(
+        "h1",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+      );
     },
     h2(props: MarkdownHeadingProps) {
-      return renderHeading("h2", props.children, headingIdsBySourceLine, props.node);
+      return renderHeading(
+        "h2",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+      );
     },
     h3(props: MarkdownHeadingProps) {
-      return renderHeading("h3", props.children, headingIdsBySourceLine, props.node);
+      return renderHeading(
+        "h3",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+      );
     },
     h4(props: MarkdownHeadingProps) {
-      return renderHeading("h4", props.children, headingIdsBySourceLine, props.node);
+      return renderHeading(
+        "h4",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+      );
     },
     h5(props: MarkdownHeadingProps) {
-      return renderHeading("h5", props.children, headingIdsBySourceLine, props.node);
+      return renderHeading(
+        "h5",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+      );
     },
     h6(props: MarkdownHeadingProps) {
-      return renderHeading("h6", props.children, headingIdsBySourceLine, props.node);
+      return renderHeading(
+        "h6",
+        props.children,
+        headingIdsBySourceLine,
+        props.node,
+      );
     },
   };
 }

@@ -71,14 +71,18 @@ export function StartupGate({ children }: { children: ReactNode }) {
   }, []);
 
   const acceptGemma = async () => {
-    const response = await apiFetch("/api/model/accept-gemma", { method: "POST" });
+    const response = await apiFetch("/api/model/accept-gemma", {
+      method: "POST",
+    });
     if (response.ok) {
       setStatus({ state: "downloading", model: "EmbeddingGemma 300M Q4" });
     }
   };
 
   const declineGemma = async () => {
-    const response = await apiFetch("/api/model/decline-gemma", { method: "POST" });
+    const response = await apiFetch("/api/model/decline-gemma", {
+      method: "POST",
+    });
     if (response.ok) {
       setStatus({ state: "downloading", model: "Nomic Embed Text v1.5" });
     }
@@ -105,7 +109,7 @@ export function StartupGate({ children }: { children: ReactNode }) {
     ? `${percent}% of embedding work complete`
     : downloading?.percent !== undefined
       ? `${percent}% of model download complete`
-    : "Measuring the vault";
+      : "Measuring the vault";
 
   return (
     <div className="startup-shell">
@@ -131,7 +135,9 @@ export function StartupGate({ children }: { children: ReactNode }) {
       </header>
 
       <main className="startup-main">
-        <p className="startup-kicker">{termsRequired ? "SEARCH MODEL" : "SEARCH INDEX"}</p>
+        <p className="startup-kicker">
+          {termsRequired ? "SEARCH MODEL" : "SEARCH INDEX"}
+        </p>
         <h1>
           {termsRequired
             ? "Set up multilingual search"
@@ -142,18 +148,21 @@ export function StartupGate({ children }: { children: ReactNode }) {
         {termsRequired ? (
           <section className="startup-terms" aria-label="Gemma terms">
             <p>
-              Hatchdoor can download EmbeddingGemma, a multilingual search
-              model licensed under Google’s Gemma Terms and Prohibited Use
-              Policy.
+              Hatchdoor can download EmbeddingGemma, a multilingual search model
+              licensed under Google’s Gemma Terms and Prohibited Use Policy.
             </p>
             <p>
               Accepting these terms only allows Hatchdoor to download and use
-              the Gemma model. It does not change ownership of your vault or
-              its contents. Hatchdoor does not send your notes to Google when
+              the Gemma model. It does not change ownership of your vault or its
+              contents. Hatchdoor does not send your notes to Google when
               indexing or searching.
             </p>
             <p>
-              <a href="https://ai.google.dev/gemma/terms" target="_blank" rel="noreferrer">
+              <a
+                href="https://ai.google.dev/gemma/terms"
+                target="_blank"
+                rel="noreferrer"
+              >
                 Read Gemma Terms
               </a>{" "}
               <a
@@ -165,10 +174,18 @@ export function StartupGate({ children }: { children: ReactNode }) {
               </a>
             </p>
             <div className="startup-actions">
-              <button type="button" className="startup-primary" onClick={() => void acceptGemma()}>
+              <button
+                type="button"
+                className="startup-primary"
+                onClick={() => void acceptGemma()}
+              >
                 Accept terms and set up Gemma
               </button>
-              <button type="button" className="startup-secondary" onClick={() => void declineGemma()}>
+              <button
+                type="button"
+                className="startup-secondary"
+                onClick={() => void declineGemma()}
+              >
                 Use Nomic instead
               </button>
             </div>
@@ -182,14 +199,14 @@ export function StartupGate({ children }: { children: ReactNode }) {
         ) : (
           <p className="startup-lede" aria-live="polite">
             {failed
-            ? (status.message ?? "Indexing could not be completed.")
-            : connectionIssue
-              ? "Waiting for Hatchdoor to respond…"
-              : downloading
-                ? `Downloading ${downloading.model ?? "the search model"}. Your vault stays locked until setup is complete.`
-              : indexing
-                ? "Building the search index. Your notes stay locked until it is ready."
-                : "Scanning notes and measuring the work ahead…"}
+              ? (status.message ?? "Indexing could not be completed.")
+              : connectionIssue
+                ? "Waiting for Hatchdoor to respond…"
+                : downloading
+                  ? `Downloading ${downloading.model ?? "the search model"}. Your vault stays locked until setup is complete.`
+                  : indexing
+                    ? "Building the search index. Your notes stay locked until it is ready."
+                    : "Scanning notes and measuring the work ahead…"}
           </p>
         )}
 
@@ -201,14 +218,33 @@ export function StartupGate({ children }: { children: ReactNode }) {
               aria-label={progressLabel}
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-valuenow={indexing || downloading?.percent !== undefined ? percent : undefined}
+              aria-valuenow={
+                indexing || downloading?.percent !== undefined
+                  ? percent
+                  : undefined
+              }
             >
               <span style={{ transform: `scaleX(${percent / 100})` }} />
             </div>
 
             <div className="startup-progress-line" aria-live="polite">
-              <strong>{indexing || downloading?.percent !== undefined ? `${percent}%` : downloading ? "Downloading" : "Scanning"}</strong>
-              <span>{indexing ? formatEta(eta) : downloading ? formatDownload(downloading.downloaded_bytes, downloading.total_bytes) : formatEta(eta)}</span>
+              <strong>
+                {indexing || downloading?.percent !== undefined
+                  ? `${percent}%`
+                  : downloading
+                    ? "Downloading"
+                    : "Scanning"}
+              </strong>
+              <span>
+                {indexing
+                  ? formatEta(eta)
+                  : downloading
+                    ? formatDownload(
+                        downloading.downloaded_bytes,
+                        downloading.total_bytes,
+                      )
+                    : formatEta(eta)}
+              </span>
             </div>
 
             {indexing ? (
@@ -260,7 +296,8 @@ function formatEta(seconds?: number) {
 }
 
 function formatDownload(downloaded?: number, total?: number) {
-  if (downloaded === undefined || total === undefined) return "Connecting to model source";
+  if (downloaded === undefined || total === undefined)
+    return "Connecting to model source";
   return `${formatBytes(downloaded)} of ${formatBytes(total)}`;
 }
 
