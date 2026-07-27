@@ -36,6 +36,9 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ["**/*.{js,css,html,svg,png,ico,woff2}"],
+        // PDF.js is loaded only for an embedded PDF. Keeping its renderer and
+        // worker out of the install-time precache preserves that lazy boundary.
+        globIgnores: ["**/pdf-*.js", "**/pdf.worker*.mjs"],
         // Keep the SPA navigation fallback from swallowing server routes. On
         // iOS standalone PWAs the `download` attribute is ignored and the
         // anchor click becomes a navigation; without this denylist the service

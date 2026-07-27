@@ -206,6 +206,65 @@
   word-break: break-word;
 }
 
+.note-body .pdf-preview {
+  width: 100%;
+  max-width: 60rem;
+  margin: 1.5rem 0;
+  border: 1px solid var(--line);
+  background: var(--paper-2);
+}
+
+.pdf-preview-toolbar,
+.pdf-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  font-family: var(--font-sans);
+  font-size: 0.86rem;
+}
+
+.pdf-preview-toolbar {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+}
+
+.pdf-preview-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pdf-preview canvas {
+  display: block;
+  max-width: 100%;
+  margin: 1rem auto;
+  background: white;
+}
+
+.pdf-preview-controls {
+  justify-content: center;
+  border-top: 1px solid var(--line);
+}
+
+.pdf-preview-controls button {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  padding: 0.35rem 0.55rem;
+  font: inherit;
+}
+
+.pdf-preview-controls button:disabled {
+  color: var(--tertiary);
+}
+
+.pdf-preview-loading,
+.pdf-preview-error {
+  margin: 1rem;
+  font-family: var(--font-sans);
+}
+
 /* Lists */
 .note-body ul,
 .note-body ol {
