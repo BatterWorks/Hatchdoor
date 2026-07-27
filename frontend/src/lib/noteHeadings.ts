@@ -2,6 +2,7 @@ export type NoteHeading = {
   level: number;
   text: string;
   id: string;
+  sourceLine: number;
 };
 
 export function extractMarkdownHeadings(markdown: string): NoteHeading[] {
@@ -10,7 +11,7 @@ export function extractMarkdownHeadings(markdown: string): NoteHeading[] {
   const headings: NoteHeading[] = [];
   let fenced = false;
 
-  for (const line of lines) {
+  for (const [lineIndex, line] of lines.entries()) {
     if (/^\s*(```|~~~)/.test(line)) {
       fenced = !fenced;
       continue;
@@ -32,7 +33,7 @@ export function extractMarkdownHeadings(markdown: string): NoteHeading[] {
     }
 
     const id = assignHeadingId(text, counts);
-    headings.push({ level, text, id });
+    headings.push({ level, text, id, sourceLine: lineIndex + 1 });
   }
 
   return headings;
