@@ -23,6 +23,9 @@
 /* Article wrapper */
 .note-content {
   min-width: 0;
+  /* Keep enough trailing scroll range for headings near the end of a note to
+     land at the same top position as headings earlier in the document. */
+  padding-bottom: max(3rem, calc(100dvh - 7rem));
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -162,7 +165,7 @@
 }
 
 .note-body :is(h1, h2, h3, h4, h5, h6) {
-  scroll-margin-top: calc(60px + env(safe-area-inset-top));
+  scroll-margin-top: 1rem;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
@@ -204,6 +207,115 @@
 .note-body :is(p, li, blockquote) {
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.note-body .pdf-preview {
+  width: 100%;
+  max-width: 60rem;
+  margin: 1.5rem 0;
+  border: 1px solid var(--rule-strong);
+  background: var(--paper);
+}
+
+.pdf-preview-toolbar,
+.pdf-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem;
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+}
+
+.pdf-preview-toolbar {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+
+.pdf-preview-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 92,
+    "wght" 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.pdf-preview-open {
+  flex: 0 0 auto;
+}
+
+.pdf-preview canvas {
+  display: block;
+  max-width: 100%;
+  margin: 1rem auto;
+  border: 1px solid var(--rule);
+  background: white;
+}
+
+.pdf-preview-controls {
+  justify-content: center;
+  border-top: 1px solid var(--rule);
+  background: var(--paper-2);
+}
+
+.pdf-preview-page-action {
+  min-width: 5.9rem;
+}
+
+.pdf-preview-page-count {
+  min-width: 7.8rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-preview-loading,
+.pdf-preview-error {
+  margin: 1rem 0;
+  padding: 0.75rem 0.9rem;
+  font-family: var(--font-sans);
+}
+
+.pdf-preview-loading {
+  border-left: 2px solid var(--hot);
+  color: var(--muted);
+}
+
+.pdf-preview-error {
+  border: 1px solid var(--err-border);
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+
+@media (max-width: 920px) {
+  .pdf-preview-toolbar,
+  .pdf-preview-controls {
+    padding: 0.5rem;
+  }
+
+  .pdf-preview-controls {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 0.4rem;
+  }
+
+  .pdf-preview-page-action {
+    min-width: 0;
+    padding-inline: 0.5rem;
+  }
+
+  .pdf-preview-page-count {
+    min-width: 0;
+    white-space: nowrap;
+  }
 }
 
 /* Lists */
@@ -762,6 +874,34 @@
   font-style: normal;
   font-size: 0.75em;
   opacity: 0.7;
+}
+
+.note-body a.pdf-link {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.14em;
+}
+
+.pdf-link-badge {
+  display: inline-block;
+  margin-inline-start: 0.36em;
+  padding: 0.08em 0.3em 0.1em;
+  border: 1px solid currentColor;
+  font-family: var(--font-mono);
+  font-size: 0.62em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  line-height: 1.15;
+  text-decoration: none;
+  vertical-align: 0.12em;
+}
+
+.pdf-link-open {
+  display: inline-block;
+  margin-inline-start: 0.22em;
+  font-family: var(--font-mono);
+  font-size: 0.72em;
+  text-decoration: none;
+  vertical-align: 0.08em;
 }
 
 .note-body .mermaid p {

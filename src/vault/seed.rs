@@ -49,6 +49,11 @@ const STARTER_NOTES: &[(&str, &str)] = &[
     ),
 ];
 
+const STARTER_ASSETS: &[(&str, &[u8])] = &[(
+    "40-reference/pdf-preview-sample.pdf",
+    include_bytes!("../../docs/starter-vault/40-reference/pdf-preview-sample.pdf"),
+)];
+
 /// Seeds a fresh vault with starter notes when it holds no markdown. `exclude`
 /// is the same noise matcher the index build uses, so the "is this vault empty?"
 /// decision and the index agree on what counts as content (phase-1 review
@@ -62,6 +67,14 @@ pub fn seed_empty_vault(root: impl AsRef<Path>, exclude: &ExcludeMatcher) -> io:
     }
 
     for (relative_path, content) in STARTER_NOTES {
+        let path = root.join(relative_path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, content)?;
+    }
+
+    for (relative_path, content) in STARTER_ASSETS {
         let path = root.join(relative_path);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -128,6 +141,9 @@ mod tests {
                 .join("40-reference/Hatchdoor — Agent Skill.md")
                 .is_file()
         );
+        let pdf = fs::read(dir.path().join("40-reference/pdf-preview-sample.pdf"))
+            .expect("seeded PDF preview sample");
+        assert!(pdf.starts_with(b"%PDF-"));
         assert!(dir.path().join("10-topics/Topics Index.md").is_file());
         assert!(dir.path().join("20-projects/Projects Index.md").is_file());
         assert!(dir.path().join("30-areas/Areas Index.md").is_file());

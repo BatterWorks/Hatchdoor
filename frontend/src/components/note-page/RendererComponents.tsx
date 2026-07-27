@@ -50,7 +50,9 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
 
   if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
     const firstText = flattenText(first.props.children).trim();
-    const match = firstText.match(/^\[!([A-Za-z0-9_-]+)\]([+-])?\s*(.*)$/m);
+    const match = firstText.match(
+      /^\[!([A-Za-z0-9_-]+)\]([+-])?[ \t]*(.*)$/m,
+    );
 
     if (match) {
       const kind = match[1].toLowerCase();
@@ -62,30 +64,30 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
         .filter(
           (node) => !(typeof node === "string" && node.trim().length === 0),
         );
+      // A Markdown block quote with consecutive `>` lines is parsed as one
+      // paragraph separated by a soft line break. Preserve the content after
+      // that break as the callout body instead of treating it as the title.
+      const pChildren = Children.toArray(
+        (first as ReactElement<{ children?: ReactNode }>).props.children,
+      );
+      const nlIdx = pChildren.findIndex(
+        (node) => typeof node === "string" && node.includes("\n"),
+      );
+      let inlineBody: ReactNode[] = [];
+      if (nlIdx !== -1) {
+        const pivot = pChildren[nlIdx] as string;
+        const tail = pivot.slice(pivot.indexOf("\n") + 1);
+        inlineBody = [
+          ...(tail ? [tail] : []),
+          ...pChildren.slice(nlIdx + 1),
+        ].filter((node) => !(typeof node === "string" && node.trim() === ""));
+      }
+      const allBody =
+        inlineBody.length > 0
+          ? [<p key="inline-callout">{inlineBody}</p>, ...bodyNodes]
+          : bodyNodes;
 
       if (kind === "quote" || kind === "cite") {
-        // The marker and quote text are often in the same <p> (soft line break),
-        // so extract inline body from the first paragraph's children after the \n.
-        const pChildren = Children.toArray(
-          (first as ReactElement<{ children?: ReactNode }>).props.children,
-        );
-        const nlIdx = pChildren.findIndex(
-          (n) => typeof n === "string" && n.includes("\n"),
-        );
-        let inlineBody: ReactNode[] = [];
-        if (nlIdx !== -1) {
-          const pivot = pChildren[nlIdx] as string;
-          const pos = pivot.indexOf("\n");
-          const tail = pivot.slice(pos + 1);
-          inlineBody = [
-            ...(tail ? [tail] : []),
-            ...pChildren.slice(nlIdx + 1),
-          ].filter((n) => !(typeof n === "string" && n.trim() === ""));
-        }
-        const allBody =
-          inlineBody.length > 0
-            ? [<p key="q">{inlineBody}</p>, ...bodyNodes]
-            : bodyNodes;
         return (
           <figure className="pullquote">
             <blockquote>{allBody}</blockquote>
@@ -101,8 +103,8 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
             open={fold === "+"}
           >
             <summary className="callout-title">{title}</summary>
-            {bodyNodes.length > 0 && (
-              <div className="callout-body">{bodyNodes}</div>
+            {allBody.length > 0 && (
+              <div className="callout-body">{allBody}</div>
             )}
           </details>
         );
@@ -111,8 +113,8 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
       return (
         <div className={`callout callout-${kind}`}>
           <div className="callout-title">{title}</div>
-          {bodyNodes.length > 0 && (
-            <div className="callout-body">{bodyNodes}</div>
+          {allBody.length > 0 && (
+            <div className="callout-body">{allBody}</div>
           )}
         </div>
       );

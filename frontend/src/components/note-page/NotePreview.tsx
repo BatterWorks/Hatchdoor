@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
 import { parseFrontmatter, stripBlockIds } from "../../lib/markdown";
+import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import { NoteProperties } from "./sections";
 import { createNoteMarkdownComponents } from "./renderers";
 import { useResolvedWikilinks } from "./wikilinks";
@@ -31,9 +32,19 @@ export function NotePreview({
     stripBlockIds(parsed.body),
     relativePath,
   );
+  const headingIdsBySourceLine = useMemo(
+    () =>
+      new Map(
+        extractMarkdownHeadings(parsed.body).map(({ sourceLine, id }) => [
+          sourceLine,
+          id,
+        ]),
+      ),
+    [parsed.body],
+  );
   const components = useMemo(
-    () => createNoteMarkdownComponents(relativePath, new Map<string, number>()),
-    [relativePath],
+    () => createNoteMarkdownComponents(relativePath, headingIdsBySourceLine),
+    [relativePath, headingIdsBySourceLine],
   );
 
   return (

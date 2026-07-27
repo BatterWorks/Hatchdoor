@@ -1,17 +1,18 @@
 import { Children, createElement, isValidElement, type ReactNode } from "react";
 
-import { assignHeadingId } from "../../lib/noteHeadings";
+import { slugifyHeading } from "../../lib/noteHeadings";
 import {
   CalloutOrQuote,
   CodeBlock,
   MermaidDiagram,
 } from "./RendererComponents";
+import { PdfPreview } from "./PdfPreview";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
 
 export function createNoteMarkdownComponents(
   noteRelativePath: string,
-  headingCounts: Map<string, number>,
+  headingIdsBySourceLine: Map<number, string>,
 ) {
   return {
     pre(props: { children?: ReactNode }) {
@@ -64,6 +65,27 @@ export function createNoteMarkdownComponents(
           </a>
         );
       }
+      if (typeof href === "string" && isPdfHref(href)) {
+        const source = resolveAssetHref(href, noteRelativePath);
+        const label = flattenText(children).trim() || "PDF";
+        return (
+          <a
+            className="pdf-link"
+            href={source}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`${label} (PDF document, opens in a new tab)`}
+          >
+            {children}
+            <span className="pdf-link-badge" aria-hidden="true">
+              PDF
+            </span>
+            <span className="pdf-link-open" aria-hidden="true">
+              ↗
+            </span>
+          </a>
+        );
+      }
       return <a href={href}>{children}</a>;
     },
     img(props: { src?: string; alt?: string }) {
@@ -71,6 +93,9 @@ export function createNoteMarkdownComponents(
         typeof props.src === "string"
           ? resolveAssetHref(props.src, noteRelativePath)
           : props.src;
+      if (typeof source === "string" && isPdfHref(source)) {
+        return <PdfPreview src={source} label={props.alt ?? "PDF"} />;
+      }
       return (
         <img
           src={source}
@@ -98,34 +123,46 @@ export function createNoteMarkdownComponents(
         </div>
       );
     },
-    h1(props: { children?: ReactNode }) {
-      return renderHeading("h1", props.children, headingCounts);
+    h1(props: MarkdownHeadingProps) {
+      return renderHeading("h1", props.children, headingIdsBySourceLine, props.node);
     },
-    h2(props: { children?: ReactNode }) {
-      return renderHeading("h2", props.children, headingCounts);
+    h2(props: MarkdownHeadingProps) {
+      return renderHeading("h2", props.children, headingIdsBySourceLine, props.node);
     },
-    h3(props: { children?: ReactNode }) {
-      return renderHeading("h3", props.children, headingCounts);
+    h3(props: MarkdownHeadingProps) {
+      return renderHeading("h3", props.children, headingIdsBySourceLine, props.node);
     },
-    h4(props: { children?: ReactNode }) {
-      return renderHeading("h4", props.children, headingCounts);
+    h4(props: MarkdownHeadingProps) {
+      return renderHeading("h4", props.children, headingIdsBySourceLine, props.node);
     },
-    h5(props: { children?: ReactNode }) {
-      return renderHeading("h5", props.children, headingCounts);
+    h5(props: MarkdownHeadingProps) {
+      return renderHeading("h5", props.children, headingIdsBySourceLine, props.node);
     },
-    h6(props: { children?: ReactNode }) {
-      return renderHeading("h6", props.children, headingCounts);
+    h6(props: MarkdownHeadingProps) {
+      return renderHeading("h6", props.children, headingIdsBySourceLine, props.node);
     },
   };
 }
 
+function isPdfHref(href: string): boolean {
+  return href.split(/[?#]/, 1)[0].toLowerCase().endsWith(".pdf");
+}
+
+type MarkdownHeadingProps = {
+  children?: ReactNode;
+  node?: { position?: { start?: { line?: number } } };
+};
+
 function renderHeading(
   tag: "h1" | "h2" | "h3" | "h4" | "h5" | "h6",
   children: ReactNode,
-  counts: Map<string, number>,
+  headingIdsBySourceLine: Map<number, string>,
+  node: MarkdownHeadingProps["node"],
 ) {
   const text = flattenText(children).trim();
-  const id = assignHeadingId(text, counts);
+  const id =
+    headingIdsBySourceLine.get(node?.position?.start?.line ?? -1) ??
+    slugifyHeading(text);
   return createElement(tag, { id }, children);
 }
 
