@@ -81,9 +81,13 @@ describe("StartupGate", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "Set up multilingual search" }),
+      await screen.findByRole("heading", {
+        name: "Set up multilingual search",
+      }),
     ).toBeVisible();
-    expect(screen.getByText(/does not change ownership of your vault/i)).toBeVisible();
+    expect(
+      screen.getByText(/does not change ownership of your vault/i),
+    ).toBeVisible();
     expect(
       screen.getByText(
         /Nomic is the fallback if you decline Gemma\. It supports English only\./,
@@ -99,13 +103,14 @@ describe("StartupGate", () => {
         /Nomic uses about 1\.3 GB of RAM while indexing; Gemma uses about 0\.5 GB\./,
       ),
     ).toBeVisible();
-    expect(screen.getByRole("link", { name: "Read Gemma Terms" })).toHaveAttribute(
-      "href",
-      "https://ai.google.dev/gemma/terms",
-    );
+    expect(
+      screen.getByRole("link", { name: "Read Gemma Terms" }),
+    ).toHaveAttribute("href", "https://ai.google.dev/gemma/terms");
 
     await act(async () => {
-      screen.getByRole("button", { name: "Accept terms and set up Gemma" }).click();
+      screen
+        .getByRole("button", { name: "Accept terms and set up Gemma" })
+        .click();
     });
     const [path, init] = fetchMock.mock.calls.at(-1) ?? [];
     expect(path).toBe("/api/model/accept-gemma");
@@ -115,7 +120,9 @@ describe("StartupGate", () => {
         headers: expect.any(Headers),
       }),
     );
-    expect((init?.headers as Headers).get("Authorization")).toBe("Bearer setup-token");
+    expect((init?.headers as Headers).get("Authorization")).toBe(
+      "Bearer setup-token",
+    );
   });
 
   it("polls until the backend becomes ready", async () => {

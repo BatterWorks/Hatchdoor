@@ -24,8 +24,7 @@ export function useResolvedWikilinks(
       const rawTargets = matches
         .filter(
           (m) =>
-            m[1] !== "!" &&
-            !isPdfAssetTarget(parseWikilinkTarget(m[2]).target),
+            m[1] !== "!" && !isPdfAssetTarget(parseWikilinkTarget(m[2]).target),
         )
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);

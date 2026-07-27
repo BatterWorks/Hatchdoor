@@ -83,7 +83,10 @@ describe("PdfPreview", () => {
   });
 
   it("renders at 2x backing resolution on a 1x display", async () => {
-    const renderPage = vi.fn(() => ({ promise: Promise.resolve(), cancel: vi.fn() }));
+    const renderPage = vi.fn(() => ({
+      promise: Promise.resolve(),
+      cancel: vi.fn(),
+    }));
     const page = {
       getViewport: ({ scale }: { scale: number }) => ({
         width: 600 * scale,
@@ -115,12 +118,17 @@ describe("PdfPreview", () => {
       value: 1,
     });
 
-    const { container } = render(<PdfPreview src="/vault-assets/sample.pdf" label="Sample" />);
+    const { container } = render(
+      <PdfPreview src="/vault-assets/sample.pdf" label="Sample" />,
+    );
 
     await waitFor(() => expect(renderPage).toHaveBeenCalledOnce());
 
     const canvas = container.querySelector("canvas");
-    expect(canvas).toHaveAttribute("style", expect.stringContaining("width: 300px"));
+    expect(canvas).toHaveAttribute(
+      "style",
+      expect.stringContaining("width: 300px"),
+    );
     expect(canvas).toHaveProperty("width", 600);
     expect(canvas).toHaveProperty("height", 800);
   });

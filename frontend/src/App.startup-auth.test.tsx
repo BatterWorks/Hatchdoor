@@ -14,7 +14,9 @@ afterEach(() => {
 it("prompts for the web token when first-run model setup is unauthorized", async () => {
   vi.spyOn(globalThis, "fetch")
     .mockResolvedValueOnce(
-      new Response(JSON.stringify({ state: "terms_required" }), { status: 200 }),
+      new Response(JSON.stringify({ state: "terms_required" }), {
+        status: 200,
+      }),
     )
     .mockResolvedValueOnce(new Response(null, { status: 401 }));
 
@@ -26,8 +28,12 @@ it("prompts for the web token when first-run model setup is unauthorized", async
 
   await screen.findByRole("button", { name: "Accept terms and set up Gemma" });
   await act(async () => {
-    screen.getByRole("button", { name: "Accept terms and set up Gemma" }).click();
+    screen
+      .getByRole("button", { name: "Accept terms and set up Gemma" })
+      .click();
   });
 
-  expect(await screen.findByRole("dialog", { name: "Access token required" })).toBeVisible();
+  expect(
+    await screen.findByRole("dialog", { name: "Access token required" }),
+  ).toBeVisible();
 });
