@@ -409,9 +409,11 @@
   margin-top: 0.3rem;
 }
 
-/* Live preview of what is about to be created, and where. */
+/* Live preview of what is about to be created, and where. It describes the
+   field above it, so it sits tight to that one and keeps its distance from
+   the next label; equal gaps made it read as belonging to the wrong field. */
 .field-path {
-  margin: -0.3rem 0 0;
+  margin: -0.65rem 0 0.4rem;
   font-family: var(--font-mono);
   font-size: 0.78rem;
   color: var(--muted);

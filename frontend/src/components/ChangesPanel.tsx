@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 
+import { SideHead } from "./Explorer";
 import type { ModifiedNote } from "../types";
 
 /** Matches the cap in the design: newest first, the rest behind a count. */
@@ -35,6 +36,9 @@ export function ChangesPanel({
       id="explorer-changes-panel"
       aria-label="Recently changed notes"
     >
+      {/* Labelled like every other section in the pane; an unlabelled list of
+          notes appearing above Recently viewed reads as part of it. */}
+      <SideHead label="Changed on disk" count={notes.length} />
       {notes.length === 0 ? (
         <p className="explorer-changes-empty">
           Nothing has changed on disk yet.
