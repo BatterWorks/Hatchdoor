@@ -1,7 +1,11 @@
 # Chrome redesign — working design
 
 **Date:** 2026-07-21, revised 2026-07-28 (sidebar zones session)
-**Status:** In progress (brainstorming). Not yet a ratified spec — see "Proposed" and "Open" sections.
+**Status:** **Implemented** on `feature/ui-ux-polish` (2026-07-28). D1–D33 are all built except
+where a decision records otherwise: the changes badge ships without a count (blocked on backend
+data — see "Dependency this exposes") and Settings reserves a dimmed slot pending issue #13.
+Item 15 (folder tree UX) remains partly open. See the packet index and the interface-change
+record at the end of this document.
 **Issues covered:** #12 (sidebar layout), #10 (messy header hierarchy), #11 (create note, both
 placement and interaction), #8 (submenu presentation).
 
@@ -593,6 +597,125 @@ node scripts/check-module-map.mjs
 ```
 
 No backend gates apply — nothing in this design touches Rust.
+
+---
+
+## Interface-change record
+
+`AGENTS.md` and `CONTRIBUTING.md` require
+[`docs/architecture/interface-change-checklist.md`](../../architecture/interface-change-checklist.md)
+whenever a supported contract crosses its producing module boundary or is externally observable.
+This work changes frontend exports, CSS selectors, a persistent format, and observable UI
+behaviour, so it applies. Recorded here as the handoff note; the block at the end is the
+PR summary the checklist asks for.
+
+### Declare the change
+
+**Producing boundaries:** Vault explorer (owned); Application shell and navigation
+(composition/shared); Shared UI and styling (shared); Note reading and rendering (owned); Note
+editing and vault actions (owned, safety-sensitive).
+
+| Contract | Old | New | Kind |
+|---|---|---|---|
+| `LastModifiedNotesList` export | present | **removed** | breaking |
+| `RecentNotesList` props | `notes`, `currentPath`, `onNavigate` | `notes`, `onNavigate`, `collapsed`, `onToggleCollapsed` | breaking |
+| `SideHead`, `ChangesPanel`, `components/icons.tsx` | — | new exports | additive |
+| `ExplorerPane` props | `explorerPaneRef` | `explorerScrollRef` + `recentCollapsed`, `onRecentCollapsedChange` | breaking |
+| CSS selectors | `.explorer-header`, `.explorer-actions`, `.explorer-page-link(s)`, `.explorer-notes-label`, `.explorer-notes-count`, `.recent-notes-title`, `.folder-suggestions` | **removed**; added `.explorer-rail`, `.explorer-rail-item`, `.explorer-nav`, `.explorer-footer`, `.explorer-changes*`, `.side-head`, `.side-label`, `.side-rule`, `.side-count`, `.side-caret`, `.idx`, `.field*`, `.topbar-menu-divider`, `.note-properties-toggle`, `.note-properties-caret` | breaking |
+| localStorage | — | `hatchdoor.recentNotesCollapsed` | additive |
+| `hatchdoor:toggle-note-properties` window event | listener, no dispatcher | **removed** | breaking in name only — dead since written |
+| Observable UI | see D16–D33 | | behavior-changing |
+
+**Why the existing contracts could not support the outcome:** `LastModifiedNotesList` existed to
+render a sidebar section D4 deletes. `RecentNotesList` took `currentPath` solely to apply the
+active-note class that D6 forbids outside the tree. `explorerPaneRef` named the pane, but after
+D16 the scroll container is `.explorer-nav`, so the old name would misdescribe what it points at.
+
+**Consumers, and how they were found:** `grep -rn` across `frontend/src` for each removed and
+renamed symbol and CSS class, plus `node scripts/check-module-map.mjs` for file ownership. Every
+consumer is in-repository:
+
+- `RecentNotesList`, `SideHead`, `ChangesPanel` → `app/ExplorerPane.tsx` (Application shell)
+- `ExplorerPane` → `App.tsx` (Application shell)
+- Removed CSS → the markup deleted in the same commits; `stats.css` held orphans and was cleaned
+- Tests: `App.navigation-search.test.tsx`, `App.content-rendering.test.tsx`,
+  `App.write-mode.test.tsx`, `NoteActionsDialog.test.tsx`
+
+**Compatibility:** no external consumers. These are internal frontend module boundaries with no
+published package, no HTTP/MCP surface, and no serialized wire format. The new localStorage key
+is additive and absent-means-expanded, so existing installs lose nothing.
+
+**Deployment/rollback:** N/A — frontend-only, shipped as one build artefact. No migration order,
+no backend coordination. Rollback is reverting the branch.
+
+### Preserve architectural invariants
+
+- **ADR-03** (writes through `vault/write/`): **upheld.** The create dialog still passes a path
+  string to `useNoteActions` → existing write API; no new write path.
+- **ADR-11** (soft delete, client validation is not a safety boundary): **upheld.** The folder
+  picker validates nothing; `validateNotePath` and the backend checks are untouched. The
+  path-traversal test still asserts the request never reaches the network.
+- **ADR-13** (no speculative abstraction): **upheld.** Material Symbols is inlined as SVG
+  components; no dependency added.
+- **ADR-01, 02, 04, 05, 06, 07, 08, 09, 10, 12:** **N/A** — no Rust changed (zero `.rs` files in
+  the diff), no auth/token/origin behaviour touched, no retrieval or cache path touched.
+
+### Update consumers and evidence
+
+- All declared consumers updated in the same commits.
+- Rust/TypeScript wire representations: **N/A**, no wire format changed.
+- Focused contract tests added: `app/ExplorerPane.test.tsx` (4 tests, previously no coverage) and
+  the rewritten folder-picker tests in `NoteActionsDialog.test.tsx`.
+- Module map updated for both new production files and for the changed Vault explorer contract.
+- Documentation: this spec, `docs/design/design-system.html` (§17b fields/dialog added, §18
+  amended), `THIRD_PARTY_NOTICES.md`, `README.md`.
+
+### Validate
+
+Run from `frontend/` unless noted. Results as of `c208175`:
+
+```bash
+npm run format:check   # pass
+npx tsc --noEmit -p tsconfig.app.json   # pass
+npm run lint           # pass
+npm test               # pass — 38 files, 186 tests
+npm run build          # pass
+node scripts/check-module-map.mjs   # pass (repo root) — 147 files, one assignment each
+```
+
+Backend gates (`cargo fmt`/`clippy`/`test`) are **N/A**: `git diff development..HEAD -- '*.rs'`
+is empty.
+
+Beyond the gates, verified in Chromium against a running instance: the Properties disclosure
+collapses and expands (the cascade bug no unit test can see), exactly one active-note highlight
+exists, only `.explorer-nav` scrolls, and rail targets are 44×44 at mobile width.
+
+`git status --short` is clean; the branch diff contains only declared owned and coordination
+paths (see the packet index, including the mid-work declarations and the `stats.css` flag).
+
+### Pull-request summary
+
+```markdown
+Interface change: chrome redesign — sidebar zones, menu presentation, create dialog
+Producer boundary: Vault explorer; Application shell and navigation; Shared UI and styling;
+  Note reading and rendering; Note editing and vault actions
+Kind: breaking (frontend-internal only)
+Old contract: LastModifiedNotesList export; RecentNotesList(currentPath);
+  ExplorerPane(explorerPaneRef); .explorer-header/.explorer-page-link/.recent-notes-title/
+  .folder-suggestions selectors
+New contract: export removed; RecentNotesList(collapsed, onToggleCollapsed);
+  ExplorerPane(explorerScrollRef, recentCollapsed, onRecentCollapsedChange); SideHead and
+  ChangesPanel added; .explorer-rail/.explorer-nav/.explorer-footer/.side-*/.idx/.field-*
+  selectors added; localStorage hatchdoor.recentNotesCollapsed added
+Consumer boundaries: Application shell and navigation (App.tsx, app/ExplorerPane.tsx) — all
+  in-repository, no external or published consumers
+Compatibility/migration: none required; new localStorage key is additive and
+  absent-means-expanded
+Rollout/rollback: N/A — frontend-only single artefact; rollback is reverting the branch
+Evidence: format:check, tsc, lint, 186 tests, build, check-module-map all pass; browser
+  verification of the disclosure cascade, single active highlight, zone scrolling, and mobile
+  touch targets
+```
 
 ---
 
