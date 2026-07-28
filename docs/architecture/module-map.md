@@ -617,13 +617,19 @@ frontend checks.
 **Owned paths:**
 
 - `frontend/src/components/Explorer.tsx`
+- `frontend/src/components/ChangesPanel.tsx`
 - `frontend/src/hooks/useVaultTree.ts`
 - `frontend/src/lib/folderPaths.ts`
 - `frontend/src/lib/noteCandidates.ts`
 - `frontend/src/styles/layout-explorer.css`
 
 **Public contract:** `useVaultTree`, explorer tree/list components, derived
-folder paths, and flattened note candidates.
+folder paths, and flattened note candidates. The sidebar is three zones — a
+fixed rail, a scrolling nav, a fixed footer — and `.explorer-nav` is the scroll
+container the shell restores scroll position against, not the pane itself.
+`ChangesPanel` lists notes changed on disk; it deliberately carries no unread
+count, because distinguishing external changes from the user's own edits needs
+backend data that does not exist yet.
 
 **Consumed dependencies:** shared API/error utilities, shared wire types,
 router links, and shared UI components.
