@@ -58,6 +58,7 @@ function ExplorerRail({
         className="explorer-rail-item"
         data-open={changesOpen}
         aria-expanded={changesOpen}
+        aria-controls="explorer-changes-panel"
         aria-label="Recently changed notes"
         title="Recently changed notes"
         onClick={onToggleChanges}
@@ -65,20 +66,24 @@ function ExplorerRail({
         <InboxIcon />
       </button>
       {/*
-       * Settings has no destination until issue #13 exists. It ships dimmed
-       * and out of the tab order so the layout does not shift when it becomes
-       * real, and it carries a tooltip: a dead control with no explanation
-       * reads as a bug.
+       * Settings has no destination until issue #13 exists. It reserves the
+       * slot so the layout does not shift when it becomes real.
+       *
+       * A real <button> with aria-disabled, not `disabled` and not a span: it
+       * stays focusable, so a keyboard user can reach it and hear why it does
+       * nothing. `disabled` would remove it from the tab order and make the
+       * explanation mouse-only, which is how a dead control reads as a bug.
        */}
-      <span
+      <button
+        type="button"
         className="explorer-rail-item is-disabled"
-        role="button"
         aria-disabled="true"
         aria-label="Settings (not yet available)"
         title="Settings (not yet available)"
+        onClick={(event) => event.preventDefault()}
       >
         <SettingsIcon />
-      </span>
+      </button>
     </div>
   );
 }

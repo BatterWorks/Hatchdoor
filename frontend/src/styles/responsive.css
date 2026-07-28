@@ -62,6 +62,13 @@ body.resizing {
     transform: translateY(0);
   }
 
+  /* The rail lives inside the drawer, so these are touch targets like any
+     other control here and take the same 44px floor. */
+  .explorer-rail-item {
+    width: 44px;
+    height: 44px;
+  }
+
   /* Touch sizing only. Alignment, case, and tracking are unconditional now and
      live in topbar.css; they used to be here, which is why desktop was wrong. */
   .topbar-menu .ui-button,

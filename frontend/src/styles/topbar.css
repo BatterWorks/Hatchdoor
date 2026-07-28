@@ -268,7 +268,7 @@
   }
 }
 
-/* Groups the nine items into mutate / destructive / utility. */
+/* Groups the nine items into mutate / utility / destructive. */
 .topbar-menu-divider {
   height: 1px;
   margin: 0.15rem 0;
