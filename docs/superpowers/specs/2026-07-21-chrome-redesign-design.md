@@ -419,6 +419,107 @@ Both issues need the system extended, not just the code changed. Three additions
 
 ---
 
+## Implementation packet index
+
+Per `AGENTS.md`, code changes need a work packet declaring owned paths, coordination paths, and
+validation. This design spans **five boundaries** in `docs/architecture/module-map.md`, three of
+which are shared or composition with *"Owned paths: none by default"*. Change rule 3 says
+coordination files are not implicitly writable, and change rule 5 says a multi-boundary feature
+must enumerate each boundary. So this ships as **five packets, not one** — a single packet here
+would be exactly the blanket authority those rules exist to prevent.
+
+This index is the shape. Each packet gets written out in full immediately before it is built,
+informed by what landed before it. Packets live in the working plan; per `AGENTS.md` a committed
+packet file is optional and none is planned.
+
+| # | Packet | Decisions | Depends on |
+|---|---|---|---|
+| P1 | Icon foundation | D31, D32 | — |
+| P2 | Menu presentation (issue #8) | D24–D26 | P1 |
+| P3 | Sidebar zones | D16–D23, D33 | P1 |
+| P4 | Properties toggle | D11 | — |
+| P5 | Create dialog (issue #11) | D27–D30 | — |
+
+P4 and P5 are independent of everything. P2 and P3 need P1 only because the icons must exist.
+
+### P1 — Icon foundation
+
+**Outcome:** the UI is visually identical except every glyph is a Material Symbols Sharp icon,
+and the theme toggle shows the mode it will switch *to*.
+**Boundaries:** Application shell and navigation (composition); Shared UI and styling (shared);
+Vault explorer (owned, for the per-folder `+`).
+**New files:** inlined icon components — new production files, so the module map must be updated
+in the same change and `node scripts/check-module-map.mjs` must pass.
+**Coordination:** `app/AppTopbar.tsx` (glyph swap), `components/Explorer.tsx` (`+` → `add`),
+`styles/topbar.css` and `styles/ui-common.css` (icon-button sizing), `docs/architecture/module-map.md`.
+**Also:** Apache 2.0 attribution. There is **no `NOTICE` file in the repo today**, so P1 creates
+one (or adds the attribution to an existing licence surface — decide when writing the packet,
+since creating a root-level file is a repo-wide change worth naming explicitly).
+**Explicitly satisfies ADR-13:** nine inlined SVGs add no dependency. Installing an icon package
+would have needed an argument; this does not.
+
+### P2 — Menu presentation (issue #8)
+
+**Outcome:** desktop menu rows are left-aligned sentence case, borderless, grouped by hairline.
+Contents and order unchanged.
+**Boundaries:** Shared UI and styling (shared); Application shell (composition).
+**Coordination:** `styles/responsive.css` (hoist rules *out* of the 920px query),
+`styles/topbar.css`, `styles/ui-common.css`, `app/AppTopbar.tsx` (divider markup),
+`docs/design/design-system.html` (§18 amendment — rows are borderless).
+**Watch:** `ui-common.css` is shared. The `.close-note` base is used well beyond the menu, so
+scope changes to `.topbar-menu .close-note` rather than editing the base.
+
+### P3 — Sidebar zones
+
+**Outcome:** three-zone sidebar — rail, scrolling nav, footer — with the mono index on notes and
+`.side-head` section headers. Largest packet.
+**Boundaries:** Vault explorer (owned); Application shell (composition).
+**Owned:** `components/Explorer.tsx`, `styles/layout-explorer.css`.
+**Coordination:** `app/ExplorerPane.tsx` (restructure), `App.tsx` (the `scrollTop` consumer moves,
+and `modifiedNotes` reroutes to the changes panel), `styles/responsive.css`.
+**New files:** rail component, changes panel — module map update required.
+**Partially blocked:** the changes badge's "external changes only" rule has no backend behind it
+(see "Dependency this exposes"). The rail slot and panel shell are buildable; the counting rule
+is not. **Do not let this packet grow into the backend work.**
+**Tests:** `ExplorerPane` has no coverage today; add the three named in the Testing section.
+
+### P4 — Properties toggle
+
+**Outcome:** clicking the Properties header expands/collapses the grid; the Show/Hide button is
+gone. Smallest and cleanest packet — one boundary, no coordination paths.
+**Boundary:** Note reading and rendering (owned).
+**Owned:** `note-page/sections.tsx`, `NotePage.tsx` (delete the dead
+`hatchdoor:toggle-note-properties` listener), `styles/note-content.css`.
+
+### P5 — Create dialog (issue #11)
+
+**Outcome:** labels read as chrome, fields are visible, the folder picker is a select with a
+`New folder…` option, and a live path line shows what will be created.
+**Boundary:** Note editing and vault actions (owned) — **safety-sensitive.**
+**Owned:** `components/NoteActionsDialog.tsx`.
+**Coordination:** `App.css` (shared aggregation stylesheet — name the reason),
+`docs/design/design-system.html` (new fields and dialog sections).
+**Invariant to respect (ADR-03/11):** *client validation does not replace backend path safety.*
+D29's `New folder…` accepts a typed folder name; the client must not become the only thing
+validating that path. Existing `lib/writePaths.ts` validation stays, and the backend
+`vault/write/` path checks remain authoritative.
+
+### Validation (every packet)
+
+```bash
+cd frontend && npm run format:check && npm run lint && npm run typecheck && npm test && npm run build
+```
+
+Plus, when production files are added or moved (P1 and P3):
+
+```bash
+node scripts/check-module-map.mjs
+```
+
+No backend gates apply — nothing in this design touches Rust.
+
+---
+
 ## Relevant code
 
 - Sidebar container: `frontend/src/app/ExplorerPane.tsx`
