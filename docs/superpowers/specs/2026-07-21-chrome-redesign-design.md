@@ -82,8 +82,9 @@ topbar, navigation in the sidebar, awareness in its own signal).
    are the real folder names and encode a deliberate order — shown verbatim, never stripped or
    reformatted.
 9. ~~**The topbar needs a genuine overhaul,** not a restyle.~~ **Reversed 2026-07-28: the
-   topbar's *structure* is not changing.** Nothing is added, removed, or reordered; every
-   control stays in its current position; the ··· menu keeps its contents. The observation that
+   topbar's *structure* is not changing.** Nothing is added or removed; every control stays in
+   its current position; the ··· menu keeps its contents. **One authorised exception:** the
+   destructive pair moves to the end of the ··· menu (D26), requested during P2. The observation that
    the menu is an overloaded grab-bag still stands and is simply not being acted on now.
    - *Clarified after the icon decision:* "structure frozen" is not "file untouched". The
      earlier wording said "icons stay exactly where they are", which meant **placement** but
@@ -307,14 +308,13 @@ The design system agrees with the fix and has since it was written — §18 spec
 
 26. **Hairline dividers group the nine items.** Grouping is presentation, not restructuring, so
     it stays inside the topbar freeze. Order within each group is unchanged.
-    - *Corrected during P2:* this said "navigate / utility / destructive". The actual groups, in
-      the order they already appear, are **mutate** (New, Edit, Rename, Move) / **destructive**
-      (Archive, Delete) / **utility** (Copy content, Download .md, Copy link). There is no
-      navigate group. Usefully, those runs are already contiguous, so dividers need no reordering.
-    - **Known imperfection, deliberately not fixed:** the destructive pair sits in the *middle*
-      rather than last, which is not where a reader expects it. Fixing that means reordering,
-      which D9's freeze forbids. Worth revisiting when the topbar reopens; recorded rather than
-      quietly corrected.
+    - *Corrected during P2:* this said "navigate / utility / destructive". There is no navigate
+      group. The groups are **mutate** (New, Edit, Rename, Move) / **utility** (Copy content,
+      Download .md, Copy link) / **destructive** (Archive, Delete).
+    - **The destructive pair moves to the end.** In the original order it sat in the *middle*,
+      which is not where a reader expects Delete. This is the one reorder in this work and it
+      is a **deliberate, authorised exception to D9's freeze**, requested directly rather than
+      taken quietly. Nothing else moves, and nothing is added or removed.
     - Both dividers neighbour a group that only renders with an active note **and** write mode,
       so they render conditionally. Otherwise a read-only or no-note menu shows rules against
       nothing.
