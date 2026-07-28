@@ -25,37 +25,49 @@ export function NoteProperties({
 
   return (
     <section className="note-properties" data-collapsed={collapsed}>
-      <header className="note-properties-head">
-        <h3>Properties</h3>
-        <UiButton
-          className="close-note"
+      {/*
+       * The heading is the disclosure, which is what removed the separate
+       * Show/Hide button. Button-inside-heading rather than heading-inside-
+       * button: a heading is flow content and is not valid inside a button,
+       * and this way the outline keeps its "Properties" entry.
+       *
+       * The caret is the same affordance as the sidebar folder rows, so a
+       * collapsible thing reads the same way wherever it appears.
+       */}
+      <h3 className="note-properties-head">
+        <button
+          type="button"
+          className="note-properties-toggle"
+          data-open={!collapsed}
           onClick={onToggleCollapsed}
           aria-expanded={!collapsed}
           aria-controls="note-properties-grid"
         >
-          {collapsed ? "Show" : "Hide"}
-        </UiButton>
-      </header>
+          <span className="note-properties-caret" aria-hidden="true" />
+          Properties
+        </button>
+      </h3>
 
-      {!collapsed ? (
-        <dl id="note-properties-grid" className="note-properties-grid">
-          {entries.map(([key, value]) => (
-            <div key={key} className="note-property-row">
-              <dt>{key}</dt>
-              <dd>
-                {key === "tags" ? (
-                  <TagChips
-                    tags={normalizeTags(value)}
-                    onSelect={onTagSelect}
-                  />
-                ) : (
-                  <PropertyValue value={value} />
-                )}
-              </dd>
-            </div>
-          ))}
-        </dl>
-      ) : null}
+      {/* Rendered even when collapsed, and hidden: `aria-controls` pointing at
+          an element that does not exist is worse than a hidden one. */}
+      <dl
+        id="note-properties-grid"
+        className="note-properties-grid"
+        hidden={collapsed}
+      >
+        {entries.map(([key, value]) => (
+          <div key={key} className="note-property-row">
+            <dt>{key}</dt>
+            <dd>
+              {key === "tags" ? (
+                <TagChips tags={normalizeTags(value)} onSelect={onTagSelect} />
+              ) : (
+                <PropertyValue value={value} />
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </section>
   );
 }

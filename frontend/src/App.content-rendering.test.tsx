@@ -305,15 +305,21 @@ Body`,
       </MemoryRouter>,
     );
 
-    expect(
-      await screen.findByRole("button", { name: "Show" }),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Show" }));
+    // The Properties heading is the disclosure now; there is no Show button.
+    const toggle = await screen.findByRole("button", { name: "Properties" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
 
-    expect(await screen.findByText("tags")).toBeInTheDocument();
-    expect(await screen.findByText("#type/reference")).toBeInTheDocument();
-    expect(await screen.findByText("created")).toBeInTheDocument();
-    expect(await screen.findByText("2026-02-08")).toBeInTheDocument();
+    // The grid stays mounted while collapsed so aria-controls has a target,
+    // so these assert visibility rather than mere presence.
+    expect(screen.getByText("tags")).not.toBeVisible();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    expect(await screen.findByText("tags")).toBeVisible();
+    expect(await screen.findByText("#type/reference")).toBeVisible();
+    expect(await screen.findByText("created")).toBeVisible();
+    expect(await screen.findByText("2026-02-08")).toBeVisible();
     expect(screen.queryByText(/^---$/)).not.toBeInTheDocument();
     expect(screen.queryByText(/tags:\s*\[/)).not.toBeInTheDocument();
   });
@@ -373,7 +379,7 @@ Body`,
       </MemoryRouter>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Show" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Properties" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "#type/reference" }),
     );
