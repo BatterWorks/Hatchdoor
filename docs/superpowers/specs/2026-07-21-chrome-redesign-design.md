@@ -1,6 +1,6 @@
 # Chrome redesign — working design
 
-**Date:** 2026-07-21
+**Date:** 2026-07-21, revised 2026-07-28 (sidebar zones session)
 **Status:** In progress (brainstorming). Not yet a ratified spec — see "Proposed" and "Open" sections.
 **Issues covered:** #12 (sidebar layout), #8 (overloaded submenu), #10 (messy header hierarchy), placement side of #11 (create note).
 
@@ -29,7 +29,7 @@ Concretely, today:
 Design system: the app follows the "Forge" direction — warm cream / near-black theming, a
 single hot-orange accent (`#ff4d1c`), zero border-radius (except kbd + status pills), a
 four-family type system (Bricolage display / Newsreader serif / Inter Tight sans / JetBrains
-mono). Living reference: `docs/design-system.html` (§05 = sidebar, §18 = popover menu). Token
+mono). Living reference: `docs/design/design-system.html` (§05 = sidebar, §18 = popover menu). Token
 source: `frontend/src/styles/base.css`.
 
 It is also a **mobile app** (PWA). On mobile the sidebar is a slide-in drawer (breakpoint
@@ -65,9 +65,11 @@ topbar, navigation in the sidebar, awareness in its own signal).
 6. **Active-note highlight is canonical in the tree only** (full hot rail + hot-soft
    background). Recently Viewed does not re-highlight the current note. This removes the
    multi-highlight bug by construction.
-7. **Stats / Graph → a visually-separated sidebar footer.** They are real whole-vault views,
-   not gimmicks — the problem was only prominence. Demoted out of the header, kept out of the
-   already-crowded topbar.
+7. ~~**Stats / Graph → a visually-separated sidebar footer.**~~ **Superseded 2026-07-28 by
+   decision #17** — they move to the sidebar *rail* instead. The reasoning holds unchanged
+   (they are real whole-vault views, the problem was only prominence, and they stay out of the
+   already-crowded topbar); only the destination changed, so the footer can hold the single
+   primary create action alone.
 8. **Folder-name numeric prefixes** (`10-topics`, `20-projects`, `30-areas`, `40-reference`)
    are the real folder names and encode a deliberate order — shown verbatim, never stripped or
    reformatted.
@@ -96,27 +98,98 @@ topbar, navigation in the sidebar, awareness in its own signal).
 ### Still to settle under this decision
 
 - **Mobile button budget.** Working rule: **no net new mobile buttons** (~4 is the ceiling:
-  ☰ / ⌕ / … / change-badge). Now that note-CRUD has left the topbar, revisit what — if
-  anything — the topbar ··· still holds, and where the set-once theme toggle lives.
+  ☰ / ⌕ / ◑ / ···). *Amended 2026-07-28:* the change-badge no longer competes for a slot — it
+  lives in the sidebar rail (decision #17), which is inside the drawer and outside this budget.
+  Now that note-CRUD has left the topbar, revisit what — if anything — the topbar ··· still
+  holds, and where the set-once theme toggle lives.
 - **The inline "Edit" button** in the title row (`note-edit-button`): keep as a visible
   one-tap primary, or fold entirely into the Notes menu? (Leaning: keep Edit visible, put the
   rest behind Notes.)
 
 ---
 
+---
+
+## Sidebar zones (decided 2026-07-28)
+
+Prompted by a Notion sidebar reference. The pattern borrowed is **structural only** — three
+fixed zones and per-row identity. The Forge skin is explicitly unchanged: no rounding, no grey
+palette softening, no new type families.
+
+The unlock: the rail lives *inside the sidebar*, so its buttons do **not** consume the
+four-slot mobile topbar budget. That is what let #13 and #14 resolve here rather than waiting
+on the topbar pass.
+
+16. **The sidebar becomes three zones:** a fixed rail at top, a scrolling nav in the middle, a
+    fixed footer at bottom. Only the middle scrolls. Today the whole `explorer-pane` is the
+    scroll container and reports `scrollTop` upward (`ExplorerPane.tsx:59`); that handler moves
+    onto the middle div and its consumer in `App.tsx` follows.
+
+17. **Rail contents: Stats · Graph · Changes … Settings.** Icon-only, so each needs
+    `aria-label` + `title`. Stats and Graph stay `NavLink`s with their active state. Changes is
+    a button carrying the count (the badge from decision #5).
+    - **Settings is rightmost and visually separated** (gap or hairline): the first three are
+      places you go, Settings is app configuration.
+    - Settings has no destination yet. It ships **visibly disabled** (dimmed, `aria-disabled`,
+      tooltip) so it reserves the slot without offering a dead click, and the layout does not
+      shift when it becomes real.
+    - **No Home icon.** Hatchdoor has no home concept — `/` renders `EmptyState`. The topbar ☰
+      opens the panel and that is the whole story.
+    - **Search stays in the topbar ⌕** and gets no rail icon: search must work with the drawer
+      closed, and two entry points would drift. Same reasoning keeps the theme toggle out.
+    - This deletes the entire `explorer-header` block — the "Vault Explorer" label, the "New"
+      button, and the `explorer-page-links` div (`ExplorerPane.tsx:63-94`).
+
+18. **Footer holds one thing: the global "New note" button**, full width, only when
+    `writeEnabled`. Resolves the parked global-create placement. Keeping it alone is
+    deliberate — a footer with three things in it becomes the next grab-bag. The per-folder `+`
+    stays as contextual creation. The create *flow* remains issue #11's job.
+
+19. **Row marks: folders keep the caret, notes get one uniform mark.** This is the minimum fix
+    for "folder rows and note rows look nearly identical". Explicitly **no per-note emoji**, no
+    per-note icon frontmatter, no colour coding — nothing to author and nothing to maintain.
+
+20. **Recently Viewed loses the active-note class** (`Explorer.tsx:33-37`). This is the
+    mechanical change that enforces decision #6 and kills the multi-highlight bug.
+
+21. **`LastModifiedNotesList` is deleted** (enacting decision #4). Its `modifiedNotes` data
+    reroutes to the changes panel.
+
+22. **No mobile mirror for the changes count.** The count lives only in the rail. Because the
+    rail is inside a drawer that is closed by default on mobile, there is **no indication
+    anywhere** that notes changed until you open the drawer. Considered and rejected: a dot on
+    the ☰ button. Accepted tradeoff, recorded deliberately.
+
+### Dependency this exposes
+
+Decision #5 says the badge counts only externally-arrived changes, not your own UI edits. The
+SSE stream (`useVaultTree.ts:75`) only bumps a revision counter and carries no per-note detail,
+and `/api/recently-modified` cannot distinguish your edit from an agent's. **The rail slot and
+the panel shell are buildable now; the "external only" counting rule needs backend work that
+does not exist yet.** Do not treat the badge as complete without it.
+
+### Testing
+
+`ExplorerPane` has no covering tests today. Add with this work: the rail renders all four
+targets; the footer create button is absent when `writeEnabled` is false; Recently Viewed does
+not carry `active-note` while the tree does.
+
+### Out of scope for this pass
+
+Topbar overhaul, the note-header "Notes" button (decisions #10–#12), and the create flow (#11).
+
+---
+
 ## Open / not yet designed
 
-13. **Change-awareness badge placement.** Decided *what* it is (a button opening a panel of
-    changed notes) but not *where* it sits, given the mobile button budget. Parked until the
-    topbar layout pass.
-14. **Global "new note" placement.** The per-folder `+` (create in a specific folder) stays —
-    it is good contextual creation. The *global* entry point is undecided. The create *flow*
-    itself is issue #11's job, not this pass.
-15. **Folder tree UX/UI review.** Requested, not yet done. Early observations from the #12
-    screenshot + `frontend/src/components/Explorer.tsx`:
+13. ~~**Change-awareness badge placement.**~~ **Resolved 2026-07-28** — the sidebar rail
+    (decision #17), with no mobile mirror (decision #22).
+14. ~~**Global "new note" placement.**~~ **Resolved 2026-07-28** — the sidebar footer
+    (decision #18). The create *flow* is still issue #11's job.
+15. **Folder tree UX/UI review.** Partially addressed — decision #19 settles the folder-vs-note
+    distinction. Still open from the original observations:
     - Depth reads weakly — nesting is a thin left border plus a small indent.
     - The open/closed cue is only a tiny 8px caret.
-    - Folder rows and note rows look nearly identical (same size/weight).
     - Long titles truncate with no mobile-friendly way to see the full name.
     - No per-folder count/affordance.
 
