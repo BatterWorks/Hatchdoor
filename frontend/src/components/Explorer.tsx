@@ -7,6 +7,7 @@ import type {
   ModifiedNote,
   RecentNote,
 } from "../types";
+import { AddIcon } from "./icons";
 import { UiPanel } from "./ui";
 
 export function RecentNotesList({
@@ -178,7 +179,7 @@ function FolderNode({
                 onCreateNoteInFolder(folderPath);
               }}
             >
-              +
+              <AddIcon />
             </button>
           ) : null}
         </summary>

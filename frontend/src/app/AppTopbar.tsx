@@ -1,10 +1,24 @@
-import { useEffect, useRef, type Ref } from "react";
+import { useEffect, useRef, type ReactElement, type Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
+import {
+  BrightnessAutoIcon,
+  DarkModeIcon,
+  LightModeIcon,
+  MenuIcon,
+  MoreHorizIcon,
+  SearchIcon,
+} from "../components/icons";
 import type { ActiveNoteMeta } from "../types";
 import type { Theme } from "../hooks/useTheme";
 
-const THEME_ICON: Record<Theme, string> = { auto: "◑", light: "○", dark: "●" };
+// One icon per theme state, mirroring the three-way cycle. The icon shows the
+// theme that is currently active, which is what the previous glyphs did too.
+const THEME_ICON: Record<Theme, ReactElement> = {
+  auto: <BrightnessAutoIcon />,
+  light: <LightModeIcon />,
+  dark: <DarkModeIcon />,
+};
 const THEME_LABEL: Record<Theme, string> = {
   auto: "Theme: System",
   light: "Theme: Light",
@@ -96,7 +110,7 @@ export function AppTopbar({
               aria-label="Toggle explorer"
               style={{ marginRight: "0.5rem" }}
             >
-              ☰
+              <MenuIcon />
             </button>
           ) : null}
           <svg
@@ -163,7 +177,7 @@ export function AppTopbar({
               onClick={onOpenSearch}
               aria-label="Search notes"
             >
-              ⌕
+              <SearchIcon />
             </button>
           )}
           <button
@@ -184,7 +198,7 @@ export function AppTopbar({
               aria-expanded={actionsMenuOpen}
               aria-label="More actions"
             >
-              ···
+              <MoreHorizIcon />
             </button>
             <div
               className="topbar-menu"

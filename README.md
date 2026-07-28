@@ -812,3 +812,6 @@ docker push battermanz/hatchdoor:latest
 
 Hatchdoor is licensed under the GNU Affero General Public License v3.0 only.
 See [LICENSE](LICENSE).
+
+Third-party material — bundled icons, and the embedding models downloaded at
+runtime — is recorded in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md).
