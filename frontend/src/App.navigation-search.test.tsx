@@ -433,7 +433,7 @@ describe("App navigation/search", () => {
     );
 
     const recent = await screen.findByTestId("recent-notes");
-    expect(within(recent).getByText("Recently Viewed")).toBeInTheDocument();
+    expect(within(recent).getByText("Recently viewed")).toBeInTheDocument();
     await waitFor(() => {
       expect(
         within(recent).getByRole("link", { name: "Home" }),
@@ -441,7 +441,7 @@ describe("App navigation/search", () => {
     });
   });
 
-  it("shows last modified notes from source file metadata", async () => {
+  it("lists notes changed on disk in the changes panel", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
@@ -491,13 +491,21 @@ describe("App navigation/search", () => {
       </MemoryRouter>,
     );
 
-    const modified = await screen.findByTestId("last-modified-notes");
-    expect(within(modified).getByText("Last Modified")).toBeInTheDocument();
+    // Last Modified no longer sits in the sidebar: it conflated awareness with
+    // navigation. The same data now opens from the rail instead.
+    const openChanges = await screen.findByRole("button", {
+      name: "Recently changed notes",
+    });
+    fireEvent.click(openChanges);
+
+    const changes = await screen.findByRole("region", {
+      name: "Recently changed notes",
+    });
     expect(
-      within(modified).getByRole("link", { name: "Project" }),
+      within(changes).getByRole("link", { name: "Project" }),
     ).toHaveAttribute("href", "/n/project");
     expect(
-      within(modified).getByRole("link", { name: "Home" }),
+      within(changes).getByRole("link", { name: "Home" }),
     ).toHaveAttribute("title", "Home.md");
   });
 

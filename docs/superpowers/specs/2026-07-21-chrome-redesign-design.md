@@ -262,6 +262,13 @@ and `/api/recently-modified` cannot distinguish your edit from an agent's. **The
 the panel shell are buildable now; the "external only" counting rule needs backend work that
 does not exist yet.** Do not treat the badge as complete without it.
 
+**What P3 actually shipped:** the rail button and the panel, listing changed notes newest-first
+with the ~15 cap and "and N more". **No count, and no unread state.** A count driven by the
+available data would tick up every time you saved a note yourself, which inverts the whole point
+of D5 — it is meant to mean "something happened behind my back". A wrong count is worse than
+none, so the panel lists changes without claiming any of them are news. The "since you last
+looked" semantics in D5 remain unimplemented and blocked on the backend.
+
 ### Testing
 
 `ExplorerPane` has no covering tests today. Add with this work: the rail renders all four
