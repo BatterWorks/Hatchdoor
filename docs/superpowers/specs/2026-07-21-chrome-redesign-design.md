@@ -82,9 +82,14 @@ topbar, navigation in the sidebar, awareness in its own signal).
    are the real folder names and encode a deliberate order — shown verbatim, never stripped or
    reformatted.
 9. ~~**The topbar needs a genuine overhaul,** not a restyle.~~ **Reversed 2026-07-28: the
-   topbar is not changing in this work.** Icons stay exactly where they are, the ··· menu keeps
-   its contents, `AppTopbar.tsx` is untouched. The observation that the menu is an overloaded
-   grab-bag still stands; it is simply not being acted on now.
+   topbar's *structure* is not changing.** Nothing is added, removed, or reordered; every
+   control stays in its current position; the ··· menu keeps its contents. The observation that
+   the menu is an overloaded grab-bag still stands and is simply not being acted on now.
+   - *Clarified after the icon decision:* "structure frozen" is not "file untouched". The
+     earlier wording said "icons stay exactly where they are", which meant **placement** but
+     read as "do not touch the icons at all". Presentation changes are in scope — the ··· menu's
+     rows (D24–D26) and the glyph swap to Material Symbols Sharp (D32) both edit
+     `AppTopbar.tsx`. What is frozen is *what is there and in what order*, not *how it renders*.
 10. ~~**Note-actions move out of the topbar and onto the note header.**~~ **Dropped 2026-07-28**
     as a consequence of the topbar reversal. Edit / Rename / Move / Archive / Delete / Copy
     content / Download .md / Copy link all stay in the topbar ··· menu where they are today.
@@ -133,9 +138,9 @@ on the topbar pass.
 
 17. **Rail contents: Stats · Graph · Changes … Settings.** Stats and Graph stay `NavLink`s with
     their active state. Changes is a button carrying the count (the badge from decision D5).
-    - ⚠️ **The rail's visual form is unresolved — see "Open: rail typography vs icons" below.**
-      The original wording said icon-only. Design review found Forge has no icon set, so that
-      needs a decision before this is buildable.
+    - **Icon-only, resolved 2026-07-28** — see D31. Briefly blocked when review found Forge had
+      no icon set; unblocked by adopting Material Symbols Sharp. Each icon still needs an
+      `aria-label` since there is no visible text.
     - **Settings is rightmost and visually separated** (gap or hairline): the first three are
       places you go, Settings is app configuration.
     - Settings has no destination yet. It ships **visibly disabled** (dimmed, `aria-disabled`,
@@ -185,38 +190,61 @@ on the topbar pass.
       two sections, the numbering encodes nothing a reader needs. Adopt the head structure;
       treat the numerals as optional and drop them unless they earn their place.
 
-### Open: rail typography vs icons
+### Icon system (decided 2026-07-28)
 
-**Forge has no icon set.** The topbar's apparent icons are literal unicode characters in JSX
-(`☰`, `◑`, `···`, `+`). There is no SVG icon system; `frontend/scripts/gen-icons.mjs` generates
-PWA app icons only. So "icon-only rail" means either inventing glyphs (`▤ ◎ ✉ ⚙`, which read as
-arbitrary in a system whose personality is entirely typographic) or introducing an icon set as
-new scope.
+**Forge had no icon set.** The topbar's apparent icons are literal unicode characters in JSX
+(`☰`, `◑`, `···`, `+`); `frontend/scripts/gen-icons.mjs` generates PWA app icons only. This
+briefly blocked D17. A typographic rail (`.side-label` device, uppercase labels instead of
+glyphs) was the alternative considered. Resolved by adopting a library instead.
 
-The alternative fits the system better: a **typographic rail** built from the same device as
-`.side-label` — small uppercase display face, 0.12em tracking, muted, hot when active.
+31. **Adopt Material Symbols Sharp.**
+    - **Licence: Apache 2.0.** Free for commercial and open-source use, no in-UI attribution;
+      a NOTICE file in the repo satisfies it. This was the deciding constraint.
+    - **Geometry:** the Sharp variant is drawn with right angles and squared terminals, the only
+      mainstream set that agrees with the zero-radius rule. Outlined and Rounded do not.
+    - **Variable axes:** the weight axis lets icon stroke sit with the display face rather than
+      fighting it. The `fill` axis gives the active state for free — outline when inactive,
+      filled when active — mapping onto the existing hot-accent treatment.
+    - **No dependency is installed.** For ~9 icons, copy the SVGs out of
+      `google/material-design-icons` and inline them as components. No icon font, no npm
+      package, no CDN request. This matters: Hatchdoor is a PWA and the offline path stays clean.
+    - **Rejected:** Pixelarticons (closest geometric match to the rect-built wordmark, but went
+      freemium — 816 free under CC BY 4.0, full set paid — and reads 8-bit against the serif);
+      Lucide, Feather, Heroicons, Tabler, Phosphor (all permissive, all rounded caps and
+      corners, would read as imported from another product).
+    - **Honest caveat:** Material Symbols is a stroke language with uniform line weight, while
+      the wordmark is solid filled rects. Sharp is *compatible* with zero-radius, not identical
+      in construction. Closest permissive match, not a perfect one.
 
-```
-ICON RAIL (as originally decided)      TYPOGRAPHIC RAIL (proposed)
-┌────────────────────────┐            ┌────────────────────────┐
-│ ▤   ◎   ✉²        ⚙   │            │ STATS GRAPH CHANGES² ⚙ │
-└────────────────────────┘            └────────────────────────┘
-  invented glyphs,                      reuses .side-label,
-  needs aria-label on each,             self-labelling,
-  no icon system exists                 fits the type-led system
-```
+32. **The topbar's unicode glyphs are replaced with Sharp icons.** This stays inside the topbar
+    freeze on the same line drawn for issue #8: **positions and order do not move, presentation
+    does.** Nothing is added, removed, or reordered.
+    - Leaving the topbar on unicode was not an option once the rail has drawn icons directly
+      below it: four typed characters beside four real icons reads as broken. Unicode glyphs
+      also render per-platform and ignore the weight axis, so they would drift in size and
+      stroke against the rail.
 
-Tradeoffs: the typographic rail is self-labelling (no `aria-label` workaround, no
-discoverability cost) and introduces nothing new. It is tighter on width — four labels across a
-280px sidebar is feasible but leaves little slack, and "CHANGES" is the long one. The icon rail
-is more compact and closer to the Notion reference that prompted this, but requires an icon set
-Hatchdoor does not have.
+    | Where | Now | Sharp icon |
+    |---|---|---|
+    | Rail | — | `bar_chart` (Stats) |
+    | Rail | — | `graph_3` (Graph) |
+    | Rail | — | `inbox` (Changes) |
+    | Rail | — | `settings` (Settings) |
+    | Topbar | `☰` | `menu` |
+    | Topbar | `⌕` | `search` |
+    | Topbar | `◑` | `light_mode` / `dark_mode` |
+    | Topbar | `···` | `more_horiz` |
+    | Sidebar | `+` | `add` |
 
-**Undecided. Needs a call before decision D17 is buildable.**
+    - **The theme toggle becomes two icons, not one.** Today `◑` is a static half-circle
+      whatever the state, which does not say what pressing it does. Showing the mode you would
+      switch *to* is a real improvement that touches only the glyph.
+    - **Left alone:** the folder caret (§05 specifies CSS-only, and it works) and the Hatchdoor
+      wordmark (hand-built rects, it is the brand).
 
-*Related:* whichever form wins, a permanently disabled Settings control is conspicuous — more so
-as a text label than as a dimmed glyph. If it ships disabled it needs a tooltip saying what it
-will be, not a bare dead control. Deferring it until issue #13 is built is the other option.
+*Still open:* a permanently disabled Settings control is conspicuous. If it ships disabled it
+needs a tooltip saying what it will be, not a bare dead control. Deferring it until issue #13 is
+built is the other option. **Not yet decided.**
 
 ### Dependency this exposes
 
@@ -234,7 +262,7 @@ not carry `active-note` while the tree does.
 
 ### Out of scope for this pass
 
-The topbar entirely (`AppTopbar.tsx` is untouched — see the reversal on decision D9) and the
+The topbar's *structure* (see D9 — `AppTopbar.tsx` is still edited for D24–D26 and D32) and the
 create flow (issue #11). The note-header work is limited to decision D11's Properties toggle.
 
 ---
