@@ -296,10 +296,14 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
-  font-size: 1rem;
+  /* The icon sizes to 1em, so font-size is what controls it. */
+  font-size: 0.9rem;
   line-height: 1;
   opacity: 0;
   padding: 0 0.3rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .folder-item summary:hover .folder-new-note,

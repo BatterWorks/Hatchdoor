@@ -232,13 +232,16 @@ glyphs) was the alternative considered. Resolved by adopting a library instead.
     | Rail | — | `settings` (Settings) |
     | Topbar | `☰` | `menu` |
     | Topbar | `⌕` | `search` |
-    | Topbar | `◑` | `light_mode` / `dark_mode` |
+    | Topbar | `◑ ○ ●` | `brightness_auto` / `light_mode` / `dark_mode` |
     | Topbar | `···` | `more_horiz` |
     | Sidebar | `+` | `add` |
 
-    - **The theme toggle becomes two icons, not one.** Today `◑` is a static half-circle
-      whatever the state, which does not say what pressing it does. Showing the mode you would
-      switch *to* is a real improvement that touches only the glyph.
+    - **The theme toggle becomes three icons.** *Corrected during P1:* the original text claimed
+      `◑` was static whatever the state, and proposed showing the mode you would switch *to*.
+      Wrong on both counts. The control is a **three-way cycle** (auto / light / dark,
+      `AppTopbar.tsx:7`) whose glyph already reflects the **current** state (`◑ ○ ●`). So it maps
+      one icon per state — `brightness_auto` / `light_mode` / `dark_mode` — preserving the
+      existing current-state semantics rather than inverting them.
     - **Left alone:** the folder caret (§05 specifies CSS-only, and it works) and the Hatchdoor
       wordmark (hand-built rects, it is the brand).
 

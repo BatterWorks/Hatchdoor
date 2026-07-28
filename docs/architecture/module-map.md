@@ -800,6 +800,7 @@ route tests, and full frontend checks.
 **Paths:**
 
 - `frontend/src/components/ui.tsx`
+- `frontend/src/components/icons.tsx`
 - `frontend/src/index.css`
 - `frontend/src/App.css`
 - `frontend/src/styles/base.css`
@@ -809,6 +810,9 @@ route tests, and full frontend checks.
 
 **Contract and responsibility:** shared primitives, global tokens/base rules,
 style aggregation, topbar/shell styles, and cross-feature responsive overrides.
+`icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
+and paint with `currentColor`, so callers control them through font-size and
+color. Attribution lives in `THIRD_PARTY_NOTICES.md`.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected
