@@ -2,7 +2,7 @@ import { useEffect, useRef, type ReactElement, type Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
 import {
-  BrightnessAutoIcon,
+  ContrastIcon,
   DarkModeIcon,
   LightModeIcon,
   MenuIcon,
@@ -14,8 +14,13 @@ import type { Theme } from "../hooks/useTheme";
 
 // One icon per theme state, mirroring the three-way cycle. The icon shows the
 // theme that is currently active, which is what the previous glyphs did too.
+//
+// `contrast` for auto, not `brightness_auto`: at 18px the latter's sun-with-A
+// reads as a circle with radiating spikes, near-identical to the settings gear
+// sitting in the sidebar rail just below it. This half-filled circle is also
+// closer to the ◑ it replaces.
 const THEME_ICON: Record<Theme, ReactElement> = {
-  auto: <BrightnessAutoIcon />,
+  auto: <ContrastIcon />,
   light: <LightModeIcon />,
   dark: <DarkModeIcon />,
 };
