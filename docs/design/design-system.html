@@ -557,6 +557,34 @@
   }
   .mobile-path:hover { background: var(--paper-2); }
 
+  /* Form fields */
+  .field { display: grid; gap: 0.3rem; margin-bottom: 0.9rem; }
+  .field-label {
+    font-family: var(--font-display);
+    font-variation-settings: "wdth" 84, "wght" 700;
+    font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  .field-input {
+    width: 100%; box-sizing: border-box;
+    border: 1px solid var(--rule-strong); background: var(--paper);
+    padding: 0.6rem 0.7rem;
+    font-family: var(--font-sans); font-size: 1rem; color: var(--ink);
+    transition: border-color var(--dur) var(--ease);
+  }
+  .field-input:focus, .field-input.is-focus { outline: none; border-color: var(--hot); }
+  .field-path { margin: 0; font-family: var(--font-mono); font-size: 0.78rem; color: var(--muted); }
+
+  /* Dialog */
+  .dialog-panel {
+    width: min(420px, 100%);
+    border: 1px solid var(--rule-strong);
+    background: var(--paper);
+    padding: 1rem;
+  }
+  .dialog-panel h2 { margin: 0 0 0.8rem; }
+  .dialog-actions { display: flex; gap: 0.5rem; }
+
   /* Popover menu */
   .menu {
     display: grid;
@@ -1320,6 +1348,7 @@
 
     <h3>Overlays</h3>
     <a href="#search">Search dialog</a>
+    <a href="#fields">Form fields &amp; dialog</a>
     <a href="#menu">Popover menu</a>
 
     <h3>States</h3>
@@ -1890,6 +1919,37 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-toggle</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
+    </section>
+
+    <!-- ───────── FIELDS ───────── -->
+    <section class="doc-section" id="fields">
+      <div class="doc-section-num">§17b</div>
+      <h2>Form fields &amp; dialog</h2>
+      <p class="blurb">Added after issue #11. There was no fields or dialog section, so the create-note dialog invented its own vocabulary &mdash; rounded corners in a zero-radius system, and the palette&rsquo;s weakest border on inputs, which is what &ldquo;the forms are VERY subtle&rdquo; meant. Fields follow <span class="key">.search-input</span>: <b>zero radius</b>, <span class="key">--rule-strong</span> border, hot border on focus. Labels reuse the sidebar section-label device so a label reads as chrome and the value reads as content.</p>
+      <div class="stage" style="display:flex; justify-content:center;">
+        <div class="dialog-panel">
+          <h2>Create note</h2>
+          <div class="field">
+            <span class="field-label">Folder</span>
+            <select class="field-input">
+              <option>Vault root</option>
+              <option selected>10-topics</option>
+              <option>New folder&hellip;</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label">Note name</span>
+            <input class="field-input" value="Weekly review">
+          </div>
+          <p class="field-path" style="margin: -0.6rem 0 0.9rem;">10-topics / Weekly review.md</p>
+          <div class="dialog-actions">
+            <button class="ui-btn primary">Create</button>
+            <button class="ui-btn ghost">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <p class="blurb">The path line is live: nothing else in the dialog says what is about to be created or where, and it surfaces the numeric folder prefixes at the moment they matter.</p>
+      <div class="tag-row"><span class="key">.field</span><span class="key">.field-label</span><span class="key">.field-input</span><span class="key">.field-input:focus</span><span class="key">.field-path</span><span class="key">.dialog-panel</span><span class="key">.dialog-actions</span></div>
     </section>
 
     <!-- ───────── MENU ───────── -->

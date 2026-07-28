@@ -295,7 +295,12 @@ describe("App write mode", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    // The picker lists folders that exist; this vault has none, so a note in
+    // "Projects" is created through the New folder path.
     fireEvent.change(screen.getByLabelText("Folder"), {
+      target: { value: "//new-folder" },
+    });
+    fireEvent.change(screen.getByLabelText("New folder name"), {
       target: { value: "Projects" },
     });
     fireEvent.change(screen.getByLabelText("Note name"), {
@@ -620,7 +625,13 @@ describe("App write mode", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    // The picker only offers folders that exist, so a traversal attempt has to
+    // come through the free-text "New folder" path. Client validation must
+    // still reject it, and the backend remains authoritative regardless.
     fireEvent.change(screen.getByLabelText("Folder"), {
+      target: { value: "//new-folder" },
+    });
+    fireEvent.change(screen.getByLabelText("New folder name"), {
       target: { value: ".." },
     });
     fireEvent.change(screen.getByLabelText("Note name"), {

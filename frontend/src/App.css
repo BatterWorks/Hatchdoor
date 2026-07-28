@@ -266,30 +266,6 @@
   overflow-y: hidden;
 }
 
-.folder-suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  margin-top: -0.35rem;
-}
-
-.folder-suggestions button {
-  border: 1px solid var(--rule);
-  border-radius: 4px;
-  background: var(--paper);
-  color: var(--ink);
-  padding: 0.28rem 0.45rem;
-  font: inherit;
-  font-size: 0.82rem;
-  cursor: pointer;
-}
-
-@media (hover: hover) {
-  .folder-suggestions button:hover {
-    background: var(--paper-2);
-  }
-}
-
 .folder-new-note {
   margin-left: auto;
   border: none;
@@ -365,12 +341,20 @@
   overflow: auto;
 }
 
+/*
+ * Dialog + form fields.
+ *
+ * These had no design-system section to build from, so they had invented their
+ * own vocabulary: rounded corners in a zero-radius system, and the weakest
+ * border in the palette on the inputs. That is what issue #11 meant by the
+ * forms being "VERY subtle".
+ */
 .modal-panel {
   width: min(520px, 100%);
   max-height: min(720px, calc(var(--visual-viewport-height, 100dvh) - 2rem));
   overflow: auto;
-  border: 1px solid var(--rule);
-  border-radius: 8px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
   background: var(--paper);
   padding: 1rem;
 }
@@ -381,33 +365,65 @@
 
 .modal-panel form {
   display: grid;
-  gap: 0.75rem;
+  gap: 0.9rem;
 }
 
-.modal-panel label {
+.field {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.3rem;
 }
 
-.modal-panel input,
-.modal-panel textarea {
+/* Same device as the sidebar section labels, so a label reads as chrome and
+   the value you type reads as content. They used to look identical. */
+.field-label {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 84,
+    "wght" 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* Matches .search-input, the system's only documented field. */
+.field-input {
   width: 100%;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  padding: 0.65rem;
+  box-sizing: border-box;
+  border: 1px solid var(--rule-strong);
+  border-radius: 0;
+  padding: 0.6rem 0.7rem;
   background: var(--paper);
   color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  transition: border-color var(--dur) var(--ease);
 }
 
-.modal-panel textarea {
+.field-input:focus {
+  outline: none;
+  border-color: var(--hot);
+}
+
+.field-input-nested {
+  margin-top: 0.3rem;
+}
+
+/* Live preview of what is about to be created, and where. */
+.field-path {
+  margin: -0.3rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+textarea.field-input {
   min-height: 8rem;
   resize: vertical;
-  font:
-    0.95rem/1.55 ui-monospace,
-    SFMono-Regular,
-    Menlo,
-    Consolas,
-    monospace;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  line-height: 1.55;
 }
 
 .modal-actions {
