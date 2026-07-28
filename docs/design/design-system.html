@@ -567,7 +567,9 @@
     background: var(--bg);
     box-shadow: var(--shadow-float);
   }
-  .menu .ui-btn { justify-content: flex-start; text-transform: none; letter-spacing: 0; font-size: 0.86rem; }
+  .menu .ui-btn { justify-content: flex-start; text-transform: none; letter-spacing: 0; font-size: 0.86rem; border-color: transparent; }
+  .menu .ui-btn:hover { background: var(--paper-2); border-color: transparent; }
+  .menu-divider { height: 1px; margin: 0.15rem 0; background: var(--rule); }
 
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Sidebar
@@ -1895,15 +1897,17 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="doc-section-num">§18</div>
       <h2>Popover menu</h2>
       <p class="blurb">The topbar &ldquo;more&rdquo; button opens this. On desktop it anchors to the trigger. On mobile it becomes a bottom-sheet (CSS variant in implementation).</p>
+      <p class="blurb"><b>Rows are borderless.</b> Only the popover carries a border &mdash; a box per row inside a bordered container is the &ldquo;boxes in boxes&rdquo; nesting issue #8 objected to. The border is kept and made transparent rather than removed, so a row does not shift when <code>:active</code> paints it hot. Hover fills with <code>--paper-2</code>. Long menus group with <code>.menu-divider</code> rather than growing into an undifferentiated wall.</p>
       <div class="stage" style="display:flex; justify-content: center;">
         <div class="menu">
           <button class="ui-btn ghost">Copy current path</button>
           <button class="ui-btn ghost">Open in editor</button>
+          <div class="menu-divider"></div>
           <button class="ui-btn ghost">Export note</button>
           <button class="ui-btn ghost">Toggle theme</button>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.menu</span><span class="key">.menu .ui-btn</span></div>
+      <div class="tag-row"><span class="key">.menu</span><span class="key">.menu .ui-btn</span><span class="key">.menu-divider</span></div>
     </section>
 
     <!-- ───────── STATE BLOCKS ───────── -->

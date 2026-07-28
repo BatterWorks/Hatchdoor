@@ -78,6 +78,10 @@ export function AppTopbar({
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
+  // The menu's three groups are mutate / destructive / utility. Both dividers
+  // sit next to a group that only renders with a note and write mode, so
+  // without one they would be stray rules against nothing.
+  const showMenuDividers = Boolean(activeNote) && writeEnabled;
 
   useEffect(() => {
     if (!actionsMenuOpen) {
@@ -254,6 +258,9 @@ export function AppTopbar({
                   Move note
                 </UiButton>
               ) : null}
+              {showMenuDividers ? (
+                <div className="topbar-menu-divider" role="separator" />
+              ) : null}
               {activeNote && writeEnabled ? (
                 <UiButton
                   className="close-note"
@@ -277,6 +284,9 @@ export function AppTopbar({
                 >
                   Delete note
                 </UiButton>
+              ) : null}
+              {showMenuDividers ? (
+                <div className="topbar-menu-divider" role="separator" />
               ) : null}
               {activeNote ? (
                 <UiButton

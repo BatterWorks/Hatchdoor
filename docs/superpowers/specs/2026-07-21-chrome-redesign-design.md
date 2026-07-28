@@ -305,9 +305,19 @@ The design system agrees with the fix and has since it was written — §18 spec
     `border-color: var(--rule)`, so §18's own mock nests bordered buttons inside a bordered
     popover. **The design system needs amending here, not just the code.**
 
-26. **Hairline dividers group the nine items** into navigate / utility / destructive. Grouping
-    is presentation, not restructuring, so it stays inside the topbar freeze. Order within each
-    group is unchanged.
+26. **Hairline dividers group the nine items.** Grouping is presentation, not restructuring, so
+    it stays inside the topbar freeze. Order within each group is unchanged.
+    - *Corrected during P2:* this said "navigate / utility / destructive". The actual groups, in
+      the order they already appear, are **mutate** (New, Edit, Rename, Move) / **destructive**
+      (Archive, Delete) / **utility** (Copy content, Download .md, Copy link). There is no
+      navigate group. Usefully, those runs are already contiguous, so dividers need no reordering.
+    - **Known imperfection, deliberately not fixed:** the destructive pair sits in the *middle*
+      rather than last, which is not where a reader expects it. Fixing that means reordering,
+      which D9's freeze forbids. Worth revisiting when the topbar reopens; recorded rather than
+      quietly corrected.
+    - Both dividers neighbour a group that only renders with an active note **and** write mode,
+      so they render conditionally. Otherwise a read-only or no-note menu shows rules against
+      nothing.
 
 ```
 BEFORE (desktop >920px)          AFTER
