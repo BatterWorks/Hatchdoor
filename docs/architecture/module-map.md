@@ -556,8 +556,10 @@ packet names the route, callback, shortcut, or state integration. A large prop
 surface is a coordination seam, not permission to move feature behavior into
 the shell.
 
-**Validation:** the applicable `App.*.test.tsx`, `useTheme.test.tsx`, storage
-tests, then full frontend checks.
+**Validation:** the applicable `App.*.test.tsx`, `app/ExplorerPane.test.tsx`,
+`useTheme.test.tsx`, storage tests, then full frontend checks. Layout changes to
+the explorer pane need a browser as well as the suite: its zone structure
+depends on real cascade behavior that jsdom does not reproduce.
 
 ### Frontend API, authentication, and shared wire contracts
 
@@ -638,7 +640,9 @@ router links, and shared UI components.
 `lib/stateCompare.ts`, responsive CSS, and backend tree/recent/event endpoints.
 
 **Validation:** folder/note-candidate/state comparison tests and affected App
-navigation tests; the hook currently needs focused coverage.
+navigation tests; `app/ExplorerPane.test.tsx` covers the tree and list
+components in composition, including the single-active-highlight invariant. The
+hook still needs focused coverage.
 
 ### Search dialog
 
