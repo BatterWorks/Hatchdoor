@@ -211,13 +211,6 @@ export function NotePage({
     );
   }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
 
-  useEffect(() => {
-    const onToggle = () => setPropertiesCollapsed((prev) => !prev);
-    window.addEventListener("hatchdoor:toggle-note-properties", onToggle);
-    return () =>
-      window.removeEventListener("hatchdoor:toggle-note-properties", onToggle);
-  }, []);
-
   const startEditing = useCallback(() => {
     if (!writeEnabled || !note || isEditing) {
       return;

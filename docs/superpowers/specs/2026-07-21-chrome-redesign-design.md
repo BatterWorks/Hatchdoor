@@ -102,6 +102,12 @@ topbar, navigation in the sidebar, awareness in its own signal).
     button onto the new clickable header.
     - **This decision survives the topbar reversal intact** and is now standalone: it is a
       note-header change with no topbar dependency.
+    - *Built in P4.* Two details worth recording. The markup is **button inside heading**, not
+      the reverse: a heading is flow content and is invalid inside a button, and this keeps
+      "Properties" in the document outline. And the grid is now **rendered while collapsed and
+      `hidden`** rather than unmounted, because `aria-controls` pointing at an element that does
+      not exist is worse than one pointing at a hidden element. Tests assert visibility rather
+      than presence as a result.
     - The dormant `hatchdoor:toggle-note-properties` window event (listener at
       `NotePage.tsx:214-219`, no dispatcher anywhere) is **removed** as part of this.
 12. ~~**The freed Show-button slot becomes the "Notes" button.**~~ **Dropped 2026-07-28** —
