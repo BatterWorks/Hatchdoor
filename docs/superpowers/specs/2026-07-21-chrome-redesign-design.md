@@ -391,6 +391,15 @@ the palette, which is the "VERY subtle" complaint. Labels having literally no tr
     - `FolderSuggestions` is deleted, along with `.folder-suggestions` in `App.css:269-290`.
     - `MoveForm` uses the same picker — worth sharing one component between create and move
       rather than diverging.
+    - *Behaviour change found in P5:* the old free-text box accepted **any** folder, including
+      ones that do not exist. A select cannot. So creating a note in a not-yet-existing folder
+      now goes through `New folder…` — which is the requested flow, but it is a real change and
+      two existing tests depended on the old permissiveness.
+    - **Safety unchanged, deliberately.** `useNoteActions` still runs `validateNotePath` on the
+      string this produces, and backend `vault/write` path checks remain authoritative. The
+      picker passes a string through and validates nothing itself, so it is not a safety
+      boundary (ADR-03/11). The path-traversal test now drives its attempt through the
+      `New folder…` input and still asserts the request never reaches the network.
 
 30. **A live path line sits below the name field:** `10-topics / Weekly review.md`, mono,
     updating as you type. Nothing currently tells you what you are about to create or where.
