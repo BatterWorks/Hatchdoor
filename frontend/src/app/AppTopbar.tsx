@@ -78,9 +78,10 @@ export function AppTopbar({
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
-  // The menu's three groups are mutate / destructive / utility. Both dividers
-  // sit next to a group that only renders with a note and write mode, so
-  // without one they would be stray rules against nothing.
+  // The menu's three groups are mutate / utility / destructive, so Archive and
+  // Delete land last where a reader expects them. Both dividers sit next to a
+  // group that only renders with a note and write mode, so without one they
+  // would be stray rules against nothing.
   const showMenuDividers = Boolean(activeNote) && writeEnabled;
 
   useEffect(() => {
@@ -261,33 +262,6 @@ export function AppTopbar({
               {showMenuDividers ? (
                 <div className="topbar-menu-divider" role="separator" />
               ) : null}
-              {activeNote && writeEnabled ? (
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onArchiveNote();
-                  }}
-                >
-                  Archive note
-                </UiButton>
-              ) : null}
-              {activeNote && writeEnabled ? (
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onDeleteNote();
-                  }}
-                >
-                  Delete note
-                </UiButton>
-              ) : null}
-              {showMenuDividers ? (
-                <div className="topbar-menu-divider" role="separator" />
-              ) : null}
               {activeNote ? (
                 <UiButton
                   className="close-note"
@@ -322,6 +296,33 @@ export function AppTopbar({
                   }}
                 >
                   Copy note link
+                </UiButton>
+              ) : null}
+              {showMenuDividers ? (
+                <div className="topbar-menu-divider" role="separator" />
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onArchiveNote();
+                  }}
+                >
+                  Archive note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onDeleteNote();
+                  }}
+                >
+                  Delete note
                 </UiButton>
               ) : null}
             </div>
