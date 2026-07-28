@@ -2,7 +2,8 @@
 
 **Date:** 2026-07-21, revised 2026-07-28 (sidebar zones session)
 **Status:** In progress (brainstorming). Not yet a ratified spec — see "Proposed" and "Open" sections.
-**Issues covered:** #12 (sidebar layout), #8 (overloaded submenu), #10 (messy header hierarchy), placement side of #11 (create note).
+**Issues covered:** #12 (sidebar layout), #10 (messy header hierarchy), placement side of #11 (create note).
+**No longer covered:** #8 (overloaded submenu) — dropped 2026-07-28 when the topbar was taken out of scope.
 
 ---
 
@@ -45,8 +46,9 @@ topbar, navigation in the sidebar, awareness in its own signal).
 
 ## Decided
 
-1. **Scope:** one coherent chrome redesign, not just the sidebar — #12 + #8 + #10 + the
-   placement side of #11.
+1. ~~**Scope:** one coherent chrome redesign covering #12 + #8 + #10 + the placement side of
+   #11.~~ **Narrowed 2026-07-28** to the sidebar (#12) plus the note-header Properties toggle
+   and the placement side of #11. The topbar and #8 are out.
 2. **Sidebar = navigation only.**
 3. **Recently Viewed:** keep it, but make it **collapsible** (remembers open/closed state;
    fine to leave closed for users who don't care).
@@ -73,38 +75,39 @@ topbar, navigation in the sidebar, awareness in its own signal).
 8. **Folder-name numeric prefixes** (`10-topics`, `20-projects`, `30-areas`, `40-reference`)
    are the real folder names and encode a deliberate order — shown verbatim, never stripped or
    reformatted.
-9. **The topbar needs a genuine overhaul,** not a restyle — it is already full and its ···
-   menu is an overloaded grab-bag.
-10. **Note-actions move out of the topbar and onto the note header.** The note-specific
-    actions (Edit / Rename / Move / Archive / Delete / Copy content / Download .md / Copy
-    link) leave the topbar ··· grab-bag and live on the note itself, so they only exist when
-    there is a note to act on. **New note** is app-global (must exist with no note open) and
-    does **not** move here — it stays a global action. This is the pivot that makes the topbar
-    overhaul possible: note-CRUD stops competing with app-level chrome.
+9. ~~**The topbar needs a genuine overhaul,** not a restyle.~~ **Reversed 2026-07-28: the
+   topbar is not changing in this work.** Icons stay exactly where they are, the ··· menu keeps
+   its contents, `AppTopbar.tsx` is untouched. The observation that the menu is an overloaded
+   grab-bag still stands; it is simply not being acted on now.
+10. ~~**Note-actions move out of the topbar and onto the note header.**~~ **Dropped 2026-07-28**
+    as a consequence of the topbar reversal. Edit / Rename / Move / Archive / Delete / Copy
+    content / Download .md / Copy link all stay in the topbar ··· menu where they are today.
 11. **The note "Properties" line becomes the disclosure toggle**, replacing the separate
-    Show/Hide button. It uses the **same caret affordance as the sidebar folder rows**
-    (▸ collapsed → ▾ open, rotating, hot accent when open); clicking the line expands/collapses
-    the properties grid. Collapsed state stays persisted per-note (existing
-    `propertiesCollapsedStorageKey`).
-12. **The freed Show-button slot becomes the "Notes" button** — the note-actions menu from
-    decision #10, anchored on the note header at the right of the Properties line. Resulting
-    row: `▸ Properties … [ Notes ]`.
-    - **Always render this row on a note, even with zero frontmatter.** Today `NoteProperties`
-      returns `null` when there are no properties (`sections.tsx:21`); that must change so the
-      Notes button is always present on a note (the caret simply has nothing to expand).
-    - The dormant `hatchdoor:toggle-note-properties` window event (listener in `NotePage.tsx`,
-      no dispatcher) can be repurposed or removed as part of this.
+    Show/Hide button (`sections.tsx:30-37`). It uses the **same caret affordance as the sidebar
+    folder rows** (▸ collapsed → ▾ open, rotating, hot accent when open); clicking the line
+    expands/collapses the properties grid. Collapsed state stays persisted per-note (existing
+    `propertiesCollapsedStorageKey`). `aria-expanded` and `aria-controls` move from the removed
+    button onto the new clickable header.
+    - **This decision survives the topbar reversal intact** and is now standalone: it is a
+      note-header change with no topbar dependency.
+    - The dormant `hatchdoor:toggle-note-properties` window event (listener at
+      `NotePage.tsx:214-219`, no dispatcher anywhere) is **removed** as part of this.
+12. ~~**The freed Show-button slot becomes the "Notes" button.**~~ **Dropped 2026-07-28** —
+    with decision #10 gone there are no note-actions to house, so the freed slot simply closes
+    up. The row is just `▸ Properties`.
+    - The related requirement to *always* render the row on a note with zero frontmatter goes
+      away with it. `NoteProperties` keeps its existing `return null` when there are no
+      properties (`sections.tsx:22-24`).
+    - The inline "Edit" button in the title row (`note-edit-button`, `NotePage.tsx:562-569`)
+      **stays visible as-is**. The open question was whether to fold it into the Notes menu;
+      there is no Notes menu now, so it is settled by default.
 
-### Still to settle under this decision
+### Consequence: issue #8 is no longer covered
 
-- **Mobile button budget.** Working rule: **no net new mobile buttons** (~4 is the ceiling:
-  ☰ / ⌕ / ◑ / ···). *Amended 2026-07-28:* the change-badge no longer competes for a slot — it
-  lives in the sidebar rail (decision #17), which is inside the drawer and outside this budget.
-  Now that note-CRUD has left the topbar, revisit what — if anything — the topbar ··· still
-  holds, and where the set-once theme toggle lives.
-- **The inline "Edit" button** in the title row (`note-edit-button`): keep as a visible
-  one-tap primary, or fold entirely into the Notes menu? (Leaning: keep Edit visible, put the
-  rest behind Notes.)
+Issue #8 (overloaded ··· submenu) was one of the four issues this spec set out to address. The
+topbar reversal means it is **not** addressed by this work and returns to the backlog untouched.
+Issues #10 and #12 remain covered (via the sidebar zones section and decision #11); the
+placement side of #11 is covered by decision #18.
 
 ---
 
@@ -176,7 +179,8 @@ not carry `active-note` while the tree does.
 
 ### Out of scope for this pass
 
-Topbar overhaul, the note-header "Notes" button (decisions #10–#12), and the create flow (#11).
+The topbar entirely (`AppTopbar.tsx` is untouched — see the reversal on decision #9) and the
+create flow (issue #11). The note-header work is limited to decision #11's Properties toggle.
 
 ---
 
