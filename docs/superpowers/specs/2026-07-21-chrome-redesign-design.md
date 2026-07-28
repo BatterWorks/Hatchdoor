@@ -242,9 +242,13 @@ glyphs) was the alternative considered. Resolved by adopting a library instead.
     - **Left alone:** the folder caret (§05 specifies CSS-only, and it works) and the Hatchdoor
       wordmark (hand-built rects, it is the brand).
 
-*Still open:* a permanently disabled Settings control is conspicuous. If it ships disabled it
-needs a tooltip saying what it will be, not a bare dead control. Deferring it until issue #13 is
-built is the other option. **Not yet decided.**
+33. **Settings ships dimmed** (decided 2026-07-28). It reserves the rail slot so the layout does
+    not shift when issue #13 lands.
+    - Rendered with `aria-disabled="true"` and removed from the tab order, so assistive tech and
+      keyboard users are not sent to a control that does nothing.
+    - **It must carry a tooltip stating what it will be**, not a bare dimmed glyph. A dead
+      control with no explanation reads as a bug.
+    - Deferring it until issue #13 was the alternative; rejected in favour of a stable layout.
 
 ### Dependency this exposes
 
