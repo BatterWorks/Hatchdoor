@@ -695,6 +695,10 @@ paths (see the packet index, including the mid-work declarations and the `stats.
 
 ### Pull-request summary
 
+The checklist prescribes a plain block. PR #40 renders the same fields as a table instead — the
+block's long single lines were unreadable in GitHub's width. Same content, same fields; format
+changed deliberately, noted here so the two do not look out of sync.
+
 ```markdown
 Interface change: chrome redesign — sidebar zones, menu presentation, create dialog
 Producer boundary: Vault explorer; Application shell and navigation; Shared UI and styling;
