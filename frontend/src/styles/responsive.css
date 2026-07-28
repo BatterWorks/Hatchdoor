@@ -62,15 +62,13 @@ body.resizing {
     transform: translateY(0);
   }
 
+  /* Touch sizing only. Alignment, case, and tracking are unconditional now and
+     live in topbar.css; they used to be here, which is why desktop was wrong. */
   .topbar-menu .ui-button,
   .topbar-menu .close-note {
-    width: 100%;
     min-height: 44px;
-    justify-content: flex-start;
     padding: 0.45rem 0.5rem;
     font-size: 0.94rem;
-    text-transform: none;
-    letter-spacing: 0;
   }
 
   .search-overlay {
