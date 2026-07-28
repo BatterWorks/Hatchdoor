@@ -106,8 +106,18 @@ topbar, navigation in the sidebar, awareness in its own signal).
       the reverse: a heading is flow content and is invalid inside a button, and this keeps
       "Properties" in the document outline. And the grid is now **rendered while collapsed and
       `hidden`** rather than unmounted, because `aria-controls` pointing at an element that does
-      not exist is worse than one pointing at a hidden element. Tests assert visibility rather
-      than presence as a result.
+      not exist is worse than one pointing at a hidden element.
+    - ⚠️ **`hidden` alone does not hide it.** `.note-properties-grid` sets `display: grid`, which
+      is author-origin and beats the user agent's `[hidden] { display: none }`. Without an
+      explicit `.note-properties-grid[hidden] { display: none }` the disclosure toggles
+      `aria-expanded` and the caret while the grid stays fully visible. This shipped broken in
+      P4 and was caught in review.
+    - **No unit test can catch it.** jsdom does not reproduce that cascade — it reports
+      `display: none` where a real browser reports `display: grid` — and jest-dom's
+      `toBeVisible()` reads the `hidden` attribute directly, so it passes either way. Verified
+      the fix in Chromium instead: with the rule `display: none`/height 0, without it
+      `display: grid`/height 33px. **Any future change to how this collapses needs a real
+      browser to verify.**
     - The dormant `hatchdoor:toggle-note-properties` window event (listener at
       `NotePage.tsx:214-219`, no dispatcher anywhere) is **removed** as part of this.
 12. ~~**The freed Show-button slot becomes the "Notes" button.**~~ **Dropped 2026-07-28** —
@@ -538,6 +548,37 @@ gone. Smallest and cleanest packet — one boundary, no coordination paths.
 D29's `New folder…` accepts a typed folder name; the client must not become the only thing
 validating that path. Existing `lib/writePaths.ts` validation stays, and the backend
 `vault/write/` path checks remain authoritative.
+
+### Paths declared mid-work (recorded after review)
+
+AGENTS.md allows declaring an undeclared path into a packet when it is necessary for the stated
+outcome and does not materially broaden risk or authority. These were declared as the work
+happened; recording them here so the index describes the diff rather than the plan:
+
+| Path | Packet | Why |
+|---|---|---|
+| `frontend/src/App.css` | P1 | an inline SVG needs flex centring where a text glyph did not |
+| `README.md` | P1 | the Apache 2.0 attribution surface |
+| `frontend/src/app/constants.ts` | P3 | a new persistence key for the collapsed state |
+| `frontend/src/styles/stats.css` | P3 | it held the styles for explorer markup P3 deletes |
+| `frontend/src/App.navigation-search.test.tsx` | P3 | asserted the deleted Last Modified list |
+| `frontend/src/App.content-rendering.test.tsx` | P4 | named the removed Show button |
+| `frontend/src/App.write-mode.test.tsx` | P5 | depended on the free-text folder field |
+
+⚠️ **`stats.css` is the one that should have been escalated, not just declared.** The module map
+lists it as an *owned path of the Statistics capability*, not a shared file — so editing it from
+a Vault-explorer packet is the case change rule 3 exists to prevent, even though the deleted
+rules were genuinely orphaned by D17. The right move was to ask first.
+
+### Known deviation: field styles duplicate rather than reuse
+
+D27 and D28 say labels and fields *reuse* `.side-label` and `.search-input`. The implementation
+**copies** their declarations into `.field-label` and `.field-input` rather than sharing a
+selector, because `search.css` is the Search capability's owned path and `layout-explorer.css`
+is Vault explorer's — sharing would mean editing across two boundaries this packet does not own.
+Recorded rather than silently diverging: it is two sources of truth, and it is the same drift
+class this spec exists to complain about. Worth consolidating when a shared field component is
+extracted.
 
 ### Validation (every packet)
 

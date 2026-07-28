@@ -979,6 +979,16 @@
   gap: 0;
 }
 
+/*
+ * `display: grid` above is author-origin and beats the user-agent's
+ * `[hidden] { display: none }`, so without this the collapsed grid stays fully
+ * visible and the disclosure does nothing. jsdom does not reproduce the real
+ * cascade here, so no unit test catches its absence.
+ */
+.note-properties-grid[hidden] {
+  display: none;
+}
+
 .note-property-row {
   display: grid;
   grid-template-columns: minmax(0, 7rem) minmax(0, 1fr);

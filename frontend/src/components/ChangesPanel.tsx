@@ -30,7 +30,11 @@ export function ChangesPanel({
   const overflow = notes.length - visible.length;
 
   return (
-    <section className="explorer-changes" aria-label="Recently changed notes">
+    <section
+      className="explorer-changes"
+      id="explorer-changes-panel"
+      aria-label="Recently changed notes"
+    >
       {notes.length === 0 ? (
         <p className="explorer-changes-empty">
           Nothing has changed on disk yet.

@@ -274,7 +274,7 @@ function CreateForm({
       </div>
       {/* Nothing previously said what you were about to make or where. This
           also surfaces the numeric folder prefixes at the moment they matter. */}
-      <p className="field-path" aria-live="polite">
+      <p className="field-path">
         {folder.trim() ? `${folder.trim()} / ` : ""}
         {name.trim() || "Untitled"}.md
       </p>

@@ -11,12 +11,14 @@ export function SideHead({
   count,
   collapsible,
   open,
+  controls,
   onToggle,
 }: {
   label: string;
   count?: number;
   collapsible?: boolean;
   open?: boolean;
+  controls?: string;
   onToggle?: () => void;
 }) {
   const inner = (
@@ -40,6 +42,7 @@ export function SideHead({
       className="side-head"
       data-open={open}
       aria-expanded={open}
+      aria-controls={controls}
       onClick={onToggle}
     >
       {inner}
@@ -70,10 +73,11 @@ export function RecentNotesList({
         count={recent.length}
         collapsible
         open={!collapsed}
+        controls="recent-notes-list"
         onToggle={onToggleCollapsed}
       />
       {collapsed ? null : (
-        <ul className="tree root-tree">
+        <ul id="recent-notes-list" className="tree root-tree">
           {recent.map((note, index) => (
             <li key={note.slug} className="note-item">
               {/* No active-note class here. The highlight is canonical in the

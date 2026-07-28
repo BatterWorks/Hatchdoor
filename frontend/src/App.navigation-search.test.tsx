@@ -504,9 +504,10 @@ describe("App navigation/search", () => {
     expect(
       within(changes).getByRole("link", { name: "Project" }),
     ).toHaveAttribute("href", "/n/project");
-    expect(
-      within(changes).getByRole("link", { name: "Home" }),
-    ).toHaveAttribute("title", "Home.md");
+    expect(within(changes).getByRole("link", { name: "Home" })).toHaveAttribute(
+      "title",
+      "Home.md",
+    );
   });
 
   it("opens search and lists matches", async () => {
