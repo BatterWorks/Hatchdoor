@@ -7,15 +7,8 @@ beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
 function setup(save = vi.fn().mockResolvedValue({ content_hash: "h1" })) {
-  const hook = renderHook(
-    ({ content }: { content: string }) =>
-      useNoteAutosave({
-        content,
-        baseHash: "h0",
-        enabled: true,
-        save,
-      }),
-    { initialProps: { content: "one" } },
+  const hook = renderHook(() =>
+    useNoteAutosave({ baseHash: "h0", enabled: true, save }),
   );
   return { hook, save };
 }
@@ -140,6 +133,94 @@ describe("useNoteAutosave", () => {
     });
 
     expect(save).toHaveBeenCalled();
+    expect(hook.result.current.status).toBe("saved");
+  });
+});
+
+describe("overlapping writes", () => {
+  /** A save whose promise the test resolves by hand. */
+  function deferredSave() {
+    const calls: Array<{
+      content: string;
+      hash: string;
+      resolve: (hash: string) => void;
+    }> = [];
+    const save = vi.fn((content: string, hash: string) => {
+      return new Promise<{ content_hash: string }>((resolve) => {
+        calls.push({
+          content,
+          hash,
+          resolve: (h) => resolve({ content_hash: h }),
+        });
+      });
+    });
+    return { save, calls };
+  }
+
+  // Writes take about a second against a real vault, and every content change
+  // commits, so a second edit landing mid-flight is routine rather than exotic.
+  it("does not drop an edit made while a write is in flight", async () => {
+    const { save, calls } = deferredSave();
+    const hook = renderHook(() =>
+      useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+    );
+
+    act(() => {
+      hook.result.current.commit("edit-A");
+    });
+    act(() => {
+      hook.result.current.commit("edit-B");
+    });
+    expect(calls).toHaveLength(1);
+
+    await act(async () => {
+      calls[0].resolve("h1");
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].content).toBe("edit-B");
+    expect(calls[1].hash).toBe("h1");
+  });
+
+  it("writes only the newest content when several edits queue up", async () => {
+    const { save, calls } = deferredSave();
+    const hook = renderHook(() =>
+      useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+    );
+
+    act(() => {
+      hook.result.current.commit("A");
+      hook.result.current.commit("B");
+      hook.result.current.commit("C");
+    });
+
+    await act(async () => {
+      calls[0].resolve("h1");
+    });
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].content).toBe("C");
+  });
+
+  it("does not report saved while an edit is still queued", async () => {
+    const { save, calls } = deferredSave();
+    const hook = renderHook(() =>
+      useNoteAutosave({ baseHash: "h0", enabled: true, save }),
+    );
+
+    act(() => {
+      hook.result.current.commit("A");
+      hook.result.current.commit("B");
+    });
+    await act(async () => {
+      calls[0].resolve("h1");
+    });
+
+    expect(hook.result.current.status).toBe("saving");
+
+    await act(async () => {
+      calls[1].resolve("h2");
+    });
     expect(hook.result.current.status).toBe("saved");
   });
 });

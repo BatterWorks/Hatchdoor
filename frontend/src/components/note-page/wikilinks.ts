@@ -15,6 +15,11 @@ export type ResolvedWikilink = { slug: string; archived: boolean };
 // does not support multi-line wikilinks either.
 const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
 
+// Resolution results are stable for the life of the page, and every content
+// change re-runs this effect, so without a cache each keystroke-driven commit
+// re-POSTs every target in the note and widens the settling window.
+const resolveCache = new Map<string, ResolvedWikilink | null>();
+
 /**
  * Rewrite every wikilink in `markdown` to a markdown link or image.
  *
@@ -92,27 +97,34 @@ export function useResolvedWikilinks(
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
 
-      const map = new Map<string, { slug: string; archived: boolean } | null>();
+      const map = new Map<string, ResolvedWikilink | null>();
+      for (const target of uniqueTargets) {
+        if (resolveCache.has(target)) {
+          map.set(target, resolveCache.get(target) ?? null);
+        }
+      }
+      const missing = uniqueTargets.filter(
+        (target) => !resolveCache.has(target),
+      );
 
-      if (uniqueTargets.length > 0) {
+      if (missing.length > 0) {
         try {
           const res = await apiFetch("/api/resolve-batch", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ targets: uniqueTargets }),
+            body: JSON.stringify({ targets: missing }),
           });
 
           if (res.ok) {
             const json = (await res.json()) as ResolveBatchResponse;
             for (const result of json.results) {
-              map.set(
-                result.target,
-                result.slug
-                  ? { slug: result.slug, archived: result.archived }
-                  : null,
-              );
+              const resolved = result.slug
+                ? { slug: result.slug, archived: result.archived }
+                : null;
+              map.set(result.target, resolved);
+              resolveCache.set(result.target, resolved);
             }
           }
         } catch {

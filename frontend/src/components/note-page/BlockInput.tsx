@@ -72,6 +72,7 @@ export function BlockInput({
   initialValue,
   initialCaret = null,
   onCommit,
+  onEdit,
   onSplit,
   onMergeUp,
   onIndent,
@@ -82,6 +83,8 @@ export function BlockInput({
   initialValue: string;
   initialCaret?: number | null;
   onCommit: (text: string) => void;
+  /** Fires on every keystroke so unflushed text is never only in this input. */
+  onEdit?: (text: string) => void;
   onSplit?: (text: string, caret: number) => void;
   onMergeUp?: (text: string) => boolean;
   onIndent?: (text: string) => boolean;
@@ -118,6 +121,8 @@ export function BlockInput({
     }
     el.style.height = "auto";
     el.style.height = `${el.scrollHeight}px`;
+    // The prefix can change while typing, so the hang is recomputed with it.
+    hangPrefix(el);
   }, [value]);
 
   const commit = () => {
@@ -163,7 +168,7 @@ export function BlockInput({
       el.selectionStart === 0 &&
       el.selectionEnd === 0
     ) {
-      if (unitType === "table row" || !onMergeUp) {
+      if (unitType === "table row" || unitType === "code block" || !onMergeUp) {
         return;
       }
       if (onMergeUp(el.value)) {
@@ -210,7 +215,10 @@ export function BlockInput({
       value={value}
       rows={1}
       spellCheck
-      onChange={(event) => setValue(event.target.value)}
+      onChange={(event) => {
+        setValue(event.target.value);
+        onEdit?.(event.target.value);
+      }}
       onBlur={commit}
       onKeyDown={onKeyDown}
     />

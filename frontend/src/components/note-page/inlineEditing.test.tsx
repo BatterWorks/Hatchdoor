@@ -32,10 +32,12 @@ vi.mock("./PdfPreview", () => ({
 function NoteHarness({
   initialContent,
   onContentChange,
+  onInProgressEdit,
   writeEnabled = true,
 }: {
   initialContent: string;
   onContentChange?: (next: string) => void;
+  onInProgressEdit?: (next: string) => void;
   writeEnabled?: boolean;
 }) {
   const [content, setContent] = useState(initialContent);
@@ -49,6 +51,7 @@ function NoteHarness({
       content={content}
       frontmatterOffset={frontmatterLineOffset(content)}
       writeEnabled={writeEnabled}
+      onInProgressChange={onInProgressEdit}
       onChange={(next) => {
         setContent(next);
         onContentChange?.(next);
@@ -706,5 +709,27 @@ After.
     expect(onChange).toHaveBeenCalledWith(
       "---\ntitle: Home\n---\n> [!warning] Heads up\n> Mind the step.\n\nAfter.\n",
     );
+  });
+});
+
+describe("in-progress text is not stranded", () => {
+  // A block holds its text locally until blur, so without a signal on every
+  // keystroke the idle flush has nothing to flush and closing the tab
+  // mid-paragraph loses everything typed since the block was opened.
+  it("reports each keystroke to the page, not just the final commit", () => {
+    const onEdit = vi.fn();
+    render(
+      <NoteHarness initialContent={"hello\n"} onInProgressEdit={onEdit} />,
+    );
+    fireEvent.click(screen.getByText("hello"));
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "hello t" },
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "hello th" },
+    });
+
+    expect(onEdit).toHaveBeenCalledWith("hello th\n");
   });
 });

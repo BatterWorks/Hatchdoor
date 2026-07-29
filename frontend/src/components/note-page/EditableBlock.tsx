@@ -138,8 +138,8 @@ export function EditableBlock({
       return;
     }
     const [startLine, endLine] = rangeKey.split(":").map(Number);
-    return registerBlock({ startLine, endLine });
-  }, [registerBlock, rangeKey]);
+    return registerBlock({ startLine, endLine }, unitType);
+  }, [registerBlock, rangeKey, unitType]);
 
   const isActive = sameRange(
     editor?.activeRange ?? null,
@@ -183,6 +183,7 @@ export function EditableBlock({
         initialValue={editor.sourceOf(range)}
         initialCaret={editor.activeCaret}
         onCommit={(text) => editor.commitBlock(range, text)}
+        onEdit={(text) => editor.previewBlock(range, text)}
         onSplit={(text, caret) => {
           // The op reads the document, so the in-progress text has to be part
           // of it first, or the split would run against the stale line.

@@ -12,6 +12,8 @@ export type InlineEditorValue = {
   /** The source text of a range, sliced out of the whole document. */
   sourceOf: (range: LineRange) => string;
   enterBlock: (range: LineRange, caret: number | null) => void;
+  /** Reports in-progress text without leaving the block or writing a save. */
+  previewBlock: (range: LineRange, text: string) => void;
   /** Writes `text` back over `range` and leaves the block. */
   commitBlock: (
     range: LineRange,
@@ -20,7 +22,7 @@ export type InlineEditorValue = {
   ) => void;
   exitBlock: () => void;
   /** Registers a block so ops can find its neighbours in source order. */
-  registerBlock: (range: LineRange) => () => void;
+  registerBlock: (range: LineRange, unitType: string) => () => void;
   /** Structural ops, each a no-op where the design disables it. */
   splitAt: (range: LineRange, caret: number) => void;
   mergeUp: (range: LineRange) => boolean;
