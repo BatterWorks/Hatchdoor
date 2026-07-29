@@ -21,13 +21,20 @@ export function stripVaultNoteLinks(markdown: string): string {
 }
 
 function stripNoteWikilinks(markdown: string): string {
-  return markdown.replace(/(?<!!)\[\[([^\]]+)\]\]/g, (_whole, body: string) => {
-    const parsed = parseWikilinkTarget(body);
-    if (body.includes("|")) {
-      return parsed.label;
-    }
-    return parsed.target.split(/[#^]/, 1)[0].trim();
-  });
+  // The character class must exclude newlines. Without that, an unclosed [[
+  // matches forward to the next ]] anywhere in the note and collapses every
+  // line between them, which shifts the source mapping for every block below.
+  // Obsidian does not support multi-line wikilinks either.
+  return markdown.replace(
+    /(?<!!)\[\[([^\]\r\n]+)\]\]/g,
+    (_whole, body: string) => {
+      const parsed = parseWikilinkTarget(body);
+      if (body.includes("|")) {
+        return parsed.label;
+      }
+      return parsed.target.split(/[#^]/, 1)[0].trim();
+    },
+  );
 }
 
 function stripInternalMarkdownLinks(markdown: string): string {

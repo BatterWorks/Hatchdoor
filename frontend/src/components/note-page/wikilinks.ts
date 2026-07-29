@@ -5,6 +5,56 @@ import { slugifyHeading } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
 import type { ResolveBatchResponse } from "../../types";
 
+export type ResolvedWikilink = { slug: string; archived: boolean };
+
+// The character class must exclude newlines. Without that, an unclosed [[
+// matches forward to the next ]] anywhere in the note and the replacement
+// collapses every line between them, so the rendered body has fewer lines than
+// the source and every block below it is misaddressed. A dangling [[ is
+// exactly what the wikilink autocomplete leaves behind mid-typing. Obsidian
+// does not support multi-line wikilinks either.
+const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
+
+/**
+ * Rewrite every wikilink in `markdown` to a markdown link or image.
+ *
+ * Line-count preserving by contract: the result always has exactly as many
+ * lines as the input, which is what lets a rendered node's position be mapped
+ * back to a line in the file.
+ */
+export function rewriteWikilinks(
+  markdown: string,
+  noteRelativePath: string,
+  resolved: Map<string, ResolvedWikilink | null>,
+): string {
+  return markdown.replace(
+    WIKILINK_PATTERN,
+    (_whole, bang: string, body: string) => {
+      const parsed = parseWikilinkTarget(body);
+
+      if (bang === "!") {
+        const source = resolveAssetHref(parsed.target, noteRelativePath);
+        return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
+      }
+
+      if (isPdfAssetTarget(parsed.target)) {
+        const source = resolveAssetHref(parsed.target, noteRelativePath);
+        return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
+      }
+
+      const hit = resolved.get(parsed.target) ?? null;
+      if (hit) {
+        const anchor = extractAnchor(parsed.target);
+        const hash = anchor ? `#${anchor}` : "";
+        const prefix = hit.archived ? "/__archived__/" : "/n/";
+        const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
+        return `[${escapeMarkdownLabel(label)}](${prefix}${hit.slug}${hash})`;
+      }
+      return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
+    },
+  );
+}
+
 export function useResolvedWikilinks(
   markdown: string,
   noteRelativePath: string,
@@ -20,7 +70,7 @@ export function useResolvedWikilinks(
     }
 
     void (async () => {
-      const matches = [...markdown.matchAll(/(!?)\[\[([^\]]+)\]\]/g)];
+      const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
       const rawTargets = matches
         .filter(
           (m) =>
@@ -58,36 +108,7 @@ export function useResolvedWikilinks(
         }
       }
 
-      const rewritten = markdown.replace(
-        /(!?)\[\[([^\]]+)\]\]/g,
-        (_whole, bang: string, body: string) => {
-          const parsed = parseWikilinkTarget(body);
-
-          if (bang === "!") {
-            const source = resolveAssetHref(parsed.target, noteRelativePath);
-            return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
-          }
-
-          if (isPdfAssetTarget(parsed.target)) {
-            const source = resolveAssetHref(parsed.target, noteRelativePath);
-            return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
-          }
-
-          const resolved = map.get(parsed.target) ?? null;
-          if (resolved) {
-            const anchor = extractAnchor(parsed.target);
-            const hash = anchor ? `#${anchor}` : "";
-            const prefix = resolved.archived ? "/__archived__/" : "/n/";
-            const label = wikilinkDisplayLabel(
-              body,
-              parsed.label,
-              resolved.archived,
-            );
-            return `[${escapeMarkdownLabel(label)}](${prefix}${resolved.slug}${hash})`;
-          }
-          return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
-        },
-      );
+      const rewritten = rewriteWikilinks(markdown, noteRelativePath, map);
 
       if (!cancelled) {
         setResolved(rewritten);
