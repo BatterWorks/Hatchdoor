@@ -7,6 +7,8 @@ import {
   MermaidDiagram,
 } from "./RendererComponents";
 import { markAsParagraph } from "./paragraphs";
+import { EditableBlock } from "./EditableBlock";
+import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
@@ -14,8 +16,9 @@ import { resolveAssetHref } from "./wikilinks";
 export function createNoteMarkdownComponents(
   noteRelativePath: string,
   headingIdsBySourceLine: Map<number, string>,
+  options: { editable?: boolean } = {},
 ) {
-  return {
+  const components = {
     pre(props: { children?: ReactNode }) {
       const first = Children.toArray(props.children)[0];
       if (
@@ -188,6 +191,49 @@ export function createNoteMarkdownComponents(
       );
     },
   };
+
+  return options.editable ? withEditableBlocks(components) : components;
+}
+
+// Block-level entries get wrapped so each rendered block can be swapped for its
+// own source lines. Inline entries (a, code, img) are deliberately absent: they
+// belong to the block that contains them, not to a range of their own.
+const EDITABLE_UNITS: Record<string, UnitType> = {
+  p: "paragraph",
+  h1: "heading",
+  h2: "heading",
+  h3: "heading",
+  h4: "heading",
+  h5: "heading",
+  h6: "heading",
+  li: "list item",
+};
+
+type ComponentMap = Record<string, (props: never) => ReactNode>;
+
+function withEditableBlocks<T extends ComponentMap>(components: T): T {
+  const wrapped = { ...components } as ComponentMap;
+
+  for (const [tag, unitType] of Object.entries(EDITABLE_UNITS)) {
+    const Original = components[tag];
+    if (!Original) {
+      continue;
+    }
+    const Wrapped = (props: { node?: unknown }) => (
+      <EditableBlock node={props.node} unitType={unitType}>
+        {(Original as (p: unknown) => ReactNode)(props)}
+      </EditableBlock>
+    );
+    wrapped[tag] = Wrapped as (props: never) => ReactNode;
+  }
+
+  // The paragraph marker must survive wrapping, or callout detection stops
+  // recognising its own first child.
+  if (wrapped.p) {
+    markAsParagraph(wrapped.p);
+  }
+
+  return wrapped as T;
 }
 
 type MarkdownElementNode = {

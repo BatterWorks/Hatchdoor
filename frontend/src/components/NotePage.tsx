@@ -21,6 +21,7 @@ import {
   stripVaultNoteLinks,
 } from "../lib/markdown";
 import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
+import { frontmatterLineOffset, linesMatch } from "../lib/sourceMap";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -47,6 +48,7 @@ import {
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { uploadNoteAttachment } from "./note-page/attachmentDrop";
+import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
@@ -94,6 +96,7 @@ export function NotePage({
   const [conflictNote, setConflictNote] = useState<Note | null>(null);
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [inlineDirty, setInlineDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
@@ -180,6 +183,7 @@ export function NotePage({
     setNoteChangedOnDisk(false);
     setEditorError(null);
     setSaving(false);
+    setInlineDirty(false);
   }, [slug]);
 
   useEffect(() => {
@@ -306,14 +310,44 @@ export function NotePage({
     () => new Map(tocHeadings.map(({ sourceLine, id }) => [sourceLine, id])),
     [tocHeadings],
   );
+  // blockRange addresses blocks by line number, so inline editing is only safe
+  // while the rendered body has exactly one line per source line. If a
+  // transform ever collapses lines, editing would write to the wrong place and
+  // confirm the hash, so the feature turns itself off for that note instead.
+  const lineMappingIntact = useMemo(
+    () => linesMatch(parsed.body, markdown),
+    [parsed.body, markdown],
+  );
+  const inlineEditingEnabled =
+    writeEnabled && !isEditing && lineMappingIntact && !!note;
+
   const markdownComponents = useMemo(
     () =>
       createNoteMarkdownComponents(
         note?.relative_path ?? "",
         headingIdsBySourceLine,
+        { editable: inlineEditingEnabled },
       ),
-    [note?.relative_path, headingIdsBySourceLine],
+    [note?.relative_path, headingIdsBySourceLine, inlineEditingEnabled],
   );
+
+  const handleInlineChange = (nextContent: string) => {
+    if (!note) {
+      return;
+    }
+    if (!inlineDirty) {
+      setEditBaseHash(note.content_hash);
+      setInlineDirty(true);
+    }
+    setDraftContent(nextContent);
+    setNote((prev) => (prev ? { ...prev, content: nextContent } : prev));
+  };
+
+  const discardInlineEdits = () => {
+    setInlineDirty(false);
+    setEditorError(null);
+    void loadNote(true);
+  };
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
@@ -449,6 +483,7 @@ export function NotePage({
       setDraftStale(false);
       setDraftNotice(null);
       setIsEditing(false);
+      setInlineDirty(false);
       onWriteNotice?.(describeWriteOutcome(outcome));
       // Patch the saved content in place so the reader updates instantly without
       // a skeleton flash, then reconcile title/links in the background.
@@ -551,7 +586,25 @@ export function NotePage({
       <article className="note-content">
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>
-          {writeEnabled && !isEditing ? (
+          {writeEnabled && !isEditing && inlineDirty ? (
+            <div className="note-inline-actions">
+              <UiButton
+                className="close-note note-edit-button"
+                onClick={() => void handleSave()}
+                disabled={saving}
+              >
+                {saving ? "Saving" : "Save"}
+              </UiButton>
+              <UiButton
+                className="close-note"
+                onClick={discardInlineEdits}
+                disabled={saving}
+              >
+                Discard
+              </UiButton>
+            </div>
+          ) : null}
+          {writeEnabled && !isEditing && !inlineDirty ? (
             <UiButton
               className="close-note note-edit-button"
               onClick={startEditing}
@@ -616,13 +669,20 @@ export function NotePage({
           />
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={rehypePlugins}
-              components={markdownComponents}
+            <InlineEditorProvider
+              content={note.content}
+              frontmatterOffset={frontmatterLineOffset(note.content)}
+              writeEnabled={inlineEditingEnabled}
+              onChange={handleInlineChange}
             >
-              {markdown}
-            </ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm, remarkMath]}
+                rehypePlugins={rehypePlugins}
+                components={markdownComponents}
+              >
+                {markdown}
+              </ReactMarkdown>
+            </InlineEditorProvider>
           </div>
         )}
       </article>
