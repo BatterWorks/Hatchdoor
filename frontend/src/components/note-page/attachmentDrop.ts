@@ -1,6 +1,7 @@
 // Attachment handling shared by the note editor and the note body drop target.
 
 import { normalizeImageForUpload } from "../../lib/imageUpload";
+import { detectLineEnding } from "../../lib/sourceMap";
 import type { AttachmentOutcome } from "../../types";
 
 const ATTACHMENT_FOLDER = "Attachments";
@@ -134,4 +135,66 @@ export function attachmentEmbedPath(
     .split("/")
     .filter((part) => part.length > 0).length;
   return "../".repeat(Math.max(depth - 1, 0)) + vaultRelativePath;
+}
+
+export type DropBlock = {
+  startLine: number;
+  endLine: number;
+  top: number;
+  bottom: number;
+};
+
+/**
+ * The line to insert a dropped attachment after, from the drop's Y coordinate.
+ *
+ * Blocks are ordered by line range rather than by the order they were
+ * collected: with remark-gfm a footnote definition renders inside a generated
+ * section at the end of the document while carrying the source position of
+ * wherever it was written, so DOM order and source order genuinely diverge.
+ */
+export function insertionLineForDrop(blocks: DropBlock[], y: number): number {
+  if (blocks.length === 0) {
+    return 0;
+  }
+
+  const ordered = [...blocks].sort((a, b) => a.startLine - b.startLine);
+  const landedOn = ordered.find((block) => y >= block.top && y <= block.bottom);
+  if (landedOn) {
+    return landedOn.endLine;
+  }
+
+  const above = ordered.filter((block) => block.bottom < y).pop();
+  return above ? above.endLine : 0;
+}
+
+/**
+ * `content` with an embed inserted as its own block after `line`, kept apart by
+ * blank lines so it does not join the paragraph above or below it.
+ */
+export function insertEmbedAt(
+  content: string,
+  line: number,
+  embedPath: string,
+): string {
+  const ending = detectLineEnding(content);
+  const lines = content.split(/\r?\n/);
+  const embed = `![[${embedPath}]]`;
+
+  const before = lines.slice(0, line);
+  const after = lines.slice(line);
+  // Only pad where there is not already a blank line, or dropping between two
+  // paragraphs leaves a widening gap behind.
+  const padBefore =
+    before.length > 0 && before[before.length - 1].trim() !== "";
+  const padAfter = after.length > 0 && after[0].trim() !== "";
+
+  const next = [
+    ...before,
+    ...(padBefore ? [""] : []),
+    embed,
+    ...(padAfter ? [""] : []),
+    ...after,
+  ];
+
+  return next.join(ending);
 }

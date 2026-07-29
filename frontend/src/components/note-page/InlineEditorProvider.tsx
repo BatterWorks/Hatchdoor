@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { replaceLines, sliceLines, type LineRange } from "../../lib/sourceMap";
 import {
@@ -16,6 +23,7 @@ export function InlineEditorProvider({
   writeEnabled,
   settling = false,
   onChange,
+  onActiveRangeChange,
   children,
 }: {
   content: string;
@@ -23,6 +31,8 @@ export function InlineEditorProvider({
   writeEnabled: boolean;
   settling?: boolean;
   onChange: (next: string) => void;
+  /** Fires when the active unit changes, so the page can recount search hits. */
+  onActiveRangeChange?: (range: LineRange | null) => void;
   children: ReactNode;
 }) {
   const [activeRange, setActiveRange] = useState<LineRange | null>(null);
@@ -33,6 +43,12 @@ export function InlineEditorProvider({
   latestRef.current = content;
   const settlingRef = useRef(settling);
   settlingRef.current = settling;
+
+  // Entering a block removes that block's <mark> nodes from the DOM, so any
+  // collection of hits taken earlier is stale the moment a unit opens.
+  useEffect(() => {
+    onActiveRangeChange?.(activeRange);
+  }, [activeRange, onActiveRangeChange]);
 
   const sourceOf = useCallback(
     (range: LineRange) => sliceLines(content, range.startLine, range.endLine),
