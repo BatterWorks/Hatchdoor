@@ -621,3 +621,90 @@ describe("arrow navigation between units", () => {
     expect(screen.getByRole("textbox")).toHaveValue("- two");
   });
 });
+
+describe("task list checkboxes", () => {
+  const TASKS = "- [ ] first\n- [x] second\n";
+
+  it("toggles a task without opening the block for editing", () => {
+    const onChange = vi.fn();
+    render(<NoteHarness initialContent={TASKS} onContentChange={onChange} />);
+
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+
+    expect(onChange).toHaveBeenCalledWith("- [x] first\n- [x] second\n");
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("unchecks a checked task", () => {
+    const onChange = vi.fn();
+    render(<NoteHarness initialContent={TASKS} onContentChange={onChange} />);
+
+    fireEvent.click(screen.getAllByRole("checkbox")[1]);
+
+    expect(onChange).toHaveBeenCalledWith("- [ ] first\n- [ ] second\n");
+  });
+
+  it("does not toggle in a read-only vault", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={TASKS}
+        onContentChange={onChange}
+        writeEnabled={false}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("clicking the item's text still opens it for editing", () => {
+    render(<NoteHarness initialContent={TASKS} />);
+
+    fireEvent.click(screen.getByText("first"));
+
+    expect(screen.getByRole("textbox")).toHaveValue("- [ ] first");
+  });
+});
+
+describe("callouts", () => {
+  const CALLOUT = `---
+title: Home
+---
+> [!warning] Heads up
+> Mind the gap.
+
+After.
+`;
+
+  it("edits the callout title line, offset by the frontmatter", () => {
+    render(<NoteHarness initialContent={CALLOUT} />);
+
+    fireEvent.click(screen.getByText("Heads up"));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> [!warning] Heads up");
+  });
+
+  it("edits the callout body, keeping its quote prefix", () => {
+    render(<NoteHarness initialContent={CALLOUT} />);
+
+    fireEvent.click(screen.getByText(/Mind the gap/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> Mind the gap.");
+  });
+
+  it("writes an edited callout body back to the right lines", () => {
+    const onChange = vi.fn();
+    render(<NoteHarness initialContent={CALLOUT} onContentChange={onChange} />);
+    fireEvent.click(screen.getByText(/Mind the gap/));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "> Mind the step." },
+    });
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      "---\ntitle: Home\n---\n> [!warning] Heads up\n> Mind the step.\n\nAfter.\n",
+    );
+  });
+});

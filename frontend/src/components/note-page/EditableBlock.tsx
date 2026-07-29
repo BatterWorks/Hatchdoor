@@ -74,15 +74,31 @@ const LONG_PRESS_SLOP_PX = 10;
  */
 export function EditableBlock({
   node,
+  range: explicitRange,
   unitType,
   children,
 }: {
-  node: unknown;
+  node?: unknown;
+  /**
+   * For content the renderer rebuilds rather than passes through, where the
+   * original node's position is no longer attached to what is on screen.
+   * Given in rendered coordinates, exactly like a node position, so the
+   * frontmatter offset still applies.
+   */
+  range?: LineRange;
   unitType: UnitType;
   children: ReactNode;
 }) {
   const editor = useInlineEditor();
-  const range = editor ? blockRange(node, editor.frontmatterOffset) : null;
+  const offset = editor?.frontmatterOffset ?? 0;
+  const range = explicitRange
+    ? {
+        startLine: explicitRange.startLine + offset,
+        endLine: explicitRange.endLine + offset,
+      }
+    : editor
+      ? blockRange(node, offset)
+      : null;
   const elementRef = useRef<HTMLElement | null>(null);
   const timerRef = useRef<number | null>(null);
   const originRef = useRef<{ x: number; y: number } | null>(null);
@@ -262,6 +278,19 @@ export function EditableBlock({
 
   const onClick = (event: MouseEvent) => {
     if (event.defaultPrevented) {
+      return;
+    }
+    // mdast-util-to-hast emits task checkboxes disabled, and disabled inputs
+    // fire no click events, so the handler has to live on the li. The input
+    // node carries no position either, so the line comes from this block.
+    const clicked = event.target as HTMLElement;
+    if (
+      unitType === "list item" &&
+      clicked instanceof HTMLInputElement &&
+      clicked.type === "checkbox"
+    ) {
+      event.preventDefault();
+      editor.toggleTask(range.startLine);
       return;
     }
     // A touch gesture already decided for itself whether to enter, so the

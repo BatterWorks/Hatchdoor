@@ -1,0 +1,15 @@
+- generic [ref=f31e3]:
+  - banner [ref=f31e5]:
+    - generic "Hatchdoor" [ref=f31e6]:
+      - generic [ref=f31e7]: "[]"
+      - generic [ref=f31e9]: HATCHDOOR
+    - generic [ref=f31e10]: Preparing vault
+    - 'button "Theme: auto" [ref=f31e11] [cursor=pointer]': ◑
+  - main [ref=f31e12]:
+    - paragraph [ref=f31e13]: SEARCH INDEX
+    - heading "Preparing your vault" [level=1] [ref=f31e14]
+    - paragraph [ref=f31e15]: Scanning notes and measuring the work ahead…
+    - progressbar "Measuring the vault" [ref=f31e16]
+    - generic [ref=f31e18]:
+      - strong [ref=f31e19]: Scanning
+      - generic [ref=f31e20]: Estimating time remaining
