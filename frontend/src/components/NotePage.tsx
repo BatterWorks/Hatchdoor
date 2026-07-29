@@ -23,6 +23,7 @@ import {
 import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
 import { frontmatterLineOffset, linesMatch } from "../lib/sourceMap";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
+import { createEditHistory } from "../lib/editHistory";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -338,11 +339,19 @@ export function NotePage({
   );
 
   const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
+  // Stable per note: a ref an effect depends on cannot be reassigned, and the
+  // history object mutates internally rather than being swapped out.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const history = useMemo(() => createEditHistory(""), [slug]);
 
   const handleInlineChange = (nextContent: string) => {
     if (!note) {
       return;
     }
+    history.record(nextContent, Date.now());
+    // Moving between units always ends a run, so undo steps line up with
+    // blocks rather than with arbitrary pauses.
+    history.breakRun();
     if (!inlineDirty) {
       setEditBaseHash(note.content_hash);
       setInlineDirty(true);
@@ -375,6 +384,50 @@ export function NotePage({
 
   autosaveRef.current = autosave;
   autosaveStatusRef.current = autosave.status;
+
+  // Seed once per note. Without this, undo before the first edit would restore
+  // the empty string the history was constructed with and blank the note.
+  const seededSlugRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (note && seededSlugRef.current !== slug) {
+      seededSlugRef.current = slug;
+      history.reset(note.content);
+    }
+  }, [note, slug, history]);
+
+  const applyHistory = useCallback((next: string | null) => {
+    if (next === null) {
+      return;
+    }
+    setNote((prev) => (prev ? { ...prev, content: next } : prev));
+    setDraftContent(next);
+    setInlineDirty(true);
+    autosaveRef.current?.commit(next);
+  }, []);
+
+  useEffect(() => {
+    if (!inlineEditingEnabled) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (!meta || event.isComposing) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const isUndo = key === "z" && !event.shiftKey;
+      const isRedo = (key === "z" && event.shiftKey) || key === "y";
+      if (!isUndo && !isRedo) {
+        return;
+      }
+      // Always prevented: mixing our stack with the browser's native textarea
+      // undo produces behaviour neither of them can explain.
+      event.preventDefault();
+      applyHistory((isUndo ? history.undo() : history.redo())?.content ?? null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [inlineEditingEnabled, applyHistory, history]);
 
   const reviewConflict = () => {
     // The conflict review lives in source mode, which already knows how to
