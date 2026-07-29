@@ -1178,3 +1178,17 @@
   font-family: var(--font-mono);
   font-size: 0.82rem;
 }
+
+.save-state {
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  align-self: center;
+}
+
+.save-state.is-error {
+  color: var(--err-fg);
+}
