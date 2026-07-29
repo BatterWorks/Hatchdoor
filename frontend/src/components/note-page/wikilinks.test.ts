@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { attachmentEmbedPath } from "./attachmentDrop";
 import { resolveAssetHref } from "./wikilinks";
 
 describe("resolveAssetHref", () => {
@@ -30,4 +31,20 @@ describe("resolveAssetHref", () => {
   it("returns raw target when normalization becomes empty", () => {
     expect(resolveAssetHref("../../..", "Notes/Sub/Entry")).toBe("../../..");
   });
+});
+
+describe("uploaded attachment round trip", () => {
+  // The embed we write and the href we resolve are computed by different
+  // modules. If they ever disagree, every attachment in a subfolder note 404s,
+  // which is exactly the bug this pairing fixes.
+  it.each(["Home.md", "Projects/Foo.md", "Projects/2026/Q3/Foo.md"])(
+    "resolves back to the uploaded path from %s",
+    (notePath) => {
+      const embed = attachmentEmbedPath("Attachments/report.pdf", notePath);
+
+      expect(resolveAssetHref(embed, notePath)).toBe(
+        "/vault-assets/Attachments/report.pdf",
+      );
+    },
+  );
 });

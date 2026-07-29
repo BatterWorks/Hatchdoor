@@ -133,6 +133,83 @@ describe("NoteEditor attachment uploads", () => {
     expect(textarea).toHaveValue("# Body\n![[Attachments/safari-paste.png]]");
   });
 
+  it("uploads a dropped PDF and inserts an embed", async () => {
+    const uploadAttachment = vi
+      .fn()
+      .mockResolvedValue("Attachments/report.pdf");
+
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    textarea.setSelectionRange(7, 7);
+    const file = new File(["%PDF-1.7"], "report.pdf", {
+      type: "application/pdf",
+    });
+    fireEvent.drop(textarea, { dataTransfer: { files: [file] } });
+
+    await screen.findByText("Inserted attachment: Attachments/report.pdf");
+    expect(uploadAttachment).toHaveBeenCalledWith(file);
+    expect(textarea).toHaveValue("# Body\n![[Attachments/report.pdf]]");
+  });
+
+  it("names what it accepts instead of uploading an unsupported file", async () => {
+    const uploadAttachment = vi.fn();
+
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    fireEvent.drop(textarea, {
+      dataTransfer: {
+        files: [
+          new File(["doc"], "notes.docx", {
+            type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          }),
+        ],
+      },
+    });
+
+    await screen.findByText("Hatchdoor accepts images and PDFs.");
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("reports the size instead of uploading an over-limit file", async () => {
+    const uploadAttachment = vi.fn();
+
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    const big = new File(["x"], "big.pdf", { type: "application/pdf" });
+    Object.defineProperty(big, "size", { value: 14 * 1024 * 1024 });
+    fireEvent.drop(textarea, { dataTransfer: { files: [big] } });
+
+    await screen.findByText("That file is 14 MB. The limit is 10 MB.");
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
   it("shows a visible drop target while dragging an image over the editor", () => {
     const uploadAttachment = vi.fn();
 

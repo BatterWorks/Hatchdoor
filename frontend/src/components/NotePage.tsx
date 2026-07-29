@@ -11,7 +11,6 @@ import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
-import { normalizeImageForUpload } from "../lib/imageUpload";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -47,6 +46,7 @@ import {
 } from "../lib/writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
+import { uploadNoteAttachment } from "./note-page/attachmentDrop";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
@@ -535,16 +535,15 @@ export function NotePage({
   };
 
   const handleUploadAttachment = async (file: File): Promise<string> => {
-    const normalizedFile = await normalizeImageForUpload(file);
-    const filename = safeAttachmentFilename(normalizedFile.name);
-    const outcome = await uploadAttachment(
-      normalizedFile,
-      `Attachments/${filename}`,
+    const result = await uploadNoteAttachment(
+      file,
+      note.relative_path,
+      uploadAttachment,
     );
-    if (outcome.git_sync_warning) {
-      onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
+    if (result.gitSyncWarning) {
+      onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
     }
-    return outcome.attachment.relative_path;
+    return result.embedPath;
   };
 
   return (
@@ -631,9 +630,4 @@ export function NotePage({
       <NoteTocDesktop headings={tocHeadings} />
     </div>
   );
-}
-
-function safeAttachmentFilename(filename: string): string {
-  const basename = filename.split(/[\\/]/).pop()?.trim() || "attachment";
-  return basename.replace(/[^A-Za-z0-9._ -]/g, "-");
 }

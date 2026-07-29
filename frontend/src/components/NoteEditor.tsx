@@ -18,6 +18,7 @@ import {
   matchNoteCandidates,
   type WikilinkTrigger,
 } from "./note-page/autocomplete";
+import { attachmentRejection } from "./note-page/attachmentDrop";
 import { diffConflictLines } from "./note-page/conflictDiff";
 import {
   buildContentWithFrontmatter,
@@ -178,6 +179,11 @@ export function NoteEditor({
     if (!onUploadAttachment) {
       return;
     }
+    const rejection = attachmentRejection(file);
+    if (rejection) {
+      setAttachmentNotice({ tone: "error", message: rejection });
+      return;
+    }
     setAttachmentNotice({
       tone: "loading",
       message: "Uploading attachment...",
@@ -191,16 +197,18 @@ export function NoteEditor({
     }
   };
 
-  const firstImageFile = (files: FileList | File[]) =>
-    Array.from(files).find((file) => file.type.startsWith("image/"));
+  // Any file is a candidate; attachmentRejection decides, so an unsupported
+  // drop gets a message rather than being silently ignored.
+  const firstAttachmentFile = (files: FileList | File[]) =>
+    Array.from(files)[0];
 
-  const firstClipboardImageFile = (clipboardData: DataTransfer) => {
-    const file = firstImageFile(clipboardData.files);
+  const firstClipboardAttachmentFile = (clipboardData: DataTransfer) => {
+    const file = firstAttachmentFile(clipboardData.files);
     if (file) {
       return file;
     }
     return Array.from(clipboardData.items)
-      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .filter((item) => item.kind === "file")
       .map((item) => item.getAsFile())
       .find((item): item is File => item !== null);
   };
@@ -209,7 +217,7 @@ export function NoteEditor({
     if (!onUploadAttachment) {
       return;
     }
-    const file = firstClipboardImageFile(event.clipboardData);
+    const file = firstClipboardAttachmentFile(event.clipboardData);
     if (!file) {
       return;
     }
@@ -221,7 +229,7 @@ export function NoteEditor({
     if (!onUploadAttachment) {
       return;
     }
-    const file = firstImageFile(event.dataTransfer.files);
+    const file = firstAttachmentFile(event.dataTransfer.files);
     if (!file) {
       return;
     }
@@ -231,7 +239,7 @@ export function NoteEditor({
   };
 
   const handleDragEnter = (event: DragEvent<HTMLTextAreaElement>) => {
-    if (onUploadAttachment && firstImageFile(event.dataTransfer.files)) {
+    if (onUploadAttachment && firstAttachmentFile(event.dataTransfer.files)) {
       event.preventDefault();
       setDragActive(true);
     }
