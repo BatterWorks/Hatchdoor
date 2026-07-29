@@ -1096,3 +1096,13 @@ uppercase`, `li` padding-left computes to exactly 22.4px, and table cells are co
 Three pre-existing defects were found and fixed in the same pass, none of them belonging to
 this feature: PDF embeds nested block content inside a paragraph, the code block inverted in
 dark mode, and the brand wordmark painted over the topbar actions below about 360px.
+
+**Reading measure: the app is authoritative, the document is stale.** `design-system.html`
+specifies `.note-body { max-width: 36rem }`; the app renders uncapped, about 100 characters per
+line at 1440px. Capping was considered and **rejected**: nearly every non-prose block in this
+system is a bordered box (`.table-wrap`, `.callout`, `.code-block`), so a narrow text column
+beside full-width boxes reads as broken alignment rather than as hierarchy, and capping
+everything uniformly instead would push tables and diagrams into horizontal scrolling much
+sooner. The text column stays left-aligned and uncapped. **The design-system document is wrong
+here and is corrected in the deferred documentation pass**, not the app. `BlockInput` therefore
+inherits the full-width measure like every other block.
