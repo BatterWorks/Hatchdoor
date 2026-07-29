@@ -330,3 +330,219 @@ describe("more unit types", () => {
     expect(screen.getByRole("textbox")).toHaveValue("| 3 | 4 |");
   });
 });
+
+describe("structural keys", () => {
+  function openBlock(text: string | RegExp) {
+    fireEvent.click(screen.getByText(text));
+    return screen.getByRole("textbox") as HTMLTextAreaElement;
+  }
+
+  it("Enter at the end of a list item starts the next one", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- one\n- two\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock("two");
+    ta.setSelectionRange(5, 5);
+
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    expect(onChange).toHaveBeenCalledWith("- one\n- two\n- \n");
+  });
+
+  it("Enter in a paragraph starts a new paragraph", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness initialContent={"hello\n"} onContentChange={onChange} />,
+    );
+    const ta = openBlock("hello");
+    ta.setSelectionRange(5, 5);
+
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    expect(onChange).toHaveBeenCalledWith("hello\n\n\n");
+  });
+
+  it("Shift+Enter inserts a line break instead of splitting", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness initialContent={"hello\n"} onContentChange={onChange} />,
+    );
+    const ta = openBlock("hello");
+    ta.setSelectionRange(5, 5);
+
+    fireEvent.keyDown(ta, { key: "Enter", shiftKey: true });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("Enter inside a fenced code block does not split the block", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"```js\nconst x = 1\n```\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock(/const x = 1/);
+    ta.setSelectionRange(5, 5);
+
+    fireEvent.keyDown(ta, { key: "Enter" });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("Backspace at offset 0 merges into the previous unit", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- one\n- two\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock("two");
+    ta.setSelectionRange(0, 0);
+
+    fireEvent.keyDown(ta, { key: "Backspace" });
+
+    expect(onChange).toHaveBeenCalledWith("- onetwo\n");
+  });
+
+  it("Backspace anywhere else deletes normally", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- one\n- two\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock("two");
+    ta.setSelectionRange(3, 3);
+
+    fireEvent.keyDown(ta, { key: "Backspace" });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("Tab indents a list item", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- one\n- two\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock("two");
+
+    fireEvent.keyDown(ta, { key: "Tab" });
+
+    expect(onChange).toHaveBeenCalledWith("- one\n  - two\n");
+  });
+
+  it("Shift+Tab outdents a list item", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- one\n  - two\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock("two");
+
+    fireEvent.keyDown(ta, { key: "Tab", shiftKey: true });
+
+    expect(onChange).toHaveBeenCalledWith("- one\n- two\n");
+  });
+
+  it("does not act on any structural key while an IME is composing", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- one\n- two\n"}
+        onContentChange={onChange}
+      />,
+    );
+    const ta = openBlock("two");
+    ta.setSelectionRange(5, 5);
+
+    fireEvent.keyDown(ta, { key: "Enter", isComposing: true });
+    ta.setSelectionRange(0, 0);
+    fireEvent.keyDown(ta, { key: "Backspace", isComposing: true });
+    fireEvent.keyDown(ta, { key: "Tab", isComposing: true });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("committing edge cases", () => {
+  it("Escape keeps what was typed, it does not discard it", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness initialContent={"hello\n"} onContentChange={onChange} />,
+    );
+    fireEvent.click(screen.getByText("hello"));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "hello there" },
+    });
+
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
+
+    expect(onChange).toHaveBeenCalledWith("hello there\n");
+  });
+
+  // After a split the next block is at a different range, and if React reuses
+  // the same input instance it keeps the old guard state and the typed text is
+  // silently dropped on blur.
+  it("saves text typed into the block created by a split", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness initialContent={"- one\n"} onContentChange={onChange} />,
+    );
+    const ta = screen.getByText("one").closest("li")!;
+    fireEvent.click(ta);
+    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
+    input.setSelectionRange(5, 5);
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const created = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(created, { target: { value: "- two" } });
+    fireEvent.blur(created);
+
+    expect(onChange).toHaveBeenLastCalledWith("- one\n- two\n");
+  });
+});
+
+describe("stale rendered tree", () => {
+  // Wikilink resolution awaits a network round-trip, so between a content
+  // change and the response every block range on screen describes the previous
+  // document. Entering one then edits the wrong lines.
+  it("refuses to enter a block while the tree is settling", () => {
+    render(
+      <InlineEditorProvider
+        content={"one\n\ntwo\n"}
+        frontmatterOffset={0}
+        writeEnabled
+        settling
+        onChange={() => {}}
+      >
+        <div className="note-body">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={createNoteMarkdownComponents("Home.md", new Map(), {
+              editable: true,
+            })}
+          >
+            {"one\n\ntwo\n"}
+          </ReactMarkdown>
+        </div>
+      </InlineEditorProvider>,
+    );
+
+    fireEvent.click(screen.getByText("one"));
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});

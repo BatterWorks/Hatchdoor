@@ -115,6 +115,16 @@ export function EditableBlock({
     [],
   );
 
+  const registerBlock = editor?.registerBlock;
+  const rangeKey = range ? `${range.startLine}:${range.endLine}` : null;
+  useEffect(() => {
+    if (!registerBlock || !rangeKey) {
+      return;
+    }
+    const [startLine, endLine] = rangeKey.split(":").map(Number);
+    return registerBlock({ startLine, endLine });
+  }, [registerBlock, rangeKey]);
+
   const isActive = sameRange(
     editor?.activeRange ?? null,
     range ?? { startLine: -1, endLine: -1 },
@@ -155,7 +165,24 @@ export function EditableBlock({
         initialValue={editor.sourceOf(range)}
         initialCaret={editor.activeCaret}
         onCommit={(text) => editor.commitBlock(range, text)}
-        onCancel={editor.exitBlock}
+        onSplit={(text, caret) => {
+          // The op reads the document, so the in-progress text has to be part
+          // of it first, or the split would run against the stale line.
+          editor.commitBlock(range, text, { keepActive: true });
+          editor.splitAt(range, caret);
+        }}
+        onMergeUp={(text) => {
+          editor.commitBlock(range, text, { keepActive: true });
+          return editor.mergeUp(range);
+        }}
+        onIndent={(text) => {
+          editor.commitBlock(range, text, { keepActive: true });
+          return editor.indent(range);
+        }}
+        onOutdent={(text) => {
+          editor.commitBlock(range, text, { keepActive: true });
+          return editor.outdent(range);
+        }}
       />
     );
     const activeClass = joinClass(

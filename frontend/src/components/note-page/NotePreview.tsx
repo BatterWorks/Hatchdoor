@@ -28,7 +28,7 @@ export function NotePreview({
   relativePath: string;
 }) {
   const parsed = useMemo(() => parseFrontmatter(content), [content]);
-  const markdown = useResolvedWikilinks(
+  const { resolved: markdown } = useResolvedWikilinks(
     stripBlockIds(parsed.body),
     relativePath,
   );
