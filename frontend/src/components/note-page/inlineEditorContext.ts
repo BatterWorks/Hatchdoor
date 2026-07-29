@@ -13,8 +13,19 @@ export type InlineEditorValue = {
   sourceOf: (range: LineRange) => string;
   enterBlock: (range: LineRange, caret: number | null) => void;
   /** Writes `text` back over `range` and leaves the block. */
-  commitBlock: (range: LineRange, text: string) => void;
+  commitBlock: (
+    range: LineRange,
+    text: string,
+    opts?: { keepActive?: boolean },
+  ) => void;
   exitBlock: () => void;
+  /** Registers a block so ops can find its neighbours in source order. */
+  registerBlock: (range: LineRange) => () => void;
+  /** Structural ops, each a no-op where the design disables it. */
+  splitAt: (range: LineRange, caret: number) => void;
+  mergeUp: (range: LineRange) => boolean;
+  indent: (range: LineRange) => boolean;
+  outdent: (range: LineRange) => boolean;
 };
 
 export const InlineEditorContext = createContext<InlineEditorValue | null>(

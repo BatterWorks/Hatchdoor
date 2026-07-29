@@ -23,13 +23,19 @@ export function BlockInput({
   initialValue,
   initialCaret = null,
   onCommit,
-  onCancel,
+  onSplit,
+  onMergeUp,
+  onIndent,
+  onOutdent,
 }: {
   unitType: UnitType;
   initialValue: string;
   initialCaret?: number | null;
   onCommit: (text: string) => void;
-  onCancel: () => void;
+  onSplit?: (text: string, caret: number) => void;
+  onMergeUp?: (text: string) => boolean;
+  onIndent?: (text: string) => boolean;
+  onOutdent?: (text: string) => boolean;
 }) {
   const [value, setValue] = useState(initialValue);
   const ref = useRef<HTMLTextAreaElement | null>(null);
@@ -76,10 +82,51 @@ export function BlockInput({
     if (event.nativeEvent.isComposing) {
       return;
     }
+    // Escape commits and leaves. Under autosave there is nothing to cancel
+    // back to, so discarding here would throw away work with no way to get it
+    // back. It is a deliberate break from Escape elsewhere in the app.
     if (event.key === "Escape") {
       event.preventDefault();
+      commit();
+      return;
+    }
+
+    const el = event.currentTarget;
+
+    // Enter splits a unit, except inside a code block or a table row, where a
+    // generic split would insert a line before the closing fence or before the
+    // delimiter row and destroy the block (D27).
+    if (event.key === "Enter" && !event.shiftKey) {
+      if (unitType === "code block" || unitType === "table row" || !onSplit) {
+        return;
+      }
+      event.preventDefault();
       committedRef.current = true;
-      onCancel();
+      onSplit(el.value, el.selectionStart);
+      return;
+    }
+
+    if (
+      event.key === "Backspace" &&
+      el.selectionStart === 0 &&
+      el.selectionEnd === 0
+    ) {
+      if (unitType === "table row" || !onMergeUp) {
+        return;
+      }
+      if (onMergeUp(el.value)) {
+        event.preventDefault();
+        committedRef.current = true;
+      }
+      return;
+    }
+
+    if (event.key === "Tab" && unitType === "list item") {
+      const handler = event.shiftKey ? onOutdent : onIndent;
+      if (handler?.(el.value)) {
+        event.preventDefault();
+        committedRef.current = true;
+      }
     }
   };
 

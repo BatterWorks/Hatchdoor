@@ -158,6 +158,47 @@ function node(
   };
 }
 
+// react-markdown hands components hast nodes, not mdast ones: the type is
+// always "element" and the kind lives in tagName. A rule written against mdast
+// type names silently never fires.
+function hast(
+  tagName: string,
+  startLine: number | null,
+  endLine?: number,
+  children: unknown[] = [],
+) {
+  return {
+    type: "element",
+    tagName,
+    children,
+    position:
+      startLine === null
+        ? undefined
+        : { start: { line: startLine }, end: { line: endLine ?? startLine } },
+  };
+}
+
+describe("blockRange with hast nodes", () => {
+  it("stops a list item at its nested list", () => {
+    const li = hast("li", 1, 5, [hast("p", 1, 1), hast("ul", 2, 5)]);
+
+    expect(blockRange(li, 0)).toEqual({ startLine: 1, endLine: 1 });
+  });
+
+  it("stops a list item at a nested ordered list", () => {
+    const li = hast("li", 4, 9, [hast("p", 4, 5), hast("ol", 6, 9)]);
+
+    expect(blockRange(li, 0)).toEqual({ startLine: 4, endLine: 5 });
+  });
+
+  it("keeps the full range for a list item with no nested list", () => {
+    expect(blockRange(hast("li", 3, 4, [hast("p", 3, 4)]), 0)).toEqual({
+      startLine: 3,
+      endLine: 4,
+    });
+  });
+});
+
 describe("blockRange", () => {
   it("maps a node's position through the frontmatter offset", () => {
     expect(blockRange(node("paragraph", 2, 4), 3)).toEqual({

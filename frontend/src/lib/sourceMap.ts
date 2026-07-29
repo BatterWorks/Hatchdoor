@@ -87,6 +87,8 @@ export type LineRange = { startLine: number; endLine: number };
 
 type PositionedNode = {
   type?: string;
+  /** hast elements carry their kind here; mdast nodes use `type`. */
+  tagName?: string;
   children?: unknown[];
   position?: {
     start?: { line?: number };
@@ -129,13 +131,13 @@ function listItemEndLine(
   node: PositionedNode | undefined,
   fallbackEnd: number,
 ): number {
-  if (node?.type !== "listItem") {
+  if (!isListItem(node)) {
     return fallbackEnd;
   }
 
-  for (const child of node.children ?? []) {
+  for (const child of node?.children ?? []) {
     const childNode = child as PositionedNode;
-    if (childNode?.type !== "list") {
+    if (!isList(childNode)) {
       continue;
     }
     const childStart = childNode.position?.start?.line;
@@ -145,6 +147,18 @@ function listItemEndLine(
   }
 
   return fallbackEnd;
+}
+
+// Accepts both shapes: react-markdown passes hast (tagName "li"), while mdast
+// uses type "listItem". Checking only one silently disables the rule.
+function isListItem(node: PositionedNode | undefined): boolean {
+  return node?.type === "listItem" || node?.tagName === "li";
+}
+
+function isList(node: PositionedNode | undefined): boolean {
+  return (
+    node?.type === "list" || node?.tagName === "ul" || node?.tagName === "ol"
+  );
 }
 
 function splitLines(content: string): string[] {

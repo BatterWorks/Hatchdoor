@@ -55,17 +55,29 @@ export function rewriteWikilinks(
   );
 }
 
+/**
+ * Resolved markdown, plus the input it was resolved from.
+ *
+ * Resolution awaits a network round-trip, so between a content change and the
+ * response the rendered tree describes the *previous* document. Every block
+ * range read during that window is stale, and acting on one edits the wrong
+ * lines. Callers compare `resolvedFor` against the current input to know when
+ * it is safe to address blocks by line.
+ */
 export function useResolvedWikilinks(
   markdown: string,
   noteRelativePath: string,
-): string {
-  const [resolved, setResolved] = useState(markdown);
+): { resolved: string; resolvedFor: string } {
+  const [state, setState] = useState({
+    resolved: markdown,
+    resolvedFor: markdown,
+  });
 
   useEffect(() => {
     let cancelled = false;
 
     if (!markdown) {
-      queueMicrotask(() => setResolved(""));
+      queueMicrotask(() => setState({ resolved: "", resolvedFor: "" }));
       return;
     }
 
@@ -111,7 +123,7 @@ export function useResolvedWikilinks(
       const rewritten = rewriteWikilinks(markdown, noteRelativePath, map);
 
       if (!cancelled) {
-        setResolved(rewritten);
+        setState({ resolved: rewritten, resolvedFor: markdown });
       }
     })();
 
@@ -120,7 +132,7 @@ export function useResolvedWikilinks(
     };
   }, [markdown, noteRelativePath]);
 
-  return resolved;
+  return state;
 }
 
 export function resolveAssetHref(

@@ -293,10 +293,14 @@ export function NotePage({
     });
   }, [note, onActiveNoteChange, parsed.body]);
 
-  const markdown = useResolvedWikilinks(
-    stripBlockIds(parsed.body),
+  const renderInput = stripBlockIds(parsed.body);
+  const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
+    renderInput,
     note?.relative_path ?? "",
   );
+  // While resolution is in flight the rendered tree still describes the
+  // previous document, so every block range on screen is stale (D28).
+  const settling = resolvedFor !== renderInput;
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
@@ -776,6 +780,7 @@ export function NotePage({
               content={note.content}
               frontmatterOffset={frontmatterLineOffset(note.content)}
               writeEnabled={inlineEditingEnabled}
+              settling={settling}
               onChange={handleInlineChange}
             >
               <ReactMarkdown
