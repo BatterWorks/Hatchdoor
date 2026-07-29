@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { normalizeTags, type FrontmatterValue } from "../../lib/markdown";
@@ -6,18 +6,52 @@ import type { NoteHeading } from "../../lib/noteHeadings";
 import type { NoteLinks } from "../../types";
 import { UiButton } from "../ui";
 import { jumpToHeading } from "./dom";
+import {
+  buildContentWithFrontmatter,
+  parseFrontmatterEntries,
+  splitFrontmatter,
+} from "./frontmatter";
 
 export function NoteProperties({
   properties,
+  content,
+  editable = false,
   collapsed,
   onToggleCollapsed,
   onTagSelect,
+  onChange,
 }: {
   properties: Record<string, FrontmatterValue>;
+  /** The whole note, needed to rewrite the frontmatter in place. */
+  content?: string;
+  editable?: boolean;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onTagSelect: (tag: string) => void;
+  onChange?: (next: string) => void;
 }) {
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+
+  const commitProperty = (key: string, value: string) => {
+    setEditingKey(null);
+    if (!content || !onChange) {
+      return;
+    }
+    const { raw, body } = splitFrontmatter(content);
+    if (raw === null) {
+      return;
+    }
+    const parsed = parseFrontmatterEntries(raw);
+    if (!parsed.editable) {
+      return;
+    }
+    const next = parsed.entries.map((entry) =>
+      entry.key === key ? { ...entry, value } : entry,
+    );
+    onChange(buildContentWithFrontmatter(next, body));
+  };
+
+  const canEdit = editable && !!content && !!onChange;
   const entries = Object.entries(properties);
   if (entries.length === 0) {
     return null;
@@ -59,16 +93,78 @@ export function NoteProperties({
           <div key={key} className="note-property-row">
             <dt>{key}</dt>
             <dd>
-              {key === "tags" ? (
-                <TagChips tags={normalizeTags(value)} onSelect={onTagSelect} />
+              {editingKey === key ? (
+                <PropertyInput
+                  initialValue={
+                    Array.isArray(value) ? value.join(", ") : String(value)
+                  }
+                  propertyName={key}
+                  onCommit={(next) => commitProperty(key, next)}
+                />
               ) : (
-                <PropertyValue value={value} />
+                <span
+                  className={canEdit ? "note-property-value" : undefined}
+                  onClick={canEdit ? () => setEditingKey(key) : undefined}
+                >
+                  {key === "tags" ? (
+                    <TagChips
+                      tags={normalizeTags(value)}
+                      onSelect={
+                        canEdit ? () => setEditingKey(key) : onTagSelect
+                      }
+                    />
+                  ) : (
+                    <PropertyValue value={value} />
+                  )}
+                </span>
               )}
             </dd>
           </div>
         ))}
       </dl>
     </section>
+  );
+}
+
+/**
+ * Frontmatter values edit in place for the same reason blocks do: changing a
+ * tag should not require dropping the whole note into source mode.
+ */
+function PropertyInput({
+  initialValue,
+  propertyName,
+  onCommit,
+}: {
+  initialValue: string;
+  propertyName: string;
+  onCommit: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  const ref = useRef<HTMLInputElement | null>(null);
+
+  useLayoutEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+
+  return (
+    <input
+      ref={ref}
+      className="field-input note-property-input"
+      aria-label={`Editing ${propertyName}`}
+      value={value}
+      onChange={(event) => setValue(event.target.value)}
+      onBlur={() => onCommit(value)}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing) {
+          return;
+        }
+        if (event.key === "Enter" || event.key === "Escape") {
+          event.preventDefault();
+          onCommit(value);
+        }
+      }}
+    />
   );
 }
 

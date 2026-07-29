@@ -170,6 +170,8 @@ export function EditableBlock({
     onPointerCancel?: () => void;
     onKeyDown?: (event: KeyboardEvent) => void;
     tabIndex?: number;
+    "data-start-line"?: number;
+    "data-end-line"?: number;
     ref?: unknown;
     children?: ReactNode;
   }>;
@@ -321,6 +323,8 @@ export function EditableBlock({
 
   const handlers = {
     className: joinClass(child.props.className, "editable-block"),
+    "data-start-line": range.startLine,
+    "data-end-line": range.endLine,
     onClick,
     onPointerDown,
     onPointerMove,

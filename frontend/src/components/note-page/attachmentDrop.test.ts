@@ -4,6 +4,8 @@ import {
   ATTACHMENT_MAX_BYTES,
   attachmentEmbedPath,
   attachmentRejection,
+  insertEmbedAt,
+  insertionLineForDrop,
   uploadNoteAttachment,
 } from "./attachmentDrop";
 
@@ -193,5 +195,79 @@ describe("uploadNoteAttachment", () => {
     const result = await uploadNoteAttachment(pdfFile(), "Home.md", upload);
 
     expect(result.gitSyncWarning).toBe("remote rejected");
+  });
+});
+
+describe("insertionLineForDrop", () => {
+  const blocks = [
+    { startLine: 1, endLine: 1, top: 0, bottom: 20 },
+    { startLine: 3, endLine: 5, top: 20, bottom: 80 },
+    { startLine: 7, endLine: 7, top: 80, bottom: 100 },
+  ];
+
+  it("inserts after the block the drop lands on", () => {
+    expect(insertionLineForDrop(blocks, 50)).toBe(5);
+  });
+
+  it("inserts after the first block when dropped on it", () => {
+    expect(insertionLineForDrop(blocks, 10)).toBe(1);
+  });
+
+  it("inserts after the last block when dropped below everything", () => {
+    expect(insertionLineForDrop(blocks, 500)).toBe(7);
+  });
+
+  it("inserts before the first block when dropped above everything", () => {
+    expect(insertionLineForDrop(blocks, -50)).toBe(0);
+  });
+
+  // DOM order and source order diverge: a footnote definition renders in a
+  // generated section at the end while carrying the position where it was
+  // written.
+  it("uses source order, not the order the blocks were given in", () => {
+    const outOfOrder = [
+      { startLine: 9, endLine: 9, top: 0, bottom: 20 },
+      { startLine: 2, endLine: 2, top: 20, bottom: 40 },
+    ];
+
+    expect(insertionLineForDrop(outOfOrder, 30)).toBe(2);
+  });
+
+  it("returns 0 when there are no blocks at all", () => {
+    expect(insertionLineForDrop([], 10)).toBe(0);
+  });
+});
+
+describe("insertEmbedAt", () => {
+  it("inserts an embed on its own line after the given line", () => {
+    expect(insertEmbedAt("one\ntwo", 1, "Attachments/a.png")).toBe(
+      "one\n\n![[Attachments/a.png]]\n\ntwo",
+    );
+  });
+
+  it("inserts at the top when the line is 0", () => {
+    expect(insertEmbedAt("one", 0, "a.png")).toBe("![[a.png]]\n\none");
+  });
+
+  it("appends at the end of the document", () => {
+    expect(insertEmbedAt("one\ntwo", 2, "a.png")).toBe(
+      "one\ntwo\n\n![[a.png]]",
+    );
+  });
+
+  it("preserves CRLF line endings", () => {
+    expect(insertEmbedAt("one\r\ntwo", 1, "a.png")).toBe(
+      "one\r\n\r\n![[a.png]]\r\n\r\ntwo",
+    );
+  });
+
+  it("does not double up a blank line that is already there", () => {
+    expect(insertEmbedAt("one\n\ntwo", 1, "a.png")).toBe(
+      "one\n\n![[a.png]]\n\ntwo",
+    );
+  });
+
+  it("keeps the file's trailing newline", () => {
+    expect(insertEmbedAt("one\n", 1, "a.png")).toBe("one\n\n![[a.png]]\n");
   });
 });

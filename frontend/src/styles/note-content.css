@@ -1190,3 +1190,19 @@
 .save-state.is-error {
   color: var(--err-fg);
 }
+
+.note-property-value {
+  cursor: text;
+}
+
+.note-property-input {
+  width: 100%;
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  padding: 0.15rem 0.35rem;
+}
+
+.note-body-drop.drag-active {
+  outline: 2px dashed var(--hot);
+  outline-offset: 0.5rem;
+}

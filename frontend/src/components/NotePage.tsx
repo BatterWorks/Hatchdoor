@@ -50,7 +50,12 @@ import {
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
 import { SaveState } from "./note-page/SaveState";
-import { uploadNoteAttachment } from "./note-page/attachmentDrop";
+import {
+  attachmentRejection,
+  insertEmbedAt,
+  insertionLineForDrop,
+  uploadNoteAttachment,
+} from "./note-page/attachmentDrop";
 import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { NotePreview } from "./note-page/NotePreview";
@@ -100,6 +105,7 @@ export function NotePage({
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
   const [inlineDirty, setInlineDirty] = useState(false);
+  const [activeUnit, setActiveUnit] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
@@ -433,6 +439,68 @@ export function NotePage({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [inlineEditingEnabled, applyHistory, history]);
 
+  const handleActiveRangeChange = useCallback(
+    (range: { startLine: number; endLine: number } | null) => {
+      setActiveUnit(range ? `${range.startLine}:${range.endLine}` : null);
+    },
+    [],
+  );
+
+  const [dropActive, setDropActive] = useState(false);
+
+  const handleBodyDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    setDropActive(false);
+    if (!inlineEditingEnabled || !note) {
+      return;
+    }
+    const file = event.dataTransfer.files[0];
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+
+    const rejection = attachmentRejection(file);
+    if (rejection) {
+      onWriteNotice?.(rejection);
+      return;
+    }
+
+    // Where it lands is decided before the upload, so the insertion point is
+    // the one the user aimed at rather than wherever the page has scrolled to
+    // by the time the request comes back.
+    const blocks = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(".editable-block"),
+    )
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return { el, top: rect.top, bottom: rect.bottom };
+      })
+      .flatMap(({ el, top, bottom }) => {
+        const start = Number(el.dataset.startLine);
+        const end = Number(el.dataset.endLine);
+        return Number.isFinite(start) && Number.isFinite(end)
+          ? [{ startLine: start, endLine: end, top, bottom }]
+          : [];
+      });
+    const line = insertionLineForDrop(blocks, event.clientY);
+
+    try {
+      const result = await uploadNoteAttachment(
+        file,
+        note.relative_path,
+        uploadAttachment,
+      );
+      if (result.gitSyncWarning) {
+        onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
+      }
+      handleInlineChange(insertEmbedAt(note.content, line, result.embedPath));
+    } catch (uploadError) {
+      onWriteNotice?.(
+        uploadError instanceof Error ? uploadError.message : "Upload failed.",
+      );
+    }
+  };
+
   const reviewConflict = () => {
     // The conflict review lives in source mode, which already knows how to
     // show the disk version beside the draft.
@@ -481,7 +549,9 @@ export function NotePage({
     return () => {
       searchHitsRef.current = [];
     };
-  }, [markdown, note?.slug, searchQuery, matchHeading]);
+    // activeUnit is a dependency because entering a block removes its marks:
+    // without recounting, SearchHitNavigator's indices silently shift.
+  }, [markdown, note?.slug, searchQuery, matchHeading, activeUnit]);
 
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
@@ -737,6 +807,9 @@ export function NotePage({
         ) : null}
         <NoteProperties
           properties={parsed.properties}
+          content={note.content}
+          editable={inlineEditingEnabled}
+          onChange={handleInlineChange}
           collapsed={propertiesCollapsed}
           onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
           onTagSelect={onTagSelect}
@@ -776,21 +849,37 @@ export function NotePage({
           />
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
-            <InlineEditorProvider
-              content={note.content}
-              frontmatterOffset={frontmatterLineOffset(note.content)}
-              writeEnabled={inlineEditingEnabled}
-              settling={settling}
-              onChange={handleInlineChange}
+            <div
+              className={`note-body-drop${dropActive ? " drag-active" : ""}`}
+              onDragOver={(event) => {
+                if (
+                  inlineEditingEnabled &&
+                  event.dataTransfer.types.includes("Files")
+                ) {
+                  event.preventDefault();
+                  setDropActive(true);
+                }
+              }}
+              onDragLeave={() => setDropActive(false)}
+              onDrop={(event) => void handleBodyDrop(event)}
             >
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={rehypePlugins}
-                components={markdownComponents}
+              <InlineEditorProvider
+                content={note.content}
+                frontmatterOffset={frontmatterLineOffset(note.content)}
+                writeEnabled={inlineEditingEnabled}
+                settling={settling}
+                onChange={handleInlineChange}
+                onActiveRangeChange={handleActiveRangeChange}
               >
-                {markdown}
-              </ReactMarkdown>
-            </InlineEditorProvider>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={rehypePlugins}
+                  components={markdownComponents}
+                >
+                  {markdown}
+                </ReactMarkdown>
+              </InlineEditorProvider>
+            </div>
           </div>
         )}
       </article>
