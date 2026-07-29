@@ -556,6 +556,27 @@ Today that cost is paid once per editing *session*. Under D15 it is paid roughly
 commit and per 2s idle flush. Git sync is separately debounced (`src/git/task.rs:75`) so that
 part is fine; the reindex is not.
 
+**Measured 2026-07-29 against a synthetic 1,200-note vault** (4.8 MB, wikilinked, CPU
+embeddings). Reindex is **incremental**, so autosave is affordable and no backend change is
+needed:
+
+```
+Search index ready: 1,200 notes checked, 1 updated, 1,199 unchanged
+                    in less than 1s  chunks_embedded=1
+```
+
+- A write re-embeds **one chunk**, not the vault. The cold build of the same vault takes about
+  16 minutes, so a rebuild-per-write would have been fatal; it does not happen.
+- End-to-end `PUT /api/note/:slug` latency was **0.86s to 1.40s**, server-side and off the
+  interaction path, so it does not block typing.
+- **D16's double bump is confirmed**: two reindex passes per write, about 320ms apart, the
+  second reporting `0 updated`. The confirmed-hash *set* is required, not a refinement.
+- The residual cost is the scan, which is O(vault): every write stats all 1,200 notes. Under 1s
+  here, but it is the term that grows, so a much larger vault should be re-measured rather than
+  extrapolated from this.
+
+Stage 2 is therefore unblocked with the D15 triggers as designed.
+
 Stage 2 does not begin until this is measured against a realistic vault. If it is prohibitive,
 the options are coalescing self-inflicted reindexes, a lighter single-note reindex path, or
 lengthening the D15 idle window. This is explicitly a backend concern, and if a backend change
