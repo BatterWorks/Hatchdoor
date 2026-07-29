@@ -183,6 +183,10 @@ export function EditableBlock({
           editor.commitBlock(range, text, { keepActive: true });
           return editor.outdent(range);
         }}
+        onMove={(text, direction, column) => {
+          editor.commitBlock(range, text, { keepActive: true });
+          return editor.moveTo(range, direction, column);
+        }}
       />
     );
     const activeClass = joinClass(

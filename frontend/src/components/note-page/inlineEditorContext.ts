@@ -26,6 +26,8 @@ export type InlineEditorValue = {
   mergeUp: (range: LineRange) => boolean;
   indent: (range: LineRange) => boolean;
   outdent: (range: LineRange) => boolean;
+  /** Move to the unit before or after this one, keeping the column. */
+  moveTo: (range: LineRange, direction: -1 | 1, column: number) => boolean;
 };
 
 export const InlineEditorContext = createContext<InlineEditorValue | null>(

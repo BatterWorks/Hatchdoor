@@ -992,9 +992,10 @@ catch-up pass afterwards. D44's copy is written before the surface it labels, no
 item in a demo-vault note produced a one-line diff, with frontmatter, blank lines, and
 `[[wikilinks]]` untouched. Two deviations are carried forward rather than fixed:
 
-- **D38 is approximate for list items.** Entering one shifts its text about 13px left, because
-  the typed `- ` is narrower than the drawn marker it replaces. The promised zero shift is not
-  achievable without knowing the prefix's rendered width, so it is accepted.
+- ~~**D38 is approximate for list items.**~~ **Fixed 2026-07-29.** The prefix's rendered width
+  is now measured on entry and hung by exactly that amount, so the visible text does not move at
+  all. Measured at zero shift for list items, headings, and paragraphs. On a phone the hang is
+  clamped to the pane's 16px padding, so a long prefix shifts slightly rather than being clipped.
 - **Callouts and blockquotes are not yet editable.** D25a puts per-line callouts in stage 4, so
   clicking one does nothing today. Every other unit type is live.
 
