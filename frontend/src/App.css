@@ -17,7 +17,7 @@
   margin: 0.5rem 1rem 0;
   padding: 0.6rem 0.85rem;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   background: var(--paper);
   color: var(--ink);
   font-size: 0.9rem;
@@ -82,7 +82,7 @@
   display: grid;
   place-items: center;
   border: 1px dashed var(--accent, var(--ink));
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   background: color-mix(in srgb, var(--paper) 86%, transparent);
   color: var(--ink);
   font-size: 0.9rem;
@@ -97,7 +97,7 @@
   margin-bottom: 0.75rem;
   padding: 0.75rem;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   background: var(--surface, rgba(127, 127, 127, 0.06));
 }
 
@@ -118,7 +118,7 @@
 .note-editor-property input {
   min-width: 0;
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: var(--radius-none);
   background: var(--paper);
   color: var(--ink);
   padding: 0.35rem 0.45rem;
@@ -131,7 +131,7 @@
   gap: 0.75rem;
   padding: 0.85rem;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   background: var(--surface, rgba(127, 127, 127, 0.06));
 }
 
@@ -172,7 +172,7 @@
   display: grid;
   overflow: auto;
   border: 1px solid var(--rule);
-  border-radius: 4px;
+  border-radius: var(--radius-none);
   background: var(--paper);
 }
 
@@ -217,7 +217,7 @@
   max-height: 14rem;
   overflow: auto;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   background: var(--paper);
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
 }
@@ -230,7 +230,7 @@
   background: transparent;
   color: var(--ink);
   padding: 0.4rem 0.5rem;
-  border-radius: 4px;
+  border-radius: var(--radius-none);
   cursor: pointer;
 }
 
@@ -244,7 +244,7 @@
   min-width: 0;
   max-width: 100%;
   border: 1px solid var(--rule);
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   padding: 0.75rem 0.9rem;
   min-height: 8rem;
   overflow-x: auto;
@@ -290,7 +290,7 @@
 .note-editor-notice {
   margin: 0;
   padding: 0.5rem 0.65rem;
-  border-radius: 6px;
+  border-radius: var(--radius-none);
   border: 1px solid var(--rule);
   background: var(--paper);
   color: var(--ink);
