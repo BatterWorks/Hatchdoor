@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -175,5 +181,78 @@ Second **paragraph** here.
 
     expect(screen.queryByRole("textbox")).toBeNull();
     expect(screen.getByText(/Second/)).toBeInTheDocument();
+  });
+});
+
+describe("touch entry", () => {
+  // Reading is the dominant mode on a phone, and tap-to-place-caret would
+  // raise the keyboard on every stray touch. Entry is a deliberate long press.
+  function touch(
+    el: Element,
+    type: "pointerDown" | "pointerUp" | "pointerMove",
+    x = 10,
+    y = 10,
+  ) {
+    fireEvent[type](el, {
+      pointerType: "touch",
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+    });
+  }
+
+  it("does not enter a block on a tap", () => {
+    vi.useFakeTimers();
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    const target = screen.getByText("First paragraph.");
+
+    touch(target, "pointerDown");
+    act(() => {
+      vi.advanceTimersByTime(120);
+    });
+    touch(target, "pointerUp");
+    fireEvent.click(target);
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("enters a block on a long press", () => {
+    vi.useFakeTimers();
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    const target = screen.getByText("First paragraph.");
+
+    touch(target, "pointerDown");
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+
+    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+    vi.useRealTimers();
+  });
+
+  it("cancels the long press when the finger moves, because that is a scroll", () => {
+    vi.useFakeTimers();
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    const target = screen.getByText("First paragraph.");
+
+    touch(target, "pointerDown", 10, 10);
+    touch(target, "pointerMove", 10, 80);
+    act(() => {
+      vi.advanceTimersByTime(600);
+    });
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it("still enters immediately on a mouse click", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    const target = screen.getByText("First paragraph.");
+
+    fireEvent.pointerDown(target, { pointerType: "mouse", bubbles: true });
+    fireEvent.click(target);
+
+    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
   });
 });
