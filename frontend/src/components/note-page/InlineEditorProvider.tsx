@@ -138,6 +138,37 @@ export function InlineEditorProvider({
     [onChange],
   );
 
+  const moveTo = useCallback(
+    (range: LineRange, direction: -1 | 1, column: number) => {
+      // Source order, not DOM order: with remark-gfm a footnote definition
+      // renders in a generated section at the end of the document while
+      // carrying the position of wherever it was written.
+      const ordered = blocksRef.current;
+      const target =
+        direction === -1
+          ? [...ordered].filter((r) => r.endLine < range.startLine).pop()
+          : ordered.find((r) => r.startLine > range.endLine);
+
+      if (!target) {
+        return false;
+      }
+
+      const text = sliceLines(
+        latestRef.current,
+        target.startLine,
+        target.endLine,
+      );
+      const lines = text.split("\n");
+      const line = direction === -1 ? lines[lines.length - 1] : lines[0];
+      const before = direction === -1 ? text.length - line.length : 0;
+
+      setActiveRange(target);
+      setActiveCaret(before + Math.min(column, line.length));
+      return true;
+    },
+    [],
+  );
+
   const exitBlock = useCallback(() => {
     setActiveRange(null);
     setActiveCaret(null);
@@ -174,6 +205,7 @@ export function InlineEditorProvider({
       mergeUp,
       indent,
       outdent,
+      moveTo,
     }),
     [
       writeEnabled,
@@ -189,6 +221,7 @@ export function InlineEditorProvider({
       mergeUp,
       indent,
       outdent,
+      moveTo,
     ],
   );
 

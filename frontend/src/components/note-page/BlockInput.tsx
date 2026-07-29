@@ -1,4 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+
+import { linePrefix } from "../../lib/linePrefix";
 import type { KeyboardEvent } from "react";
 
 export type UnitType =
@@ -18,6 +20,53 @@ export type UnitType =
  * styles in this app uppercase their text and would otherwise show the typist a
  * different string than the one being saved.
  */
+/**
+ * Hangs the line's markdown prefix into the gutter so the visible text does not
+ * move when a block is entered.
+ *
+ * The prefix has to be *measured*: "- " is about 9px while the bullet marker it
+ * replaces is inset 22.4px, so a fixed hang leaves the text 13px out. The
+ * offset is clamped to the space the scroll pane actually has, which is 56px on
+ * desktop but only 16px on a phone, so a long prefix never gets clipped.
+ */
+function hangPrefix(el: HTMLTextAreaElement) {
+  const prefix = linePrefix(el.value);
+  if (!prefix) {
+    el.style.marginLeft = "";
+    el.style.width = "";
+    return;
+  }
+
+  const style = getComputedStyle(el);
+  const width = measureText(prefix, style.font);
+  if (width === null) {
+    return;
+  }
+
+  const pane = el.closest("main");
+  const available = pane
+    ? parseFloat(getComputedStyle(pane).paddingLeft) || 0
+    : 0;
+  const existingInset = parseFloat(style.paddingLeft) || 0;
+  const hang = Math.min(width, available + existingInset);
+
+  el.style.marginLeft = `${-hang}px`;
+  el.style.width = `calc(100% + ${hang}px)`;
+}
+
+let measureContext: CanvasRenderingContext2D | null | undefined;
+
+function measureText(text: string, font: string): number | null {
+  if (measureContext === undefined) {
+    measureContext = document.createElement("canvas").getContext("2d");
+  }
+  if (!measureContext) {
+    return null;
+  }
+  measureContext.font = font;
+  return measureContext.measureText(text).width;
+}
+
 export function BlockInput({
   unitType,
   initialValue,
@@ -27,6 +76,7 @@ export function BlockInput({
   onMergeUp,
   onIndent,
   onOutdent,
+  onMove,
 }: {
   unitType: UnitType;
   initialValue: string;
@@ -36,6 +86,7 @@ export function BlockInput({
   onMergeUp?: (text: string) => boolean;
   onIndent?: (text: string) => boolean;
   onOutdent?: (text: string) => boolean;
+  onMove?: (text: string, direction: -1 | 1, column: number) => boolean;
 }) {
   const [value, setValue] = useState(initialValue);
   const ref = useRef<HTMLTextAreaElement | null>(null);
@@ -54,6 +105,7 @@ export function BlockInput({
     el.setSelectionRange(caret, caret);
     // Keeps the active line above the virtual keyboard on a phone.
     el.scrollIntoView?.({ block: "nearest" });
+    hangPrefix(el);
     // Deliberately mount-only: the caret is placed once on entry, and rerunning
     // this would yank the caret back mid-edit.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -115,6 +167,26 @@ export function BlockInput({
         return;
       }
       if (onMergeUp(el.value)) {
+        event.preventDefault();
+        committedRef.current = true;
+      }
+      return;
+    }
+
+    // Arrow keys only leave the unit from its edge lines; motion inside the
+    // block is the browser's job.
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      const caret = el.selectionStart;
+      const upToCaret = el.value.slice(0, caret);
+      const lastBreak = upToCaret.lastIndexOf("\n");
+      const onFirstLine = lastBreak === -1;
+      const onLastLine = el.value.indexOf("\n", caret) === -1;
+      const leaving = event.key === "ArrowUp" ? onFirstLine : onLastLine;
+      if (!leaving || !onMove) {
+        return;
+      }
+      const column = caret - (lastBreak + 1);
+      if (onMove(el.value, event.key === "ArrowUp" ? -1 : 1, column)) {
         event.preventDefault();
         committedRef.current = true;
       }

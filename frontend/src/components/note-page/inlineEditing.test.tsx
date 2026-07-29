@@ -546,3 +546,78 @@ describe("stale rendered tree", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 });
+
+describe("arrow navigation between units", () => {
+  it("ArrowUp on the first line moves to the previous unit", () => {
+    render(<NoteHarness initialContent={"- one\n- two\n- three\n"} />);
+    fireEvent.click(screen.getByText("two"));
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    ta.setSelectionRange(0, 0);
+
+    fireEvent.keyDown(ta, { key: "ArrowUp" });
+
+    expect(screen.getByRole("textbox")).toHaveValue("- one");
+  });
+
+  it("ArrowDown on the last line moves to the next unit", () => {
+    render(<NoteHarness initialContent={"- one\n- two\n- three\n"} />);
+    fireEvent.click(screen.getByText("two"));
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    ta.setSelectionRange(5, 5);
+
+    fireEvent.keyDown(ta, { key: "ArrowDown" });
+
+    expect(screen.getByRole("textbox")).toHaveValue("- three");
+  });
+
+  it("preserves the column when moving between units", () => {
+    render(<NoteHarness initialContent={"- alpha\n- bravo\n"} />);
+    fireEvent.click(screen.getByText("bravo"));
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    ta.setSelectionRange(4, 4);
+
+    fireEvent.keyDown(ta, { key: "ArrowUp" });
+
+    expect(
+      (screen.getByRole("textbox") as HTMLTextAreaElement).selectionStart,
+    ).toBe(4);
+  });
+
+  it("stays put at the first unit", () => {
+    render(<NoteHarness initialContent={"- one\n- two\n"} />);
+    fireEvent.click(screen.getByText("one"));
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    ta.setSelectionRange(0, 0);
+
+    fireEvent.keyDown(ta, { key: "ArrowUp" });
+
+    expect(screen.getByRole("textbox")).toHaveValue("- one");
+  });
+
+  it("leaves a multi-line block when the caret is not on its edge line", () => {
+    // A hard-wrapped paragraph is one block spanning two source lines.
+    render(
+      <NoteHarness initialContent={"first\n\nwrapped one\nwrapped two\n"} />,
+    );
+    fireEvent.click(screen.getByText(/wrapped one/));
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(ta.value).toBe("wrapped one\nwrapped two");
+    // Caret on the second source line: within-block motion is the browser's.
+    ta.setSelectionRange(15, 15);
+
+    fireEvent.keyDown(ta, { key: "ArrowUp" });
+
+    expect(screen.getByRole("textbox")).toHaveValue("wrapped one\nwrapped two");
+  });
+
+  it("does not navigate while an IME is composing", () => {
+    render(<NoteHarness initialContent={"- one\n- two\n"} />);
+    fireEvent.click(screen.getByText("two"));
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    ta.setSelectionRange(0, 0);
+
+    fireEvent.keyDown(ta, { key: "ArrowUp", isComposing: true });
+
+    expect(screen.getByRole("textbox")).toHaveValue("- two");
+  });
+});
