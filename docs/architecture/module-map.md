@@ -694,6 +694,7 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/components/note-page/PdfPreview.tsx`
 - `frontend/src/components/note-page/RendererComponents.tsx`
 - `frontend/src/components/note-page/dom.ts`
+- `frontend/src/components/note-page/paragraphs.ts`
 - `frontend/src/components/note-page/renderers.tsx`
 - `frontend/src/components/note-page/sections.tsx`
 - `frontend/src/components/note-page/text.ts`
@@ -706,7 +707,9 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 
 **Public contract:** `NotePage`, note preview/rendering behavior, safe asset and
 wikilink resolution, heading/search-hit navigation, Markdown transformations,
-and note navigation/rendering behavior.
+note navigation/rendering behavior, the editable-block component map produced by
+`createNoteMarkdownComponents`, and the paragraph marker `CalloutOrQuote` uses to
+recognise its own first child.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, and note editing.
@@ -716,7 +719,10 @@ handlers, `NoteEditor.tsx`, Search query navigation, shared and responsive CSS.
 
 **Invariants:** vault Markdown remains the rendered source; vault content is
 data rather than trusted executable instructions; asset URLs retain auth and
-path safety.
+path safety; **the rendered body keeps one line per source line**, since inline
+editing addresses blocks by line number and a transform that collapses lines
+would write to the wrong place (`linesMatch` enforces this at runtime and
+disables inline editing for that note).
 
 **Validation:** note-page unit tests, Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
@@ -732,18 +738,33 @@ path safety.
 - `frontend/src/components/NoteEditor.tsx`
 - `frontend/src/components/NoteActionsDialog.tsx`
 - `frontend/src/hooks/useNoteActions.ts`
+- `frontend/src/hooks/useNoteAutosave.ts`
 - `frontend/src/hooks/useWriteMode.ts`
+- `frontend/src/lib/blockOps.ts`
+- `frontend/src/lib/caretMap.ts`
+- `frontend/src/lib/editHistory.ts`
 - `frontend/src/lib/imageUpload.ts`
+- `frontend/src/lib/linePrefix.ts`
+- `frontend/src/lib/sourceMap.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
+- `frontend/src/components/note-page/BlockInput.tsx`
+- `frontend/src/components/note-page/EditableBlock.tsx`
+- `frontend/src/components/note-page/InlineEditorProvider.tsx`
+- `frontend/src/components/note-page/SaveState.tsx`
+- `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
 - `frontend/src/components/note-page/conflictDiff.ts`
 - `frontend/src/components/note-page/frontmatter.ts`
+- `frontend/src/components/note-page/inlineEditorContext.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
 components, note-action/write-mode hooks, local draft behavior, client path
-validation, upload normalization, frontmatter editing, conflict display, and
-wikilink autocomplete.
+validation, upload normalization, frontmatter editing, conflict display,
+wikilink autocomplete, inline block editing (the editor provider/context, the
+per-block wrapper and input, structural block operations, document-level undo,
+autosave scheduling and save state), line mapping between rendered nodes and
+file lines, and attachment acceptance and insertion.
 
 **Consumed dependencies:** shared API/types/UI, router navigation, vault tree
 note candidates, and backend HTTP write endpoints.
@@ -754,10 +775,16 @@ note candidates, and backend HTTP write endpoints.
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
-safety; every mutation continues through backend `vault/write` (ADR-03/11).
+safety; every mutation continues through backend `vault/write` (ADR-03/11);
+**nothing re-serializes a note** — edits replace only the lines a block owns and
+reproduce the file's own line endings; **block operations refuse rather than
+guess** when a range no block owns lies between them, or when the rendered tree
+is still settling behind a wikilink resolve.
 
 **Validation:** write API, editor, action dialog, upload, draft, path,
-frontmatter, conflict, and autocomplete tests plus `App.write-mode.test.tsx`
+frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
+`caretMap`, `editHistory`, `linePrefix`, `useNoteAutosave`, `attachmentDrop`,
+`inlineEditing`, and `properties` tests; plus `App.write-mode.test.tsx`
 and full frontend checks.
 
 ### Graph
