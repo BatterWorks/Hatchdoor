@@ -1351,6 +1351,13 @@
     gap: 0.5rem;
   }
 
+  /* Body demos are shown at the width the app actually gives a note. That
+     width is not a max-width on .note-body: it is what remains of
+     .note-page-layout's grid once the 220px table of contents and its gap are
+     taken, which is 798px at a 1440px window and caps at 1120px. Demoing prose
+     at the full doc column would show a measure the app never renders. */
+  .stage-note > .note-body { max-width: 798px; }
+
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Inline editing
      ════════════════════════════════════════════════════════════════ */
@@ -1895,7 +1902,7 @@
       <h2>Prose &amp; inline elements</h2>
       <p class="blurb"><b>Reading measure: uncapped.</b> This document previously specified <code>max-width: 36rem</code> on the note body; the app has always rendered full width, about 100 characters at 1440px. Capping was considered and rejected. Nearly every non-prose block here is a bordered box &mdash; <span class="key">.table-wrap</span>, <span class="key">.callout</span>, <span class="key">.code-block</span> &mdash; so a narrow text column beside full-width boxes reads as broken alignment rather than as hierarchy, and capping every block uniformly instead pushes tables and diagrams into horizontal scrolling much sooner. The app is authoritative; this document was stale.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
-      <div class="stage paper">
+      <div class="stage stage-note paper">
         <div class="note-body">
           <p>The mornings have turned colder than they should be for May, and the cordons along the south wall are flowering anyway. I went out at half-six to see whether <a href="#">the frost</a> had taken the blossom — it had not — but the bees were absent and the wasps were already on the cherries.</p>
           <p>The rosemary planted along the path is doing more for the pollinator count than the lavender ever did. <em>The lavender is theatrical; the rosemary is reliable.</em> Use <code>secateurs</code> on spurs, <strong>not on the leader</strong>. See also <span class="ty-broken">→ missing note</span>.</p>
@@ -1910,8 +1917,8 @@
       <div class="doc-section-num">§11</div>
       <h2>Lists</h2>
       <p class="blurb">Unordered: Inter Tight sans at 1.02rem with a 1px hot tick as bullet. Ordered: same body, but the number renders in mono hot.</p>
-      <div class="grid-2">
-        <div class="stage paper">
+      <div>
+        <div class="stage paper stage-note">
           <div class="note-body">
             <ul>
               <li>Reinette — full blossom, no frost damage.</li>
@@ -1921,7 +1928,7 @@
             </ul>
           </div>
         </div>
-        <div class="stage paper">
+        <div class="stage paper stage-note">
           <div class="note-body">
             <ol>
               <li>Sharpen the steel the night before.</li>
@@ -1940,7 +1947,7 @@
       <div class="doc-section-num">§12</div>
       <h2>Blockquote</h2>
       <p class="blurb">Newsreader italic at 1.4rem with a 2px hot left rail. Citation uses condensed Bricolage in muted uppercase.</p>
-      <div class="stage paper">
+      <div class="stage stage-note paper">
         <div class="note-body">
           <blockquote>
             A garden is the only mirror in which you can watch yourself become slower.
@@ -1956,7 +1963,7 @@
       <div class="doc-section-num">§13</div>
       <h2>Callouts</h2>
       <p class="blurb">Four variants. Each shows a tinted surface, matching border, and a colored square marker on the left with a single glyph. Body text is italic serif.</p>
-      <div class="stage paper">
+      <div class="stage stage-note paper">
         <div class="callout default">
           The rule does not survive contact with brambles. Brambles are an exception to every rule, including the rule that there are no exceptions.
         </div>
@@ -1978,7 +1985,7 @@
       <div class="doc-section-num">§14</div>
       <h2>Code block</h2>
       <p class="blurb">Inverted: dark surface always (even in light mode) for contrast. Optional header with language label and copy button.</p>
-      <div class="stage">
+      <div class="stage stage-note">
         <div class="code-block">
           <div class="code-block-head">
             <span class="code-lang">toml</span>
@@ -2001,7 +2008,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="doc-section-num">§15</div>
       <h2>Table</h2>
       <p class="blurb">Inter Tight sans, hairline rules, no heavy top/bottom borders. First column muted with tabular-nums alignment. Wraps in a horizontally-scrollable container for narrow viewports.</p>
-      <div class="stage paper">
+      <div class="stage stage-note paper">
         <div class="note-body">
           <div class="table-wrap">
             <table>
@@ -2026,7 +2033,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb">Embedded media. Mermaid and KaTeX get neutral paper containers — the libraries render their own content inside; we just frame it.</p>
 
       <h3 class="doc-sub">Figure</h3>
-      <div class="stage paper">
+      <div class="stage stage-note paper">
         <div class="note-body">
           <figure class="figure">
             <div class="img-placeholder"></div>
@@ -2037,13 +2044,13 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.figure</span><span class="key">.figure img</span><span class="key">.figure figcaption</span></div>
 
       <h3 class="doc-sub">Mermaid container</h3>
-      <div class="stage">
+      <div class="stage stage-note">
         <div class="mermaid"><div class="placeholder">graph TD · A→B · B→C</div></div>
       </div>
       <div class="tag-row"><span class="key">.mermaid</span></div>
 
       <h3 class="doc-sub">KaTeX block</h3>
-      <div class="stage">
+      <div class="stage stage-note">
         <div class="katex-block">∫₀^∞ e^(-x²) dx = √π / 2</div>
       </div>
       <div class="tag-row"><span class="key">.katex-block</span></div>
@@ -2152,7 +2159,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb">Clicking a block swaps it for a textarea holding that block&rsquo;s own markdown. The affordance is a <b>rule in the left gutter</b>, not a fill and not a box: it reuses the device the list bullet already uses, so it reads as content rather than as a control, and it costs no horizontal space, so nothing reflows.</p>
       <p class="blurb">It is drawn with <span class="key">::after</span> because <span class="key">::before</span> is already the list marker, and <span class="key">.editable-block</span> is the rendered element itself. Wrapping blocks in a div would sit between a <code>ul</code> and its <code>li</code> children and break every marker rule.</p>
 
-      <div class="stage paper">
+      <div class="stage stage-note paper">
         <div class="note-body">
           <p class="editable-block">Resting: no mark at all, so a note reads as a document.</p>
           <p class="editable-block is-hover">Hovered: a 1px hot hairline at 45% in the gutter.</p>
