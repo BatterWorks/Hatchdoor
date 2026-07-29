@@ -41,6 +41,13 @@
   --example-border: #e0c0cc;
   --highlight: #f7ebbf;
   --highlight-active: #f1d779;
+  /* Code surface stays a dark slab in both themes. It must not be built from
+     --ink/--bg, which swap on theme change and would flip the code block to a
+     cream slab on a dark page. */
+  --code-surface: #0c0c0a;
+  --code-ink: #f4f1e8;
+  --code-ink-soft: rgba(244, 241, 232, 0.6);
+  --code-rule: rgba(255, 255, 255, 0.14);
   --shadow-soft: 0 1px 0 rgba(12, 12, 10, 0.04);
   --shadow-float: 0 14px 32px rgba(12, 12, 10, 0.18);
   --shadow-overlay: 0 24px 60px rgba(12, 12, 10, 0.28);
@@ -89,6 +96,12 @@
   --example-border: #3e1e2e;
   --highlight: #4a3f15;
   --highlight-active: #6b5a1f;
+  /* Lifted off the page background so the slab still reads as a distinct
+     block once the page itself is near-black. */
+  --code-surface: #1a1a17;
+  --code-ink: #ece8d8;
+  --code-ink-soft: rgba(236, 232, 216, 0.6);
+  --code-rule: rgba(255, 255, 255, 0.12);
   --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
   --shadow-float: 0 14px 32px rgba(0, 0, 0, 0.6);
   --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.7);
@@ -137,6 +150,12 @@
     --example-border: #3e1e2e;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
+    /* Lifted off the page background so the slab still reads as a distinct
+     block once the page itself is near-black. */
+    --code-surface: #1a1a17;
+    --code-ink: #ece8d8;
+    --code-ink-soft: rgba(236, 232, 216, 0.6);
+    --code-rule: rgba(255, 255, 255, 0.12);
     --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
     --shadow-float: 0 14px 32px rgba(0, 0, 0, 0.6);
     --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.7);

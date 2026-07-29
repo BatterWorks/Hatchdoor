@@ -6,6 +6,7 @@ import {
   CodeBlock,
   MermaidDiagram,
 } from "./RendererComponents";
+import { markAsParagraph } from "./paragraphs";
 import { PdfPreview } from "./PdfPreview";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
@@ -88,6 +89,21 @@ export function createNoteMarkdownComponents(
       }
       return <a href={href}>{children}</a>;
     },
+    p: markAsParagraph(function NoteParagraph(props: {
+      children?: ReactNode;
+      node?: MarkdownElementNode;
+    }) {
+      // A lone PDF embed parses as a paragraph wrapping an image, but
+      // PdfPreview renders block content. Leaving the paragraph produces
+      // invalid nesting, which the browser resolves by splitting the paragraph
+      // and detaching the preview from it. Decided from the source node,
+      // because by the time children are React elements they carry the mapped
+      // img component as their type, not PdfPreview.
+      if (holdsOnlyPdfEmbed(props.node, noteRelativePath)) {
+        return <>{props.children}</>;
+      }
+      return <p>{props.children}</p>;
+    }),
     img(props: { src?: string; alt?: string }) {
       const source =
         typeof props.src === "string"
@@ -172,6 +188,35 @@ export function createNoteMarkdownComponents(
       );
     },
   };
+}
+
+type MarkdownElementNode = {
+  children?: Array<{
+    type?: string;
+    tagName?: string;
+    value?: string;
+    properties?: { src?: unknown };
+  }>;
+};
+
+function holdsOnlyPdfEmbed(
+  node: MarkdownElementNode | undefined,
+  noteRelativePath: string,
+): boolean {
+  const meaningful = (node?.children ?? []).filter(
+    (child) => !(child.type === "text" && (child.value ?? "").trim() === ""),
+  );
+
+  if (meaningful.length !== 1) {
+    return false;
+  }
+
+  const only = meaningful[0];
+  if (only.tagName !== "img" || typeof only.properties?.src !== "string") {
+    return false;
+  }
+
+  return isPdfHref(resolveAssetHref(only.properties.src, noteRelativePath));
 }
 
 function isPdfHref(href: string): boolean {

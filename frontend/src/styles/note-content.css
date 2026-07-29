@@ -537,8 +537,8 @@
 /* Code block */
 .code-block {
   margin: 1.6rem 0;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--code-surface);
+  color: var(--code-ink);
   position: relative;
   overflow: hidden;
 }
@@ -549,13 +549,13 @@
   align-items: center;
   background: rgba(255, 255, 255, 0.06);
   padding: 0.3rem 0.7rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--code-rule);
 }
 
 .code-lang {
   font-family: var(--font-mono);
   font-size: 0.66rem;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--code-ink-soft);
   text-transform: uppercase;
   letter-spacing: 0.14em;
 }
@@ -567,8 +567,8 @@
   font-size: 0.82rem;
   line-height: 1.6;
   overflow-x: auto;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--code-surface);
+  color: var(--code-ink);
   border: 0;
   border-radius: 0;
 }
@@ -583,9 +583,9 @@
   font-size: 0.66rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--bg);
+  color: var(--code-ink);
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--code-rule);
   padding: 0.18rem 0.5rem;
   min-height: unset;
 }
@@ -594,7 +594,7 @@
 .code-block .close-note:hover {
   background: var(--hot);
   border-color: var(--hot);
-  color: var(--bg);
+  color: var(--code-ink);
 }
 
 /* Reset inline code style when inside a code block */
@@ -611,8 +611,8 @@
   width: 100%;
   max-width: 100%;
   overflow: auto;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--code-surface);
+  color: var(--code-ink);
   border: 1px solid var(--rule);
   padding: 0.9rem 1rem;
   box-sizing: border-box;
