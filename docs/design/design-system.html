@@ -34,6 +34,10 @@
     --info-border: #d7e2ee;
     --highlight: #f7ebbf;
     --highlight-active: #f1d779;
+    --code-surface: #0c0c0a;
+    --code-ink: #f4f1e8;
+    --code-ink-soft: rgba(244, 241, 232, 0.6);
+    --code-rule: rgba(255, 255, 255, 0.14);
     --shadow-soft: 0 1px 0 rgba(12, 12, 10, 0.04);
     --shadow-float: 0 14px 32px rgba(12, 12, 10, 0.18);
     --shadow-overlay: 0 24px 60px rgba(12, 12, 10, 0.28);
@@ -62,6 +66,10 @@
     --info-border: #233444;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
+    --code-surface: #1a1a17;
+    --code-ink: #ece8d8;
+    --code-ink-soft: rgba(236, 232, 216, 0.6);
+    --code-rule: rgba(255, 255, 255, 0.12);
     --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
     --shadow-float: 0 14px 32px rgba(0, 0, 0, 0.6);
     --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.7);
@@ -91,6 +99,10 @@
       --info-border: #233444;
       --highlight: #4a3f15;
       --highlight-active: #6b5a1f;
+    --code-surface: #1a1a17;
+    --code-ink: #ece8d8;
+    --code-ink-soft: rgba(236, 232, 216, 0.6);
+    --code-rule: rgba(255, 255, 255, 0.12);
       --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
       --shadow-float: 0 14px 32px rgba(0, 0, 0, 0.6);
       --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.7);
@@ -110,6 +122,7 @@
     --space-12: 3rem;
     --space-16: 4rem;
     --radius-pill: 999px;
+    --edit-gutter: 0.75rem;
     --radius-none: 0;
     --dur-fast: 120ms;
     --dur: 200ms;
@@ -919,7 +932,8 @@
   .toc-link[data-level="3"] { padding-left: 1rem; color: var(--muted); }
 
   /* Body & blocks */
-  .note-body { max-width: 36rem; }
+  /* Uncapped: see the Reading measure note in §07. */
+  .note-body { max-width: 100%; }
   .note-body p { font-family: var(--font-serif); font-size: 1.18rem; line-height: 1.62; color: var(--ink); margin: 0 0 1.2rem; }
   .note-body h1 { font-family: var(--font-display); font-variation-settings: "wdth" 88, "wght" 700; font-size: 1.7rem; text-transform: uppercase; letter-spacing: -0.012em; margin: 2.4rem 0 0.8rem; }
   .note-body h2 { font-family: var(--font-serif); font-style: italic; font-weight: 500; font-size: 1.85rem; line-height: 1.18; letter-spacing: -0.012em; margin: 2.6rem 0 0.5rem; }
@@ -1021,8 +1035,8 @@
   /* Code block */
   .code-block {
     margin: 1.6rem 0;
-    background: var(--ink);
-    color: var(--bg);
+    background: var(--code-surface);
+    color: var(--code-ink);
     position: relative;
     overflow: hidden;
   }
@@ -1037,7 +1051,7 @@
   .code-lang {
     font-family: var(--font-mono);
     font-size: 0.66rem;
-    color: rgba(255,255,255,0.6);
+    color: var(--code-ink-soft);
     text-transform: uppercase;
     letter-spacing: 0.14em;
   }
@@ -1047,9 +1061,9 @@
     font-size: 0.66rem;
     letter-spacing: 0.14em;
     text-transform: uppercase;
-    color: var(--bg);
+    color: var(--code-ink);
     background: transparent;
-    border: 1px solid rgba(255,255,255,0.18);
+    border: 1px solid var(--code-rule);
     padding: 0.18rem 0.5rem;
     cursor: pointer;
   }
@@ -1061,8 +1075,8 @@
     font-size: 0.82rem;
     line-height: 1.6;
     overflow-x: auto;
-    background: var(--ink);
-    color: var(--bg);
+    background: var(--code-surface);
+    color: var(--code-ink);
     border: 0;
   }
   .code-block pre .com { color: #8a8a82; font-style: italic; }
@@ -1338,6 +1352,78 @@
   }
 
   /* ════════════════════════════════════════════════════════════════
+     COMPONENT — Inline editing
+     ════════════════════════════════════════════════════════════════ */
+  .editable-block { position: relative; cursor: text; }
+  .editable-block::after {
+    content: "";
+    position: absolute;
+    left: calc(var(--edit-gutter) * -1);
+    top: 0.15em; bottom: 0.15em;
+    width: 1px;
+    background: var(--hot);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-fast) var(--ease);
+  }
+  .editable-block:hover::after, .editable-block.is-hover::after { opacity: 0.45; }
+  .editable-block.is-active::after { width: 2px; opacity: 1; }
+
+  .block-input {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    margin: 0; padding: 0; border: 0;
+    border-radius: var(--radius-none);
+    background: transparent;
+    resize: none;
+    overflow: hidden;
+    outline: none;
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+    text-transform: none;
+    caret-color: var(--hot);
+  }
+
+  .save-state {
+    font-family: var(--font-sans);
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .save-state.is-error { color: var(--err-fg); }
+
+  .write-notice {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.85rem;
+    border: 1px solid var(--rule);
+    border-radius: var(--radius-none);
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+  }
+
+  .note-property-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--rule-strong);
+    border-radius: var(--radius-none);
+    background: var(--paper);
+    font-family: var(--font-sans);
+    font-size: 0.88rem;
+    color: var(--ink);
+    padding: 0.15rem 0.35rem;
+  }
+  .note-property-input:focus { outline: none; border-color: var(--hot); }
+
+  /* ════════════════════════════════════════════════════════════════
      UTIL — keys/values list for tokens display
      ════════════════════════════════════════════════════════════════ */
   .kv-table {
@@ -1364,7 +1450,7 @@
   <!-- ════ DOC NAV ════════════════════════════════════ -->
   <aside class="doc-nav">
     <h2 class="doc-nav-brand"><span class="dot"></span>HATCHDOOR</h2>
-    <div style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-bottom: 1rem;">Design system · v2026.5</div>
+    <div style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-bottom: 1rem;">Design system · v2026.7</div>
 
     <h3>System</h3>
     <a href="#tokens">Tokens</a>
@@ -1394,6 +1480,11 @@
     <a href="#search">Search dialog</a>
     <a href="#fields">Form fields &amp; dialog</a>
     <a href="#menu">Popover menu</a>
+
+    <h3>Editing</h3>
+    <a href="#editing">Inline editing</a>
+    <a href="#save-state">Save state</a>
+    <a href="#write-notice">Notices &amp; banners</a>
 
     <h3>States</h3>
     <a href="#states">Loading / empty / error</a>
@@ -1802,6 +1893,7 @@
     <section class="doc-section" id="body-text">
       <div class="doc-section-num">§10</div>
       <h2>Prose &amp; inline elements</h2>
+      <p class="blurb"><b>Reading measure: uncapped.</b> This document previously specified <code>max-width: 36rem</code> on the note body; the app has always rendered full width, about 100 characters at 1440px. Capping was considered and rejected. Nearly every non-prose block here is a bordered box &mdash; <span class="key">.table-wrap</span>, <span class="key">.callout</span>, <span class="key">.code-block</span> &mdash; so a narrow text column beside full-width boxes reads as broken alignment rather than as hierarchy, and capping every block uniformly instead pushes tables and diagrams into horizontal scrolling much sooner. The app is authoritative; this document was stale.</p>
       <p class="blurb">Body paragraphs use Newsreader serif at 1.18rem / lh 1.62. Inline links underline with a 2px hot rail (hovering inverts: hot fill, paper text). Inline code uses a paper-2 surface. Broken links show dashed underline in error color.</p>
       <div class="stage paper">
         <div class="note-body" style="max-width: 38rem;">
@@ -2053,9 +2145,92 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.menu</span><span class="key">.menu .ui-btn</span><span class="key">.menu-divider</span></div>
     </section>
 
+    <!-- ───────── INLINE EDITING ───────── -->
+    <section class="doc-section" id="editing">
+      <div class="doc-section-num">§20</div>
+      <h2>Inline editing</h2>
+      <p class="blurb">Clicking a block swaps it for a textarea holding that block&rsquo;s own markdown. The affordance is a <b>rule in the left gutter</b>, not a fill and not a box: it reuses the device the list bullet already uses, so it reads as content rather than as a control, and it costs no horizontal space, so nothing reflows.</p>
+      <p class="blurb">It is drawn with <span class="key">::after</span> because <span class="key">::before</span> is already the list marker, and <span class="key">.editable-block</span> is the rendered element itself. Wrapping blocks in a div would sit between a <code>ul</code> and its <code>li</code> children and break every marker rule.</p>
+
+      <div class="stage paper">
+        <div class="note-body">
+          <p class="editable-block">Resting: no mark at all, so a note reads as a document.</p>
+          <p class="editable-block is-hover">Hovered: a 1px hot hairline at 45% in the gutter.</p>
+          <p class="editable-block is-active">Active: the same device at 2px and full weight. No ring, no fill, so it does not fight the borders callouts and tables already carry.</p>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.editable-block</span><span class="key">.editable-block:hover</span><span class="key">.editable-block.is-active</span><span class="key">--edit-gutter</span></div>
+
+      <h3 class="doc-sub">The gutter is borrowed, not owned</h3>
+      <p class="blurb">The note body sits flush against its container. The space the rule occupies is <span class="key">.note-pane</span>&rsquo;s padding, which is <b>56px on desktop and 16px on a phone</b>, and that element is <code>overflow-x: hidden</code>. Clipping happens at the padding box, so a negative-margin rule survives, but the offset has to be a token rather than a constant.</p>
+
+      <h3 class="doc-sub">Block input: match the metrics, never the transforms</h3>
+      <p class="blurb">The input inherits family, size, weight, line-height and colour from the block it replaces, and explicitly resets <code>text-transform</code>. Three rendered styles in this system uppercase their text &mdash; <code>h1</code>, <code>h3</code>, <code>h6</code>, callout titles and table headers &mdash; and an input that inherited that would show the typist a different string than the one being written to the file.</p>
+      <p class="blurb">The line&rsquo;s markdown prefix is <b>measured and hung into the gutter</b>, so the visible text does not move on entry. A fixed hang cannot work: <code>- </code> is about 9px while the bullet it replaces is inset 22.4px, and the width varies per prefix. On a phone the hang is clamped to the pane&rsquo;s 16px, so a long prefix shifts slightly rather than being clipped.</p>
+      <div class="tag-row"><span class="key">.block-input</span><span class="key">font: inherit</span><span class="key">text-transform: none</span><span class="key">caret-color: --hot</span></div>
+
+      <h3 class="doc-sub">Per-unit skins</h3>
+      <table class="kv-table">
+        <tr><th>Unit</th><th>Skin</th></tr>
+        <tr><td class="name">paragraph</td><td class="val">serif 1.18rem / 1.62</td></tr>
+        <tr><td class="name">heading</td><td class="val">the level&rsquo;s own family and size, transform reset</td></tr>
+        <tr><td class="name">list item</td><td class="val">sans 1.02rem, marker hidden while active</td></tr>
+        <tr><td class="name">callout title</td><td class="val">band&rsquo;s display face; light on a saturated fill for a known kind, dark on paper otherwise</td></tr>
+        <tr><td class="name">callout body</td><td class="val">serif italic 1.02rem</td></tr>
+        <tr><td class="name">fenced code</td><td class="val">--code-surface / --code-ink, mono 0.82rem</td></tr>
+        <tr><td class="name">fence, no language</td><td class="val">bare <code>pre</code>, a different presentation from .code-block</td></tr>
+        <tr><td class="name">table row</td><td class="val">mono, overlaid on the row (see below)</td></tr>
+      </table>
+
+      <h3 class="doc-sub">Table rows are overlaid, not replaced</h3>
+      <p class="blurb">A <code>tr</code> may not contain a textarea, and swapping its cells for one lets every column resize on entry and again on exit, because widths derive from content. The cells stay in the flow holding the grid still, and the input is laid over the row from inside its first cell.</p>
+
+      <h3 class="doc-sub">Touch</h3>
+      <p class="blurb">A tap reads; a <b>long press</b> (500ms, cancelled by 10px of movement) enters a block. Tap-to-edit would raise the keyboard on every stray touch, and reading is the dominant mode on a phone. The gutter rule is drawn persistently at low opacity on coarse pointers, because a long press is otherwise an invisible gesture.</p>
+    </section>
+
+    <!-- ───────── SAVE STATE ───────── -->
+    <section class="doc-section" id="save-state">
+      <div class="doc-section-num">§21</div>
+      <h2>Save state</h2>
+      <p class="blurb">Autosave removed the Save button, and with it the only evidence a user had that their writing survived. In a vault with agent co-writers and git sync, that evidence is the trust surface of the whole feature, so it gets a permanent slot beside <b>Edit</b>.</p>
+      <p class="blurb">It states what is true <i>now</i> rather than announcing an event: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. The failure state is a click target that opens the conflict review.</p>
+      <div class="stage" style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">
+        <span class="save-state">Saving…</span>
+        <span class="save-state">Saved 14:32</span>
+        <span class="save-state is-error">Not saving</span>
+      </div>
+      <div class="tag-row"><span class="key">.save-state</span><span class="key">.save-state.is-error</span></div>
+    </section>
+
+    <!-- ───────── NOTICES ───────── -->
+    <section class="doc-section" id="write-notice">
+      <div class="doc-section-num">§22</div>
+      <h2>Notices &amp; banners</h2>
+      <p class="blurb">A full-bleed strip above the note body, for things the reader must know but must not be interrupted by. A conflict gets this rather than a modal: interrupting someone mid-sentence is worse than a banner that persists.</p>
+      <p class="blurb"><b>Corrected:</b> this shell and the source-mode notices carried a 6px radius in a system whose §01 states zero radius everywhere except the kbd pill and status badges. Squared, along with the other write-mode surfaces that inherited it.</p>
+      <div class="stage" style="display:grid; gap:0.8rem;">
+        <div class="write-notice">
+          <div>Edits aren&rsquo;t saving. This note changed somewhere else.</div>
+          <button class="ui-btn ghost">Review</button>
+        </div>
+        <div class="write-notice">
+          <div>This note&rsquo;s source and rendered lines don&rsquo;t line up, so inline editing is off here. Use Edit to open source mode.</div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.write-notice</span><span class="key">.note-editor-notice</span></div>
+
+      <h3 class="doc-sub">Editable properties</h3>
+      <p class="blurb">Frontmatter values edit in place for the same reason blocks do: changing a tag should not require dropping the whole note into source mode. The input follows <span class="key">.field-input</span>. Tag chips keep filtering; editing tags is a separate <b>Edit</b> affordance on the row, so a chip does not silently stop doing what it always did.</p>
+      <div class="stage paper" style="max-width: 32rem;">
+        <input class="note-property-input" value="2026-09-01">
+      </div>
+      <div class="tag-row"><span class="key">.note-property-input</span><span class="key">.note-property-edit</span></div>
+    </section>
+
     <!-- ───────── STATE BLOCKS ───────── -->
     <section class="doc-section" id="states">
-      <div class="doc-section-num">§20</div>
+      <div class="doc-section-num">§23</div>
       <h2>State blocks</h2>
       <p class="blurb">Loading uses a shimmer skeleton (paper-2 → paper → paper-2 sweep). Empty and error use the same shell with different headings and bodies.</p>
       <div class="grid-3">
@@ -2090,7 +2265,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
     <!-- ───────── BADGES ───────── -->
     <section class="doc-section" id="badges">
-      <div class="doc-section-num">§21</div>
+      <div class="doc-section-num">§24</div>
       <h2>Status badges</h2>
       <p class="blurb">Pill-shaped (only place radius lives, besides the kbd hint). Used in the topbar for offline / errors and elsewhere for status pills.</p>
       <div class="stage" style="display:flex; gap: 0.6rem; flex-wrap: wrap;">
@@ -2106,7 +2281,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
     <!-- ───────── BUTTONS ───────── -->
     <section class="doc-section" id="buttons">
-      <div class="doc-section-num">§22</div>
+      <div class="doc-section-num">§25</div>
       <h2>Buttons</h2>
       <p class="blurb">Three variants: default (ink border), primary (hot fill), ghost (rule border). Icon buttons are 2.1rem square (or 44px on mobile). All states are shown — focus uses a 2px hot outline.</p>
 
@@ -2148,11 +2323,11 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.float-actions</span></div>
     </section>
 
-    <p style="font-family: var(--font-sans); font-size: 0.8rem; color: var(--muted); margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);">End of design system · v2026.5 · all components used by the React app, with light + dark variants and every interaction state. Implementation: token block → component classes → wire to existing JSX.</p>
+    <p style="font-family: var(--font-sans); font-size: 0.8rem; color: var(--muted); margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);">End of design system · v2026.7 · all components used by the React app, with light + dark variants and every interaction state. Implementation: token block → component classes → wire to existing JSX.</p>
 
     <!-- ───────── ICONS ───────── -->
     <section class="doc-section" id="icons">
-      <div class="doc-section-num">§23</div>
+      <div class="doc-section-num">§26</div>
       <h2>Icons</h2>
       <p class="blurb"><b>Material Symbols &mdash; Sharp variant only.</b> Sharp is drawn with right angles and squared terminals, which is the only mainstream icon language that agrees with the zero-radius rule. Outlined and Rounded do not; do not mix them in. Licensed Apache 2.0, attributed in <code>THIRD_PARTY_NOTICES.md</code>.</p>
       <p class="blurb"><b>Inlined, never installed.</b> Icons live as components in <code>frontend/src/components/icons.tsx</code> with the path data copied verbatim. No icon font, no npm package, no CDN request &mdash; this keeps the PWA&rsquo;s offline path clean and satisfies ADR-13. Adding one means pasting a Sharp SVG, not adding a dependency.</p>
