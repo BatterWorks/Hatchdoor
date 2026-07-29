@@ -22,6 +22,7 @@ import {
 } from "../lib/markdown";
 import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
 import { frontmatterLineOffset, linesMatch } from "../lib/sourceMap";
+import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -47,6 +48,7 @@ import {
 } from "../lib/writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
+import { SaveState } from "./note-page/SaveState";
 import { uploadNoteAttachment } from "./note-page/attachmentDrop";
 import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
@@ -110,6 +112,7 @@ export function NotePage({
   const currentSlugRef = useRef(slug);
   const lastEditRequestIdRef = useRef(editRequestId);
   const lastHandledRevisionRef = useRef(0);
+  const autosaveStatusRef = useRef<string>("idle");
   currentSlugRef.current = slug;
 
   const loadNote = useCallback(
@@ -199,14 +202,17 @@ export function NotePage({
     // the content hash the editor saves against and silently defeat the
     // optimistic-concurrency guard. Flag the change instead so the user can
     // reload deliberately.
-    if (isEditing) {
+    // D16: our own writes bump the revision twice. Refetching while the
+    // document is dirty or a write is in flight would move the hash the next
+    // save is made against and defeat the concurrency guard.
+    if (isEditing || inlineDirty || autosaveStatusRef.current === "saving") {
       setNoteChangedOnDisk(true);
       return;
     }
 
     void loadNote(false);
     void loadNoteLinks();
-  }, [loadNote, loadNoteLinks, vaultRevision, isEditing]);
+  }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -331,6 +337,8 @@ export function NotePage({
     [note?.relative_path, headingIdsBySourceLine, inlineEditingEnabled],
   );
 
+  const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
+
   const handleInlineChange = (nextContent: string) => {
     if (!note) {
       return;
@@ -341,12 +349,51 @@ export function NotePage({
     }
     setDraftContent(nextContent);
     setNote((prev) => (prev ? { ...prev, content: nextContent } : prev));
+    autosaveRef.current?.commit(nextContent);
   };
 
-  const discardInlineEdits = () => {
-    setInlineDirty(false);
-    setEditorError(null);
-    void loadNote(true);
+  const autosave = useNoteAutosave({
+    content: note?.content ?? "",
+    baseHash: note?.content_hash ?? "",
+    enabled: inlineEditingEnabled,
+    save: async (nextContent, expectedHash) => {
+      const outcome = await updateNote(slug, nextContent, expectedHash);
+      if (outcome.git_sync_warning) {
+        onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
+      }
+      return outcome;
+    },
+    onSaved: (result) => {
+      setNote((prev) =>
+        prev && result.content_hash
+          ? { ...prev, content_hash: result.content_hash }
+          : prev,
+      );
+      setInlineDirty(false);
+    },
+  });
+
+  autosaveRef.current = autosave;
+  autosaveStatusRef.current = autosave.status;
+
+  const reviewConflict = () => {
+    // The conflict review lives in source mode, which already knows how to
+    // show the disk version beside the draft.
+    setDraftContent(note?.content ?? "");
+    setEditBaseHash(editBaseHash || (note?.content_hash ?? ""));
+    setConflict(true);
+    setIsEditing(true);
+    void (async () => {
+      try {
+        const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
+        if (res.ok) {
+          const json = (await res.json()) as { note: Note };
+          setConflictNote(json.note);
+        }
+      } catch {
+        // The banner already said what happened; source mode still holds the draft.
+      }
+    })();
   };
 
   useLayoutEffect(() => {
@@ -586,34 +633,31 @@ export function NotePage({
       <article className="note-content">
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>
-          {writeEnabled && !isEditing && inlineDirty ? (
+          {writeEnabled && !isEditing ? (
             <div className="note-inline-actions">
+              <SaveState status={autosave.status} savedAt={autosave.savedAt} />
               <UiButton
                 className="close-note note-edit-button"
-                onClick={() => void handleSave()}
-                disabled={saving}
+                onClick={startEditing}
               >
-                {saving ? "Saving" : "Save"}
-              </UiButton>
-              <UiButton
-                className="close-note"
-                onClick={discardInlineEdits}
-                disabled={saving}
-              >
-                Discard
+                Edit
               </UiButton>
             </div>
           ) : null}
-          {writeEnabled && !isEditing && !inlineDirty ? (
-            <UiButton
-              className="close-note note-edit-button"
-              onClick={startEditing}
-            >
-              Edit
-            </UiButton>
-          ) : null}
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
+        {autosave.status === "conflict" || autosave.status === "error" ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              {autosave.status === "conflict"
+                ? "Edits aren't saving. This note changed somewhere else."
+                : "Edits aren't saving. Hatchdoor could not reach the vault."}
+            </div>
+            <UiButton className="close-note" onClick={reviewConflict}>
+              Review
+            </UiButton>
+          </div>
+        ) : null}
         {writeEnabled && !isEditing && !lineMappingIntact ? (
           <p className="note-editor-notice">
             This note&rsquo;s source and rendered lines don&rsquo;t line up, so
