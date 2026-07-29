@@ -3,17 +3,19 @@
 **Date:** 2026-07-28
 **Status:** Approved, pending implementation plan.
 **Revised 2026-07-28** after an adversarial spec review that found one fatal and nine serious
-issues. See "Review corrections" at the end for what changed and why.
+issues. **Revised again 2026-07-29** after a design review against the design system, which
+found the appearance of the feature almost entirely unspecified. See "Review corrections" at
+the end for what changed and why.
 **Issues covered:** [#14 — Live editing content](https://github.com/BattermanZ/Hatchdoor/issues/14),
 partially [#7 — Improve attachment UX](https://github.com/BattermanZ/Hatchdoor/issues/7)
 (the PDF drop stage)
 **Roadmap horizon:** v2.5.0 ("Polished, publishable UI/UX")
 
-> **Numbering convention.** `D1`–`D35` refer to *decisions in this document*. A bare `#7`,
-> `#14` always means a **GitHub issue**. Decision numbers are stable: the review-driven
-> revision edited the content of existing decisions and appended `D25`–`D35` rather than
-> renumbering, so the new decisions appear beside the topic they affect rather than in
-> numeric order.
+> **Numbering convention.** `D1`–`D45` refer to *decisions in this document*. A bare `#7`,
+> `#14` always means a **GitHub issue**. Decision numbers are stable: each review-driven
+> revision edited the content of existing decisions and appended new ones (`D25`–`D35`, then
+> `D36`–`D45`) rather than renumbering, so decisions appear beside the topic they affect
+> rather than in numeric order.
 
 ---
 
@@ -259,7 +261,8 @@ ranges. The **delimiter row** (`|---|---|`) is represented by no node at all and
 Therefore:
 
 - The editable unit is the **`tr`**, not the `td`. D4's "single table row" wins; D13's "`Enter`
-  inside a table cell" is dropped.
+  inside a table cell" is dropped. A textarea cannot be a child of `tr`, so the input is
+  overlaid on the row rather than placed in it (D40).
 - `Enter` and `Backspace` block ops are **disabled inside tables**. Generic split would insert
   a row before the delimiter and destroy the table; generic merge would join the header row
   across the delimiter into the first body row.
@@ -364,9 +367,13 @@ the reflow problem that killed line-level paragraphs.
 ### D11. BlockInput matches the typography it replaces
 
 The textarea is auto-growing and styled to match the rendered unit (heading size, code font,
-list indent, callout inset), so nothing shifts when it appears or disappears. Wikilink
-autocomplete (`note-page/autocomplete.ts`) and image paste/drop carry over from `NoteEditor`
-unchanged.
+list indent, callout inset). Wikilink autocomplete (`note-page/autocomplete.ts`) and image
+paste/drop carry over from `NoteEditor` unchanged.
+
+**Corrected:** "matches the rendered unit, so nothing shifts" is too loose on both halves.
+Matching is *metrics only*, because three rendered styles actively misreport what is in the
+file (D37). And nothing shifts only if the revealed line prefix is engineered into the gutter;
+by default it pushes text right (D38). The per-unit skins are specified in D39.
 
 ### D30. Keyboard entry and accessibility
 
@@ -399,11 +406,18 @@ replaces it, and it is required, not optional.
 The app is a PWA and this is a "publishable UI/UX" milestone, so mobile is in scope, not a
 follow-up.
 
+- **A tap does not enter a block. A long press does.** On coarse pointers, reading is the
+  dominant mode and D9's tap-to-place-caret would raise the keyboard on every stray touch,
+  which reads as broken rather than as a limitation. Entry is a long press (with the D30
+  keyboard path unchanged, and the D22 source toggle still available). Tap continues to do
+  what it does today: follow links, toggle checkboxes, collapse callouts.
 - The active `BlockInput` scrolls into view above the virtual keyboard on focus.
-- `caretPositionFromPoint` is used on touch identically to mouse; the D9 fallback covers
-  engines where it is unreliable.
+- `caretPositionFromPoint` is used on touch identically to mouse once entry has happened; the
+  D9 fallback covers engines where it is unreliable.
 - The D10 click exceptions get touch-sized targets so a tap on a checkbox or callout summary
   does not accidentally enter the block.
+- The D36 hover affordance has no touch equivalent, so the long press needs its own discovery
+  path. The gutter rule is drawn persistently, at its faint weight, on coarse pointers.
 
 ### D33. Search highlighting yields to the active block
 
@@ -616,6 +630,183 @@ Without this fix, stage 0 works only for notes at the vault root.
 
 ---
 
+## Visual design
+
+Added after a design review against `docs/design/design-system.html` and the shipped CSS it
+describes (`frontend/src/styles/note-content.css`, `ui-common.css`, `App.css`). The original
+document specified the feature's behaviour in thirty-five decisions and its appearance in one
+sentence (D11), which is not enough for a milestone whose stated goal is a publishable UI.
+Line references below are to shipped CSS, not to the design-system document.
+
+### D36. The active block is marked by a gutter rule, not a box
+
+Two states, not one, and the original document conflated them:
+
+| State | Treatment |
+|---|---|
+| Hoverable | 1px hot hairline in the left gutter at low opacity, `--dur-fast` fade in |
+| Focused, not editing | The system focus ring: `outline: 2px solid var(--hot); outline-offset: 1px` (`ui-common.css:44`). This is the D30 Tab state, reached before entry |
+| Active, editing | 2px solid hot rule in the same gutter position, no ring, no fill |
+
+The gutter rule is the device `note-content.css:355` already uses for list bullets: a hot
+hairline hanging left of the content. It therefore reads as "this is a line of your content"
+rather than as a control, it costs no horizontal space so nothing reflows, and it does not
+collide with the borders `.callout` (`:626`) and `.table-wrap` (`:498`) already carry.
+
+Rejected: a `--paper-2` hover fill. It matches the sidebar and menu row convention, but
+`.note-body` prose sits directly on `--bg` with no horizontal padding, so a fill needs bleed
+padding to avoid looking pinched, and lighting up every paragraph the pointer crosses makes
+reading a long note twitchy. Rejected: the focus ring alone as the active treatment. A 2px hot
+box around a full paragraph on every click is loud at prose scale and doubles on bordered
+units.
+
+`prefers-reduced-motion` drops the fade; the rule still appears.
+
+### D37. BlockInput matches metrics, not transforms
+
+Three shipped rules make the rendered text a *different string* from the file, so a textarea
+that inherits them lies about what is being written:
+
+- `text-transform: uppercase` on `h1` (`:111`), `h3` (`:132`), `h6` (`:161`),
+  `.callout-title` (`:643`), and `th` (`:494`). Type lowercase, see uppercase, save lowercase.
+- `font-variation-settings` and `font-family` do not reach form controls by inheritance.
+  `font: inherit` is required, and it resets variation settings, so they must be restated.
+- `letter-spacing` is kept (it does not change the characters), as is `font-style: italic` on
+  `h2`, `h4`, `blockquote`, and `.callout-body`.
+
+So the rule is: **inherit the metrics (family, size, weight, line-height, spacing, colour),
+reset every transform.** `text-transform: none` is set unconditionally on `BlockInput`.
+
+`caret-color` is set explicitly per skin rather than left at `currentColor`, which is invisible
+inside a code block (D39).
+
+### D38. Line prefixes hang in the gutter
+
+`## `, `- `, `1. `, `> `, and `- [ ] ` exist in the file and not in the rendered text.
+Revealing them pushes the line right unless the input is indented to absorb them. The rule is a
+negative text indent equal to the marker inset the rendered unit already reserves:
+
+```css
+/* list item: li already has padding-left 1.4rem with ::before at left:0 */
+text-indent: -1.4rem;
+padding-left: 1.4rem;
+```
+
+so `- ` occupies exactly the width the hot dash occupied, and the rendered `::before` is
+suppressed while the unit is active (otherwise the reader sees the dash device and a literal
+`-` together). The same treatment, sized to the unit, applies to `blockquote`'s 1.4rem inset
+(`:441`) and to headings, whose `## ` prefix has no reserved inset and therefore hangs into the
+left margin.
+
+This is what makes D11's no-shift promise deliverable rather than aspirational. It is one rule
+per unit type, specified in D39.
+
+### D39. Per-unit BlockInput skins
+
+| Unit | Skin |
+|---|---|
+| Paragraph | serif 1.18rem/1.62, `--ink`. No indent |
+| Heading h1–h6 | inherit the level's family, size, variation settings, spacing. `text-transform: none`. Prefix hangs left |
+| List item | sans 1.02rem, negative indent per D38, `::before` suppressed |
+| Task list item | as list item; the checkbox is suppressed while active since `- [ ] ` is in the text |
+| Blockquote | serif italic 1.4rem, `--ink-soft`, hot left border retained, `> ` hangs into the 1.4rem inset |
+| Callout title | the `.callout-title` band's display face at 0.72rem, `text-transform: none`, on the band's own background |
+| Callout body | serif italic 1.02rem inside the body's 0.9rem/1.1rem padding |
+| Code block | `background: var(--ink); color: var(--bg); caret-color: var(--hot)`, mono 0.82rem/1.6. Inverted from every other skin |
+| Table row | mono, overlaid (D40) |
+
+Two consequences worth stating because they are easy to get wrong at implementation time:
+
+- **The code block's header band stays, and Copy stays live.** The band shows the language,
+  which the revealed fence now also shows; the duplication is preferable to chrome that
+  appears and disappears under the cursor.
+- **Callouts retype live.** Changing `[!warning]` to `[!note]` on the title line recolours the
+  band as you type, because the tree re-renders from `note.content` anyway (D3). This is free
+  and is the better behaviour; it is specified so nobody debounces it away.
+
+### D40. Table rows are edited by an overlay
+
+`tr` accepts only cell children, so the input cannot be placed inside the row. Placing it in a
+`colspan` cell instead makes every column resize on entry and again on exit, because
+`border-collapse: collapse` derives widths from content and `th` is `white-space: nowrap`
+(`:500`) inside an `overflow-x: auto` wrapper (`:498`).
+
+Therefore the input is **absolutely positioned over the row's measured box**, inside a
+`position: relative` wrapper, with the row left in the flow to hold its own height. Column
+widths freeze while editing. The overlay is clipped by `.table-wrap`, so a long row scrolls
+with the table rather than escaping it.
+
+### D41. Ordered-list markers diverge from source numbers, accepted
+
+`ol > li::before` is a CSS counter (`:404`), with `lower-alpha` at depth 2 (`:415`) and
+`lower-roman` at depth 3 (`:419`). D12 deliberately does not renumber the source. So a list
+written `1. / 1. / 1.` renders 1, 2, 3 and reveals `1.` when any item is entered, and a nested
+item renders `a.` and reveals `1.`.
+
+This is the most visible seam in the feature, and this design system creates it rather than
+markdown. It is accepted rather than fixed: hiding the source number would mean editing the
+li's *content* rather than its line, which reintroduces the prefix-slicing D38 exists to avoid.
+Recorded in D24 so it is not rediscovered as a bug.
+
+### D42. Save state is a topbar badge
+
+D15 removes the Save button, which removes the only evidence a user has that their writing
+survived. In an app with MCP agent co-writers and git sync, that evidence is the feature's
+trust surface, and the original document specified none.
+
+The vocabulary already exists: pill status badges in the topbar, where `Offline` and
+`Indexing…` already live. One slot, three states:
+
+| State | Badge | Copy |
+|---|---|---|
+| Writing in flight | `.badge.info` | `Saving…` |
+| Settled | none, or muted text | `Saved 14:32` |
+| Autosave stopped (D17 conflict, offline) | `.badge.error` | `Not saving` |
+
+`Not saving` is a click target that opens the D17 review panel, so the banner and the badge
+lead to the same place. The badge states what is true now rather than announcing an event,
+which is why it reads `Saved 14:32` and not `Saved!`.
+
+### D43. The conflict banner, and the radius drift it inherits
+
+D17's "non-blocking banner above the note" has no component in the design system. The nearest
+shipped things are `.write-notice` (`App.css:12`) and `.note-editor-notice`, and **both carry
+`border-radius: 6px` in a system whose §01 states zero radius everywhere except the kbd pill
+and status badges.** That drift predates this feature.
+
+The banner reuses `.write-notice` (border `--rule`, `--paper` background, full-bleed above the
+note body), and the same pass corrects both files to `--radius-none`. Correcting them is in
+scope because this feature is what makes the banner a routine sight rather than an edge case.
+
+The same shell carries D25's guard fallback notice.
+
+### D44. Interface copy is specified, not improvised
+
+Four surfaces the original document described only by function. Written in the system's voice
+per §20: sentence case, plain verbs, no apology, state what is true and what to do.
+
+| Surface | Copy |
+|---|---|
+| D19 over-limit file | `That file is 14 MB. The limit is 10 MB.` |
+| D19 unsupported type | `Hatchdoor accepts images and PDFs.` |
+| D25 guard fallback | `This note's source and rendered lines don't line up, so inline editing is off here. Open source mode to edit.` |
+| D17 conflict banner | `Edits aren't saving. This note changed somewhere else.` + `Review` button |
+| D30 aria-label | `Editing heading`, `Editing list item`, `Editing paragraph`, one per unit type in D39 |
+
+The vocabulary is locked across surfaces: the D22 toggle says **Source mode**, so every message
+says "source mode" and never "the editor" or "raw mode".
+
+### D45. The rendered node is unmounted, not hidden
+
+An open question with two live consumers. Keeping the rendered output mounted under
+`display: none` would fix D24's print artefact for free, but it leaves that block's
+`<mark class="search-hit">` nodes in the DOM, which is exactly what D33's recount reads.
+
+The node is **unmounted**. D33's recount then measures what is visible, which is the behaviour
+it specifies. D24's print artefact stands, and remains not worth code.
+
+---
+
 ## Retained surfaces
 
 ### D21. Frontmatter properties become editable inline
@@ -642,6 +833,16 @@ behaves exactly as it does today.
 - **Cross-block selection cannot be typed over.** Browser selection across rendered units still
   works for reading and copying, but replacing a multi-unit selection by typing does not.
   Notion solves this with block-level selection; out of scope.
+- **There is no discard.** The old flow had Cancel plus a `window.confirm`. Under D15 every
+  keystroke reaches disk within about 2s, and D14's undo is in-memory: it does not survive
+  navigation or reload. Recovery for "I mangled this note yesterday" is git sync, not the app.
+  This is the one place the feature is *less* safe than what it replaces, and it is accepted
+  because the alternative is keeping the save friction the feature exists to remove. Source
+  mode keeps its draft and its explicit save (D22).
+- **Escape commits rather than cancels.** Everywhere else in this app (search dialog, create
+  dialog) Escape backs out. Under autosave there is nothing to back out of, so D13's Escape
+  exits the unit and keeps the text. The vocabulary break is deliberate and noted.
+- **Ordered-list numbers diverge from the source while editing** (D41).
 - **Caret offset mapping is approximate** (D9).
 - **Hard-wrapped paragraphs reveal their whole source** (D1). Measured at 45% of paragraphs,
   18% of all units. Revisit after stage 1 if it grates in practice.
@@ -682,7 +883,11 @@ behaves exactly as it does today.
 | `NotePage.tsx` | Drop `isEditing` gating, mount provider, wire autosave, source toggle |
 | `note-page/sections.tsx` | Editable properties in `NoteProperties` |
 | `NoteEditor.tsx` | Becomes source mode; widen attachment predicate; export the conflict panel |
-| `App.css` | Block input styling matched to rendered typography |
+| `styles/note-content.css` | Gutter rule (D36), per-unit `BlockInput` skins (D37–D39), table overlay (D40) |
+| `styles/ui-common.css` | Banner shell, and the `--radius-none` correction it inherits (D43) |
+| `styles/topbar.css` | Save-state badge slot (D42) |
+| `App.css` | `.write-notice` radius correction (D43) |
+| `docs/design/design-system.html` | New entries: active block, save badge, banner. Corrected: the two 6px radii |
 
 `NotePage.tsx` is already 639 lines. Autosave and conflict logic goes into `useNoteAutosave`,
 not into the component, so this reduces it rather than growing it.
@@ -709,6 +914,11 @@ not into the component, so this reduces it rather than growing it.
   PDF drop inserts the expected embed; a duplicate filename gets a suffix; a note in a subfolder
   embeds a resolvable path; an over-limit file shows a size error.
 - **Existing tests** in `NoteEditor.test.tsx` must keep passing as source-mode coverage.
+- **D37 is testable and must be tested**, because it is the failure that silently corrupts what
+  the user meant: entering an `h3`, typing lowercase, and committing must write lowercase. Assert
+  the committed content string, not the rendered output, which is uppercase either way.
+- **D40**: entering and leaving a table row leaves the header cells' measured widths unchanged.
+- **D32**: a tap on prose with a coarse pointer does not enter a block; a long press does.
 
 ---
 
@@ -717,10 +927,13 @@ not into the component, so this reduces it rather than growing it.
 | Stage | Content | Rationale |
 |-------|---------|-----------|
 | **0** | PDF drop and paste (D19), subfolder path fix (D35) | Independent and shippable, but only once D35 is fixed |
-| **1** | Wikilink newline fix and runtime guard (D25), frontmatter offset (D6), source mapping (D5, D29), click into a unit, edit, commit (D7, D8, D9, D26, D27). Explicit save retained | The go/no-go gate |
-| **2** | Autosave, conflict banner, undo (D14–D17, D34), panel extraction | Blocked on the D34 measurement |
+| **1** | Wikilink newline fix and runtime guard (D25), frontmatter offset (D6), source mapping (D5, D29), click into a unit, edit, commit (D7, D8, D9, D26, D27). **Gutter rule and per-unit skins (D36–D41), since a unit you cannot see is not a testable gate.** Explicit save retained | The go/no-go gate |
+| **2** | Autosave, conflict banner, undo (D14–D17, D34), panel extraction, save badge (D42), banner shell and radius correction (D43) | Blocked on the D34 measurement |
 | **3** | Structural ops, arrow navigation, IME gating (D12, D13, D31) | Not shippable before stage 2: destructive ops without undo |
 | **4** | Checkbox toggle, inline properties, source-mode toggle, body drop target, per-line callouts, a11y and mobile passes (D18, D20, D21, D22, D25a, D30, D32, D33) | Remaining scope |
+
+The design-system document is updated **in the stage that ships each component**, not in a
+catch-up pass afterwards. D44's copy is written before the surface it labels, not after.
 
 Stage 1 is the go/no-go gate. If source mapping proves unreliable against real vault notes
 after D25 and D6 are fixed, the design is reconsidered before stages 2 to 4 are built on it.
@@ -746,7 +959,8 @@ including the `content_hash` optimistic-concurrency guard.
 **Coordination paths:** `frontend/src/components/NotePage.tsx`,
 `frontend/src/components/note-page/renderers.tsx`,
 `frontend/src/components/note-page/sections.tsx`, `frontend/src/components/NoteEditor.tsx`,
-`frontend/src/App.css`.
+`frontend/src/App.css`, `frontend/src/styles/{note-content,ui-common,topbar}.css`,
+`docs/design/design-system.html`.
 
 `AGENTS.md` names `src/server.rs`, `src/app_state.rs`, and `frontend/src/App.tsx` as declared
 integration points. `NotePage.tsx` and `renderers.tsx` are **not** in that list; they are
@@ -782,6 +996,13 @@ be confirmed rather than cited as policy.
 4. **Caret offset mapping (D9).** Accepted as approximate; refine after stage 1 if it grates.
 5. **Autosave against agent writers (D16).** Hatchdoor notes have concurrent writers by design.
    Stage 2 should be exercised against a live MCP agent editing the same note.
+6. **The gutter rule may be too quiet (D36).** It is chosen for calm while reading, which is the
+   right default for a note app, but it is a small mark and click-to-edit has to be discovered.
+   If stage 1 shows people not finding it, the escalation is weight and opacity on the rule, not
+   a fill: the fill was rejected on reading comfort and that reasoning does not change.
+7. **Long press on mobile has no precedent in this app (D32).** It is the right call for a
+   reading-first PWA, but it is an invisible gesture. The persistent faint gutter rule is the
+   only discovery path, and stage 4 should check that it is enough.
 
 ---
 
@@ -803,3 +1024,22 @@ merely incomplete:
 | Syntax is revealed per line | Per block, measured as identical for 82% of units, with per-line callouts closing the worst gap (D1, D25a) |
 | Accessibility, IME, mobile, search highlighting | Were absent entirely; now D30, D31, D32, D33 |
 | Line endings | Were unspecified; naive implementation would rewrite CRLF files (D29) |
+
+### Design review, 2026-07-29
+
+A second pass, this time against `docs/design/design-system.html` and the CSS that shipped from
+it. The behaviour was specified in thirty-five decisions; the appearance was specified in one
+sentence. What that sentence hid:
+
+| Was | Now |
+|---|---|
+| "Styled to match the rendered unit, so nothing shifts" | Matching the unit is what breaks it. Uppercase headings, callout titles, and table headers make the typist see a different string than they are saving (D37) |
+| Implicitly, revealing syntax costs nothing | Every line prefix pushes text right unless it is engineered into the gutter (D38) |
+| `tr` is the editable unit | Still true, but a textarea cannot be a child of `tr`. It is overlaid on the row's measured box (D40) |
+| Nothing on affordance | Click-to-edit had no signal at all. A hot gutter rule, reusing the list-bullet device (D36) |
+| Nothing on save state | D15 removes the Save button and with it the user's only evidence of persistence. A topbar badge (D42) |
+| "A non-blocking banner" | No such component exists; the two closest carry a 6px radius in a zero-radius system (D43) |
+| Copy described by function | Written (D44) |
+| D32: touch behaves like mouse | Tap-to-edit makes reading on a phone a minefield. Long press to enter (D32) |
+| Ordered lists were not considered | Rendered markers are CSS counters, so they diverge from the source numbers the moment a unit is entered (D41) |
+| The design-system document was not a deliverable | It is, per stage, alongside the components it documents |
