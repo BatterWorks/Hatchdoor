@@ -662,6 +662,16 @@ units.
 
 `prefers-reduced-motion` drops the fade; the rule still appears.
 
+**The gutter is borrowed, not owned, and mobile is the binding constraint.** Measured in the
+running app: `.note-body` sits flush against its container, so there is no gutter inside the
+note. The space to its left belongs to `main.note-pane` as padding, and that element is
+`overflow-x: hidden`. Clipping happens at the padding box, so a negative-margin rule survives.
+But that padding is **56px on desktop and 16px on a 390px phone**, so a fixed -12px offset puts
+the rule 4px off the screen edge, and D32 draws it *persistently* on touch. The offset is
+therefore a token (`--edit-gutter`), not a constant: roughly 0.75rem on desktop and 0.375rem
+below the mobile breakpoint. If it ever needs to exceed the pane padding, the rule moves inside
+the block's own box rather than growing the pane.
+
 ### D37. BlockInput matches metrics, not transforms
 
 Three shipped rules make the rendered text a *different string* from the file, so a textarea
@@ -710,10 +720,26 @@ per unit type, specified in D39.
 | List item | sans 1.02rem, negative indent per D38, `::before` suppressed |
 | Task list item | as list item; the checkbox is suppressed while active since `- [ ] ` is in the text |
 | Blockquote | serif italic 1.4rem, `--ink-soft`, hot left border retained, `> ` hangs into the 1.4rem inset |
-| Callout title | the `.callout-title` band's display face at 0.72rem, `text-transform: none`, on the band's own background |
+| Callout title, known kind | the band's display face at 0.72rem, `text-transform: none`, **light text on the kind's saturated fill** |
+| Callout title, unknown kind | same metrics, dark text on the default `--paper` band |
 | Callout body | serif italic 1.02rem inside the body's 0.9rem/1.1rem padding |
-| Code block | `background: var(--ink); color: var(--bg); caret-color: var(--hot)`, mono 0.82rem/1.6. Inverted from every other skin |
+| Fenced code, with language | `background: var(--code-surface); color: var(--code-ink); caret-color: var(--hot)`, mono 0.82rem/1.6 |
+| Fenced code, no language | the same mono metrics on the **bare `pre`**, which is a different presentation from `.code-block` |
 | Table row | mono, overlaid (D40) |
+
+**Verified against the running app, 2026-07-29.** Three of these rows were wrong or missing in
+the first draft, and only looking at it found them:
+
+- **Callout titles are two skins, and the common one is inverted.** A known kind (note, tip,
+  summary) renders a saturated dark fill with light uppercase text. An unrecognised kind gets
+  the default paper band with dark text. "On the band's own background" was too vague to
+  implement and missed the inversion entirely.
+- **A fence with no language is not a `.code-block`.** It renders as a bare `pre`, so "code
+  block" was always two presentations.
+- **The code surface must not be built from `--ink`/`--bg`.** Those swap on theme change, and
+  the shipped rule was `background: var(--ink); color: var(--bg)`, which flipped code blocks to
+  a cream slab on a dark page in dark mode. `--code-surface` / `--code-ink` are theme-stable
+  and are what the skin uses.
 
 Two consequences worth stating because they are easy to get wrong at implementation time:
 
@@ -742,6 +768,12 @@ with the table rather than escaping it.
 `lower-roman` at depth 3 (`:419`). D12 deliberately does not renumber the source. So a list
 written `1. / 1. / 1.` renders 1, 2, 3 and reveals `1.` when any item is entered, and a nested
 item renders `a.` and reveals `1.`.
+
+**Verified in the demo vault, and worse than first written.** The first draft assumed the
+divergence would be a `1. / 1. / 1.` source rendering as 1, 2, 3. The actual content nests
+`1.` and `2.` at depth 2, which render as `a.` and `b.`, and depth 3 renders lower-roman. So
+entering a nested item changes the *character class* of the marker beside the caret, not merely
+its digit.
 
 This is the most visible seam in the feature, and this design system creates it rather than
 markdown. It is accepted rather than fixed: hiding the source number would mean editing the
@@ -1043,3 +1075,24 @@ sentence. What that sentence hid:
 | D32: touch behaves like mouse | Tap-to-edit makes reading on a phone a minefield. Long press to enter (D32) |
 | Ordered lists were not considered | Rendered markers are CSS counters, so they diverge from the source numbers the moment a unit is entered (D41) |
 | The design-system document was not a deliverable | It is, per stage, alongside the components it documents |
+
+### Running-app review, 2026-07-29
+
+A third pass, this time against the app itself rather than its CSS, in both themes and at
+desktop and phone widths. Four corrections, all of them things reading the stylesheet had
+missed:
+
+| Was | Now |
+|---|---|
+| D39's code skin used `--ink`/`--bg` | Those swap on theme change. The shipped rule flips code blocks to a cream slab on a dark page; the skin uses theme-stable `--code-surface`/`--code-ink` (D39) |
+| "Code block" was one skin | Two: a fence with a language is a `.code-block`, one without is a bare `pre` (D39) |
+| Callout title was "the band's own background" | Two skins, and the common one is light text on a saturated fill (D39) |
+| D36's gutter offset was a constant | The gutter is the scroll pane's padding, which is 56px on desktop and 16px on a phone. It is a token (D36) |
+
+D37, D38, and D40 were confirmed rather than corrected: `h3` computes `text-transform:
+uppercase`, `li` padding-left computes to exactly 22.4px, and table cells are content-sized
+(229 / 445 / 122px on the showcase note), so a colspan cell would visibly reflow all three.
+
+Three pre-existing defects were found and fixed in the same pass, none of them belonging to
+this feature: PDF embeds nested block content inside a paragraph, the code block inverted in
+dark mode, and the brand wordmark painted over the topbar actions below about 360px.

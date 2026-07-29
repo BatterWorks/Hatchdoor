@@ -11,6 +11,7 @@ import {
 import type { MermaidApi } from "../../types";
 import { copyText } from "../../lib/clipboard";
 import { UiButton } from "../ui";
+import { isParagraphElement } from "./paragraphs";
 import { flattenText } from "./text";
 
 let mermaidModulePromise: Promise<MermaidApi> | null = null;
@@ -48,7 +49,10 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
 
   const first = nodes[firstContentIndex];
 
-  if (isValidElement<{ children?: ReactNode }>(first) && first.type === "p") {
+  if (
+    isValidElement<{ children?: ReactNode }>(first) &&
+    isParagraphElement(first)
+  ) {
     const firstText = flattenText(first.props.children).trim();
     const match = firstText.match(/^\[!([A-Za-z0-9_-]+)\]([+-])?[ \t]*(.*)$/m);
 

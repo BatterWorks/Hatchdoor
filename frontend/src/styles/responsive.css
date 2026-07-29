@@ -15,6 +15,12 @@ body.resizing {
     display: none;
   }
 
+  /* Keeps the wordmark from sitting flush against the first action button
+     once the brand column has shrunk to its narrowest. */
+  .topbar-brand {
+    padding-right: 0.5rem;
+  }
+
   .app-layout {
     grid-template-columns: minmax(0, 1fr);
     min-height: calc(100dvh - var(--mobile-drawer-top, 0px));
