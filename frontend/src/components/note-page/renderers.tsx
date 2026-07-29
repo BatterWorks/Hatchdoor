@@ -243,6 +243,13 @@ function withEditableBlocks<T extends ComponentMap>(components: T): T {
     const Original = components[tag];
     const Wrapped = (props: { node?: unknown; children?: ReactNode }) => (
       <EditableBlock node={props.node} unitType={unitType}>
+        {/* Called rather than rendered, deliberately: this has to yield the
+            intrinsic element (a <p>, an <li>) so EditableBlock can clone the
+            handlers straight onto it. Rendering it as a component would make
+            the child a component element, which falls back to a wrapper div
+            and takes the tabIndex off the real element. The cost is that a
+            wrapped renderer may not use hooks; none do, and the keyboard-entry
+            tests fail loudly if this changes. */}
         {Original
           ? (Original as (p: unknown) => ReactNode)(props)
           : createElement(tag, null, props.children)}

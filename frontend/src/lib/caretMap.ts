@@ -38,6 +38,29 @@ export function sourceOffsetForRenderedOffset(
       continue;
     }
 
+    // An embed renders nothing inline; a wikilink renders its alias when it
+    // has one and its target otherwise. Both are the dominant syntax in an
+    // Obsidian vault, so leaving them out put the caret inside the brackets.
+    const embed = /^!\[\[[^\]\r\n]*\]\]/.exec(rest);
+    if (embed) {
+      index += embed[0].length;
+      continue;
+    }
+
+    const wikilink = /^\[\[([^\]\r\n]*)\]\]/.exec(rest);
+    if (wikilink) {
+      const body = wikilink[1];
+      const pipe = body.indexOf("|");
+      const shown = pipe >= 0 ? body.slice(pipe + 1) : body;
+      const shownStart = pipe >= 0 ? 2 + pipe + 1 : 2;
+      if (target - rendered < shown.length) {
+        return index + shownStart + (target - rendered);
+      }
+      rendered += shown.length;
+      index += wikilink[0].length;
+      continue;
+    }
+
     // A link renders its label and drops its target.
     const link = /^!?\[([^\]]*)\]\([^)]*\)/.exec(rest);
 

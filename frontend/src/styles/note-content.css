@@ -1206,3 +1206,19 @@
   outline: 2px dashed var(--hot);
   outline-offset: 0.5rem;
 }
+
+.note-property-edit {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 0 0.3rem;
+}
+
+.note-property-edit:hover {
+  color: var(--hot);
+}

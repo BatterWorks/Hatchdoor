@@ -22,7 +22,9 @@ export function InlineEditorProvider({
   frontmatterOffset,
   writeEnabled,
   settling = false,
+  externalChangeSignal,
   onChange,
+  onInProgressChange,
   onActiveRangeChange,
   children,
 }: {
@@ -30,7 +32,15 @@ export function InlineEditorProvider({
   frontmatterOffset: number;
   writeEnabled: boolean;
   settling?: boolean;
+  /** Bump to force any open block closed, for edits the provider did not make. */
+  externalChangeSignal?: number;
   onChange: (next: string) => void;
+  /**
+   * The document as it would be if the open block were committed right now.
+   * Lets the page schedule an idle flush, so text living in an open input is
+   * not lost when the tab closes.
+   */
+  onInProgressChange?: (next: string) => void;
   /** Fires when the active unit changes, so the page can recount search hits. */
   onActiveRangeChange?: (range: LineRange | null) => void;
   children: ReactNode;
@@ -49,6 +59,18 @@ export function InlineEditorProvider({
   useEffect(() => {
     onActiveRangeChange?.(activeRange);
   }, [activeRange, onActiveRangeChange]);
+
+  // An open block holds its text in local state seeded once at mount. If the
+  // document is replaced underneath it, undo being the way that happens, the
+  // next blur would write the pre-undo text back at ranges that may no longer
+  // exist. Leaving the block first is the only safe answer.
+  useEffect(() => {
+    if (externalChangeSignal === undefined) {
+      return;
+    }
+    setActiveRange(null);
+    setActiveCaret(null);
+  }, [externalChangeSignal]);
 
   const sourceOf = useCallback(
     (range: LineRange) => sliceLines(content, range.startLine, range.endLine),
@@ -72,9 +94,9 @@ export function InlineEditorProvider({
   // a footnote definition renders inside a generated section at the end of the
   // document while carrying the position of wherever it was written, so the two
   // orders genuinely diverge.
-  const blocksRef = useRef<LineRange[]>([]);
-  const registerBlock = useCallback((range: LineRange) => {
-    blocksRef.current = [...blocksRef.current, range].sort(
+  const blocksRef = useRef<Array<LineRange & { unitType: string }>>([]);
+  const registerBlock = useCallback((range: LineRange, unitType: string) => {
+    blocksRef.current = [...blocksRef.current, { ...range, unitType }].sort(
       (a, b) => a.startLine - b.startLine,
     );
     return () => {
@@ -112,7 +134,16 @@ export function InlineEditorProvider({
 
   const mergeUp = useCallback(
     (range: LineRange) => {
-      const result = mergeBlockUp(latestRef.current, range, previousOf(range));
+      const previous = previousOf(range);
+      // Merging into a table row joins the header across the delimiter, and
+      // merging a fenced block drags its fences into the paragraph above.
+      if (
+        previous?.unitType === "table row" ||
+        previous?.unitType === "code block"
+      ) {
+        return false;
+      }
+      const result = mergeBlockUp(latestRef.current, range, previous);
       if (!result) {
         return false;
       }
@@ -188,6 +219,11 @@ export function InlineEditorProvider({
 
   const toggleTask = useCallback(
     (line: number) => {
+      // Same reason enterBlock refuses: against a stale tree this line number
+      // points at whatever happens to be there now.
+      if (settlingRef.current) {
+        return;
+      }
       const next = toggleCheckbox(latestRef.current, line);
       if (next === latestRef.current) {
         return;
@@ -202,6 +238,18 @@ export function InlineEditorProvider({
     setActiveRange(null);
     setActiveCaret(null);
   }, []);
+
+  const previewBlock = useCallback(
+    (range: LineRange, text: string) => {
+      if (!onInProgressChange) {
+        return;
+      }
+      onInProgressChange(
+        replaceLines(latestRef.current, range.startLine, range.endLine, text),
+      );
+    },
+    [onInProgressChange],
+  );
 
   const commitBlock = useCallback(
     (range: LineRange, text: string, opts?: { keepActive?: boolean }) => {
@@ -227,6 +275,7 @@ export function InlineEditorProvider({
       activeCaret,
       sourceOf,
       enterBlock,
+      previewBlock,
       commitBlock,
       exitBlock,
       registerBlock,
@@ -244,6 +293,7 @@ export function InlineEditorProvider({
       activeCaret,
       sourceOf,
       enterBlock,
+      previewBlock,
       commitBlock,
       exitBlock,
       registerBlock,

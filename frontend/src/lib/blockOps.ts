@@ -9,6 +9,8 @@ import { detectLineEnding, type LineRange } from "./sourceMap";
 export type BlockOpResult = {
   content: string;
   caretLine: number;
+  /** Last line of the block the caret ends up in; equals caretLine when it is one line. */
+  caretEndLine: number;
   caretOffset: number;
 };
 
@@ -68,9 +70,11 @@ export function splitBlock(
   const firstLine = blockLines[0] ?? "";
   const prefix = continuationPrefix(firstLine);
 
+  // Each element must be exactly one line: a multi-line string here would keep
+  // its embedded LF through a CRLF join and quietly mix line endings.
   const inserted = prefix
-    ? [...before.split("\n"), `${prefix}${after}`]
-    : [...before.split("\n"), "", after];
+    ? [...before.split("\n"), ...`${prefix}${after}`.split("\n")]
+    : [...before.split("\n"), "", ...after.split("\n")];
 
   const next = [
     ...lines.slice(0, range.startLine - 1),
@@ -78,10 +82,17 @@ export function splitBlock(
     ...lines.slice(range.endLine),
   ];
 
-  const caretLine = range.startLine - 1 + inserted.length;
+  // The remainder can span several lines, and the caller builds the active
+  // range from these, so reporting only its first line would open an input
+  // showing part of the block.
+  const remainderLines = prefix
+    ? `${prefix}${after}`.split("\n").length
+    : after.split("\n").length;
+  const caretEndLine = range.startLine - 1 + inserted.length;
   return {
     content: join(next, content),
-    caretLine,
+    caretLine: caretEndLine - remainderLines + 1,
+    caretEndLine,
     caretOffset: prefix.length,
   };
 }
@@ -103,6 +114,15 @@ export function mergeBlockUp(
   }
 
   const lines = splitLines(content);
+
+  // Anything between the two blocks that is not blank belongs to no block:
+  // raw HTML, a link reference definition, or display math, none of which
+  // reach the renderer as a positioned node. Absorbing one into the merge
+  // would delete it, so refuse rather than guess.
+  const between = lines.slice(previousRange.endLine, range.startLine - 1);
+  if (between.some((line) => line.trim() !== "")) {
+    return null;
+  }
   const previous = lines[previousRange.endLine - 1] ?? "";
   const block = lines.slice(range.startLine - 1, range.endLine).join("\n");
 
@@ -110,16 +130,16 @@ export function mergeBlockUp(
   const ownPrefix = continuationPrefix(block.split("\n")[0] ?? "");
   const body = block.slice(ownPrefix.length);
 
-  const merged = `${previous}${body}`;
   const next = [
     ...lines.slice(0, previousRange.endLine - 1),
-    merged,
+    ...`${previous}${body}`.split("\n"),
     ...lines.slice(range.endLine),
   ];
 
   return {
     content: join(next, content),
     caretLine: previousRange.endLine,
+    caretEndLine: previousRange.endLine,
     caretOffset: previous.length,
   };
 }

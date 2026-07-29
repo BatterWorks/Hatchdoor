@@ -16,13 +16,11 @@ export type SaveResult = { content_hash?: string | null };
  * retrying into a losing race.
  */
 export function useNoteAutosave({
-  content,
   baseHash,
   enabled,
   save,
   onSaved,
 }: {
-  content: string;
   baseHash: string;
   enabled: boolean;
   save: (content: string, expectedHash: string) => Promise<SaveResult>;
@@ -39,9 +37,8 @@ export function useNoteAutosave({
   const timerRef = useRef<number | null>(null);
   const pendingRef = useRef<string | null>(null);
   const inFlightRef = useRef(false);
+  const queuedRef = useRef<string | null>(null);
   const stoppedRef = useRef(false);
-  const latestRef = useRef(content);
-  latestRef.current = content;
 
   useEffect(() => {
     hashRef.current = baseHash;
@@ -57,27 +54,48 @@ export function useNoteAutosave({
 
   const write = useCallback(
     async (next: string) => {
-      if (!enabled || stoppedRef.current || inFlightRef.current) {
+      if (!enabled || stoppedRef.current) {
         return;
       }
+      // A write takes about a second against a real vault and every content
+      // change commits, so edits arriving mid-flight are routine. Queue the
+      // newest one rather than dropping it: dropping loses the edit outright
+      // and still reports "Saved".
+      if (inFlightRef.current) {
+        queuedRef.current = next;
+        return;
+      }
+
       inFlightRef.current = true;
-      setStatus("saving");
       try {
-        const result = await save(next, hashRef.current);
-        if (result?.content_hash) {
-          hashRef.current = result.content_hash;
-          ownHashesRef.current.add(result.content_hash);
+        let current: string | null = next;
+        while (current !== null && !stoppedRef.current) {
+          setStatus("saving");
+          try {
+            const result = await save(current, hashRef.current);
+            if (result?.content_hash) {
+              hashRef.current = result.content_hash;
+              ownHashesRef.current.add(result.content_hash);
+            }
+            onSaved?.(result);
+          } catch (error) {
+            stoppedRef.current = true;
+            queuedRef.current = null;
+            setStatus(
+              error instanceof Error && error.name === "ConflictError"
+                ? "conflict"
+                : "error",
+            );
+            return;
+          }
+
+          current = queuedRef.current;
+          queuedRef.current = null;
+          if (current === null) {
+            setStatus("saved");
+            setSavedAt(new Date());
+          }
         }
-        setStatus("saved");
-        setSavedAt(new Date());
-        onSaved?.(result);
-      } catch (error) {
-        stoppedRef.current = true;
-        setStatus(
-          error instanceof Error && error.name === "ConflictError"
-            ? "conflict"
-            : "error",
-        );
       } finally {
         inFlightRef.current = false;
       }

@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { normalizeTags, type FrontmatterValue } from "../../lib/markdown";
+import { detectLineEnding } from "../../lib/sourceMap";
 import type { NoteHeading } from "../../lib/noteHeadings";
 import type { NoteLinks } from "../../types";
 import { UiButton } from "../ui";
@@ -48,7 +49,11 @@ export function NoteProperties({
     const next = parsed.entries.map((entry) =>
       entry.key === key ? { ...entry, value } : entry,
     );
-    onChange(buildContentWithFrontmatter(next, body));
+    // buildContentWithFrontmatter joins with LF, so a CRLF note would come
+    // back entirely rewritten: a whole-file diff from editing one property.
+    const rebuilt = buildContentWithFrontmatter(next, body);
+    const ending = detectLineEnding(content);
+    onChange(ending === "\n" ? rebuilt : rebuilt.split("\n").join("\r\n"));
   };
 
   const canEdit = editable && !!content && !!onChange;

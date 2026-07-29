@@ -120,6 +120,7 @@ export function NotePage({
   const lastEditRequestIdRef = useRef(editRequestId);
   const lastHandledRevisionRef = useRef(0);
   const autosaveStatusRef = useRef<string>("idle");
+  const activeUnitRef = useRef<string | null>(null);
   currentSlugRef.current = slug;
 
   const loadNote = useCallback(
@@ -212,8 +213,20 @@ export function NotePage({
     // D16: our own writes bump the revision twice. Refetching while the
     // document is dirty or a write is in flight would move the hash the next
     // save is made against and defeat the concurrency guard.
-    if (isEditing || inlineDirty || autosaveStatusRef.current === "saving") {
+    if (isEditing) {
       setNoteChangedOnDisk(true);
+      return;
+    }
+
+    // Our own writes bump the revision twice, so a bump arriving while a save
+    // is in flight or the document is dirty is almost always ours. Flagging it
+    // leaves a warning that never clears; a genuine external change is caught
+    // by the next bump once things are quiet.
+    if (
+      inlineDirty ||
+      activeUnitRef.current !== null ||
+      autosaveStatusRef.current === "saving"
+    ) {
       return;
     }
 
@@ -372,7 +385,6 @@ export function NotePage({
   };
 
   const autosave = useNoteAutosave({
-    content: note?.content ?? "",
     baseHash: note?.content_hash ?? "",
     enabled: inlineEditingEnabled,
     save: async (nextContent, expectedHash) => {
@@ -392,8 +404,10 @@ export function NotePage({
     },
   });
 
-  autosaveRef.current = autosave;
-  autosaveStatusRef.current = autosave.status;
+  useEffect(() => {
+    autosaveRef.current = autosave;
+    autosaveStatusRef.current = autosave.status;
+  }, [autosave]);
 
   // Seed once per note. Without this, undo before the first edit would restore
   // the empty string the history was constructed with and blank the note.
@@ -405,10 +419,14 @@ export function NotePage({
     }
   }, [note, slug, history]);
 
+  const [externalChange, setExternalChange] = useState(0);
+
   const applyHistory = useCallback((next: string | null) => {
     if (next === null) {
       return;
     }
+    // The open block, if any, is seeded from the pre-undo document.
+    setExternalChange((n) => n + 1);
     setNote((prev) => (prev ? { ...prev, content: next } : prev));
     setDraftContent(next);
     setInlineDirty(true);
@@ -439,9 +457,17 @@ export function NotePage({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [inlineEditingEnabled, applyHistory, history]);
 
+  // Text sitting in an open block exists nowhere else, so it is flushed after
+  // an idle pause and on the way out of the page rather than waiting for blur.
+  const handleInProgressChange = (nextContent: string) => {
+    autosaveRef.current?.touch(nextContent);
+  };
+
   const handleActiveRangeChange = useCallback(
     (range: { startLine: number; endLine: number } | null) => {
-      setActiveUnit(range ? `${range.startLine}:${range.endLine}` : null);
+      const key = range ? `${range.startLine}:${range.endLine}` : null;
+      activeUnitRef.current = key;
+      setActiveUnit(key);
     },
     [],
   );
@@ -868,7 +894,9 @@ export function NotePage({
                 frontmatterOffset={frontmatterLineOffset(note.content)}
                 writeEnabled={inlineEditingEnabled}
                 settling={settling}
+                externalChangeSignal={externalChange}
                 onChange={handleInlineChange}
+                onInProgressChange={handleInProgressChange}
                 onActiveRangeChange={handleActiveRangeChange}
               >
                 <ReactMarkdown

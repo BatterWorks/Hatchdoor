@@ -86,6 +86,7 @@ describe("mergeBlockUp", () => {
     expect(out).toEqual({
       content: "- onetwo",
       caretLine: 1,
+      caretEndLine: 1,
       caretOffset: 5,
     });
   });
@@ -172,5 +173,88 @@ describe("toggleCheckbox", () => {
 
   it("keeps indentation", () => {
     expect(toggleCheckbox("  - [ ] nested", 1)).toBe("  - [x] nested");
+  });
+});
+
+describe("mergeBlockUp refuses to cross unowned lines", () => {
+  // Raw HTML, link reference definitions and display math reach the renderer
+  // with no node at all, so no block registers them. Merging across one
+  // deletes it silently, then autosave persists the deletion.
+  it("refuses across a raw HTML block", () => {
+    expect(
+      mergeBlockUp("para one\n\n<div>keep me</div>\n\npara two", r(5), r(1)),
+    ).toBeNull();
+  });
+
+  it("refuses across a link reference definition", () => {
+    expect(
+      mergeBlockUp("para one\n\n[ref]: https://x.com\n\npara two", r(5), r(1)),
+    ).toBeNull();
+  });
+
+  it("refuses across display math", () => {
+    expect(
+      mergeBlockUp("para one\n\n$$\nx=1\n$$\n\npara two", r(7), r(1)),
+    ).toBeNull();
+  });
+
+  it("still merges across blank lines, which separate blocks rather than hide content", () => {
+    expect(mergeBlockUp("one\n\ntwo", r(3), r(1))?.content).toBe("onetwo");
+  });
+
+  it("still merges adjacent lines", () => {
+    expect(mergeBlockUp("- one\n- two", r(2), r(1))?.content).toBe("- onetwo");
+  });
+});
+
+describe("block ops preserve CRLF", () => {
+  it("splitBlock keeps CRLF throughout a multi-line block", () => {
+    const out = splitBlock("alpha\r\nbeta\r\ngamma\r\n\r\nnext", r(1, 3), 2);
+
+    expect(out.content).not.toMatch(/(?<!\r)\n/);
+  });
+
+  it("splitBlock keeps CRLF for a single-line block", () => {
+    expect(splitBlock("- one\r\n- two", r(2), 5).content).toBe(
+      "- one\r\n- two\r\n- ",
+    );
+  });
+
+  it("mergeBlockUp keeps CRLF", () => {
+    expect(mergeBlockUp("one\r\n\r\ntwo\r\nthree", r(3), r(1))?.content).toBe(
+      "onetwo\r\nthree",
+    );
+  });
+
+  it("indent and outdent keep CRLF", () => {
+    expect(indentListItem("- one\r\n- two", r(2))?.content).toBe(
+      "- one\r\n  - two",
+    );
+    expect(outdentListItem("- one\r\n  - two", r(2))?.content).toBe(
+      "- one\r\n- two",
+    );
+  });
+
+  it("toggleCheckbox keeps CRLF", () => {
+    expect(toggleCheckbox("- [ ] a\r\n- [ ] b", 2)).toBe("- [ ] a\r\n- [x] b");
+  });
+});
+
+describe("splitBlock caret range", () => {
+  // The remainder of a split can itself span several lines, and the caller
+  // makes the active range from these, so a single-line answer would open an
+  // input showing only part of the block.
+  it("reports the whole remainder when it spans several lines", () => {
+    const out = splitBlock("one\ntwo\nthree", r(1, 3), 2);
+
+    expect(out.caretLine).toBe(3);
+    expect(out.caretEndLine).toBe(5);
+  });
+
+  it("reports a single line when the remainder is one line", () => {
+    const out = splitBlock("- one\n- two", r(2), 5);
+
+    expect(out.caretLine).toBe(3);
+    expect(out.caretEndLine).toBe(3);
   });
 });
