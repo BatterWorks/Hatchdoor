@@ -21,11 +21,13 @@ export type UnitType =
 export function BlockInput({
   unitType,
   initialValue,
+  initialCaret = null,
   onCommit,
   onCancel,
 }: {
   unitType: UnitType;
   initialValue: string;
+  initialCaret?: number | null;
   onCommit: (text: string) => void;
   onCancel: () => void;
 }) {
@@ -39,7 +41,16 @@ export function BlockInput({
       return;
     }
     el.focus();
-    el.setSelectionRange(el.value.length, el.value.length);
+    const caret =
+      initialCaret === null
+        ? el.value.length
+        : Math.min(Math.max(initialCaret, 0), el.value.length);
+    el.setSelectionRange(caret, caret);
+    // Keeps the active line above the virtual keyboard on a phone.
+    el.scrollIntoView?.({ block: "nearest" });
+    // Deliberately mount-only: the caret is placed once on entry, and rerunning
+    // this would yank the caret back mid-edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

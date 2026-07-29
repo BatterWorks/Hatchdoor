@@ -967,6 +967,16 @@ not into the component, so this reduces it rather than growing it.
 The design-system document is updated **in the stage that ships each component**, not in a
 catch-up pass afterwards. D44's copy is written before the surface it labels, not after.
 
+**Stage 1 shipped 2026-07-29.** Source mapping held against real vault notes: editing one list
+item in a demo-vault note produced a one-line diff, with frontmatter, blank lines, and
+`[[wikilinks]]` untouched. Two deviations are carried forward rather than fixed:
+
+- **D38 is approximate for list items.** Entering one shifts its text about 13px left, because
+  the typed `- ` is narrower than the drawn marker it replaces. The promised zero shift is not
+  achievable without knowing the prefix's rendered width, so it is accepted.
+- **Callouts and blockquotes are not yet editable.** D25a puts per-line callouts in stage 4, so
+  clicking one does nothing today. Every other unit type is live.
+
 Stage 1 is the go/no-go gate. If source mapping proves unreliable against real vault notes
 after D25 and D6 are fixed, the design is reconsidered before stages 2 to 4 are built on it.
 

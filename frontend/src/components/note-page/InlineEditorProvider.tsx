@@ -17,6 +17,7 @@ export function InlineEditorProvider({
   children: ReactNode;
 }) {
   const [activeRange, setActiveRange] = useState<LineRange | null>(null);
+  const [activeCaret, setActiveCaret] = useState<number | null>(null);
 
   const sourceOf = useCallback(
     (range: LineRange) => sliceLines(content, range.startLine, range.endLine),
@@ -24,20 +25,25 @@ export function InlineEditorProvider({
   );
 
   const enterBlock = useCallback(
-    (range: LineRange) => {
+    (range: LineRange, caret: number | null) => {
       if (!writeEnabled) {
         return;
       }
       setActiveRange(range);
+      setActiveCaret(caret);
     },
     [writeEnabled],
   );
 
-  const exitBlock = useCallback(() => setActiveRange(null), []);
+  const exitBlock = useCallback(() => {
+    setActiveRange(null);
+    setActiveCaret(null);
+  }, []);
 
   const commitBlock = useCallback(
     (range: LineRange, text: string) => {
       setActiveRange(null);
+      setActiveCaret(null);
       if (text === sliceLines(content, range.startLine, range.endLine)) {
         return;
       }
@@ -51,6 +57,7 @@ export function InlineEditorProvider({
       writeEnabled,
       frontmatterOffset,
       activeRange,
+      activeCaret,
       sourceOf,
       enterBlock,
       commitBlock,
@@ -60,6 +67,7 @@ export function InlineEditorProvider({
       writeEnabled,
       frontmatterOffset,
       activeRange,
+      activeCaret,
       sourceOf,
       enterBlock,
       commitBlock,

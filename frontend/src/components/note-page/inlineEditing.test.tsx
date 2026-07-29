@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { frontmatterLineOffset } from "../../lib/sourceMap";
@@ -55,6 +56,7 @@ function NoteHarness({
     >
       <div className="note-body">
         <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
           components={createNoteMarkdownComponents("Home.md", new Map(), {
             editable: true,
           })}
@@ -254,5 +256,77 @@ describe("touch entry", () => {
     fireEvent.click(target);
 
     expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+  });
+});
+
+describe("keyboard entry", () => {
+  it("puts every editable block in the tab order", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+
+    expect(screen.getByText("First paragraph.")).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
+  });
+
+  it("opens the focused block on Enter", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+
+    fireEvent.keyDown(screen.getByText("First paragraph."), { key: "Enter" });
+
+    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+  });
+
+  it("does not open on other keys", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+
+    fireEvent.keyDown(screen.getByText("First paragraph."), { key: "a" });
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("returns focus to the block on Escape so a keyboard user is never trapped", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    fireEvent.keyDown(screen.getByText("First paragraph."), { key: "Enter" });
+
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByText("First paragraph."));
+  });
+
+  it("does not enter a block while an IME composition is active", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+
+    fireEvent.keyDown(screen.getByText("First paragraph."), {
+      key: "Enter",
+      isComposing: true,
+    });
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});
+
+describe("more unit types", () => {
+  it("edits a fenced code block including its fences", () => {
+    render(
+      <NoteHarness initialContent={"```js\nconst x = 1\n```\n\nAfter.\n"} />,
+    );
+
+    fireEvent.click(screen.getByText(/const x = 1/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("```js\nconst x = 1\n```");
+  });
+
+  it("edits a single table row", () => {
+    render(
+      <NoteHarness
+        initialContent={"| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n"}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("3"));
+
+    expect(screen.getByRole("textbox")).toHaveValue("| 3 | 4 |");
   });
 });

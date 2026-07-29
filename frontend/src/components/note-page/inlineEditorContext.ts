@@ -7,9 +7,11 @@ export type InlineEditorValue = {
   frontmatterOffset: number;
   /** The range currently being edited, or null when nothing is. */
   activeRange: LineRange | null;
+  /** Caret offset within the active block's source, or null for end-of-block. */
+  activeCaret: number | null;
   /** The source text of a range, sliced out of the whole document. */
   sourceOf: (range: LineRange) => string;
-  enterBlock: (range: LineRange) => void;
+  enterBlock: (range: LineRange, caret: number | null) => void;
   /** Writes `text` back over `range` and leaves the block. */
   commitBlock: (range: LineRange, text: string) => void;
   exitBlock: () => void;
