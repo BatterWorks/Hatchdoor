@@ -124,6 +124,25 @@ export function createNoteMarkdownComponents(
         />
       );
     },
+    input(props: { type?: string; checked?: boolean; className?: string }) {
+      // mdast-util-to-hast emits task checkboxes disabled, and a disabled input
+      // fires no click events at all, so the toggle on the li would never be
+      // reached. Enabling it also gives the checkbox a keyboard path: Space
+      // fires a click, which bubbles to the same handler.
+      if (props.type !== "checkbox") {
+        return <input {...props} />;
+      }
+      return (
+        <input
+          type="checkbox"
+          className={props.className}
+          checked={props.checked ?? false}
+          disabled={!options.editable}
+          aria-label={options.editable ? "Toggle task" : undefined}
+          onChange={() => {}}
+        />
+      );
+    },
     li(props: { children?: ReactNode; className?: string }) {
       const isTask = props.className?.includes("task-list-item") ?? false;
       return (
@@ -132,8 +151,10 @@ export function createNoteMarkdownComponents(
         </li>
       );
     },
-    blockquote(props: { children?: ReactNode }) {
-      return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+    blockquote(props: { children?: ReactNode; node?: unknown }) {
+      return (
+        <CalloutOrQuote node={props.node}>{props.children}</CalloutOrQuote>
+      );
     },
     table(props: { children?: ReactNode }) {
       return (

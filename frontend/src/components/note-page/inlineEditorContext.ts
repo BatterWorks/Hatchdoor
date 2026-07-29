@@ -28,6 +28,8 @@ export type InlineEditorValue = {
   outdent: (range: LineRange) => boolean;
   /** Move to the unit before or after this one, keeping the column. */
   moveTo: (range: LineRange, direction: -1 | 1, column: number) => boolean;
+  /** Flip a task checkbox on `line` and save, without entering the unit. */
+  toggleTask: (line: number) => void;
 };
 
 export const InlineEditorContext = createContext<InlineEditorValue | null>(

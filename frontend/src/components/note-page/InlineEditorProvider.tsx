@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { replaceLines, sliceLines, type LineRange } from "../../lib/sourceMap";
 import {
+  toggleCheckbox,
   indentListItem,
   mergeBlockUp,
   outdentListItem,
@@ -169,6 +170,18 @@ export function InlineEditorProvider({
     [],
   );
 
+  const toggleTask = useCallback(
+    (line: number) => {
+      const next = toggleCheckbox(latestRef.current, line);
+      if (next === latestRef.current) {
+        return;
+      }
+      latestRef.current = next;
+      onChange(next);
+    },
+    [onChange],
+  );
+
   const exitBlock = useCallback(() => {
     setActiveRange(null);
     setActiveCaret(null);
@@ -206,6 +219,7 @@ export function InlineEditorProvider({
       indent,
       outdent,
       moveTo,
+      toggleTask,
     }),
     [
       writeEnabled,
@@ -222,6 +236,7 @@ export function InlineEditorProvider({
       indent,
       outdent,
       moveTo,
+      toggleTask,
     ],
   );
 

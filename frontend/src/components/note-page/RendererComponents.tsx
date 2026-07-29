@@ -12,6 +12,7 @@ import type { MermaidApi } from "../../types";
 import { copyText } from "../../lib/clipboard";
 import { UiButton } from "../ui";
 import { isParagraphElement } from "./paragraphs";
+import { EditableBlock } from "./EditableBlock";
 import { flattenText } from "./text";
 
 let mermaidModulePromise: Promise<MermaidApi> | null = null;
@@ -37,7 +38,13 @@ async function waitForDocumentFonts(): Promise<void> {
   await document.fonts?.ready;
 }
 
-export function CalloutOrQuote({ children }: { children: ReactNode }) {
+export function CalloutOrQuote({
+  children,
+  node,
+}: {
+  children: ReactNode;
+  node?: unknown;
+}) {
   const nodes = Children.toArray(children);
   const firstContentIndex = nodes.findIndex(
     (node) => !(typeof node === "string" && node.trim().length === 0),
@@ -84,10 +91,34 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
           ...pChildren.slice(nlIdx + 1),
         ].filter((node) => !(typeof node === "string" && node.trim() === ""));
       }
+      // A callout's lines are contiguous, so the title is the blockquote's
+      // first line and the run of body text reconstructed from the same
+      // paragraph starts on the next one. Both are rebuilt here rather than
+      // passed through, so neither carries a usable position any more.
+      const firstLine = calloutStartLine(node);
+      const inlineBodyEnd = calloutParagraphEndLine(first);
       const allBody =
         inlineBody.length > 0
-          ? [<p key="inline-callout">{inlineBody}</p>, ...bodyNodes]
+          ? [
+              <EditableBlock
+                key="inline-callout"
+                unitType="callout"
+                range={
+                  firstLine !== null && inlineBodyEnd !== null
+                    ? { startLine: firstLine + 1, endLine: inlineBodyEnd }
+                    : undefined
+                }
+              >
+                <p>{inlineBody}</p>
+              </EditableBlock>,
+              ...bodyNodes,
+            ]
           : bodyNodes;
+
+      const titleRange =
+        firstLine === null
+          ? undefined
+          : { startLine: firstLine, endLine: firstLine };
 
       if (kind === "quote" || kind === "cite") {
         return (
@@ -114,7 +145,9 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
 
       return (
         <div className={`callout callout-${kind}`}>
-          <div className="callout-title">{title}</div>
+          <EditableBlock unitType="callout" range={titleRange}>
+            <div className="callout-title">{title}</div>
+          </EditableBlock>
           {allBody.length > 0 && <div className="callout-body">{allBody}</div>}
         </div>
       );
@@ -122,6 +155,24 @@ export function CalloutOrQuote({ children }: { children: ReactNode }) {
   }
 
   return <blockquote>{children}</blockquote>;
+}
+
+type Positioned = {
+  position?: { start?: { line?: number }; end?: { line?: number } };
+};
+
+function calloutStartLine(node: unknown): number | null {
+  const line = (node as Positioned | undefined)?.position?.start?.line;
+  return typeof line === "number" ? line : null;
+}
+
+function calloutParagraphEndLine(paragraph: ReactNode): number | null {
+  if (!isValidElement<{ node?: unknown }>(paragraph)) {
+    return null;
+  }
+  const line = (paragraph.props.node as Positioned | undefined)?.position?.end
+    ?.line;
+  return typeof line === "number" ? line : null;
 }
 
 export function CodeBlock({
