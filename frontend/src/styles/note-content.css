@@ -1052,3 +1052,109 @@
   outline: 2px solid var(--hot);
   outline-offset: 1px;
 }
+
+/* ── Inline editing ─────────────────────────────────────────────────────────
+   The affordance is a rule in the left gutter, not a fill or a box. It reuses
+   the device the list bullet already uses, so it reads as "this is a line of
+   your content" rather than as a control, and it costs no horizontal space, so
+   nothing reflows when a block is entered.
+
+   It is drawn with ::after because ::before is already the list marker, and
+   .editable-block is the rendered element itself: wrapping blocks in a div
+   would sit between a ul and its li children and break every marker rule.
+
+   The gutter is borrowed from .note-pane's padding, which is 56px on desktop
+   and 16px on a phone, so the offset is a token rather than a constant. */
+:root {
+  --edit-gutter: 0.75rem;
+}
+
+.note-body .editable-block {
+  position: relative;
+  cursor: text;
+}
+
+.note-body .editable-block::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--edit-gutter) * -1);
+  top: 0.15em;
+  bottom: 0.15em;
+  width: 1px;
+  background: var(--hot);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.note-body .editable-block:hover::after {
+  opacity: 0.45;
+}
+
+/* The active block: same device at full weight, no ring and no fill, so it
+   does not fight the borders .callout and .table-wrap already carry. */
+.note-body .editable-block.is-active::after {
+  width: 2px;
+  opacity: 1;
+}
+
+/* Touch has no hover, so the rule is the only discovery path for the long
+   press that enters a block. It stays drawn. */
+@media (hover: none) {
+  .note-body .editable-block::after {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .note-body .editable-block::after {
+    transition: none;
+  }
+}
+
+.block-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  resize: none;
+  overflow: hidden;
+  outline: none;
+
+  /* Metrics are inherited from the block being replaced. Transforms are not:
+     h1, h3, h6, callout titles and table headers all uppercase their text, and
+     a textarea that inherited that would show the typist a different string
+     than the one being written to the file. */
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: none;
+  text-indent: 0;
+  caret-color: var(--hot);
+}
+
+/* A list item's marker is drawn by ::before and the revealed source carries
+   its own "- ", so the drawn marker steps aside while the line is being
+   edited. The input hangs by the marker inset, which puts the typed marker
+   exactly where the drawn one was, so nothing shifts. */
+.note-body li > .block-input {
+  margin-left: -1.4rem;
+  width: calc(100% + 1.4rem);
+}
+
+.note-body li.is-active::before {
+  display: none;
+}
+
+.note-inline-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.note-inline-actions .close-note {
+  white-space: nowrap;
+}
