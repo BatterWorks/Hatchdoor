@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  blockRange,
   detectLineEnding,
   frontmatterLineOffset,
   linesMatch,
@@ -138,5 +139,77 @@ describe("linesMatch", () => {
 
   it("compares CRLF source against an LF-rendered body", () => {
     expect(linesMatch("a\r\nb\r\nc", "a\nb\nc")).toBe(true);
+  });
+});
+
+function node(
+  type: string,
+  startLine: number | null,
+  endLine?: number,
+  children: unknown[] = [],
+) {
+  return {
+    type,
+    children,
+    position:
+      startLine === null
+        ? undefined
+        : { start: { line: startLine }, end: { line: endLine ?? startLine } },
+  };
+}
+
+describe("blockRange", () => {
+  it("maps a node's position through the frontmatter offset", () => {
+    expect(blockRange(node("paragraph", 2, 4), 3)).toEqual({
+      startLine: 5,
+      endLine: 7,
+    });
+  });
+
+  it("maps a single-line node", () => {
+    expect(blockRange(node("heading", 1, 1), 0)).toEqual({
+      startLine: 1,
+      endLine: 1,
+    });
+  });
+
+  // Display math, raw HTML blocks, link reference definitions, and generated
+  // footnote nodes all reach the renderer without a position. They own no
+  // lines and must render unchanged rather than becoming editable.
+  it("returns null for a node with no position", () => {
+    expect(blockRange(node("span", null), 0)).toBeNull();
+  });
+
+  // A list item must not swallow its sublist, or clicking the parent bullet
+  // drops the whole nested list into raw markdown.
+  it("stops a list item at the start of its first nested list", () => {
+    const li = node("listItem", 1, 5, [
+      node("paragraph", 1, 1),
+      node("list", 2, 5),
+    ]);
+
+    expect(blockRange(li, 0)).toEqual({ startLine: 1, endLine: 1 });
+  });
+
+  it("stops a list item at a nested ordered list too", () => {
+    const li = node("listItem", 4, 9, [
+      node("paragraph", 4, 5),
+      node("list", 6, 9),
+    ]);
+
+    expect(blockRange(li, 0)).toEqual({ startLine: 4, endLine: 5 });
+  });
+
+  it("keeps the full range for a list item with no nested list", () => {
+    const li = node("listItem", 3, 4, [node("paragraph", 3, 4)]);
+
+    expect(blockRange(li, 0)).toEqual({ startLine: 3, endLine: 4 });
+  });
+
+  it("keeps the full range for a multi-line paragraph", () => {
+    expect(blockRange(node("paragraph", 7, 9), 0)).toEqual({
+      startLine: 7,
+      endLine: 9,
+    });
   });
 });

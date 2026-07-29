@@ -83,6 +83,70 @@ export function linesMatch(source: string, transformed: string): boolean {
   return countLines(source) === countLines(transformed);
 }
 
+export type LineRange = { startLine: number; endLine: number };
+
+type PositionedNode = {
+  type?: string;
+  children?: unknown[];
+  position?: {
+    start?: { line?: number };
+    end?: { line?: number };
+  };
+};
+
+/**
+ * The file lines a rendered node owns, or null if it owns none.
+ *
+ * Null is a normal answer, not an error. Display math, raw HTML blocks, link
+ * reference definitions, and the generated footnote section all reach the
+ * renderer with no position, and callers must render them unchanged and
+ * non-editable rather than guessing a range.
+ */
+export function blockRange(
+  node: unknown,
+  frontmatterOffset: number,
+): LineRange | null {
+  const positioned = node as PositionedNode | undefined;
+  const start = positioned?.position?.start?.line;
+  const end = positioned?.position?.end?.line;
+
+  if (typeof start !== "number" || typeof end !== "number") {
+    return null;
+  }
+
+  return {
+    startLine: start + frontmatterOffset,
+    endLine: listItemEndLine(positioned, end) + frontmatterOffset,
+  };
+}
+
+/**
+ * A list item's own lines stop where its first nested list begins. Without
+ * this, clicking one bullet drops the entire nested list into raw markdown,
+ * which is the pain inline editing exists to remove.
+ */
+function listItemEndLine(
+  node: PositionedNode | undefined,
+  fallbackEnd: number,
+): number {
+  if (node?.type !== "listItem") {
+    return fallbackEnd;
+  }
+
+  for (const child of node.children ?? []) {
+    const childNode = child as PositionedNode;
+    if (childNode?.type !== "list") {
+      continue;
+    }
+    const childStart = childNode.position?.start?.line;
+    if (typeof childStart === "number") {
+      return childStart - 1;
+    }
+  }
+
+  return fallbackEnd;
+}
+
 function splitLines(content: string): string[] {
   return content.split(/\r?\n/);
 }
