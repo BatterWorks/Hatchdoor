@@ -207,6 +207,10 @@ const EDITABLE_UNITS: Record<string, UnitType> = {
   h5: "heading",
   h6: "heading",
   li: "list item",
+  // D27: the tr is the unit, not the td. mdast gives tr and td identical
+  // ranges, and the delimiter row belongs to no node at all.
+  tr: "table row",
+  pre: "code block",
 };
 
 type ComponentMap = Record<string, (props: never) => ReactNode>;
@@ -216,12 +220,11 @@ function withEditableBlocks<T extends ComponentMap>(components: T): T {
 
   for (const [tag, unitType] of Object.entries(EDITABLE_UNITS)) {
     const Original = components[tag];
-    if (!Original) {
-      continue;
-    }
-    const Wrapped = (props: { node?: unknown }) => (
+    const Wrapped = (props: { node?: unknown; children?: ReactNode }) => (
       <EditableBlock node={props.node} unitType={unitType}>
-        {(Original as (p: unknown) => ReactNode)(props)}
+        {Original
+          ? (Original as (p: unknown) => ReactNode)(props)
+          : createElement(tag, null, props.children)}
       </EditableBlock>
     );
     wrapped[tag] = Wrapped as (props: never) => ReactNode;

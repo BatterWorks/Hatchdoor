@@ -614,6 +614,12 @@ export function NotePage({
           ) : null}
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
+        {writeEnabled && !isEditing && !lineMappingIntact ? (
+          <p className="note-editor-notice">
+            This note&rsquo;s source and rendered lines don&rsquo;t line up, so
+            inline editing is off here. Use Edit to open source mode.
+          </p>
+        ) : null}
         {searchHitCount > 0 ? (
           <SearchHitNavigator
             totalHits={searchHitCount}

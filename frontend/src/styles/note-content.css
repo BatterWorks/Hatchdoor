@@ -1158,3 +1158,23 @@
 .note-inline-actions .close-note {
   white-space: nowrap;
 }
+
+/* A table row's cells stay in the flow while it is edited, so the columns keep
+   their widths, and the input is laid over the row instead of replacing it. */
+.note-body tr.editable-block.is-active {
+  position: relative;
+}
+
+.note-body .block-input-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 0.7rem;
+  background: var(--paper);
+}
+
+.note-body .block-input-overlay .block-input {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
