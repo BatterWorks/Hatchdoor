@@ -996,8 +996,20 @@ item in a demo-vault note produced a one-line diff, with frontmatter, blank line
   is now measured on entry and hung by exactly that amount, so the visible text does not move at
   all. Measured at zero shift for list items, headings, and paragraphs. On a phone the hang is
   clamped to the pane's 16px padding, so a long prefix shifts slightly rather than being clipped.
-- **Callouts and blockquotes are not yet editable.** D25a puts per-line callouts in stage 4, so
-  clicking one does nothing today. Every other unit type is live.
+- ~~**Callouts and blockquotes are not yet editable.**~~ **Fixed 2026-07-30.** D25a is live for
+  both of its unit types: a callout body and a hard-wrapped list item are each addressed one
+  source line at a time, with the `>` or indent prefix sliced from the file and displayed.
+  Verified against `demo-vault/40-reference/Markdown Showcase.md`, where the two body lines of
+  the `[!info]` callout resolve to file lines 90 and 91 rather than to one range.
+
+  Two consequences worth recording. **A line's index is the only thing that maps it back to the
+  file**, since the renderer rebuilds these nodes and the positions do not survive. So no
+  interior line is ever dropped while splitting, and a list item whose rendered line count
+  disagrees with the span it claims falls back to being addressed whole rather than writing to a
+  guessed line. **A wrapped unit no longer reflows as one run of prose:** each source line is
+  its own flow element, which is what makes "revealing one line does not disturb the flow of the
+  others" true, and it is what D1 rejected for paragraphs. Consecutive lines are drawn with no
+  gap between them (`note-content.css`), so the unit still reads as one block.
 
 Stage 1 is the go/no-go gate. If source mapping proves unreliable against real vault notes
 after D25 and D6 are fixed, the design is reconsidered before stages 2 to 4 are built on it.
