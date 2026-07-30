@@ -146,6 +146,7 @@ export function NotePage({
   const lastHandledRevisionRef = useRef(0);
   const autosaveStatusRef = useRef<string>("idle");
   const activeUnitRef = useRef<string | null>(null);
+  const latestContentRef = useRef("");
   currentSlugRef.current = slug;
 
   const loadNote = useCallback(
@@ -426,6 +427,10 @@ export function NotePage({
     if (!note) {
       return;
     }
+    // Readable before React re-renders. A block committed inside an async
+    // handler has to be visible to the rest of that handler, which still holds
+    // the document this render closed over.
+    latestContentRef.current = nextContent;
     // An edit landed, so the gesture has been learned and the hint has done its
     // job. Retiring it here rather than on entry means an accidental double tap
     // does not count as having taught anything.
@@ -478,6 +483,10 @@ export function NotePage({
     }
   }, [note, slug, history]);
 
+  useEffect(() => {
+    latestContentRef.current = note?.content ?? "";
+  }, [note?.content]);
+
   const [externalChange, setExternalChange] = useState(0);
 
   const applyHistory = useCallback((next: string | null) => {
@@ -486,6 +495,7 @@ export function NotePage({
     }
     // The open block, if any, is seeded from the pre-undo document.
     setExternalChange((n) => n + 1);
+    latestContentRef.current = next;
     setNote((prev) => (prev ? { ...prev, content: next } : prev));
     setDraftContent(next);
     setInlineDirty(true);
@@ -551,9 +561,24 @@ export function NotePage({
       return;
     }
 
+    // An open block holds its text nowhere else, and its commit rewrites the
+    // whole document from the copy it was seeded with. A drop does not move
+    // focus, so left open it would commit after the write below and overwrite
+    // it, dropping the embed and orphaning the file that was just uploaded.
+    // Blurring commits it synchronously, so everything after this works from
+    // one document rather than two.
+    const focused = document.activeElement;
+    if (
+      focused instanceof HTMLElement &&
+      event.currentTarget.contains(focused)
+    ) {
+      focused.blur();
+    }
+
     // Where it lands is decided before the upload, so the insertion point is
     // the one the user aimed at rather than wherever the page has scrolled to
-    // by the time the request comes back.
+    // by the time the request comes back. The commit above replaces a block's
+    // lines in place, so the line numbers collected here still hold.
     const blocks = Array.from(
       event.currentTarget.querySelectorAll<HTMLElement>(".editable-block"),
     )
@@ -579,7 +604,11 @@ export function NotePage({
       if (result.gitSyncWarning) {
         onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
       }
-      handleInlineChange(insertEmbedAt(note.content, line, result.embedPath));
+      // Not note.content: that is the document this render closed over, and a
+      // block committed above has already moved past it.
+      handleInlineChange(
+        insertEmbedAt(latestContentRef.current, line, result.embedPath),
+      );
     } catch (uploadError) {
       onWriteNotice?.(
         uploadError instanceof Error ? uploadError.message : "Upload failed.",
