@@ -190,65 +190,79 @@ Second **paragraph** here.
 });
 
 describe("touch entry", () => {
-  // Reading is the dominant mode on a phone, and tap-to-place-caret would
-  // raise the keyboard on every stray touch. Entry is a deliberate long press.
-  function touch(
-    el: Element,
-    type: "pointerDown" | "pointerUp" | "pointerMove",
-    x = 10,
-    y = 10,
-  ) {
-    fireEvent[type](el, {
+  // Reading is the dominant mode on a phone, and entering on a single tap would
+  // raise the keyboard on every stray touch. Entry is a deliberate double tap,
+  // which unlike a hold does not race the OS text-selection gesture.
+  function tap(el: Element, x = 10, y = 10) {
+    fireEvent.pointerDown(el, {
       pointerType: "touch",
       clientX: x,
       clientY: y,
       bubbles: true,
     });
+    fireEvent.pointerUp(el, {
+      pointerType: "touch",
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+    });
+    fireEvent.click(el, { clientX: x, clientY: y, bubbles: true });
   }
 
-  it("does not enter a block on a tap", () => {
-    vi.useFakeTimers();
+  it("does not enter a block on a single tap", () => {
     render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
     const target = screen.getByText("First paragraph.");
 
-    touch(target, "pointerDown");
-    act(() => {
-      vi.advanceTimersByTime(120);
-    });
-    touch(target, "pointerUp");
-    fireEvent.click(target);
+    tap(target);
 
     expect(screen.queryByRole("textbox")).toBeNull();
-    vi.useRealTimers();
   });
 
-  it("enters a block on a long press", () => {
-    vi.useFakeTimers();
+  it("enters a block on a double tap", () => {
     render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
     const target = screen.getByText("First paragraph.");
 
-    touch(target, "pointerDown");
-    act(() => {
-      vi.advanceTimersByTime(600);
-    });
+    tap(target);
+    tap(target);
 
     expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
-    vi.useRealTimers();
   });
 
-  it("cancels the long press when the finger moves, because that is a scroll", () => {
+  it("does not enter when the second tap comes too late", () => {
     vi.useFakeTimers();
     render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
     const target = screen.getByText("First paragraph.");
 
-    touch(target, "pointerDown", 10, 10);
-    touch(target, "pointerMove", 10, 80);
+    tap(target);
     act(() => {
-      vi.advanceTimersByTime(600);
+      vi.advanceTimersByTime(500);
     });
+    tap(target);
 
     expect(screen.queryByRole("textbox")).toBeNull();
     vi.useRealTimers();
+  });
+
+  it("does not enter when the second tap lands too far away", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    const target = screen.getByText("First paragraph.");
+
+    tap(target, 10, 10);
+    tap(target, 10, 90);
+
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("treats a third tap as the start of a new pair, not another entry", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+    const target = screen.getByText("First paragraph.");
+
+    tap(target);
+    tap(target);
+    fireEvent.blur(screen.getByRole("textbox"));
+    tap(screen.getByText("First paragraph."));
+
+    expect(screen.queryByRole("textbox")).toBeNull();
   });
 
   it("still enters immediately on a mouse click", () => {
@@ -257,6 +271,17 @@ describe("touch entry", () => {
 
     fireEvent.pointerDown(target, { pointerType: "mouse", bubbles: true });
     fireEvent.click(target);
+
+    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+  });
+
+  // A screen reader activating the focused block synthesizes a bare click with
+  // no pointer sequence in front of it. Requiring two of those would put touch
+  // users of VoiceOver and TalkBack behind a gesture they cannot make.
+  it("enters on a single activation with no pointer event, as a screen reader sends", () => {
+    render(<NoteHarness initialContent={WITH_FRONTMATTER} />);
+
+    fireEvent.click(screen.getByText("First paragraph."));
 
     expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
   });

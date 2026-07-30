@@ -1096,6 +1096,12 @@
 .note-body .editable-block {
   position: relative;
   cursor: text;
+  /* Entry on touch is a double tap, and the viewport does not disable
+     double-tap-to-zoom, so without this iOS zooms the page instead of opening
+     the block. `manipulation` drops double-tap zoom and the legacy click delay
+     while leaving panning and pinch-zoom alone, so scrolling from a paragraph
+     and zooming for legibility both still work. */
+  touch-action: manipulation;
 }
 
 .note-body .editable-block::after {

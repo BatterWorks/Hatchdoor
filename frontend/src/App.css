@@ -301,6 +301,24 @@
   border-style: dashed;
 }
 
+/* Quieter than the write notice it borrows its shell from: that one reports a
+   failure, this one teaches a gesture and then goes away for good. It also sits
+   inside the note column rather than above it, so it takes that margin. */
+.write-notice.touch-edit-hint {
+  margin: 0;
+  color: var(--muted);
+  align-items: center;
+}
+
+/* This notice only ever appears on a coarse pointer, so its dismiss control is
+   always a finger and gets a finger-sized target. The shared device keeps its
+   own size, since elsewhere it is a mouse target too. */
+.write-notice.touch-edit-hint .write-notice-dismiss {
+  min-width: 44px;
+  min-height: 44px;
+  margin: -0.6rem -0.85rem -0.6rem 0;
+}
+
 .note-editor-notice.attachment-success {
   border-color: color-mix(in srgb, var(--ink) 28%, var(--rule));
 }

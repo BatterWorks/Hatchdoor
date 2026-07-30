@@ -836,3 +836,125 @@ describe("App write mode", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("touch editing hint", () => {
+  // Entering a block on touch is a double tap, which is invisible: the gutter
+  // rule says "something is here" without saying what gesture reaches it.
+  function mockPointer(coarse: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      (query: string) =>
+        ({
+          matches: coarse && query.includes("coarse"),
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }) as unknown as MediaQueryList,
+    );
+  }
+
+  const HINT = "Double-tap a line to edit it.";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the hint on a coarse pointer", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(HINT)).toBeInTheDocument();
+  });
+
+  it("does not show it on a pointer that can hover", async () => {
+    mockReadAndWriteApi();
+    mockPointer(false);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+
+  it("does not show it again once it has been dismissed", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+    window.localStorage.setItem("hatchdoor.touchEditHintSeen", "1");
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+
+  // Retired on a landed edit rather than on entry, so an accidental double tap
+  // does not count as having taught the gesture.
+  it("retires the hint once an edit lands", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(HINT);
+    const block = screen.getByText("Original");
+    for (let i = 0; i < 2; i += 1) {
+      fireEvent.pointerDown(block, {
+        pointerType: "touch",
+        clientX: 10,
+        clientY: 10,
+        bubbles: true,
+      });
+      fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+    }
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "Edited" } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(screen.queryByText(HINT)).toBeNull();
+    });
+    expect(window.localStorage.getItem("hatchdoor.touchEditHintSeen")).toBe(
+      "1",
+    );
+  });
+
+  it("remembers the dismissal when tapped", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // By its label, not by the notice text: dismissal has to be a visible
+    // control, since on touch there is no cursor to reveal that the line itself
+    // is clickable.
+    await screen.findByText(HINT);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss hint" }));
+
+    expect(screen.queryByText(HINT)).toBeNull();
+    expect(window.localStorage.getItem("hatchdoor.touchEditHintSeen")).toBe(
+      "1",
+    );
+  });
+});

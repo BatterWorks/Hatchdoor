@@ -54,10 +54,44 @@ function caretOffsetAtPoint(
   return null;
 }
 
-/** How long a touch must be held before it counts as "edit this", not "read". */
-const LONG_PRESS_MS = 500;
-/** Past this much movement the gesture is a scroll, not a press. */
-const LONG_PRESS_SLOP_PX = 10;
+/**
+ * How long after a tap a second one still counts as "edit this", not "read".
+ *
+ * Generous on purpose. A double-tap handler normally has to hold a single tap's
+ * action hostage while it waits, so the window is a latency budget. Here a
+ * single tap on prose does nothing, so there is nothing to delay and nothing to
+ * disambiguate: the window costs only forgiveness.
+ */
+const DOUBLE_TAP_MS = 400;
+/** Two taps further apart than this are aimed at different lines. */
+const DOUBLE_TAP_SLOP_PX = 30;
+
+type TapMark = { x: number; y: number; at: number };
+
+/**
+ * Whether this tap closes a double tap, recording it as the opening one if not.
+ *
+ * Module scope rather than a closure so the clock is read outside a component
+ * body, where reading it is a rule violation rather than merely inelegant.
+ */
+function isSecondTap(
+  lastTap: { current: TapMark | null },
+  clientX: number,
+  clientY: number,
+): boolean {
+  const previous = lastTap.current;
+  const now = Date.now();
+  const closes =
+    previous !== null &&
+    now - previous.at <= DOUBLE_TAP_MS &&
+    Math.abs(clientX - previous.x) <= DOUBLE_TAP_SLOP_PX &&
+    Math.abs(clientY - previous.y) <= DOUBLE_TAP_SLOP_PX;
+
+  // A tap that closes a pair is consumed, so a third tap opens a new pair
+  // rather than re-entering the block.
+  lastTap.current = closes ? null : { x: clientX, y: clientY, at: now };
+  return closes;
+}
 
 /**
  * Makes one rendered block editable in place.
@@ -100,8 +134,7 @@ export function EditableBlock({
       ? blockRange(node, offset)
       : null;
   const elementRef = useRef<HTMLElement | null>(null);
-  const timerRef = useRef<number | null>(null);
-  const originRef = useRef<{ x: number; y: number } | null>(null);
+  const lastTapRef = useRef<{ x: number; y: number; at: number } | null>(null);
   const touchRef = useRef(false);
 
   const enterAt = (clientX: number, clientY: number) => {
@@ -113,23 +146,6 @@ export function EditableBlock({
       caretOffsetAtPoint(clientX, clientY, editor.sourceOf(range)),
     );
   };
-
-  const clearPress = () => {
-    if (timerRef.current !== null) {
-      window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    originRef.current = null;
-  };
-
-  useEffect(
-    () => () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current);
-      }
-    },
-    [],
-  );
 
   const registerBlock = editor?.registerBlock;
   const rangeKey = range ? `${range.startLine}:${range.endLine}` : null;
@@ -165,9 +181,6 @@ export function EditableBlock({
     className?: string;
     onClick?: (event: MouseEvent) => void;
     onPointerDown?: (event: PointerEvent) => void;
-    onPointerMove?: (event: PointerEvent) => void;
-    onPointerUp?: () => void;
-    onPointerCancel?: () => void;
     onKeyDown?: (event: KeyboardEvent) => void;
     tabIndex?: number;
     "data-start-line"?: number;
@@ -249,34 +262,13 @@ export function EditableBlock({
     return !!el?.closest?.("a, input, summary, button");
   };
 
+  // Only a real touch sequence arms the two-tap requirement. A screen reader
+  // activating the focused block synthesizes a bare click with no pointer
+  // sequence in front of it, so it takes the mouse path and enters on one
+  // activation rather than needing a literal double-tap.
   const onPointerDown = (event: PointerEvent) => {
     touchRef.current =
       event.pointerType === "touch" || event.pointerType === "pen";
-    clearPress();
-    if (!touchRef.current || claimsGesture(event.target)) {
-      return;
-    }
-    // On a phone, reading is the dominant mode: tap-to-enter would raise the
-    // keyboard on every stray touch. Entry is a deliberate hold.
-    originRef.current = { x: event.clientX, y: event.clientY };
-    const { clientX, clientY } = event;
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
-      enterAt(clientX, clientY);
-    }, LONG_PRESS_MS);
-  };
-
-  const onPointerMove = (event: PointerEvent) => {
-    const origin = originRef.current;
-    if (timerRef.current === null || !origin) {
-      return;
-    }
-    const moved =
-      Math.abs(event.clientX - origin.x) > LONG_PRESS_SLOP_PX ||
-      Math.abs(event.clientY - origin.y) > LONG_PRESS_SLOP_PX;
-    if (moved) {
-      clearPress();
-    }
   };
 
   const onClick = (event: MouseEvent) => {
@@ -296,14 +288,18 @@ export function EditableBlock({
       editor.toggleTask(range.startLine);
       return;
     }
-    // A touch gesture already decided for itself whether to enter, so the
-    // synthetic click it produces must not enter a second time.
-    if (touchRef.current) {
-      return;
-    }
     // The innermost block wins, so an ancestor never claims a click a
     // descendant already handled.
     if (claimsGesture(event.target)) {
+      return;
+    }
+    // On a phone, reading is the dominant mode: entering on a single tap would
+    // raise the keyboard on every stray touch. Entry is a deliberate double
+    // tap, which unlike a hold does not race the OS text-selection gesture.
+    if (
+      touchRef.current &&
+      !isSecondTap(lastTapRef, event.clientX, event.clientY)
+    ) {
       return;
     }
     event.preventDefault();
@@ -328,9 +324,6 @@ export function EditableBlock({
     "data-end-line": range.endLine,
     onClick,
     onPointerDown,
-    onPointerMove,
-    onPointerUp: clearPress,
-    onPointerCancel: clearPress,
     onKeyDown,
     ref: elementRef,
     // Every editable unit is reachable by Tab, so there is a keyboard-only
