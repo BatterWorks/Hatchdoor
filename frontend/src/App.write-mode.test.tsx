@@ -964,4 +964,129 @@ describe("touch editing hint", () => {
       "1",
     );
   });
+  // Dropping a file while a block is open uploaded the attachment and then
+  // silently lost its embed: the drop wrote the document it had computed from
+  // the pre-edit content, and the open block's own commit, seeded before the
+  // drop, landed second and overwrote it. Both writes returned 200, so nothing
+  // surfaced the loss and the attachment was left orphaned in the vault.
+  it("keeps the embed when a file is dropped while a block is open", async () => {
+    const writes: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+
+        if (url.includes("/api/write-capabilities")) {
+          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/recently-modified")) {
+          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        }
+        if (url.includes("/api/note/home/links")) {
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/attachment") && method === "POST") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              attachment: { relative_path: "Attachments/report.pdf" },
+              git_sync_warning: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/note/home") && method === "PUT") {
+          writes.push(JSON.parse(String(init?.body)).content as string);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              slug: "home",
+              relative_path: "Home",
+              content_hash: `hash-${writes.length + 1}`,
+              git_sync_warning: null,
+              rewritten_notes: 0,
+              moved_assets: 0,
+              trashed_path: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "# Home\nOriginal",
+                content_hash: "hash-1",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // Open the paragraph and type into it without leaving the block, so the
+    // edit is still uncommitted when the file lands.
+    const block = await screen.findByText("Original");
+    fireEvent.click(block);
+    const input = await screen.findByRole("textbox");
+    const view = EditorView.findFromDOM(input as HTMLElement)!;
+    act(() => {
+      view.dispatch({
+        changes: {
+          from: 0,
+          to: view.state.doc.length,
+          insert: "Original edited",
+        },
+      });
+    });
+
+    const file = new File(["%PDF"], "report.pdf", { type: "application/pdf" });
+    const dropTarget = document.querySelector(".note-body-drop")!;
+    await act(async () => {
+      fireEvent.drop(dropTarget, {
+        dataTransfer: { files: [file] },
+        clientY: 10,
+      });
+    });
+
+    await waitFor(() => {
+      expect(writes.length).toBeGreaterThan(0);
+    });
+    // Whatever order the writes land in, the last one is what the vault keeps,
+    // and it has to carry both the embed and the edit.
+    await waitFor(() => {
+      const latest = writes[writes.length - 1];
+      expect(latest).toContain("![[Attachments/report.pdf]]");
+      expect(latest).toContain("Original edited");
+    });
+  });
 });
