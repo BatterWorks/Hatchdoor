@@ -161,6 +161,56 @@ function isList(node: PositionedNode | undefined): boolean {
   );
 }
 
+/**
+ * Stands in for a blank line so the renderer emits a paragraph node there.
+ *
+ * A zero-width space, because CommonMark does not count it as whitespace: a
+ * line holding one is a paragraph, where a line holding a space is nothing at
+ * all. It is never seen. An active block renders its input in place of its
+ * children, and this substitution only ever happens on the active range.
+ */
+export const BLANK_LINE_PLACEHOLDER = "​";
+
+/**
+ * Give the active range something to render, when the line the caret is on is
+ * blank.
+ *
+ * Splitting a paragraph, leaving a list, and clicking between two blocks all
+ * put the caret on a blank line. A blank line parses to no node, a node is
+ * what carries the position an editable block is addressed by, so without this
+ * the input has nowhere to live and the user is silently dropped out of
+ * editing mid-keystroke.
+ *
+ * The substitution is made only in the text handed to the renderer. The file
+ * keeps its blank line, and sourceOf still slices the real content, so the
+ * input opens empty rather than holding a character the user never typed.
+ */
+export function placeholderForBlankRange(
+  content: string,
+  range: LineRange | null,
+): string {
+  // Only ever one line: a blank block is a single line by construction, and
+  // widening this would blank out real content on a range that merely starts
+  // with an empty line.
+  if (!range || range.startLine !== range.endLine) {
+    return content;
+  }
+
+  const lines = splitLines(content);
+  const at = range.startLine - 1;
+  const line = lines[at];
+  if (line === undefined || line.trim() !== "") {
+    return content;
+  }
+
+  lines[at] = BLANK_LINE_PLACEHOLDER;
+  return join(lines, content);
+}
+
+function join(lines: string[], content: string): string {
+  return lines.join(detectLineEnding(content));
+}
+
 function splitLines(content: string): string[] {
   return content.split(/\r?\n/);
 }

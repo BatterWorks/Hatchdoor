@@ -21,7 +21,12 @@ import {
   stripVaultNoteLinks,
 } from "../lib/markdown";
 import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
-import { frontmatterLineOffset, linesMatch } from "../lib/sourceMap";
+import {
+  frontmatterLineOffset,
+  linesMatch,
+  placeholderForBlankRange,
+  type LineRange,
+} from "../lib/sourceMap";
 import { useNoteAutosave } from "../hooks/useNoteAutosave";
 import { createEditHistory } from "../lib/editHistory";
 import {
@@ -56,6 +61,7 @@ import {
   insertionLineForDrop,
   uploadNoteAttachment,
 } from "./note-page/attachmentDrop";
+import { BlockGap } from "./note-page/BlockGap";
 import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { NotePreview } from "./note-page/NotePreview";
@@ -117,6 +123,7 @@ export function NotePage({
   const [editorError, setEditorError] = useState<string | null>(null);
   const [inlineDirty, setInlineDirty] = useState(false);
   const [activeUnit, setActiveUnit] = useState<string | null>(null);
+  const [activeRange, setActiveRange] = useState<LineRange | null>(null);
   const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
@@ -369,6 +376,27 @@ export function NotePage({
   const inlineEditingEnabled =
     writeEnabled && !isEditing && lineMappingIntact && !!note;
 
+  // Applied after wikilink resolution rather than before it: the resolver is
+  // keyed on its input, so editing that input would mark the tree as settling
+  // and disable editing for exactly as long as the caret sat on a blank line.
+  //
+  // The range arrives in file coordinates, and this is the body, so the
+  // frontmatter offset comes back off.
+  const frontmatterOffset = frontmatterLineOffset(note?.content ?? "");
+  const renderedMarkdown = useMemo(
+    () =>
+      placeholderForBlankRange(
+        markdown,
+        activeRange
+          ? {
+              startLine: activeRange.startLine - frontmatterOffset,
+              endLine: activeRange.endLine - frontmatterOffset,
+            }
+          : null,
+      ),
+    [markdown, activeRange, frontmatterOffset],
+  );
+
   const markdownComponents = useMemo(
     () =>
       createNoteMarkdownComponents(
@@ -499,6 +527,7 @@ export function NotePage({
       const key = range ? `${range.startLine}:${range.endLine}` : null;
       activeUnitRef.current = key;
       setActiveUnit(key);
+      setActiveRange(range);
     },
     [],
   );
@@ -594,6 +623,26 @@ export function NotePage({
     setSearchHitCount(hits.length);
     setActiveSearchHit(0);
 
+    return () => {
+      searchHitsRef.current = [];
+    };
+    // activeUnit is a dependency because entering a block removes its marks:
+    // without recounting, SearchHitNavigator's indices silently shift.
+  }, [markdown, note?.slug, searchQuery, matchHeading, activeUnit]);
+
+  // Jumping to the first hit is a landing gesture, so it is deliberately not
+  // tied to activeUnit the way the recount above is. Entering a block changes
+  // the active unit, and scrolling on that would throw the reader back to the
+  // top of the note the moment they clicked something near the bottom.
+  //
+  // Runs after the recount effect, which is what fills searchHitsRef: layout
+  // effects fire in declaration order within a commit.
+  useLayoutEffect(() => {
+    if (!noteBodyRef.current) {
+      return;
+    }
+
+    const hits = searchHitsRef.current;
     if (hits.length > 0) {
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
@@ -602,13 +651,7 @@ export function NotePage({
       const lastSegment = parts[parts.length - 1] ?? matchHeading;
       jumpToHeading(slugifyHeading(lastSegment));
     }
-
-    return () => {
-      searchHitsRef.current = [];
-    };
-    // activeUnit is a dependency because entering a block removes its marks:
-    // without recounting, SearchHitNavigator's indices silently shift.
-  }, [markdown, note?.slug, searchQuery, matchHeading, activeUnit]);
+  }, [markdown, note?.slug, searchQuery, matchHeading]);
 
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
@@ -949,13 +992,15 @@ export function NotePage({
                 onInProgressChange={handleInProgressChange}
                 onActiveRangeChange={handleActiveRangeChange}
               >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={rehypePlugins}
-                  components={markdownComponents}
-                >
-                  {markdown}
-                </ReactMarkdown>
+                <BlockGap>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={rehypePlugins}
+                    components={markdownComponents}
+                  >
+                    {renderedMarkdown}
+                  </ReactMarkdown>
+                </BlockGap>
               </InlineEditorProvider>
             </div>
           </div>

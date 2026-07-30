@@ -10,6 +10,8 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { EditorView } from "@codemirror/view";
+
 import { frontmatterLineOffset } from "../../lib/sourceMap";
 import { InlineEditorProvider } from "./InlineEditorProvider";
 import { createNoteMarkdownComponents } from "./renderers";
@@ -23,6 +25,42 @@ vi.mock("./PdfPreview", () => ({
     <div data-testid="pdf-preview">{label}</div>
   ),
 }));
+
+// The open block is a CodeMirror editor, so its text lives in editor state
+// rather than in a DOM value. These reach through to the same three things a
+// textarea exposed directly: the element, its text, and the caret.
+function editorEl(): HTMLElement {
+  return screen.getByRole("textbox");
+}
+
+function editorView(): EditorView {
+  const view = EditorView.findFromDOM(editorEl() as HTMLElement);
+  if (!view) {
+    throw new Error("no CodeMirror view is mounted on the active block");
+  }
+  return view;
+}
+
+function editorValue(): string {
+  return editorView().state.doc.toString();
+}
+
+function caretPos(): number {
+  return editorView().state.selection.main.head;
+}
+
+function setCaret(at: number): void {
+  const view = editorView();
+  view.dispatch({ selection: { anchor: at } });
+}
+
+/** Replaces the block's whole text, as typing over a selection would. */
+function setEditorValue(text: string): void {
+  const view = editorView();
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+  });
+}
 
 /**
  * Renders the note body the way NotePage does: the rendered markdown is the
@@ -85,7 +123,7 @@ describe("entering a block", () => {
 
     fireEvent.click(screen.getByText(/Second/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("Second *paragraph* here.");
+    expect(editorValue()).toBe("Second *paragraph* here.");
   });
 
   it("maps through the frontmatter offset rather than the rendered line", () => {
@@ -93,7 +131,7 @@ describe("entering a block", () => {
 
     fireEvent.click(screen.getByText("First paragraph."));
 
-    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+    expect(editorValue()).toBe("First paragraph.");
   });
 
   it("reveals the heading marker when a heading is entered", () => {
@@ -101,7 +139,7 @@ describe("entering a block", () => {
 
     fireEvent.click(screen.getByRole("heading", { name: "A heading" }));
 
-    expect(screen.getByRole("textbox")).toHaveValue("## A heading");
+    expect(editorValue()).toBe("## A heading");
   });
 
   it("edits one list item rather than the whole list", () => {
@@ -109,7 +147,7 @@ describe("entering a block", () => {
 
     fireEvent.click(screen.getByText("two"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("- two");
+    expect(editorValue()).toBe("- two");
   });
 
   it("keeps only one block active at a time", () => {
@@ -119,7 +157,7 @@ describe("entering a block", () => {
     fireEvent.click(screen.getByText(/Second/));
 
     expect(screen.getAllByRole("textbox")).toHaveLength(1);
-    expect(screen.getByRole("textbox")).toHaveValue("Second *paragraph* here.");
+    expect(editorValue()).toBe("Second *paragraph* here.");
   });
 
   it("does not open a block in a read-only vault", () => {
@@ -144,9 +182,7 @@ describe("committing a block", () => {
     );
 
     fireEvent.click(screen.getByText(/Second/));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "Second **paragraph** here." },
-    });
+    setEditorValue("Second **paragraph** here.");
     fireEvent.blur(screen.getByRole("textbox"));
 
     expect(onChange).toHaveBeenCalledWith(
@@ -170,9 +206,7 @@ Second **paragraph** here.
     );
 
     fireEvent.click(screen.getByRole("heading", { name: "A heading" }));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "### A heading" },
-    });
+    setEditorValue("### A heading");
     fireEvent.blur(screen.getByRole("textbox"));
 
     expect(onChange).toHaveBeenCalledWith("### A heading\n\nBody.\n");
@@ -225,7 +259,7 @@ describe("touch entry", () => {
     tap(target);
     tap(target);
 
-    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+    expect(editorValue()).toBe("First paragraph.");
   });
 
   it("does not enter when the second tap comes too late", () => {
@@ -272,7 +306,7 @@ describe("touch entry", () => {
     fireEvent.pointerDown(target, { pointerType: "mouse", bubbles: true });
     fireEvent.click(target);
 
-    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+    expect(editorValue()).toBe("First paragraph.");
   });
 
   // A screen reader activating the focused block synthesizes a bare click with
@@ -283,7 +317,7 @@ describe("touch entry", () => {
 
     fireEvent.click(screen.getByText("First paragraph."));
 
-    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+    expect(editorValue()).toBe("First paragraph.");
   });
 });
 
@@ -302,7 +336,7 @@ describe("keyboard entry", () => {
 
     fireEvent.keyDown(screen.getByText("First paragraph."), { key: "Enter" });
 
-    expect(screen.getByRole("textbox")).toHaveValue("First paragraph.");
+    expect(editorValue()).toBe("First paragraph.");
   });
 
   it("does not open on other keys", () => {
@@ -343,7 +377,7 @@ describe("more unit types", () => {
 
     fireEvent.click(screen.getByText(/const x = 1/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("```js\nconst x = 1\n```");
+    expect(editorValue()).toBe("```js\nconst x = 1\n```");
   });
 
   it("edits a single table row", () => {
@@ -355,14 +389,14 @@ describe("more unit types", () => {
 
     fireEvent.click(screen.getByText("3"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("| 3 | 4 |");
+    expect(editorValue()).toBe("| 3 | 4 |");
   });
 });
 
 describe("structural keys", () => {
   function openBlock(text: string | RegExp) {
     fireEvent.click(screen.getByText(text));
-    return screen.getByRole("textbox") as HTMLTextAreaElement;
+    return editorEl();
   }
 
   it("Enter at the end of a list item starts the next one", () => {
@@ -374,7 +408,7 @@ describe("structural keys", () => {
       />,
     );
     const ta = openBlock("two");
-    ta.setSelectionRange(5, 5);
+    setCaret(5);
 
     fireEvent.keyDown(ta, { key: "Enter" });
 
@@ -387,7 +421,7 @@ describe("structural keys", () => {
       <NoteHarness initialContent={"hello\n"} onContentChange={onChange} />,
     );
     const ta = openBlock("hello");
-    ta.setSelectionRange(5, 5);
+    setCaret(5);
 
     fireEvent.keyDown(ta, { key: "Enter" });
 
@@ -400,7 +434,7 @@ describe("structural keys", () => {
       <NoteHarness initialContent={"hello\n"} onContentChange={onChange} />,
     );
     const ta = openBlock("hello");
-    ta.setSelectionRange(5, 5);
+    setCaret(5);
 
     fireEvent.keyDown(ta, { key: "Enter", shiftKey: true });
 
@@ -416,7 +450,7 @@ describe("structural keys", () => {
       />,
     );
     const ta = openBlock(/const x = 1/);
-    ta.setSelectionRange(5, 5);
+    setCaret(5);
 
     fireEvent.keyDown(ta, { key: "Enter" });
 
@@ -432,7 +466,7 @@ describe("structural keys", () => {
       />,
     );
     const ta = openBlock("two");
-    ta.setSelectionRange(0, 0);
+    setCaret(0);
 
     fireEvent.keyDown(ta, { key: "Backspace" });
 
@@ -448,7 +482,7 @@ describe("structural keys", () => {
       />,
     );
     const ta = openBlock("two");
-    ta.setSelectionRange(3, 3);
+    setCaret(3);
 
     fireEvent.keyDown(ta, { key: "Backspace" });
 
@@ -494,10 +528,10 @@ describe("structural keys", () => {
       />,
     );
     const ta = openBlock("two");
-    ta.setSelectionRange(5, 5);
+    setCaret(5);
 
     fireEvent.keyDown(ta, { key: "Enter", isComposing: true });
-    ta.setSelectionRange(0, 0);
+    setCaret(0);
     fireEvent.keyDown(ta, { key: "Backspace", isComposing: true });
     fireEvent.keyDown(ta, { key: "Tab", isComposing: true });
 
@@ -512,9 +546,7 @@ describe("committing edge cases", () => {
       <NoteHarness initialContent={"hello\n"} onContentChange={onChange} />,
     );
     fireEvent.click(screen.getByText("hello"));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "hello there" },
-    });
+    setEditorValue("hello there");
 
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
 
@@ -531,12 +563,12 @@ describe("committing edge cases", () => {
     );
     const ta = screen.getByText("one").closest("li")!;
     fireEvent.click(ta);
-    const input = screen.getByRole("textbox") as HTMLTextAreaElement;
-    input.setSelectionRange(5, 5);
+    const input = editorEl();
+    setCaret(5);
     fireEvent.keyDown(input, { key: "Enter" });
 
-    const created = screen.getByRole("textbox") as HTMLTextAreaElement;
-    fireEvent.change(created, { target: { value: "- two" } });
+    const created = editorEl();
+    setEditorValue("- two");
     fireEvent.blur(created);
 
     expect(onChange).toHaveBeenLastCalledWith("- one\n- two\n");
@@ -579,47 +611,45 @@ describe("arrow navigation between units", () => {
   it("ArrowUp on the first line moves to the previous unit", () => {
     render(<NoteHarness initialContent={"- one\n- two\n- three\n"} />);
     fireEvent.click(screen.getByText("two"));
-    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
-    ta.setSelectionRange(0, 0);
+    const ta = editorEl();
+    setCaret(0);
 
     fireEvent.keyDown(ta, { key: "ArrowUp" });
 
-    expect(screen.getByRole("textbox")).toHaveValue("- one");
+    expect(editorValue()).toBe("- one");
   });
 
   it("ArrowDown on the last line moves to the next unit", () => {
     render(<NoteHarness initialContent={"- one\n- two\n- three\n"} />);
     fireEvent.click(screen.getByText("two"));
-    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
-    ta.setSelectionRange(5, 5);
+    const ta = editorEl();
+    setCaret(5);
 
     fireEvent.keyDown(ta, { key: "ArrowDown" });
 
-    expect(screen.getByRole("textbox")).toHaveValue("- three");
+    expect(editorValue()).toBe("- three");
   });
 
   it("preserves the column when moving between units", () => {
     render(<NoteHarness initialContent={"- alpha\n- bravo\n"} />);
     fireEvent.click(screen.getByText("bravo"));
-    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
-    ta.setSelectionRange(4, 4);
+    const ta = editorEl();
+    setCaret(4);
 
     fireEvent.keyDown(ta, { key: "ArrowUp" });
 
-    expect(
-      (screen.getByRole("textbox") as HTMLTextAreaElement).selectionStart,
-    ).toBe(4);
+    expect(caretPos()).toBe(4);
   });
 
   it("stays put at the first unit", () => {
     render(<NoteHarness initialContent={"- one\n- two\n"} />);
     fireEvent.click(screen.getByText("one"));
-    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
-    ta.setSelectionRange(0, 0);
+    const ta = editorEl();
+    setCaret(0);
 
     fireEvent.keyDown(ta, { key: "ArrowUp" });
 
-    expect(screen.getByRole("textbox")).toHaveValue("- one");
+    expect(editorValue()).toBe("- one");
   });
 
   it("leaves a multi-line block when the caret is not on its edge line", () => {
@@ -628,25 +658,25 @@ describe("arrow navigation between units", () => {
       <NoteHarness initialContent={"first\n\nwrapped one\nwrapped two\n"} />,
     );
     fireEvent.click(screen.getByText(/wrapped one/));
-    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
-    expect(ta.value).toBe("wrapped one\nwrapped two");
+    const ta = editorEl();
+    expect(editorValue()).toBe("wrapped one\nwrapped two");
     // Caret on the second source line: within-block motion is the browser's.
-    ta.setSelectionRange(15, 15);
+    setCaret(15);
 
     fireEvent.keyDown(ta, { key: "ArrowUp" });
 
-    expect(screen.getByRole("textbox")).toHaveValue("wrapped one\nwrapped two");
+    expect(editorValue()).toBe("wrapped one\nwrapped two");
   });
 
   it("does not navigate while an IME is composing", () => {
     render(<NoteHarness initialContent={"- one\n- two\n"} />);
     fireEvent.click(screen.getByText("two"));
-    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
-    ta.setSelectionRange(0, 0);
+    const ta = editorEl();
+    setCaret(0);
 
     fireEvent.keyDown(ta, { key: "ArrowUp", isComposing: true });
 
-    expect(screen.getByRole("textbox")).toHaveValue("- two");
+    expect(editorValue()).toBe("- two");
   });
 });
 
@@ -692,7 +722,7 @@ describe("task list checkboxes", () => {
 
     fireEvent.click(screen.getByText("first"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("- [ ] first");
+    expect(editorValue()).toBe("- [ ] first");
   });
 });
 
@@ -711,7 +741,7 @@ After.
 
     fireEvent.click(screen.getByText("Heads up"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> [!warning] Heads up");
+    expect(editorValue()).toBe("> [!warning] Heads up");
   });
 
   it("edits the callout body, keeping its quote prefix", () => {
@@ -719,16 +749,14 @@ After.
 
     fireEvent.click(screen.getByText(/Mind the gap/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> Mind the gap.");
+    expect(editorValue()).toBe("> Mind the gap.");
   });
 
   it("writes an edited callout body back to the right lines", () => {
     const onChange = vi.fn();
     render(<NoteHarness initialContent={CALLOUT} onContentChange={onChange} />);
     fireEvent.click(screen.getByText(/Mind the gap/));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "> Mind the step." },
-    });
+    setEditorValue("> Mind the step.");
     fireEvent.blur(screen.getByRole("textbox"));
 
     expect(onChange).toHaveBeenCalledWith(
@@ -748,12 +776,8 @@ describe("in-progress text is not stranded", () => {
     );
     fireEvent.click(screen.getByText("hello"));
 
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "hello t" },
-    });
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "hello th" },
-    });
+    setEditorValue("hello t");
+    setEditorValue("hello th");
 
     expect(onEdit).toHaveBeenCalledWith("hello th\n");
   });
@@ -773,7 +797,7 @@ After.
 
     fireEvent.click(screen.getByText(/Second body line/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> Second body line.");
+    expect(editorValue()).toBe("> Second body line.");
   });
 
   it("opens the first body line on its own", () => {
@@ -781,7 +805,7 @@ After.
 
     fireEvent.click(screen.getByText(/First body line/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> First body line.");
+    expect(editorValue()).toBe("> First body line.");
   });
 
   it("writes one line back, leaving the rest of the callout alone", () => {
@@ -789,9 +813,7 @@ After.
     render(<NoteHarness initialContent={CALLOUT} onContentChange={onChange} />);
 
     fireEvent.click(screen.getByText(/Third body line/));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "> Third line, edited." },
-    });
+    setEditorValue("> Third line, edited.");
     fireEvent.blur(screen.getByRole("textbox"));
 
     expect(onChange).toHaveBeenCalledWith(
@@ -804,7 +826,7 @@ After.
 
     fireEvent.click(screen.getByText("Heads up"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> [!warning] Heads up");
+    expect(editorValue()).toBe("> [!warning] Heads up");
   });
 });
 
@@ -823,7 +845,7 @@ describe("callout lines survive being rebuilt (D25a)", () => {
 
     fireEvent.click(screen.getByText("beta"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> **beta**");
+    expect(editorValue()).toBe("> **beta**");
   });
 
   it("keeps the line above it addressable too", () => {
@@ -831,7 +853,7 @@ describe("callout lines survive being rebuilt (D25a)", () => {
 
     fireEvent.click(screen.getByText("alpha"));
 
-    expect(screen.getByRole("textbox")).toHaveValue("> **alpha**");
+    expect(editorValue()).toBe("> **alpha**");
   });
 
   it("writes an element-only line back without touching its neighbour", () => {
@@ -841,9 +863,7 @@ describe("callout lines survive being rebuilt (D25a)", () => {
     );
 
     fireEvent.click(screen.getByText("beta"));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "> **gamma**" },
-    });
+    setEditorValue("> **gamma**");
     fireEvent.blur(screen.getByRole("textbox"));
 
     expect(onChange).toHaveBeenCalledWith(
@@ -878,7 +898,7 @@ describe("multi-line list items are addressed per line (D25a)", () => {
 
     fireEvent.click(screen.getByText(/continues here/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("  continues here");
+    expect(editorValue()).toBe("  continues here");
   });
 
   it("opens the item's first line on its own", () => {
@@ -886,7 +906,7 @@ describe("multi-line list items are addressed per line (D25a)", () => {
 
     fireEvent.click(screen.getByText(/First bullet line/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("- First bullet line");
+    expect(editorValue()).toBe("- First bullet line");
   });
 
   it("writes one line back, leaving the rest of the item alone", () => {
@@ -894,9 +914,7 @@ describe("multi-line list items are addressed per line (D25a)", () => {
     render(<NoteHarness initialContent={WRAPPED} onContentChange={onChange} />);
 
     fireEvent.click(screen.getByText(/continues here/));
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "  continues differently" },
-    });
+    setEditorValue("  continues differently");
     fireEvent.blur(screen.getByRole("textbox"));
 
     expect(onChange).toHaveBeenCalledWith(
@@ -909,7 +927,7 @@ describe("multi-line list items are addressed per line (D25a)", () => {
 
     fireEvent.click(screen.getByText(/Second bullet/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("- Second bullet");
+    expect(editorValue()).toBe("- Second bullet");
   });
 
   // D8: an item's own lines stop where its nested list begins, so splitting
@@ -923,11 +941,11 @@ describe("multi-line list items are addressed per line (D25a)", () => {
     render(<NoteHarness initialContent={NESTED} />);
 
     fireEvent.click(screen.getByText(/parent line two/));
-    expect(screen.getByRole("textbox")).toHaveValue("  parent line two");
+    expect(editorValue()).toBe("  parent line two");
 
     fireEvent.blur(screen.getByRole("textbox"));
     fireEvent.click(screen.getByText("Child item"));
-    expect(screen.getByRole("textbox")).toHaveValue("  - Child item");
+    expect(editorValue()).toBe("  - Child item");
   });
 
   it("addresses each line of a wrapped item in a loose list", () => {
@@ -940,7 +958,7 @@ describe("multi-line list items are addressed per line (D25a)", () => {
 
     fireEvent.click(screen.getByText(/continues here/));
 
-    expect(screen.getByRole("textbox")).toHaveValue("  continues here");
+    expect(editorValue()).toBe("  continues here");
   });
 
   it("still toggles the checkbox of a wrapped task item", () => {

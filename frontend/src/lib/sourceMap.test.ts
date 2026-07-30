@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BLANK_LINE_PLACEHOLDER,
   blockRange,
   detectLineEnding,
   frontmatterLineOffset,
   linesMatch,
+  placeholderForBlankRange,
   replaceLines,
   sliceLines,
 } from "./sourceMap";
@@ -252,5 +254,65 @@ describe("blockRange", () => {
       startLine: 7,
       endLine: 9,
     });
+  });
+});
+
+describe("placeholderForBlankRange", () => {
+  it("substitutes a placeholder so a blank line parses as a block", () => {
+    const out = placeholderForBlankRange("one\n\ntwo", {
+      startLine: 2,
+      endLine: 2,
+    });
+
+    expect(out).toBe(`one\n${BLANK_LINE_PLACEHOLDER}\ntwo`);
+  });
+
+  it("leaves the text alone when the range has content", () => {
+    const content = "one\ntwo\nthree";
+
+    expect(
+      placeholderForBlankRange(content, { startLine: 2, endLine: 2 }),
+    ).toBe(content);
+  });
+
+  it("leaves the text alone when no range is active", () => {
+    const content = "one\n\ntwo";
+
+    expect(placeholderForBlankRange(content, null)).toBe(content);
+  });
+
+  it("treats a whitespace-only line as blank", () => {
+    const out = placeholderForBlankRange("one\n   \ntwo", {
+      startLine: 2,
+      endLine: 2,
+    });
+
+    expect(out).toBe(`one\n${BLANK_LINE_PLACEHOLDER}\ntwo`);
+  });
+
+  it("refuses a multi-line range, which no blank block ever is", () => {
+    const content = "one\n\n\ntwo";
+
+    expect(
+      placeholderForBlankRange(content, { startLine: 2, endLine: 3 }),
+    ).toBe(content);
+  });
+
+  it("preserves the line count, which every block range depends on", () => {
+    const content = "one\n\ntwo";
+    const out = placeholderForBlankRange(content, {
+      startLine: 2,
+      endLine: 2,
+    });
+
+    expect(out.split("\n")).toHaveLength(content.split("\n").length);
+  });
+
+  it("ignores a range outside the document", () => {
+    const content = "one\ntwo";
+
+    expect(
+      placeholderForBlankRange(content, { startLine: 9, endLine: 9 }),
+    ).toBe(content);
   });
 });
