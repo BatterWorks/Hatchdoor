@@ -39,6 +39,18 @@ async function waitForDocumentFonts(): Promise<void> {
   await document.fonts?.ready;
 }
 
+/**
+ * The hairline that carries a callout's kind label to the right edge.
+ *
+ * It states the block's top boundary, which is why a callout needs no top
+ * border. It is an element rather than a `::after` because .editable-block
+ * already owns that pseudo-element for the edit-gutter mark, and the title is
+ * an editable unit.
+ */
+function CalloutLeadRule() {
+  return <span className="callout-lead-rule" aria-hidden="true" />;
+}
+
 export function CalloutOrQuote({
   children,
   node,
@@ -157,7 +169,10 @@ export function CalloutOrQuote({
             className={`callout callout-${kind} callout-collapsible`}
             open={fold === "+"}
           >
-            <summary className="callout-title">{title}</summary>
+            <summary className="callout-title">
+              {title}
+              <CalloutLeadRule />
+            </summary>
             {allBody.length > 0 && (
               <div className="callout-body">{allBody}</div>
             )}
@@ -168,7 +183,10 @@ export function CalloutOrQuote({
       return (
         <div className={`callout callout-${kind}`}>
           <EditableBlock unitType="callout" range={titleRange}>
-            <div className="callout-title">{title}</div>
+            <div className="callout-title">
+              {title}
+              <CalloutLeadRule />
+            </div>
           </EditableBlock>
           {allBody.length > 0 && <div className="callout-body">{allBody}</div>}
         </div>

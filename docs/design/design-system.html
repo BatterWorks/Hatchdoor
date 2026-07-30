@@ -24,14 +24,18 @@
     --hot: #ff4d1c;
     --hot-soft: #ffeae0;
     --warn-bg: #fff6e7;
-    --warn-fg: #7d5b1a;
+    --warn-fg: #755415;
     --warn-border: #f0ddb7;
-    --err-bg: #fdeeee;
-    --err-fg: #8f2f2f;
-    --err-border: #efc7c7;
-    --info-bg: #eef3fa;
-    --info-fg: #3d6f9f;
-    --info-border: #d7e2ee;
+    --err-bg: #faeee7;
+    --err-fg: #903f2b;
+    --err-border: #e8bfaa;
+    --co-info: #465d75;
+    --co-abstract: #5e5b51;
+    --co-tip: #2f6753;
+    --co-success: #4d642c;
+    --co-question: #6a4f73;
+    --co-example: #7b4862;
+    --co-fail: #7f4d30;
     --highlight: #f7ebbf;
     --highlight-active: #f1d779;
     --code-surface: #0c0c0a;
@@ -56,14 +60,18 @@
     --hot: #ff5a2b;
     --hot-soft: #2a1410;
     --warn-bg: #2a2014;
-    --warn-fg: #d9a850;
+    --warn-fg: #c29e63;
     --warn-border: #4a3a1f;
-    --err-bg: #2a1414;
-    --err-fg: #d97070;
-    --err-border: #4a2424;
-    --info-bg: #14202a;
-    --info-fg: #7da3d6;
-    --info-border: #233444;
+    --err-bg: #271410;
+    --err-fg: #e38973;
+    --err-border: #472618;
+    --co-info: #8ea8c2;
+    --co-abstract: #a8a49a;
+    --co-tip: #7ab39c;
+    --co-success: #95af75;
+    --co-question: #b698c0;
+    --co-example: #ca91ac;
+    --co-fail: #ce9677;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
     --code-surface: #1a1a17;
@@ -89,14 +97,18 @@
       --hot: #ff5a2b;
       --hot-soft: #2a1410;
       --warn-bg: #2a2014;
-      --warn-fg: #d9a850;
+      --warn-fg: #c29e63;
       --warn-border: #4a3a1f;
-      --err-bg: #2a1414;
-      --err-fg: #d97070;
-      --err-border: #4a2424;
-      --info-bg: #14202a;
-      --info-fg: #7da3d6;
-      --info-border: #233444;
+      --err-bg: #271410;
+      --err-fg: #e38973;
+      --err-border: #472618;
+      --co-info: #8ea8c2;
+      --co-abstract: #a8a49a;
+      --co-tip: #7ab39c;
+      --co-success: #95af75;
+      --co-question: #b698c0;
+      --co-example: #ca91ac;
+      --co-fail: #ce9677;
       --highlight: #4a3f15;
       --highlight-active: #6b5a1f;
     --code-surface: #1a1a17;
@@ -535,7 +547,6 @@
   }
   .badge.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-fg); }
   .badge.error { background: var(--err-bg); border-color: var(--err-border); color: var(--err-fg); }
-  .badge.info { background: var(--info-bg); border-color: var(--info-border); color: var(--info-fg); }
 
   /* Mobile topbar variant */
   .mobile-topbar {
@@ -1000,37 +1011,67 @@
 
   /* Callouts */
   .callout {
-    border: 1px solid var(--rule-strong);
-    background: var(--paper);
-    padding: 0.9rem 1.1rem 0.9rem 3.1rem;
+    --callout-accent: var(--muted);
+    border: none;
+    border-left: 3px solid var(--callout-accent);
+    background: color-mix(in oklab, var(--callout-accent) 12%, var(--paper));
+    padding: 0;
     margin: 1.6rem 0;
+    color: var(--ink-soft);
+    overflow: hidden;
+  }
+  .callout-title {
+    font-family: var(--font-display);
+    font-variation-settings: "wdth" 88, "wght" 700;
+    font-style: normal;
+    font-size: 0.7rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--callout-accent);
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.8rem 0 0 0.95rem;
+  }
+  .callout-lead-rule {
+    flex: 1;
+    min-width: 1.5rem;
+    height: 1px;
+    background: color-mix(in oklab, var(--callout-accent) 40%, transparent);
+  }
+  .callout-body {
     font-family: var(--font-serif);
     font-style: italic;
     font-size: 1.02rem;
     line-height: 1.55;
-    color: var(--ink-soft);
-    position: relative;
+    padding: 0.4rem 1.1rem 0.85rem 0.95rem;
   }
-  .callout::before {
-    position: absolute;
-    left: 0.9rem; top: 50%;
-    transform: translateY(-50%);
-    width: 1.5rem; height: 1.5rem;
-    display: flex; align-items: center; justify-content: center;
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 75, "wght" 800;
-    font-style: normal;
-    font-size: 1rem;
-    line-height: 1;
-    color: var(--bg);
+  .callout-body > :last-child { margin-bottom: 0; }
+  .callout:not(:has(.callout-body)) .callout-title { padding-bottom: 0.8rem; }
+  .callout-collapsible > .callout-title { cursor: pointer; list-style: none; }
+  .callout-collapsible > .callout-title::-webkit-details-marker { display: none; }
+  .callout-collapsible > .callout-title::before {
+    content: "";
+    flex: none;
+    width: 0.32rem; height: 0.32rem;
+    border-right: 1.5px solid var(--callout-accent);
+    border-bottom: 1.5px solid var(--callout-accent);
+    transform: rotate(-45deg);
+    transition: transform var(--dur) var(--ease);
   }
-  .callout.note::before { content: "i"; background: var(--info-fg); }
-  .callout.warning::before { content: "!"; background: var(--warn-fg); }
-  .callout.danger::before, .callout.error::before { content: "×"; background: var(--err-fg); }
-  .callout.default::before { content: "!"; background: var(--hot); }
-  .callout.note { background: var(--info-bg); border-color: var(--info-border); color: var(--info-fg); }
-  .callout.warning { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-fg); }
-  .callout.danger, .callout.error { background: var(--err-bg); border-color: var(--err-border); color: var(--err-fg); }
+  .callout-collapsible[open] > .callout-title::before { transform: rotate(45deg); }
+  @media (prefers-reduced-motion: reduce) {
+    .callout-collapsible > .callout-title::before { transition: none; }
+  }
+  .callout.note, .callout.info { --callout-accent: var(--co-info); }
+  .callout.abstract { --callout-accent: var(--co-abstract); }
+  .callout.tip { --callout-accent: var(--co-tip); }
+  .callout.success { --callout-accent: var(--co-success); }
+  .callout.question { --callout-accent: var(--co-question); }
+  .callout.example { --callout-accent: var(--co-example); }
+  .callout.warning { --callout-accent: var(--warn-fg); }
+  .callout.danger, .callout.error { --callout-accent: var(--err-fg); }
+  .callout.failure { --callout-accent: var(--co-fail); }
 
   /* Code block */
   .code-block {
@@ -1546,15 +1587,41 @@
         <div class="sw"><div class="sw-chip" style="background:var(--highlight-active)"></div><div class="sw-meta"><div class="n">--highlight-active</div><div class="v">active hit</div></div></div>
       </div>
 
-      <h3 class="doc-sub">Status (warn / error / info)</h3>
+      <h3 class="doc-sub">Status (warn / error)</h3>
+      <p class="blurb">Badge surfaces, for the topbar and inline messages. <code>--warn-fg</code> and <code>--err-fg</code> double as callout accents, so a warning reads the same in the chrome as it does in a note.</p>
       <div class="swatches">
         <div class="sw"><div class="sw-chip" style="background:var(--warn-bg)"></div><div class="sw-meta"><div class="n">--warn-bg</div><div class="v">warning surface</div></div></div>
-        <div class="sw"><div class="sw-chip" style="background:var(--warn-fg)"></div><div class="sw-meta"><div class="n">--warn-fg</div><div class="v">warning text</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--warn-fg)"></div><div class="sw-meta"><div class="n">--warn-fg</div><div class="v">warning text · accent</div></div></div>
         <div class="sw"><div class="sw-chip" style="background:var(--err-bg)"></div><div class="sw-meta"><div class="n">--err-bg</div><div class="v">error surface</div></div></div>
-        <div class="sw"><div class="sw-chip" style="background:var(--err-fg)"></div><div class="sw-meta"><div class="n">--err-fg</div><div class="v">error text</div></div></div>
-        <div class="sw"><div class="sw-chip" style="background:var(--info-bg)"></div><div class="sw-meta"><div class="n">--info-bg</div><div class="v">info surface</div></div></div>
-        <div class="sw"><div class="sw-chip" style="background:var(--info-fg)"></div><div class="sw-meta"><div class="n">--info-fg</div><div class="v">info text</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--err-fg)"></div><div class="sw-meta"><div class="n">--err-fg</div><div class="v">error text · accent</div></div></div>
       </div>
+
+      <h3 class="doc-sub">Callout accents</h3>
+      <p class="blurb">One hue per meaning, not one per kind name. A callout's spine, label, and lead rule are all this colour and its surface tint is mixed from it, so a kind needs a single value and nothing else. Kinds that mean the same thing share an accent; kinds that mean different things never do.</p>
+      <div class="swatches">
+        <div class="sw"><div class="sw-chip" style="background:var(--co-info)"></div><div class="sw-meta"><div class="n">--co-info</div><div class="v">note &middot; info</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--co-abstract)"></div><div class="sw-meta"><div class="n">--co-abstract</div><div class="v">abstract &middot; summary &middot; tldr</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--co-tip)"></div><div class="sw-meta"><div class="n">--co-tip</div><div class="v">tip &middot; hint &middot; important</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--co-success)"></div><div class="sw-meta"><div class="n">--co-success</div><div class="v">success &middot; check &middot; done</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--co-question)"></div><div class="sw-meta"><div class="n">--co-question</div><div class="v">question &middot; help &middot; faq</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--co-example)"></div><div class="sw-meta"><div class="n">--co-example</div><div class="v">example</div></div></div>
+        <div class="sw"><div class="sw-chip" style="background:var(--co-fail)"></div><div class="sw-meta"><div class="n">--co-fail</div><div class="v">failure &middot; missing &middot; bug</div></div></div>
+      </div>
+      <p class="blurb"><b>These are mixed like press inks, not picked as status colours.</b> Forge owns an unusually narrow band: every other chromatic token in this document sits between <b>35&deg; and 95&deg;</b> in OKLCh, running from <span class="key">--hot</span> through ochre to cream. Telling nine kinds apart needs more hue spread than that wedge holds &mdash; hue is the only discriminator that survives at a 0.7rem label &mdash; so the hues falling outside it earn their place by giving up chroma. A pressman's blue on cream is a dusty slate, never a process blue. Hence <span class="key">--co-info</span> at C&nbsp;0.048 against oxblood's 0.115: <b>the further a hue sits from the house wedge, the greyer it has to be.</b> Danger keeps the most chroma and sits on <span class="key">--hot</span>'s own hue, so it stays the loudest thing a note can say.</p>
+      <p class="blurb">All nine share one lightness per theme, so no kind's label outweighs another's. Light values below; dark holds the same hues and the same chroma ranking at L&nbsp;0.720.</p>
+      <table class="kv-table">
+        <tr><th>token</th><th>light</th><th>L</th><th>C</th><th>H</th><th>off wedge</th><th>ceiling</th><th>on tint</th></tr>
+        <tr><td class="name">--err-fg</td><td class="val">#903f2b</td><td class="val">0.471</td><td class="val">0.115</td><td class="val">35&deg;</td><td class="val">&mdash;</td><td class="val">0.115</td><td class="val">5.55:1</td></tr>
+        <tr><td class="name">--warn-fg</td><td class="val">#755415</td><td class="val">0.470</td><td class="val">0.088</td><td class="val">79&deg;</td><td class="val">&mdash;</td><td class="val">0.115</td><td class="val">5.36:1</td></tr>
+        <tr><td class="name">--co-fail</td><td class="val">#7f4d30</td><td class="val">0.471</td><td class="val">0.080</td><td class="val">50&deg;</td><td class="val">&mdash;</td><td class="val">0.115</td><td class="val">5.41:1</td></tr>
+        <tr><td class="name">--co-abstract</td><td class="val">#5e5b51</td><td class="val">0.471</td><td class="val">0.016</td><td class="val">93&deg;</td><td class="val">&mdash;</td><td class="val">0.115</td><td class="val">5.29:1</td></tr>
+        <tr><td class="name">--co-success</td><td class="val">#4d642c</td><td class="val">0.471</td><td class="val">0.086</td><td class="val">128&deg;</td><td class="val">33&deg;</td><td class="val">0.115</td><td class="val">5.15:1</td></tr>
+        <tr><td class="name">--co-example</td><td class="val">#7b4862</td><td class="val">0.470</td><td class="val">0.078</td><td class="val">349&deg;</td><td class="val">46&deg;</td><td class="val">0.090</td><td class="val">5.54:1</td></tr>
+        <tr><td class="name">--co-tip</td><td class="val">#2f6753</td><td class="val">0.470</td><td class="val">0.068</td><td class="val">168&deg;</td><td class="val">73&deg;</td><td class="val">0.075</td><td class="val">5.15:1</td></tr>
+        <tr><td class="name">--co-question</td><td class="val">#6a4f73</td><td class="val">0.470</td><td class="val">0.066</td><td class="val">318&deg;</td><td class="val">77&deg;</td><td class="val">0.075</td><td class="val">5.46:1</td></tr>
+        <tr><td class="name">--co-info</td><td class="val">#465d75</td><td class="val">0.470</td><td class="val">0.048</td><td class="val">250&deg;</td><td class="val">145&deg;</td><td class="val">0.055</td><td class="val">5.29:1</td></tr>
+      </table>
+      <p class="blurb" style="margin-top: 0.9rem;"><b>These rules are enforced, not aspirational.</b> <code>python3 docs/design/palette.py</code> checks all four &mdash; uniform lightness, the chroma ceilings above, 4.5:1 on each tinted surface, and 4.5:1 on the badge surfaces for the two accents that also colour chrome &mdash; and exits non-zero on a violation. Run it after touching any accent. <span class="key">--co-abstract</span> is exempt from the chroma ceiling: it is near-achromatic because a summary is neutral gravity rather than a signal, so its chroma comes from meaning, not from hue distance.</p>
 
       <h3 class="doc-sub">Spacing, motion, fonts</h3>
       <div class="grid-2">
@@ -1652,7 +1719,7 @@
           </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.badge.warn</span><span class="key">.badge.error</span><span class="key">.badge.info</span></div>
+      <div class="tag-row"><span class="key">.badge</span><span class="key">.badge.warn</span><span class="key">.badge.error</span></div>
     </section>
 
     <!-- ───────── TOPBAR MOBILE ───────── -->
@@ -1962,22 +2029,61 @@
     <section class="doc-section" id="callouts">
       <div class="doc-section-num">§13</div>
       <h2>Callouts</h2>
-      <p class="blurb">Four variants. Each shows a tinted surface, matching border, and a colored square marker on the left with a single glyph. Body text is italic serif.</p>
+      <p class="blurb"><b>A marked aside, not a coloured box.</b> Colour appears in three thin places: the spine at the left edge, the kind label, and the hairline lead rule that carries the label to the right edge and closes the top of the block, which is why a callout has no top, right, or bottom border. The surface is tinted 12% from the same accent &mdash; enough that the hue is legible at a glance, far short of a fill that competes with the prose it sits in. Body text is italic serif; body ink stays <code>--ink-soft</code> in every kind, because accent-coloured prose reads as an alert rather than as a note.</p>
+      <p class="blurb">Each kind sets one custom property, <code>--callout-accent</code>, and inherits everything else. An unrecognised kind keeps the neutral <code>--muted</code> mark rather than borrowing <code>--hot</code>, which would make an unknown callout the loudest thing on the page. Tints mix in oklab: it holds the hue on the paper's warm axis in light and lifts it evenly off near-black in dark, where sRGB greys out at these percentages.</p>
       <div class="stage stage-note paper">
-        <div class="callout default">
-          The rule does not survive contact with brambles. Brambles are an exception to every rule, including the rule that there are no exceptions.
-        </div>
         <div class="callout note">
-          For context: this is what we agreed last Tuesday — the espaliered pears are pruned in the week of St Swithin's, not before.
+          <div class="callout-title">For context<span class="callout-lead-rule" aria-hidden="true"></span></div>
+          <div class="callout-body">This is what we agreed last Tuesday &mdash; the espaliered pears are pruned in the week of St Swithin's, not before.</div>
+        </div>
+        <div class="callout tip">
+          <div class="callout-title">Tip<span class="callout-lead-rule" aria-hidden="true"></span></div>
+          <div class="callout-body">Stone fruit first, then the pears, then the apples last of all.</div>
         </div>
         <div class="callout warning">
-          Frost is forecast for the night of 14 May. Cover the cordons with fleece before dusk.
+          <div class="callout-title">Warning<span class="callout-lead-rule" aria-hidden="true"></span></div>
+          <div class="callout-body">Frost is forecast for the night of 14 May. Cover the cordons with fleece before dusk.</div>
         </div>
         <div class="callout danger">
-          Canker observed on Bramley B south leader. Quarantine tools after pruning; do not compost cuttings.
+          <div class="callout-title">Danger<span class="callout-lead-rule" aria-hidden="true"></span></div>
+          <div class="callout-body">Canker observed on Bramley B south leader. Quarantine tools after pruning; do not compost cuttings.</div>
+        </div>
+        <div class="callout">
+          <div class="callout-title">Weirdkind<span class="callout-lead-rule" aria-hidden="true"></span></div>
+          <div class="callout-body">The rule does not survive contact with brambles. Brambles are an exception to every rule, including the rule that there are no exceptions.</div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.callout.default</span><span class="key">.callout.note</span><span class="key">.callout.warning</span><span class="key">.callout.danger</span><span class="key">.callout.error</span></div>
+      <h3 class="doc-sub">Collapsible</h3>
+      <p class="blurb">A trailing <code>+</code> or <code>-</code> on the marker (<code>[!tip]-</code>) makes the callout a <code>&lt;details&gt;</code> with <span class="key">.callout-collapsible</span>, and the title becomes its <code>&lt;summary&gt;</code>; <code>+</code> starts open, <code>-</code> starts closed. Flex layout drops the UA disclosure triangle, so the state is stated by a caret drawn in the accent, which turns on open and holds still under <code>prefers-reduced-motion</code>. Collapsed, a callout is a single labelled rule &mdash; it costs one line until it is wanted.</p>
+      <div class="stage stage-note paper">
+        <details class="callout tip callout-collapsible" open>
+          <summary class="callout-title">Pruning order<span class="callout-lead-rule" aria-hidden="true"></span></summary>
+          <div class="callout-body">Stone fruit first, then the pears, then the apples last of all.</div>
+        </details>
+        <details class="callout question callout-collapsible">
+          <summary class="callout-title">Still undecided<span class="callout-lead-rule" aria-hidden="true"></span></summary>
+          <div class="callout-body">Whether to lift the quince at all this year.</div>
+        </details>
+      </div>
+
+      <h3 class="doc-sub">Markers</h3>
+      <p class="blurb">Every marker the renderer accepts, and the accent it resolves to. Aliases within a row are the same colour by design: they mean the same thing. An unlisted marker is not an error &mdash; it renders as a callout with the neutral <span class="key">--muted</span> mark and its own name as the label.</p>
+      <table class="kv-table">
+        <tr><th>markers</th><th>accent</th><th>reads as</th></tr>
+        <tr><td class="name">note &middot; info</td><td class="val">--co-info</td><td class="val">slate &mdash; for context</td></tr>
+        <tr><td class="name">abstract &middot; summary &middot; tldr</td><td class="val">--co-abstract</td><td class="val">graphite &mdash; the digest</td></tr>
+        <tr><td class="name">tip &middot; hint &middot; important</td><td class="val">--co-tip</td><td class="val">verdigris &mdash; do it this way</td></tr>
+        <tr><td class="name">success &middot; check &middot; done</td><td class="val">--co-success</td><td class="val">olive &mdash; settled</td></tr>
+        <tr><td class="name">question &middot; help &middot; faq</td><td class="val">--co-question</td><td class="val">mulberry &mdash; open</td></tr>
+        <tr><td class="name">example</td><td class="val">--co-example</td><td class="val">plum &mdash; a case in point</td></tr>
+        <tr><td class="name">warning &middot; caution &middot; attention</td><td class="val">--warn-fg</td><td class="val">ochre &mdash; act before</td></tr>
+        <tr><td class="name">danger &middot; error</td><td class="val">--err-fg</td><td class="val">oxblood &mdash; alarm</td></tr>
+        <tr><td class="name">failure &middot; fail &middot; missing &middot; bug</td><td class="val">--co-fail</td><td class="val">rust &mdash; broken or absent</td></tr>
+        <tr><td class="name"><i>anything else</i></td><td class="val">--muted</td><td class="val">neutral mark</td></tr>
+        <tr><td class="name">quote &middot; cite</td><td class="val"><i>n/a</i></td><td class="val">not a callout &mdash; see &sect;12 pullquote</td></tr>
+      </table>
+      <p class="blurb" style="margin-top: 0.9rem;">Two pairs sit close on purpose. <code>danger</code> at 35&deg; and <code>failure</code> at 50&deg; are 15&deg; apart, and <code>warning</code> at 79&deg; is 29&deg; from <code>failure</code> &mdash; these are adjacent in meaning, and a reader who confuses &ldquo;broken&rdquo; with &ldquo;dangerous&rdquo; has lost nothing. Separation was spent where it buys something instead: no two kinds that mean genuinely different things share a hue.</p>
+      <div class="tag-row"><span class="key">.callout</span><span class="key">.callout-title</span><span class="key">.callout-lead-rule</span><span class="key">.callout-body</span><span class="key">.callout-collapsible</span><span class="key">--callout-accent</span></div>
     </section>
 
     <!-- ───────── CODE BLOCK ───────── -->
@@ -2277,16 +2383,16 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
     <section class="doc-section" id="badges">
       <div class="doc-section-num">§24</div>
       <h2>Status badges</h2>
-      <p class="blurb">Pill-shaped (only place radius lives, besides the kbd hint). Used in the topbar for offline / errors and elsewhere for status pills.</p>
+      <p class="blurb">Pill-shaped (only place radius lives, besides the kbd hint). Used in the topbar for offline / errors and elsewhere for status pills. <b>Two tones.</b> This document listed a third, <span class="key">.badge.info</span>, built on an <code>--info-*</code> triple; <code>StatusBadge</code> has only ever accepted <code>warn</code> and <code>error</code>, so the tone and its tokens are gone. A neutral pill is the base <span class="key">.badge</span>, with the ink border. The app is authoritative.</p>
       <div class="stage" style="display:flex; gap: 0.6rem; flex-wrap: wrap;">
         <span class="badge warn">Offline</span>
         <span class="badge warn">Indexing…</span>
         <span class="badge error">Vault error</span>
         <span class="badge error">3 conflicts</span>
-        <span class="badge info">Read-only</span>
-        <span class="badge info">Beta</span>
+        <span class="badge">Read-only</span>
+        <span class="badge">Beta</span>
       </div>
-      <div class="tag-row"><span class="key">.badge.warn</span><span class="key">.badge.error</span><span class="key">.badge.info</span></div>
+      <div class="tag-row"><span class="key">.badge</span><span class="key">.badge.warn</span><span class="key">.badge.error</span></div>
     </section>
 
     <!-- ───────── BUTTONS ───────── -->
