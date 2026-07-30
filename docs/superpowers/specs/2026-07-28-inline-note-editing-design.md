@@ -406,18 +406,44 @@ replaces it, and it is required, not optional.
 The app is a PWA and this is a "publishable UI/UX" milestone, so mobile is in scope, not a
 follow-up.
 
-- **A tap does not enter a block. A long press does.** On coarse pointers, reading is the
+- **A tap does not enter a block. A second tap does.** On coarse pointers, reading is the
   dominant mode and D9's tap-to-place-caret would raise the keyboard on every stray touch,
-  which reads as broken rather than as a limitation. Entry is a long press (with the D30
+  which reads as broken rather than as a limitation. Entry is a double tap (with the D30
   keyboard path unchanged, and the D22 source toggle still available). Tap continues to do
   what it does today: follow links, toggle checkboxes, collapse callouts.
+
+  **Corrected 2026-07-30: this was a long press, and it lost on a real phone.** A 500ms hold on
+  prose races the OS text-selection gesture, since nothing sets `user-select` on the note body,
+  so holding produced selection handles and the copy/lookup bar competing with the block
+  opening. Tested on a phone, it read as broken rather than as deliberate. A double tap makes no
+  contact with that gesture.
+
+  Two consequences. **`touch-action: manipulation` on `.editable-block` is load-bearing**, not
+  polish: the viewport sets no `maximum-scale` or `user-scalable=no`, so without it a double tap
+  zooms the page instead of opening the block. It suppresses double-tap zoom while leaving
+  panning and pinch-zoom intact, so scrolling from a paragraph and zooming for legibility both
+  survive. **The window can be generous** (400ms, 30px) because a single tap on prose has no
+  action to hold hostage while waiting, unlike a normal double-tap handler where the window is a
+  latency budget. Here it buys only forgiveness.
+
+  Only a real touch `pointerdown` arms the two-tap requirement. VoiceOver and TalkBack
+  synthesize a bare click on the focused element with no pointer sequence in front of it, so
+  assistive activation takes the mouse path and enters on one activation rather than needing a
+  gesture a screen-reader user cannot make.
 - The active `BlockInput` scrolls into view above the virtual keyboard on focus.
 - `caretPositionFromPoint` is used on touch identically to mouse once entry has happened; the
   D9 fallback covers engines where it is unreliable.
 - The D10 click exceptions get touch-sized targets so a tap on a checkbox or callout summary
   does not accidentally enter the block.
-- The D36 hover affordance has no touch equivalent, so the long press needs its own discovery
+- The D36 hover affordance has no touch equivalent, so touch entry needs its own discovery
   path. The gutter rule is drawn persistently, at its faint weight, on coarse pointers.
+
+  **Corrected 2026-07-30: the rule alone was not enough**, which is what a real phone showed the
+  moment one was used. This was the one part of D32 that shipped unverified, because the
+  automated browser reports `hover: hover` with `maxTouchPoints 0` and so never ran the rule at
+  all. The failure is not visibility, it is teaching: a hairline says "something is here" and
+  cannot say what gesture reaches it. Superseded by D46, which carries the teaching so the rule
+  can go back to being ambient signal.
 
 ### D33. Search highlighting yields to the active block
 
@@ -858,6 +884,35 @@ An open question with two live consumers. Keeping the rendered output mounted un
 The node is **unmounted**. D33's recount then measures what is visible, which is the behaviour
 it specifies. D24's print artefact stands, and remains not worth code.
 
+### D46. Touch editing is taught once, then never again
+
+D32's gutter rule was the only discovery path on touch, and a hairline cannot communicate a
+gesture. On a coarse pointer in a writable vault, a quiet line reads
+`Double-tap a line to edit it.` It reuses the write notice's shell and its `×` control rather
+than introducing a component, so dismissal is a device already established on this surface.
+
+**The `×` is required, not decoration.** The first cut made the notice silently its own dismiss
+target, which on touch is no affordance at all: `cursor: pointer` is the whole signal and there
+is no cursor. A notice that can be dismissed must look like one. Because this notice appears
+only on a coarse pointer, its `×` is always a finger and takes a 44px target, while the shared
+device keeps its own size for the surfaces where it is also a mouse target.
+
+It is **retired on the first landed edit**, not on the first entry, so an accidental double tap
+does not count as having taught anything. The fact is remembered in `localStorage` under
+`hatchdoor.touchEditHintSeen`, following `hatchdoor.recentNotesCollapsed`.
+
+Once per install rather than once per note or per session. A gesture is learned or it is not, and
+a hint that returns is an admission that it failed. This also matters for the public demo vault,
+where every visitor is a first-time user of a feature that is otherwise invisible.
+
+**Rejected: making the gutter rule louder.** It treats the problem as visibility when the problem
+is teaching. A brighter rule still does not say "double-tap me", and raising it fights D36's
+whole reason for choosing a calm device that reads as content rather than as a control.
+
+**Rejected: an explicit edit toggle on mobile.** The most discoverable option by a distance, and
+it contradicts D3: editing is a decoration on the rendered tree, not a state the page enters.
+Arming a mode to edit is the clunk issue #14 was filed about.
+
 ---
 
 ## Retained surfaces
@@ -971,7 +1026,12 @@ not into the component, so this reduces it rather than growing it.
   the user meant: entering an `h3`, typing lowercase, and committing must write lowercase. Assert
   the committed content string, not the rendered output, which is uppercase either way.
 - **D40**: entering and leaving a table row leaves the header cells' measured widths unchanged.
-- **D32**: a tap on prose with a coarse pointer does not enter a block; a long press does.
+- **D32**: a tap on prose with a coarse pointer does not enter a block; a second tap within the
+  window does. Cover both edges, since they are what separate the gesture from a stray touch: a
+  second tap after the window, and one outside the radius, must both do nothing. A bare click
+  with no pointer event ahead of it must still enter, or screen-reader activation is locked out.
+- **D46**: the hint appears only on a coarse pointer in a writable vault, and does not return
+  after an edit lands.
 
 ---
 

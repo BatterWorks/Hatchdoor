@@ -69,6 +69,17 @@ import {
 } from "./note-page/sections";
 import { useResolvedWikilinks } from "./note-page/wikilinks";
 
+const TOUCH_EDIT_HINT_KEY = "hatchdoor.touchEditHintSeen";
+
+/**
+ * Whether the primary pointer cannot hover, which is what makes the double tap
+ * the entry gesture and the hint worth showing. Guarded because jsdom and older
+ * WebKit do not implement matchMedia.
+ */
+function isCoarsePointer(): boolean {
+  return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+}
+
 export function NotePage({
   onActiveNoteChange,
   onTagSelect,
@@ -112,6 +123,13 @@ export function NotePage({
       return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
     },
   );
+  // Entering a block on touch is a double tap, which is invisible: the gutter
+  // rule signals "something is here" without saying what gesture reaches it.
+  // Shown once per install, on coarse pointers only, and retired as soon as the
+  // gesture has demonstrably been learned.
+  const [touchEditHintSeen, setTouchEditHintSeen] = useState<boolean>(() => {
+    return window.localStorage.getItem(TOUCH_EDIT_HINT_KEY) === "1";
+  });
   const [searchHitCount, setSearchHitCount] = useState(0);
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
@@ -367,10 +385,23 @@ export function NotePage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const history = useMemo(() => createEditHistory(""), [slug]);
 
+  const dismissTouchEditHint = useCallback(() => {
+    setTouchEditHintSeen((seen) => {
+      if (!seen) {
+        window.localStorage.setItem(TOUCH_EDIT_HINT_KEY, "1");
+      }
+      return true;
+    });
+  }, []);
+
   const handleInlineChange = (nextContent: string) => {
     if (!note) {
       return;
     }
+    // An edit landed, so the gesture has been learned and the hint has done its
+    // job. Retiring it here rather than on entry means an accidental double tap
+    // does not count as having taught anything.
+    dismissTouchEditHint();
     history.record(nextContent, Date.now());
     // Moving between units always ends a run, so undo steps line up with
     // blocks rather than with arbitrary pauses.
@@ -816,6 +847,25 @@ export function NotePage({
             This note&rsquo;s source and rendered lines don&rsquo;t line up, so
             inline editing is off here. Use Edit to open source mode.
           </p>
+        ) : null}
+        {inlineEditingEnabled && !touchEditHintSeen && isCoarsePointer() ? (
+          // The same shell the write notice uses, so the × is a device already
+          // established here. A notice that is silently its own dismiss target
+          // has no affordance at all on touch, where there is no cursor to
+          // change.
+          <div className="write-notice touch-edit-hint" role="status">
+            <div className="write-notice-messages">
+              Double-tap a line to edit it.
+            </div>
+            <button
+              type="button"
+              className="write-notice-dismiss"
+              aria-label="Dismiss hint"
+              onClick={dismissTouchEditHint}
+            >
+              ×
+            </button>
+          </div>
         ) : null}
         {searchHitCount > 0 ? (
           <SearchHitNavigator
