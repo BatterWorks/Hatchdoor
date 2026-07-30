@@ -663,10 +663,21 @@
   margin: 1.6rem 0;
 }
 
-/* Callouts */
+/* Callouts — a marked aside, not a coloured box.
+   Colour appears in three thin places: the spine at the left edge, the kind
+   label, and the hairline lead rule that carries the label to the right edge.
+   The surface is tinted 12% from the same accent: enough that the hue is
+   legible at a glance, far short of a fill that competes with the prose.
+   Mixing in oklab keeps the tint on the paper's warm axis in light and lifts
+   it evenly off near-black in dark; sRGB greys it out at these percentages. */
 .callout {
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
+  /* Every kind sets only this. An unrecognised kind keeps the neutral mark
+     rather than borrowing the brand accent, which would make an unknown
+     callout the loudest thing on the page. */
+  --callout-accent: var(--muted);
+  border: none;
+  border-left: 3px solid var(--callout-accent);
+  background: color-mix(in oklab, var(--callout-accent) 12%, var(--paper));
   padding: 0;
   margin: 1.6rem 0;
   color: var(--ink-soft);
@@ -679,23 +690,70 @@
     "wdth" 88,
     "wght" 700;
   font-style: normal;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  display: block;
-  padding: 0.45rem 1.1rem;
-  color: var(--ink-soft);
-  border-bottom: 1px solid var(--rule-strong);
+  color: var(--callout-accent);
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  /* No right padding: the lead rule runs to the edge, where it meets the
+     spine's corner and closes the top of the block. */
+  padding: 0.8rem 0 0 0.95rem;
+}
+
+/* The lead rule ends the label and states the block's top edge, which is why
+   the callout needs no top border of its own. */
+.callout-lead-rule {
+  flex: 1;
+  /* A long custom title takes the rule's space before it wraps, which would
+     leave the block with no top edge at all. The floor keeps a stub. */
+  min-width: 1.5rem;
+  height: 1px;
+  background: color-mix(in oklab, var(--callout-accent) 40%, transparent);
+}
+
+/* A title with nothing under it still has to sit off the bottom edge. */
+.callout:not(:has(.callout-body)) .callout-title {
+  padding-bottom: 0.8rem;
+}
+
+/* The body's own padding separates the last line from the bottom edge, so the
+   trailing paragraph margin would only add dead space inside the block. */
+.callout-body > :last-child {
+  margin-bottom: 0;
 }
 
 .callout-collapsible > .callout-title {
   cursor: pointer;
   list-style: none;
-  display: list-item;
 }
 
 .callout-collapsible > .callout-title::-webkit-details-marker {
   display: none;
+}
+
+/* Flex layout drops the disclosure marker, so the collapsed state is stated
+   by a caret that turns with the accent rather than by the UA triangle. */
+.callout-collapsible > .callout-title::before {
+  content: "";
+  flex: none;
+  width: 0.32rem;
+  height: 0.32rem;
+  border-right: 1.5px solid var(--callout-accent);
+  border-bottom: 1.5px solid var(--callout-accent);
+  transform: rotate(-45deg);
+  transition: transform var(--dur) var(--ease);
+}
+
+.callout-collapsible[open] > .callout-title::before {
+  transform: rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .callout-collapsible > .callout-title::before {
+    transition: none;
+  }
 }
 
 .callout-body {
@@ -703,7 +761,7 @@
   font-style: italic;
   font-size: 1.02rem;
   line-height: 1.55;
-  padding: 0.9rem 1.1rem;
+  padding: 0.4rem 1.1rem 0.85rem 0.95rem;
 }
 
 /* D25a: a callout body is addressed one source line at a time, so each line is
@@ -717,162 +775,58 @@
   margin-bottom: 0;
 }
 
-.callout-warning {
-  background: var(--warn-bg);
-  border-color: var(--warn-border);
-  color: var(--warn-fg);
-}
-
-.callout-warning .callout-title {
-  background: var(--warn-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-danger,
-.callout-error {
-  background: var(--err-bg);
-  border-color: var(--err-border);
-  color: var(--err-fg);
-}
-
-.callout-danger .callout-title,
-.callout-error .callout-title {
-  background: var(--err-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
 .callout-note,
 .callout-info {
-  background: var(--info-bg);
-  border-color: var(--info-border);
-  color: var(--info-fg);
-}
-
-.callout-note .callout-title,
-.callout-info .callout-title {
-  background: var(--info-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-tip,
-.callout-hint,
-.callout-important {
-  background: var(--tip-bg);
-  border-color: var(--tip-border);
-  color: var(--tip-fg);
-}
-
-.callout-tip .callout-title,
-.callout-hint .callout-title,
-.callout-important .callout-title {
-  background: var(--tip-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-success,
-.callout-check,
-.callout-done {
-  background: var(--success-bg);
-  border-color: var(--success-border);
-  color: var(--success-fg);
-}
-
-.callout-success .callout-title,
-.callout-check .callout-title,
-.callout-done .callout-title {
-  background: var(--success-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-question,
-.callout-help,
-.callout-faq {
-  background: var(--question-bg);
-  border-color: var(--question-border);
-  color: var(--question-fg);
-}
-
-.callout-question .callout-title,
-.callout-help .callout-title,
-.callout-faq .callout-title {
-  background: var(--question-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+  --callout-accent: var(--co-info);
 }
 
 .callout-abstract,
 .callout-summary,
 .callout-tldr {
-  background: var(--abstract-bg);
-  border-color: var(--abstract-border);
-  color: var(--abstract-fg);
+  --callout-accent: var(--co-abstract);
 }
 
-.callout-abstract .callout-title,
-.callout-summary .callout-title,
-.callout-tldr .callout-title {
-  background: var(--abstract-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.callout-tip,
+.callout-hint,
+.callout-important {
+  --callout-accent: var(--co-tip);
 }
 
-.callout-caution,
-.callout-attention {
-  background: var(--warn-bg);
-  border-color: var(--warn-border);
-  color: var(--warn-fg);
+.callout-success,
+.callout-check,
+.callout-done {
+  --callout-accent: var(--co-success);
 }
 
-.callout-caution .callout-title,
-.callout-attention .callout-title {
-  background: var(--warn-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-failure,
-.callout-fail,
-.callout-missing {
-  background: var(--failure-bg);
-  border-color: var(--failure-border);
-  color: var(--failure-fg);
-}
-
-.callout-failure .callout-title,
-.callout-fail .callout-title,
-.callout-missing .callout-title {
-  background: var(--failure-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-bug {
-  background: var(--err-bg);
-  border-color: var(--err-border);
-  color: var(--err-fg);
-}
-
-.callout-bug .callout-title {
-  background: var(--err-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.callout-question,
+.callout-help,
+.callout-faq {
+  --callout-accent: var(--co-question);
 }
 
 .callout-example {
-  background: var(--example-bg);
-  border-color: var(--example-border);
-  color: var(--example-fg);
+  --callout-accent: var(--co-example);
 }
 
-.callout-example .callout-title {
-  background: var(--example-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.callout-warning,
+.callout-caution,
+.callout-attention {
+  --callout-accent: var(--warn-fg);
+}
+
+/* Alarm. The only kinds that get the reddest accent, so it still means
+   something when one appears. */
+.callout-danger,
+.callout-error {
+  --callout-accent: var(--err-fg);
+}
+
+/* Something is broken or absent, which is not the same as dangerous. */
+.callout-failure,
+.callout-fail,
+.callout-missing,
+.callout-bug {
+  --callout-accent: var(--co-fail);
 }
 
 /* Pull-quote (rendered from [!quote] and [!cite] callouts) */
