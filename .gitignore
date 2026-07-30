@@ -27,3 +27,6 @@ __pycache__/
 
 # Eval query-set design handbook (names hosts, people, IPs — keep local only)
 docs/superpowers/specs/2026-07-25-eval-query-set-design.md
+
+# just dev-server PID files and logs
+/.dev/

@@ -1,5 +1,13 @@
 # Agent Instructions
 
+## Running dev servers
+
+Use `just dev-start` / `just dev-stop` (see `justfile`) instead of backgrounding
+raw `cargo run` / `npm run dev` calls. Those get orphaned across sessions and
+duplicate build-cache directories accumulate when `CARGO_TARGET_DIR` isn't set
+in the invoking shell - `just dev-start` handles both. `just dev-status` shows
+what's currently running before you start another copy.
+
 ## CodeGraph
 
 When a `.codegraph/` directory exists at the repository root, reach for
