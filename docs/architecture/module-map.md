@@ -754,9 +754,11 @@ a guessed line.
 - `frontend/src/lib/sourceMap.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
+- `frontend/src/components/note-page/BlockGap.tsx`
 - `frontend/src/components/note-page/BlockInput.tsx`
 - `frontend/src/components/note-page/EditableBlock.tsx`
 - `frontend/src/components/note-page/InlineEditorProvider.tsx`
+- `frontend/src/components/note-page/blockEditorSetup.ts`
 - `frontend/src/components/note-page/SaveState.tsx`
 - `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
@@ -768,9 +770,11 @@ a guessed line.
 components, note-action/write-mode hooks, local draft behavior, client path
 validation, upload normalization, frontmatter editing, conflict display,
 wikilink autocomplete, inline block editing (the editor provider/context, the
-per-block wrapper and input, structural block operations, document-level undo,
-autosave scheduling and save state), line mapping between rendered nodes and
-file lines, and attachment acceptance and insertion.
+per-block wrapper, the CodeMirror block input and its markdown syntax
+highlighting, click-to-write in the space between blocks, structural block
+operations, document-level undo, autosave scheduling and save state), line
+mapping between rendered nodes and file lines, and attachment acceptance and
+insertion.
 
 **Consumed dependencies:** shared API/types/UI, router navigation, vault tree
 note candidates, and backend HTTP write endpoints.

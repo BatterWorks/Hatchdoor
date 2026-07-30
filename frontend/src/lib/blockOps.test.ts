@@ -5,6 +5,8 @@ import {
   mergeBlockUp,
   outdentListItem,
   splitBlock,
+  exitEmptyListItem,
+  insertParagraphAt,
   toggleCheckbox,
 } from "./blockOps";
 
@@ -256,5 +258,121 @@ describe("splitBlock caret range", () => {
 
     expect(out.caretLine).toBe(3);
     expect(out.caretEndLine).toBe(3);
+  });
+});
+
+describe("exitEmptyListItem", () => {
+  it("lifts a nested empty item one level instead of leaving the list", () => {
+    const out = exitEmptyListItem("- one\n  - ", r(2));
+
+    expect(out).toEqual({
+      content: "- one\n- ",
+      caretLine: 2,
+      caretEndLine: 2,
+      caretOffset: 2,
+    });
+  });
+
+  it("turns a top-level empty item into a paragraph below the list", () => {
+    // Two blank lines, not one: the first ends the list, the second is where
+    // the caret lands. One line would leave the caret on a lazy continuation
+    // of the item above.
+    const out = exitEmptyListItem("- one\n- ", r(2));
+
+    expect(out).toEqual({
+      content: "- one\n\n",
+      caretLine: 3,
+      caretEndLine: 3,
+      caretOffset: 0,
+    });
+  });
+
+  it("ends an empty task item the same way", () => {
+    expect(exitEmptyListItem("- [ ] done\n- [ ] ", r(2))?.content).toBe(
+      "- [ ] done\n\n",
+    );
+  });
+
+  it("outdents a deeply nested empty item one level at a time", () => {
+    expect(exitEmptyListItem("- a\n  - b\n    - ", r(3))?.content).toBe(
+      "- a\n  - b\n  - ",
+    );
+  });
+
+  it("refuses an item that still has text, which Enter should split", () => {
+    expect(exitEmptyListItem("- one\n- two", r(2))).toBeNull();
+  });
+
+  it("refuses a line that is not a list item at all", () => {
+    expect(exitEmptyListItem("a paragraph", r(1))).toBeNull();
+  });
+
+  it("treats trailing whitespace after the marker as empty", () => {
+    expect(exitEmptyListItem("- one\n-   ", r(2))?.content).toBe("- one\n\n");
+  });
+
+  it("ends an empty ordered item without renumbering the list", () => {
+    expect(exitEmptyListItem("1. one\n1. ", r(2))?.content).toBe("1. one\n\n");
+  });
+
+  it("leaves the lines around it untouched", () => {
+    const out = exitEmptyListItem("intro\n\n- one\n- \n\nafter", r(4));
+
+    expect(out?.content).toBe("intro\n\n- one\n\n\n\nafter");
+    expect(out?.caretLine).toBe(5);
+  });
+
+  it("refuses a multi-line range, which an empty item never is", () => {
+    expect(
+      exitEmptyListItem("- one\n- ", { startLine: 1, endLine: 2 }),
+    ).toBeNull();
+  });
+});
+
+describe("insertParagraphAt", () => {
+  it("opens a line in the gap between two paragraphs", () => {
+    // one / blank / caret / blank / two: the gap's existing blank line becomes
+    // the separator below, so only the one above has to be added.
+    const out = insertParagraphAt("one\n\ntwo", 1);
+
+    expect(out.content).toBe("one\n\n\n\ntwo");
+    expect(out.caretLine).toBe(3);
+    expect(out.caretOffset).toBe(0);
+  });
+
+  it("appends below the last block", () => {
+    const out = insertParagraphAt("one", 1);
+
+    expect(out.content).toBe("one\n\n");
+    expect(out.caretLine).toBe(3);
+  });
+
+  it("opens a line above the first block", () => {
+    const out = insertParagraphAt("one", 0);
+
+    expect(out.content).toBe("\n\none");
+    expect(out.caretLine).toBe(1);
+  });
+
+  it("does not pad where a blank line already separates", () => {
+    const out = insertParagraphAt("one\n\n\ntwo", 2);
+
+    expect(out.content).toBe("one\n\n\n\ntwo");
+    expect(out.caretLine).toBe(3);
+  });
+
+  it("keeps the new line clear of a list above it", () => {
+    // Without the padding the typed text becomes a lazy continuation of the
+    // item and silently rejoins the bullet.
+    const out = insertParagraphAt("- one\n- two", 2);
+
+    expect(out.content).toBe("- one\n- two\n\n");
+    expect(out.caretLine).toBe(4);
+  });
+
+  it("preserves CRLF line endings", () => {
+    expect(insertParagraphAt("one\r\n\r\ntwo", 1).content).toBe(
+      "one\r\n\r\n\r\n\r\ntwo",
+    );
   });
 });

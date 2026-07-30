@@ -10,7 +10,9 @@ import {
 import { replaceLines, sliceLines, type LineRange } from "../../lib/sourceMap";
 import {
   toggleCheckbox,
+  exitEmptyListItem,
   indentListItem,
+  insertParagraphAt,
   mergeBlockUp,
   outdentListItem,
   splitBlock,
@@ -121,7 +123,12 @@ export function InlineEditorProvider({
 
   const splitAt = useCallback(
     (range: LineRange, caret: number) => {
-      const result = splitBlock(latestRef.current, range, caret);
+      // Enter on an empty bullet leaves the list rather than adding another
+      // one. Tried first because it is the narrower case: it declines anything
+      // that still has text, and a split is what everything else wants.
+      const result =
+        exitEmptyListItem(latestRef.current, range) ??
+        splitBlock(latestRef.current, range, caret);
       setActiveRange({
         startLine: result.caretLine,
         endLine: result.caretLine,
@@ -217,6 +224,25 @@ export function InlineEditorProvider({
     [],
   );
 
+  const insertParagraph = useCallback(
+    (afterLine: number) => {
+      // Same reason enterBlock refuses: against a stale tree the line the
+      // click was resolved to points at whatever happens to be there now.
+      if (!writeEnabled || settlingRef.current) {
+        return;
+      }
+      const result = insertParagraphAt(latestRef.current, afterLine);
+      latestRef.current = result.content;
+      setActiveRange({
+        startLine: result.caretLine,
+        endLine: result.caretEndLine,
+      });
+      setActiveCaret(result.caretOffset);
+      onChange(result.content);
+    },
+    [onChange, writeEnabled],
+  );
+
   const toggleTask = useCallback(
     (line: number) => {
       // Same reason enterBlock refuses: against a stale tree this line number
@@ -284,6 +310,7 @@ export function InlineEditorProvider({
       indent,
       outdent,
       moveTo,
+      insertParagraph,
       toggleTask,
     }),
     [
@@ -302,6 +329,7 @@ export function InlineEditorProvider({
       indent,
       outdent,
       moveTo,
+      insertParagraph,
       toggleTask,
     ],
   );

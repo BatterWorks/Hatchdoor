@@ -144,6 +144,112 @@ export function mergeBlockUp(
   };
 }
 
+/**
+ * Enter on an item with nothing in it leaves the list, the way a word
+ * processor does, instead of adding another empty bullet the user then has to
+ * delete.
+ *
+ * It steps out one level at a time: a nested item lifts to its parent's level
+ * and only a top-level one becomes a plain line. That makes Enter the way back
+ * out of a deep list, matching what Shift-Tab does a level at a time.
+ *
+ * Returns null when this is not an empty item, which is the caller's signal to
+ * split normally.
+ */
+export function exitEmptyListItem(
+  content: string,
+  range: LineRange,
+): BlockOpResult | null {
+  // An empty item is one line by construction. A wider range means the block
+  // holds continuation lines, so there is something here to split.
+  if (range.startLine !== range.endLine) {
+    return null;
+  }
+
+  const lines = splitLines(content);
+  const line = lines[range.startLine - 1];
+  if (line === undefined) {
+    return null;
+  }
+
+  const marker = LIST_MARKER.exec(line);
+  if (!marker || line.slice(marker[0].length).trim() !== "") {
+    return null;
+  }
+
+  const [, indent] = marker;
+  if (indent.length >= 2) {
+    // Lift one level, keeping the marker so the user carries on typing in the
+    // list they are still in.
+    // Sliced, not trimmed: the space after the marker is where the caret goes,
+    // and trimming it would put the caret tight against the bullet.
+    const lifted = line.slice(2);
+    lines[range.startLine - 1] = lifted;
+    return {
+      content: join(lines, content),
+      caretLine: range.startLine,
+      caretEndLine: range.startLine,
+      caretOffset: lifted.length,
+    };
+  }
+
+  // Out of the list entirely, which takes two lines rather than one. The first
+  // blank line is what ends the list; the caret goes on the second. Landing on
+  // the first instead would put the caret on a line markdown reads as a lazy
+  // continuation of the item above, so the "paragraph" the user then typed
+  // would silently rejoin the bullet they just left.
+  const next = [
+    ...lines.slice(0, range.startLine - 1),
+    "",
+    "",
+    ...lines.slice(range.startLine),
+  ];
+  return {
+    content: join(next, content),
+    caretLine: range.startLine + 1,
+    caretEndLine: range.startLine + 1,
+    caretOffset: 0,
+  };
+}
+
+/**
+ * Open an empty line after `afterLine`, for a click that landed between two
+ * blocks rather than on one.
+ *
+ * The new line is padded clear of its neighbours, because an unpadded line
+ * next to a paragraph or a list item is read as a continuation of it: what the
+ * user typed would join the block above instead of becoming its own. Padding
+ * is skipped where a blank line already does that job.
+ *
+ * `afterLine` is 1-indexed and may be 0, which opens a line above everything.
+ */
+export function insertParagraphAt(
+  content: string,
+  afterLine: number,
+): BlockOpResult {
+  const lines = splitLines(content);
+  const at = Math.max(0, Math.min(afterLine, lines.length));
+
+  const padBefore = at > 0 && lines[at - 1].trim() !== "";
+  const padAfter = at < lines.length && lines[at].trim() !== "";
+
+  const next = [
+    ...lines.slice(0, at),
+    ...(padBefore ? [""] : []),
+    "",
+    ...(padAfter ? [""] : []),
+    ...lines.slice(at),
+  ];
+  const caretLine = at + (padBefore ? 1 : 0) + 1;
+
+  return {
+    content: join(next, content),
+    caretLine,
+    caretEndLine: caretLine,
+    caretOffset: 0,
+  };
+}
+
 /** Nest a list item one level deeper. Null when that is not meaningful. */
 export function indentListItem(
   content: string,

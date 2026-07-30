@@ -9,6 +9,8 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { EditorView } from "@codemirror/view";
+
 import { VaultApp as App } from "./App";
 import { noteDraftKey } from "./lib/writeDrafts";
 
@@ -925,7 +927,12 @@ describe("touch editing hint", () => {
       fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
     }
     const input = await screen.findByRole("textbox");
-    fireEvent.change(input, { target: { value: "Edited" } });
+    // The open block is a CodeMirror editor, so its text is editor state
+    // rather than a DOM value.
+    const view = EditorView.findFromDOM(input as HTMLElement)!;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: "Edited" },
+    });
     fireEvent.blur(input);
 
     await waitFor(() => {

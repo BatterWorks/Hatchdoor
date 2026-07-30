@@ -403,6 +403,22 @@
 
 .note-body ol {
   counter-reset: olc;
+  /* Ordered markers are words, not a single glyph, so they need more room than
+     a bullet's dash. Set as the shared inset rather than a separate token, so
+     the padding and the D36 gutter-rule correction both follow it. */
+  --li-inset: 1.9rem;
+}
+
+/* Roman numerals are the widest markers the list ever draws: "viii." is three
+   times the width of "1.". */
+.note-body ol ol ol {
+  --li-inset: 2.7rem;
+}
+
+/* A bullet nested inside an ordered list is still a bullet, and needs only a
+   dash's worth of room. */
+.note-body ol ul {
+  --li-inset: 1.4rem;
 }
 
 /* Use > so only direct ol children get the counter — prevents ul sub-items
@@ -416,6 +432,17 @@
   position: absolute;
   left: 0;
   top: 0;
+  /* Right-aligned in a box that stops short of the text. Two things follow
+     from this: the periods line up down the list however wide the numbers
+     get, and a marker too long for its box grows leftwards into the margin
+     instead of colliding with the words. */
+  width: calc(var(--li-inset) - 0.5rem);
+  text-align: right;
+  /* The marker's line box has to match the item's, or its baseline rides high:
+     it is set in a smaller font, and a line box that is 4px shorter than the
+     text's puts the number visibly above the words it numbers. 1.02rem/1.55
+     are the list's own font size and line height. */
+  line-height: calc(1.02rem * 1.55);
   font-family: var(--font-mono);
   font-size: 0.86rem;
   color: var(--hot);
@@ -442,6 +469,9 @@
   font-size: unset;
   color: unset;
   font-weight: unset;
+  /* Reset the ordered marker's text box: this one is a drawn rule, not type. */
+  text-align: unset;
+  line-height: unset;
 }
 
 .note-body ol ul ul > li::before {
@@ -1128,13 +1158,10 @@
   opacity: 1;
 }
 
-/* Touch has no hover, so the rule is the only discovery path for the long
-   press that enters a block. It stays drawn. */
-@media (hover: none) {
-  .note-body .editable-block::after {
-    opacity: 0.3;
-  }
-}
+/* Touch gets no resting rule. A phone is where reading dominates, and a mark
+   beside every block reads as clutter on a narrow column rather than as an
+   affordance. The rule still appears on the block being edited, which is the
+   only moment it carries information. */
 
 @media (prefers-reduced-motion: reduce) {
   .note-body .editable-block::after {
@@ -1151,13 +1178,17 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  resize: none;
-  overflow: hidden;
   outline: none;
+  /* Visible, because the editor inside is pulled left by the width of the
+     line's markdown prefix so the prose stays put when a block is entered.
+     That overhang is the `- ` or `1.` itself: clipping it hides the one thing
+     telling the writer they are still in a list. The editor does its own
+     scrolling, so nothing here needs to. */
+  overflow: visible;
 
   /* Metrics are inherited from the block being replaced. Transforms are not:
      h1, h3, h6, callout titles and table headers all uppercase their text, and
-     a textarea that inherited that would show the typist a different string
+     an editor that inherited that would show the typist a different string
      than the one being written to the file. */
   font: inherit;
   color: inherit;
@@ -1194,6 +1225,15 @@
    bullet where it is. */
 .note-body li:has(> .li-line:first-child.is-active)::before {
   display: none;
+}
+
+/* The click target for the space between blocks. It reaches past the last one
+   so the run-out at the end of a note is clickable too, which is where writing
+   usually continues. 8rem rather than the full pane height: enough to land in
+   without turning a click well below a short note into an edit. */
+.note-body .block-gap {
+  padding-bottom: 8rem;
+  cursor: text;
 }
 
 .note-inline-actions {
