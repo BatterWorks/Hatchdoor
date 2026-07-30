@@ -332,9 +332,20 @@
 
 .note-body ul li,
 .note-body ol li {
-  padding-left: 1.4rem;
+  /* A token because the D36 gutter rule for a per-line block (D25a) has to be
+     pulled back out of this inset to line up with a whole item's rule. */
+  padding-left: var(--li-inset);
   margin-bottom: 0.4rem;
   position: relative;
+}
+
+/* D25a: a wrapped list item is addressed one source line at a time, so each
+   line is its own element. They are lines of one item, not separate blocks, so
+   consecutive lines sit on their own baselines with no gap. The last line keeps
+   whatever margin its element carries, which is what separates the item from a
+   nested list or a paragraph below it. */
+.note-body .li-line:has(+ .li-line) {
+  margin-bottom: 0;
 }
 
 .note-body li > ul,
@@ -663,6 +674,17 @@
   font-size: 1.02rem;
   line-height: 1.55;
   padding: 0.9rem 1.1rem;
+}
+
+/* D25a: a callout body is addressed one source line at a time, so each line is
+   its own paragraph element. They are lines of one run of prose, not separate
+   paragraphs, so consecutive lines sit on their own baselines with no gap. The
+   last line keeps the paragraph margin, which is what separates the run from a
+   real paragraph below it. */
+/* Not scoped to .callout-body: a `> [!quote]` renders as a pullquote figure and
+   its lines are split the same way. */
+.note-body .callout-line:has(+ .callout-line) {
+  margin-bottom: 0;
 }
 
 .callout-warning {
@@ -1067,6 +1089,8 @@
    and 16px on a phone, so the offset is a token rather than a constant. */
 :root {
   --edit-gutter: 0.75rem;
+  /* The bullet inset on .note-body li. */
+  --li-inset: 1.4rem;
 }
 
 .note-body .editable-block {
@@ -1145,6 +1169,24 @@
    the drawn marker it replaces are different widths. */
 
 .note-body li.is-active::before {
+  display: none;
+}
+
+/* A wrapped item's lines sit inside the li's bullet inset (D25a), so their
+   gutter rule has to be pulled back out of it to land in the same column as a
+   whole item's. A task item has no inset, so it needs no correction. */
+.note-body .li-line::after {
+  left: calc((var(--edit-gutter) + var(--li-inset)) * -1);
+}
+
+.note-body li.task-list-item .li-line::after {
+  left: calc(var(--edit-gutter) * -1);
+}
+
+/* Only an item's first line reveals the `- ` or `1.` marker, so only that line
+   replaces the drawn one. A continuation line reveals its indent and leaves the
+   bullet where it is. */
+.note-body li:has(> .li-line:first-child.is-active)::before {
   display: none;
 }
 

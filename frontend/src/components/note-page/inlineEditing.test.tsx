@@ -733,3 +733,205 @@ describe("in-progress text is not stranded", () => {
     expect(onEdit).toHaveBeenCalledWith("hello th\n");
   });
 });
+
+describe("callouts are addressed per line (D25a)", () => {
+  const CALLOUT = `> [!warning] Heads up
+> First body line.
+> Second body line.
+> Third body line.
+
+After.
+`;
+
+  it("opens only the clicked body line, not the whole run", () => {
+    render(<NoteHarness initialContent={CALLOUT} />);
+
+    fireEvent.click(screen.getByText(/Second body line/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> Second body line.");
+  });
+
+  it("opens the first body line on its own", () => {
+    render(<NoteHarness initialContent={CALLOUT} />);
+
+    fireEvent.click(screen.getByText(/First body line/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> First body line.");
+  });
+
+  it("writes one line back, leaving the rest of the callout alone", () => {
+    const onChange = vi.fn();
+    render(<NoteHarness initialContent={CALLOUT} onContentChange={onChange} />);
+
+    fireEvent.click(screen.getByText(/Third body line/));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "> Third line, edited." },
+    });
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      "> [!warning] Heads up\n> First body line.\n> Second body line.\n> Third line, edited.\n\nAfter.\n",
+    );
+  });
+
+  it("still opens the title line on its own", () => {
+    render(<NoteHarness initialContent={CALLOUT} />);
+
+    fireEvent.click(screen.getByText("Heads up"));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> [!warning] Heads up");
+  });
+});
+
+describe("callout lines survive being rebuilt (D25a)", () => {
+  // A line whose content is a single element leaves the soft break as a
+  // string child of its own. Treating that break as stray whitespace merges
+  // two source lines into one block, so the second becomes unreachable and
+  // committing the first writes the merged text over one line.
+  const ELEMENT_LINES = `> [!note] Emphasis
+> **alpha**
+> **beta**
+`;
+
+  it("addresses a line whose whole content is one element", () => {
+    render(<NoteHarness initialContent={ELEMENT_LINES} />);
+
+    fireEvent.click(screen.getByText("beta"));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> **beta**");
+  });
+
+  it("keeps the line above it addressable too", () => {
+    render(<NoteHarness initialContent={ELEMENT_LINES} />);
+
+    fireEvent.click(screen.getByText("alpha"));
+
+    expect(screen.getByRole("textbox")).toHaveValue("> **alpha**");
+  });
+
+  it("writes an element-only line back without touching its neighbour", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness initialContent={ELEMENT_LINES} onContentChange={onChange} />,
+    );
+
+    fireEvent.click(screen.getByText("beta"));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "> **gamma**" },
+    });
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      "> [!note] Emphasis\n> **alpha**\n> **gamma**\n",
+    );
+  });
+
+  // A link keeps its own click behaviour, so this line is checked by the range
+  // it claims rather than by entering it.
+  it("gives a line that is only a link its own range", () => {
+    render(
+      <NoteHarness
+        initialContent={"> [!note] Links\n> plain line\n> [text](x.md)\n"}
+      />,
+    );
+
+    const line = screen.getByText("text").closest(".editable-block");
+
+    expect(line).toHaveAttribute("data-start-line", "3");
+    expect(line).toHaveAttribute("data-end-line", "3");
+  });
+});
+
+describe("multi-line list items are addressed per line (D25a)", () => {
+  const WRAPPED = `- First bullet line
+  continues here
+- Second bullet
+`;
+
+  it("opens only the continuation line, not the whole item", () => {
+    render(<NoteHarness initialContent={WRAPPED} />);
+
+    fireEvent.click(screen.getByText(/continues here/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("  continues here");
+  });
+
+  it("opens the item's first line on its own", () => {
+    render(<NoteHarness initialContent={WRAPPED} />);
+
+    fireEvent.click(screen.getByText(/First bullet line/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("- First bullet line");
+  });
+
+  it("writes one line back, leaving the rest of the item alone", () => {
+    const onChange = vi.fn();
+    render(<NoteHarness initialContent={WRAPPED} onContentChange={onChange} />);
+
+    fireEvent.click(screen.getByText(/continues here/));
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "  continues differently" },
+    });
+    fireEvent.blur(screen.getByRole("textbox"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      "- First bullet line\n  continues differently\n- Second bullet\n",
+    );
+  });
+
+  it("still opens a single-line item whole", () => {
+    render(<NoteHarness initialContent={WRAPPED} />);
+
+    fireEvent.click(screen.getByText(/Second bullet/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("- Second bullet");
+  });
+
+  // D8: an item's own lines stop where its nested list begins, so splitting
+  // must not reach into the sublist.
+  it("does not take lines from a nested sublist", () => {
+    const NESTED = `- Parent line one
+  parent line two
+  - Child item
+- Sibling
+`;
+    render(<NoteHarness initialContent={NESTED} />);
+
+    fireEvent.click(screen.getByText(/parent line two/));
+    expect(screen.getByRole("textbox")).toHaveValue("  parent line two");
+
+    fireEvent.blur(screen.getByRole("textbox"));
+    fireEvent.click(screen.getByText("Child item"));
+    expect(screen.getByRole("textbox")).toHaveValue("  - Child item");
+  });
+
+  it("addresses each line of a wrapped item in a loose list", () => {
+    const LOOSE = `- First bullet line
+  continues here
+
+- Second bullet
+`;
+    render(<NoteHarness initialContent={LOOSE} />);
+
+    fireEvent.click(screen.getByText(/continues here/));
+
+    expect(screen.getByRole("textbox")).toHaveValue("  continues here");
+  });
+
+  it("still toggles the checkbox of a wrapped task item", () => {
+    const onChange = vi.fn();
+    render(
+      <NoteHarness
+        initialContent={"- [ ] wrapped task\n  second line\n"}
+        onContentChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("checkbox"));
+
+    expect(onChange).toHaveBeenCalledWith(
+      "- [x] wrapped task\n  second line\n",
+    );
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});

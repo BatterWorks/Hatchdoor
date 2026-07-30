@@ -4,6 +4,7 @@ import { slugifyHeading } from "../../lib/noteHeadings";
 import {
   CalloutOrQuote,
   CodeBlock,
+  ListItem,
   MermaidDiagram,
 } from "./RendererComponents";
 import { markAsParagraph } from "./paragraphs";
@@ -143,12 +144,18 @@ export function createNoteMarkdownComponents(
         />
       );
     },
-    li(props: { children?: ReactNode; className?: string }) {
-      const isTask = props.className?.includes("task-list-item") ?? false;
+    li(props: { children?: ReactNode; className?: string; node?: unknown }) {
+      // Absent from EDITABLE_UNITS on purpose: a wrapped item is addressed one
+      // line at a time (D25a), which only this renderer can see, so it owns
+      // its own EditableBlock rather than being wrapped in one.
       return (
-        <li className={isTask ? "task-list-item" : undefined}>
+        <ListItem
+          node={props.node}
+          className={props.className}
+          editable={options.editable ?? false}
+        >
           {props.children}
-        </li>
+        </ListItem>
       );
     },
     blockquote(props: { children?: ReactNode; node?: unknown }) {
@@ -227,7 +234,6 @@ const EDITABLE_UNITS: Record<string, UnitType> = {
   h4: "heading",
   h5: "heading",
   h6: "heading",
-  li: "list item",
   // D27: the tr is the unit, not the td. mdast gives tr and td identical
   // ranges, and the delimiter row belongs to no node at all.
   tr: "table row",

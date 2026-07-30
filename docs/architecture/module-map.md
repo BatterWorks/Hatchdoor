@@ -708,8 +708,9 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 **Public contract:** `NotePage`, note preview/rendering behavior, safe asset and
 wikilink resolution, heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the editable-block component map produced by
-`createNoteMarkdownComponents`, and the paragraph marker `CalloutOrQuote` uses to
-recognise its own first child.
+`createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
+recognise its own first child, and the soft-break splitter that reconstructs one
+source line per rendered line for the two unit types addressed per line.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, and note editing.
@@ -722,7 +723,12 @@ data rather than trusted executable instructions; asset URLs retain auth and
 path safety; **the rendered body keeps one line per source line**, since inline
 editing addresses blocks by line number and a transform that collapses lines
 would write to the wrong place (`linesMatch` enforces this at runtime and
-disables inline editing for that note).
+disables inline editing for that note); a callout body and a wrapped list item
+are rebuilt rather than passed through, so their positions do not survive and a
+line's **index** is the only thing mapping it back to the file, which is why no
+interior line is dropped while splitting and why a list item whose rendered line
+count disagrees with the span it claims is addressed whole rather than written to
+a guessed line.
 
 **Validation:** note-page unit tests, Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
