@@ -1,22 +1,65 @@
 import { NavLink } from "react-router-dom";
 import { useMemo } from "react";
 
-import type {
-  ExplorerFolder,
-  ExplorerNote,
-  ModifiedNote,
-  RecentNote,
-} from "../types";
+import type { ExplorerFolder, ExplorerNote, RecentNote } from "../types";
+import { AddIcon } from "./icons";
 import { UiPanel } from "./ui";
+
+/** Section header: `01 · RECENT · ──── · 04`, per §05 of the design system. */
+export function SideHead({
+  label,
+  count,
+  collapsible,
+  open,
+  controls,
+  onToggle,
+}: {
+  label: string;
+  count?: number;
+  collapsible?: boolean;
+  open?: boolean;
+  controls?: string;
+  onToggle?: () => void;
+}) {
+  const inner = (
+    <>
+      {collapsible ? <span className="side-caret" aria-hidden="true" /> : null}
+      <span className="side-label">{label}</span>
+      <span className="side-rule" />
+      {count === undefined ? null : (
+        <span className="side-count">{String(count).padStart(2, "0")}</span>
+      )}
+    </>
+  );
+
+  if (!collapsible) {
+    return <div className="side-head">{inner}</div>;
+  }
+
+  return (
+    <button
+      type="button"
+      className="side-head"
+      data-open={open}
+      aria-expanded={open}
+      aria-controls={controls}
+      onClick={onToggle}
+    >
+      {inner}
+    </button>
+  );
+}
 
 export function RecentNotesList({
   notes,
-  currentPath,
   onNavigate,
+  collapsed,
+  onToggleCollapsed,
 }: {
   notes: RecentNote[];
-  currentPath: string;
   onNavigate: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
   if (notes.length === 0) {
     return null;
@@ -25,63 +68,36 @@ export function RecentNotesList({
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
-      <p className="recent-notes-title">Recently Viewed</p>
-      <ul className="tree root-tree">
-        {recent.map((note) => (
-          <li key={note.slug} className="note-item">
-            <NavLink
-              className={
-                currentPath === `/n/${note.slug}`
-                  ? "note-link active-note"
-                  : "note-link"
-              }
-              to={`/n/${note.slug}`}
-              onClick={onNavigate}
-              title={`${note.relativePath}.md`}
-            >
-              <span className="note-label">{note.title}</span>
-            </NavLink>
-          </li>
-        ))}
-      </ul>
-    </UiPanel>
-  );
-}
-
-export function LastModifiedNotesList({
-  notes,
-  currentPath,
-  onNavigate,
-}: {
-  notes: ModifiedNote[];
-  currentPath: string;
-  onNavigate: () => void;
-}) {
-  if (notes.length === 0) {
-    return null;
-  }
-
-  return (
-    <UiPanel className="recent-notes" data-testid="last-modified-notes">
-      <p className="recent-notes-title">Last Modified</p>
-      <ul className="tree root-tree">
-        {notes.map((note) => (
-          <li key={note.slug} className="note-item">
-            <NavLink
-              className={
-                currentPath === `/n/${note.slug}`
-                  ? "note-link active-note"
-                  : "note-link"
-              }
-              to={`/n/${note.slug}`}
-              onClick={onNavigate}
-              title={`${note.relative_path}.md`}
-            >
-              <span className="note-label">{note.title}</span>
-            </NavLink>
-          </li>
-        ))}
-      </ul>
+      <SideHead
+        label="Recently viewed"
+        count={recent.length}
+        collapsible
+        open={!collapsed}
+        controls="recent-notes-list"
+        onToggle={onToggleCollapsed}
+      />
+      {collapsed ? null : (
+        <ul id="recent-notes-list" className="tree root-tree">
+          {recent.map((note, index) => (
+            <li key={note.slug} className="note-item">
+              {/* No active-note class here. The highlight is canonical in the
+                  tree only; applying it in several lists at once is the bug
+                  issue #12 reported. */}
+              <NavLink
+                className="note-link"
+                to={`/n/${note.slug}`}
+                onClick={onNavigate}
+                title={`${note.relativePath}.md`}
+              >
+                <span className="idx" aria-hidden="true">
+                  {String(index + 1).padStart(3, "0")}
+                </span>
+                <span className="note-label">{note.title}</span>
+              </NavLink>
+            </li>
+          ))}
+        </ul>
+      )}
     </UiPanel>
   );
 }
@@ -124,8 +140,13 @@ export function FolderTree({
           }
         />
       ))}
-      {root.notes.map((note) => (
-        <NoteNode key={note.slug} note={note} currentPath={currentPath} />
+      {root.notes.map((note, index) => (
+        <NoteNode
+          key={note.slug}
+          note={note}
+          currentPath={currentPath}
+          index={index}
+        />
       ))}
     </ul>
   );
@@ -178,7 +199,7 @@ function FolderNode({
                 onCreateNoteInFolder(folderPath);
               }}
             >
-              +
+              <AddIcon />
             </button>
           ) : null}
         </summary>
@@ -196,8 +217,13 @@ function FolderNode({
               onToggleFolder={onToggleFolder}
             />
           ))}
-          {folder.notes.map((note) => (
-            <NoteNode key={note.slug} note={note} currentPath={currentPath} />
+          {folder.notes.map((note, index) => (
+            <NoteNode
+              key={note.slug}
+              note={note}
+              currentPath={currentPath}
+              index={index}
+            />
           ))}
         </ul>
       </details>
@@ -208,9 +234,11 @@ function FolderNode({
 function NoteNode({
   note,
   currentPath,
+  index,
 }: {
   note: ExplorerNote;
   currentPath: string;
+  index: number;
 }) {
   return (
     <li className="note-item">
@@ -223,6 +251,11 @@ function NoteNode({
         to={`/n/${note.slug}`}
         title={`${note.title}.md`}
       >
+        {/* §05: folders carry the caret, notes carry a mono index. This is what
+            tells the two row kinds apart without changing size or weight. */}
+        <span className="idx" aria-hidden="true">
+          {String(index + 1).padStart(3, "0")}
+        </span>
         <span className="note-label">{note.title}</span>
       </NavLink>
     </li>

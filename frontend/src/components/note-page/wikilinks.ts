@@ -5,22 +5,89 @@ import { slugifyHeading } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
 import type { ResolveBatchResponse } from "../../types";
 
+export type ResolvedWikilink = { slug: string; archived: boolean };
+
+// The character class must exclude newlines. Without that, an unclosed [[
+// matches forward to the next ]] anywhere in the note and the replacement
+// collapses every line between them, so the rendered body has fewer lines than
+// the source and every block below it is misaddressed. A dangling [[ is
+// exactly what the wikilink autocomplete leaves behind mid-typing. Obsidian
+// does not support multi-line wikilinks either.
+const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
+
+// Resolution results are stable for the life of the page, and every content
+// change re-runs this effect, so without a cache each keystroke-driven commit
+// re-POSTs every target in the note and widens the settling window.
+const resolveCache = new Map<string, ResolvedWikilink | null>();
+
+/**
+ * Rewrite every wikilink in `markdown` to a markdown link or image.
+ *
+ * Line-count preserving by contract: the result always has exactly as many
+ * lines as the input, which is what lets a rendered node's position be mapped
+ * back to a line in the file.
+ */
+export function rewriteWikilinks(
+  markdown: string,
+  noteRelativePath: string,
+  resolved: Map<string, ResolvedWikilink | null>,
+): string {
+  return markdown.replace(
+    WIKILINK_PATTERN,
+    (_whole, bang: string, body: string) => {
+      const parsed = parseWikilinkTarget(body);
+
+      if (bang === "!") {
+        const source = resolveAssetHref(parsed.target, noteRelativePath);
+        return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
+      }
+
+      if (isPdfAssetTarget(parsed.target)) {
+        const source = resolveAssetHref(parsed.target, noteRelativePath);
+        return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
+      }
+
+      const hit = resolved.get(parsed.target) ?? null;
+      if (hit) {
+        const anchor = extractAnchor(parsed.target);
+        const hash = anchor ? `#${anchor}` : "";
+        const prefix = hit.archived ? "/__archived__/" : "/n/";
+        const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
+        return `[${escapeMarkdownLabel(label)}](${prefix}${hit.slug}${hash})`;
+      }
+      return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
+    },
+  );
+}
+
+/**
+ * Resolved markdown, plus the input it was resolved from.
+ *
+ * Resolution awaits a network round-trip, so between a content change and the
+ * response the rendered tree describes the *previous* document. Every block
+ * range read during that window is stale, and acting on one edits the wrong
+ * lines. Callers compare `resolvedFor` against the current input to know when
+ * it is safe to address blocks by line.
+ */
 export function useResolvedWikilinks(
   markdown: string,
   noteRelativePath: string,
-): string {
-  const [resolved, setResolved] = useState(markdown);
+): { resolved: string; resolvedFor: string } {
+  const [state, setState] = useState({
+    resolved: markdown,
+    resolvedFor: markdown,
+  });
 
   useEffect(() => {
     let cancelled = false;
 
     if (!markdown) {
-      queueMicrotask(() => setResolved(""));
+      queueMicrotask(() => setState({ resolved: "", resolvedFor: "" }));
       return;
     }
 
     void (async () => {
-      const matches = [...markdown.matchAll(/(!?)\[\[([^\]]+)\]\]/g)];
+      const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
       const rawTargets = matches
         .filter(
           (m) =>
@@ -30,27 +97,34 @@ export function useResolvedWikilinks(
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
 
-      const map = new Map<string, { slug: string; archived: boolean } | null>();
+      const map = new Map<string, ResolvedWikilink | null>();
+      for (const target of uniqueTargets) {
+        if (resolveCache.has(target)) {
+          map.set(target, resolveCache.get(target) ?? null);
+        }
+      }
+      const missing = uniqueTargets.filter(
+        (target) => !resolveCache.has(target),
+      );
 
-      if (uniqueTargets.length > 0) {
+      if (missing.length > 0) {
         try {
           const res = await apiFetch("/api/resolve-batch", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
-            body: JSON.stringify({ targets: uniqueTargets }),
+            body: JSON.stringify({ targets: missing }),
           });
 
           if (res.ok) {
             const json = (await res.json()) as ResolveBatchResponse;
             for (const result of json.results) {
-              map.set(
-                result.target,
-                result.slug
-                  ? { slug: result.slug, archived: result.archived }
-                  : null,
-              );
+              const resolved = result.slug
+                ? { slug: result.slug, archived: result.archived }
+                : null;
+              map.set(result.target, resolved);
+              resolveCache.set(result.target, resolved);
             }
           }
         } catch {
@@ -58,39 +132,10 @@ export function useResolvedWikilinks(
         }
       }
 
-      const rewritten = markdown.replace(
-        /(!?)\[\[([^\]]+)\]\]/g,
-        (_whole, bang: string, body: string) => {
-          const parsed = parseWikilinkTarget(body);
-
-          if (bang === "!") {
-            const source = resolveAssetHref(parsed.target, noteRelativePath);
-            return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
-          }
-
-          if (isPdfAssetTarget(parsed.target)) {
-            const source = resolveAssetHref(parsed.target, noteRelativePath);
-            return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
-          }
-
-          const resolved = map.get(parsed.target) ?? null;
-          if (resolved) {
-            const anchor = extractAnchor(parsed.target);
-            const hash = anchor ? `#${anchor}` : "";
-            const prefix = resolved.archived ? "/__archived__/" : "/n/";
-            const label = wikilinkDisplayLabel(
-              body,
-              parsed.label,
-              resolved.archived,
-            );
-            return `[${escapeMarkdownLabel(label)}](${prefix}${resolved.slug}${hash})`;
-          }
-          return `[${escapeMarkdownLabel(parsed.label)}](/__missing__/${encodeURIComponent(parsed.target)})`;
-        },
-      );
+      const rewritten = rewriteWikilinks(markdown, noteRelativePath, map);
 
       if (!cancelled) {
-        setResolved(rewritten);
+        setState({ resolved: rewritten, resolvedFor: markdown });
       }
     })();
 
@@ -99,7 +144,7 @@ export function useResolvedWikilinks(
     };
   }, [markdown, noteRelativePath]);
 
-  return resolved;
+  return state;
 }
 
 export function resolveAssetHref(

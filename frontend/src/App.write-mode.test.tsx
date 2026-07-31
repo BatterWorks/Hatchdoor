@@ -9,6 +9,8 @@ import {
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { EditorView } from "@codemirror/view";
+
 import { VaultApp as App } from "./App";
 import { noteDraftKey } from "./lib/writeDrafts";
 
@@ -295,7 +297,12 @@ describe("App write mode", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    // The picker lists folders that exist; this vault has none, so a note in
+    // "Projects" is created through the New folder path.
     fireEvent.change(screen.getByLabelText("Folder"), {
+      target: { value: "//new-folder" },
+    });
+    fireEvent.change(screen.getByLabelText("New folder name"), {
       target: { value: "Projects" },
     });
     fireEvent.change(screen.getByLabelText("Note name"), {
@@ -620,7 +627,13 @@ describe("App write mode", () => {
     await screen.findByRole("heading", { level: 2, name: "Home" });
     fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     fireEvent.click(await screen.findByRole("menuitem", { name: "New note" }));
+    // The picker only offers folders that exist, so a traversal attempt has to
+    // come through the free-text "New folder" path. Client validation must
+    // still reject it, and the backend remains authoritative regardless.
     fireEvent.change(screen.getByLabelText("Folder"), {
+      target: { value: "//new-folder" },
+    });
+    fireEvent.change(screen.getByLabelText("New folder name"), {
       target: { value: ".." },
     });
     fireEvent.change(screen.getByLabelText("Note name"), {
@@ -823,5 +836,257 @@ describe("App write mode", () => {
     expect(
       await screen.findByText("Updated 1 linking note."),
     ).toBeInTheDocument();
+  });
+});
+
+describe("touch editing hint", () => {
+  // Entering a block on touch is a double tap, which is invisible: the gutter
+  // rule says "something is here" without saying what gesture reaches it.
+  function mockPointer(coarse: boolean) {
+    vi.stubGlobal(
+      "matchMedia",
+      (query: string) =>
+        ({
+          matches: coarse && query.includes("coarse"),
+          media: query,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+        }) as unknown as MediaQueryList,
+    );
+  }
+
+  const HINT = "Double-tap a line to edit it.";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the hint on a coarse pointer", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(HINT)).toBeInTheDocument();
+  });
+
+  it("does not show it on a pointer that can hover", async () => {
+    mockReadAndWriteApi();
+    mockPointer(false);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+
+  it("does not show it again once it has been dismissed", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+    window.localStorage.setItem("hatchdoor.touchEditHintSeen", "1");
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("heading", { level: 2, name: "Home" });
+    expect(screen.queryByText(HINT)).toBeNull();
+  });
+
+  // Retired on a landed edit rather than on entry, so an accidental double tap
+  // does not count as having taught the gesture.
+  it("retires the hint once an edit lands", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText(HINT);
+    const block = screen.getByText("Original");
+    for (let i = 0; i < 2; i += 1) {
+      fireEvent.pointerDown(block, {
+        pointerType: "touch",
+        clientX: 10,
+        clientY: 10,
+        bubbles: true,
+      });
+      fireEvent.click(block, { clientX: 10, clientY: 10, bubbles: true });
+    }
+    const input = await screen.findByRole("textbox");
+    // The open block is a CodeMirror editor, so its text is editor state
+    // rather than a DOM value.
+    const view = EditorView.findFromDOM(input as HTMLElement)!;
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: "Edited" },
+    });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(screen.queryByText(HINT)).toBeNull();
+    });
+    expect(window.localStorage.getItem("hatchdoor.touchEditHintSeen")).toBe(
+      "1",
+    );
+  });
+
+  it("remembers the dismissal when tapped", async () => {
+    mockReadAndWriteApi();
+    mockPointer(true);
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // By its label, not by the notice text: dismissal has to be a visible
+    // control, since on touch there is no cursor to reveal that the line itself
+    // is clickable.
+    await screen.findByText(HINT);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss hint" }));
+
+    expect(screen.queryByText(HINT)).toBeNull();
+    expect(window.localStorage.getItem("hatchdoor.touchEditHintSeen")).toBe(
+      "1",
+    );
+  });
+  // Dropping a file while a block is open uploaded the attachment and then
+  // silently lost its embed: the drop wrote the document it had computed from
+  // the pre-edit content, and the open block's own commit, seeded before the
+  // drop, landed second and overwrote it. Both writes returned 200, so nothing
+  // surfaced the loss and the attachment was left orphaned in the vault.
+  it("keeps the embed when a file is dropped while a block is open", async () => {
+    const writes: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+
+        if (url.includes("/api/write-capabilities")) {
+          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/api/tree")) {
+          return new Response(
+            JSON.stringify({
+              name: "Vault",
+              folders: [],
+              notes: [{ title: "Home", slug: "home" }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/recently-modified")) {
+          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        }
+        if (url.includes("/api/note/home/links")) {
+          return new Response(
+            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/attachment") && method === "POST") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              attachment: { relative_path: "Attachments/report.pdf" },
+              git_sync_warning: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/note/home") && method === "PUT") {
+          writes.push(JSON.parse(String(init?.body)).content as string);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              slug: "home",
+              relative_path: "Home",
+              content_hash: `hash-${writes.length + 1}`,
+              git_sync_warning: null,
+              rewritten_notes: 0,
+              moved_assets: 0,
+              trashed_path: null,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/note/home")) {
+          return new Response(
+            JSON.stringify({
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "# Home\nOriginal",
+                content_hash: "hash-1",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/api/resolve-batch")) {
+          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/n/home"]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    // Open the paragraph and type into it without leaving the block, so the
+    // edit is still uncommitted when the file lands.
+    const block = await screen.findByText("Original");
+    fireEvent.click(block);
+    const input = await screen.findByRole("textbox");
+    const view = EditorView.findFromDOM(input as HTMLElement)!;
+    act(() => {
+      view.dispatch({
+        changes: {
+          from: 0,
+          to: view.state.doc.length,
+          insert: "Original edited",
+        },
+      });
+    });
+
+    const file = new File(["%PDF"], "report.pdf", { type: "application/pdf" });
+    const dropTarget = document.querySelector(".note-body-drop")!;
+    await act(async () => {
+      fireEvent.drop(dropTarget, {
+        dataTransfer: { files: [file] },
+        clientY: 10,
+      });
+    });
+
+    await waitFor(() => {
+      expect(writes.length).toBeGreaterThan(0);
+    });
+    // Whatever order the writes land in, the last one is what the vault keeps,
+    // and it has to carry both the embed and the edit.
+    await waitFor(() => {
+      const latest = writes[writes.length - 1];
+      expect(latest).toContain("![[Attachments/report.pdf]]");
+      expect(latest).toContain("Original edited");
+    });
   });
 });

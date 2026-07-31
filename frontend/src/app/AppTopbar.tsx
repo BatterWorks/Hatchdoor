@@ -1,10 +1,29 @@
-import { useEffect, useRef, type Ref } from "react";
+import { useEffect, useRef, type ReactElement, type Ref } from "react";
 
 import { StatusBadge, UiButton } from "../components/ui";
+import {
+  ContrastIcon,
+  DarkModeIcon,
+  LightModeIcon,
+  MenuIcon,
+  MoreHorizIcon,
+  SearchIcon,
+} from "../components/icons";
 import type { ActiveNoteMeta } from "../types";
 import type { Theme } from "../hooks/useTheme";
 
-const THEME_ICON: Record<Theme, string> = { auto: "◑", light: "○", dark: "●" };
+// One icon per theme state, mirroring the three-way cycle. The icon shows the
+// theme that is currently active, which is what the previous glyphs did too.
+//
+// `contrast` for auto, not `brightness_auto`: at 18px the latter's sun-with-A
+// reads as a circle with radiating spikes, near-identical to the settings gear
+// sitting in the sidebar rail just below it. This half-filled circle is also
+// closer to the ◑ it replaces.
+const THEME_ICON: Record<Theme, ReactElement> = {
+  auto: <ContrastIcon />,
+  light: <LightModeIcon />,
+  dark: <DarkModeIcon />,
+};
 const THEME_LABEL: Record<Theme, string> = {
   auto: "Theme: System",
   light: "Theme: Light",
@@ -64,6 +83,11 @@ export function AppTopbar({
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
+  // The menu's three groups are mutate / utility / destructive, so Archive and
+  // Delete land last where a reader expects them. Both dividers sit next to a
+  // group that only renders with a note and write mode, so without one they
+  // would be stray rules against nothing.
+  const showMenuDividers = Boolean(activeNote) && writeEnabled;
 
   useEffect(() => {
     if (!actionsMenuOpen) {
@@ -96,7 +120,7 @@ export function AppTopbar({
               aria-label="Toggle explorer"
               style={{ marginRight: "0.5rem" }}
             >
-              ☰
+              <MenuIcon />
             </button>
           ) : null}
           <svg
@@ -163,7 +187,7 @@ export function AppTopbar({
               onClick={onOpenSearch}
               aria-label="Search notes"
             >
-              ⌕
+              <SearchIcon />
             </button>
           )}
           <button
@@ -184,7 +208,7 @@ export function AppTopbar({
               aria-expanded={actionsMenuOpen}
               aria-label="More actions"
             >
-              ···
+              <MoreHorizIcon />
             </button>
             <div
               className="topbar-menu"
@@ -240,29 +264,8 @@ export function AppTopbar({
                   Move note
                 </UiButton>
               ) : null}
-              {activeNote && writeEnabled ? (
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onArchiveNote();
-                  }}
-                >
-                  Archive note
-                </UiButton>
-              ) : null}
-              {activeNote && writeEnabled ? (
-                <UiButton
-                  className="close-note"
-                  role="menuitem"
-                  onClick={() => {
-                    onCloseActionsMenu();
-                    onDeleteNote();
-                  }}
-                >
-                  Delete note
-                </UiButton>
+              {showMenuDividers ? (
+                <div className="topbar-menu-divider" role="separator" />
               ) : null}
               {activeNote ? (
                 <UiButton
@@ -298,6 +301,33 @@ export function AppTopbar({
                   }}
                 >
                   Copy note link
+                </UiButton>
+              ) : null}
+              {showMenuDividers ? (
+                <div className="topbar-menu-divider" role="separator" />
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onArchiveNote();
+                  }}
+                >
+                  Archive note
+                </UiButton>
+              ) : null}
+              {activeNote && writeEnabled ? (
+                <UiButton
+                  className="close-note"
+                  role="menuitem"
+                  onClick={() => {
+                    onCloseActionsMenu();
+                    onDeleteNote();
+                  }}
+                >
+                  Delete note
                 </UiButton>
               ) : null}
             </div>

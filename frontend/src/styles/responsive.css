@@ -15,6 +15,12 @@ body.resizing {
     display: none;
   }
 
+  /* Keeps the wordmark from sitting flush against the first action button
+     once the brand column has shrunk to its narrowest. */
+  .topbar-brand {
+    padding-right: 0.5rem;
+  }
+
   .app-layout {
     grid-template-columns: minmax(0, 1fr);
     min-height: calc(100dvh - var(--mobile-drawer-top, 0px));
@@ -62,15 +68,20 @@ body.resizing {
     transform: translateY(0);
   }
 
+  /* The rail lives inside the drawer, so these are touch targets like any
+     other control here and take the same 44px floor. */
+  .explorer-rail-item {
+    width: 44px;
+    height: 44px;
+  }
+
+  /* Touch sizing only. Alignment, case, and tracking are unconditional now and
+     live in topbar.css; they used to be here, which is why desktop was wrong. */
   .topbar-menu .ui-button,
   .topbar-menu .close-note {
-    width: 100%;
     min-height: 44px;
-    justify-content: flex-start;
     padding: 0.45rem 0.5rem;
     font-size: 0.94rem;
-    text-transform: none;
-    letter-spacing: 0;
   }
 
   .search-overlay {
@@ -142,5 +153,13 @@ body.resizing {
 @media (display-mode: standalone) {
   .note-pane {
     padding-bottom: calc(3rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 920px) {
+  /* The gutter is .note-pane's padding, which drops to 16px here. A desktop
+     offset would put the rule against the screen edge. */
+  :root {
+    --edit-gutter: 0.375rem;
   }
 }

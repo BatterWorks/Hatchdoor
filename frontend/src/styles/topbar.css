@@ -29,13 +29,21 @@
   color: var(--ink);
   text-decoration: none;
   flex-shrink: 0;
+  /* Lets the wordmark below shrink instead of painting past this box. */
+  min-width: 0;
 }
 
 .brand-wordmark {
   height: 1.45rem;
   width: auto;
   display: block;
-  flex-shrink: 0;
+  /* The SVG carries a viewBox, so width: auto derives a fixed width from the
+     aspect ratio. Without these it keeps that width in a narrower column and,
+     being overflow: visible, paints straight over the topbar actions on small
+     phones. Shrinking the box lets the viewBox scale the artwork instead. */
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 100%;
   overflow: visible;
 }
 
@@ -235,6 +243,44 @@
     transform 160ms ease,
     opacity 160ms ease,
     visibility 0s;
+}
+
+/*
+ * Menu rows. Left-aligned, sentence case, borderless — a row of centred
+ * all-caps boxes inside a bordered popover is what issue #8 objected to, and
+ * §18 of the design system already specifies the first two.
+ *
+ * These rules were previously mobile-only, which left desktop falling through
+ * to the uppercase/centred `.close-note` base. Scoped to `.topbar-menu` on
+ * purpose: that base is used well beyond this menu.
+ *
+ * The border is kept and made transparent rather than removed, so the row does
+ * not shift by a pixel when :active paints it hot.
+ */
+.topbar-menu .ui-button,
+.topbar-menu .close-note {
+  width: 100%;
+  justify-content: flex-start;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.86rem;
+  padding: 0.4rem 0.5rem;
+  border-color: transparent;
+}
+
+@media (hover: hover) {
+  .topbar-menu .ui-button:hover,
+  .topbar-menu .close-note:hover {
+    background: var(--paper-2);
+    border-color: transparent;
+  }
+}
+
+/* Groups the nine items into mutate / utility / destructive. */
+.topbar-menu-divider {
+  height: 1px;
+  margin: 0.15rem 0;
+  background: var(--rule);
 }
 
 /* Mobile meta row (below topbar) */

@@ -332,9 +332,20 @@
 
 .note-body ul li,
 .note-body ol li {
-  padding-left: 1.4rem;
+  /* A token because the D36 gutter rule for a per-line block (D25a) has to be
+     pulled back out of this inset to line up with a whole item's rule. */
+  padding-left: var(--li-inset);
   margin-bottom: 0.4rem;
   position: relative;
+}
+
+/* D25a: a wrapped list item is addressed one source line at a time, so each
+   line is its own element. They are lines of one item, not separate blocks, so
+   consecutive lines sit on their own baselines with no gap. The last line keeps
+   whatever margin its element carries, which is what separates the item from a
+   nested list or a paragraph below it. */
+.note-body .li-line:has(+ .li-line) {
+  margin-bottom: 0;
 }
 
 .note-body li > ul,
@@ -392,6 +403,22 @@
 
 .note-body ol {
   counter-reset: olc;
+  /* Ordered markers are words, not a single glyph, so they need more room than
+     a bullet's dash. Set as the shared inset rather than a separate token, so
+     the padding and the D36 gutter-rule correction both follow it. */
+  --li-inset: 1.9rem;
+}
+
+/* Roman numerals are the widest markers the list ever draws: "viii." is three
+   times the width of "1.". */
+.note-body ol ol ol {
+  --li-inset: 2.7rem;
+}
+
+/* A bullet nested inside an ordered list is still a bullet, and needs only a
+   dash's worth of room. */
+.note-body ol ul {
+  --li-inset: 1.4rem;
 }
 
 /* Use > so only direct ol children get the counter — prevents ul sub-items
@@ -405,6 +432,17 @@
   position: absolute;
   left: 0;
   top: 0;
+  /* Right-aligned in a box that stops short of the text. Two things follow
+     from this: the periods line up down the list however wide the numbers
+     get, and a marker too long for its box grows leftwards into the margin
+     instead of colliding with the words. */
+  width: calc(var(--li-inset) - 0.5rem);
+  text-align: right;
+  /* The marker's line box has to match the item's, or its baseline rides high:
+     it is set in a smaller font, and a line box that is 4px shorter than the
+     text's puts the number visibly above the words it numbers. 1.02rem/1.55
+     are the list's own font size and line height. */
+  line-height: calc(1.02rem * 1.55);
   font-family: var(--font-mono);
   font-size: 0.86rem;
   color: var(--hot);
@@ -431,6 +469,9 @@
   font-size: unset;
   color: unset;
   font-weight: unset;
+  /* Reset the ordered marker's text box: this one is a drawn rule, not type. */
+  text-align: unset;
+  line-height: unset;
 }
 
 .note-body ol ul ul > li::before {
@@ -537,8 +578,8 @@
 /* Code block */
 .code-block {
   margin: 1.6rem 0;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--code-surface);
+  color: var(--code-ink);
   position: relative;
   overflow: hidden;
 }
@@ -549,13 +590,13 @@
   align-items: center;
   background: rgba(255, 255, 255, 0.06);
   padding: 0.3rem 0.7rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--code-rule);
 }
 
 .code-lang {
   font-family: var(--font-mono);
   font-size: 0.66rem;
-  color: rgba(255, 255, 255, 0.6);
+  color: var(--code-ink-soft);
   text-transform: uppercase;
   letter-spacing: 0.14em;
 }
@@ -567,8 +608,8 @@
   font-size: 0.82rem;
   line-height: 1.6;
   overflow-x: auto;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--code-surface);
+  color: var(--code-ink);
   border: 0;
   border-radius: 0;
 }
@@ -583,9 +624,9 @@
   font-size: 0.66rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--bg);
+  color: var(--code-ink);
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.22);
+  border: 1px solid var(--code-rule);
   padding: 0.18rem 0.5rem;
   min-height: unset;
 }
@@ -594,7 +635,7 @@
 .code-block .close-note:hover {
   background: var(--hot);
   border-color: var(--hot);
-  color: var(--bg);
+  color: var(--code-ink);
 }
 
 /* Reset inline code style when inside a code block */
@@ -611,8 +652,8 @@
   width: 100%;
   max-width: 100%;
   overflow: auto;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--code-surface);
+  color: var(--code-ink);
   border: 1px solid var(--rule);
   padding: 0.9rem 1rem;
   box-sizing: border-box;
@@ -622,10 +663,21 @@
   margin: 1.6rem 0;
 }
 
-/* Callouts */
+/* Callouts — a marked aside, not a coloured box.
+   Colour appears in three thin places: the spine at the left edge, the kind
+   label, and the hairline lead rule that carries the label to the right edge.
+   The surface is tinted 12% from the same accent: enough that the hue is
+   legible at a glance, far short of a fill that competes with the prose.
+   Mixing in oklab keeps the tint on the paper's warm axis in light and lifts
+   it evenly off near-black in dark; sRGB greys it out at these percentages. */
 .callout {
-  border: 1px solid var(--rule-strong);
-  background: var(--paper);
+  /* Every kind sets only this. An unrecognised kind keeps the neutral mark
+     rather than borrowing the brand accent, which would make an unknown
+     callout the loudest thing on the page. */
+  --callout-accent: var(--muted);
+  border: none;
+  border-left: 3px solid var(--callout-accent);
+  background: color-mix(in oklab, var(--callout-accent) 12%, var(--paper));
   padding: 0;
   margin: 1.6rem 0;
   color: var(--ink-soft);
@@ -638,23 +690,70 @@
     "wdth" 88,
     "wght" 700;
   font-style: normal;
-  font-size: 0.72rem;
+  font-size: 0.7rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  display: block;
-  padding: 0.45rem 1.1rem;
-  color: var(--ink-soft);
-  border-bottom: 1px solid var(--rule-strong);
+  color: var(--callout-accent);
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  /* No right padding: the lead rule runs to the edge, where it meets the
+     spine's corner and closes the top of the block. */
+  padding: 0.8rem 0 0 0.95rem;
+}
+
+/* The lead rule ends the label and states the block's top edge, which is why
+   the callout needs no top border of its own. */
+.callout-lead-rule {
+  flex: 1;
+  /* A long custom title takes the rule's space before it wraps, which would
+     leave the block with no top edge at all. The floor keeps a stub. */
+  min-width: 1.5rem;
+  height: 1px;
+  background: color-mix(in oklab, var(--callout-accent) 40%, transparent);
+}
+
+/* A title with nothing under it still has to sit off the bottom edge. */
+.callout:not(:has(.callout-body)) .callout-title {
+  padding-bottom: 0.8rem;
+}
+
+/* The body's own padding separates the last line from the bottom edge, so the
+   trailing paragraph margin would only add dead space inside the block. */
+.callout-body > :last-child {
+  margin-bottom: 0;
 }
 
 .callout-collapsible > .callout-title {
   cursor: pointer;
   list-style: none;
-  display: list-item;
 }
 
 .callout-collapsible > .callout-title::-webkit-details-marker {
   display: none;
+}
+
+/* Flex layout drops the disclosure marker, so the collapsed state is stated
+   by a caret that turns with the accent rather than by the UA triangle. */
+.callout-collapsible > .callout-title::before {
+  content: "";
+  flex: none;
+  width: 0.32rem;
+  height: 0.32rem;
+  border-right: 1.5px solid var(--callout-accent);
+  border-bottom: 1.5px solid var(--callout-accent);
+  transform: rotate(-45deg);
+  transition: transform var(--dur) var(--ease);
+}
+
+.callout-collapsible[open] > .callout-title::before {
+  transform: rotate(45deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .callout-collapsible > .callout-title::before {
+    transition: none;
+  }
 }
 
 .callout-body {
@@ -662,165 +761,72 @@
   font-style: italic;
   font-size: 1.02rem;
   line-height: 1.55;
-  padding: 0.9rem 1.1rem;
+  padding: 0.4rem 1.1rem 0.85rem 0.95rem;
 }
 
-.callout-warning {
-  background: var(--warn-bg);
-  border-color: var(--warn-border);
-  color: var(--warn-fg);
-}
-
-.callout-warning .callout-title {
-  background: var(--warn-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-danger,
-.callout-error {
-  background: var(--err-bg);
-  border-color: var(--err-border);
-  color: var(--err-fg);
-}
-
-.callout-danger .callout-title,
-.callout-error .callout-title {
-  background: var(--err-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+/* D25a: a callout body is addressed one source line at a time, so each line is
+   its own paragraph element. They are lines of one run of prose, not separate
+   paragraphs, so consecutive lines sit on their own baselines with no gap. The
+   last line keeps the paragraph margin, which is what separates the run from a
+   real paragraph below it. */
+/* Not scoped to .callout-body: a `> [!quote]` renders as a pullquote figure and
+   its lines are split the same way. */
+.note-body .callout-line:has(+ .callout-line) {
+  margin-bottom: 0;
 }
 
 .callout-note,
 .callout-info {
-  background: var(--info-bg);
-  border-color: var(--info-border);
-  color: var(--info-fg);
-}
-
-.callout-note .callout-title,
-.callout-info .callout-title {
-  background: var(--info-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-tip,
-.callout-hint,
-.callout-important {
-  background: var(--tip-bg);
-  border-color: var(--tip-border);
-  color: var(--tip-fg);
-}
-
-.callout-tip .callout-title,
-.callout-hint .callout-title,
-.callout-important .callout-title {
-  background: var(--tip-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-success,
-.callout-check,
-.callout-done {
-  background: var(--success-bg);
-  border-color: var(--success-border);
-  color: var(--success-fg);
-}
-
-.callout-success .callout-title,
-.callout-check .callout-title,
-.callout-done .callout-title {
-  background: var(--success-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-question,
-.callout-help,
-.callout-faq {
-  background: var(--question-bg);
-  border-color: var(--question-border);
-  color: var(--question-fg);
-}
-
-.callout-question .callout-title,
-.callout-help .callout-title,
-.callout-faq .callout-title {
-  background: var(--question-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+  --callout-accent: var(--co-info);
 }
 
 .callout-abstract,
 .callout-summary,
 .callout-tldr {
-  background: var(--abstract-bg);
-  border-color: var(--abstract-border);
-  color: var(--abstract-fg);
+  --callout-accent: var(--co-abstract);
 }
 
-.callout-abstract .callout-title,
-.callout-summary .callout-title,
-.callout-tldr .callout-title {
-  background: var(--abstract-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.callout-tip,
+.callout-hint,
+.callout-important {
+  --callout-accent: var(--co-tip);
 }
 
-.callout-caution,
-.callout-attention {
-  background: var(--warn-bg);
-  border-color: var(--warn-border);
-  color: var(--warn-fg);
+.callout-success,
+.callout-check,
+.callout-done {
+  --callout-accent: var(--co-success);
 }
 
-.callout-caution .callout-title,
-.callout-attention .callout-title {
-  background: var(--warn-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-failure,
-.callout-fail,
-.callout-missing {
-  background: var(--failure-bg);
-  border-color: var(--failure-border);
-  color: var(--failure-fg);
-}
-
-.callout-failure .callout-title,
-.callout-fail .callout-title,
-.callout-missing .callout-title {
-  background: var(--failure-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
-}
-
-.callout-bug {
-  background: var(--err-bg);
-  border-color: var(--err-border);
-  color: var(--err-fg);
-}
-
-.callout-bug .callout-title {
-  background: var(--err-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.callout-question,
+.callout-help,
+.callout-faq {
+  --callout-accent: var(--co-question);
 }
 
 .callout-example {
-  background: var(--example-bg);
-  border-color: var(--example-border);
-  color: var(--example-fg);
+  --callout-accent: var(--co-example);
 }
 
-.callout-example .callout-title {
-  background: var(--example-fg);
-  color: var(--bg);
-  border-bottom-color: transparent;
+.callout-warning,
+.callout-caution,
+.callout-attention {
+  --callout-accent: var(--warn-fg);
+}
+
+/* Alarm. The only kinds that get the reddest accent, so it still means
+   something when one appears. */
+.callout-danger,
+.callout-error {
+  --callout-accent: var(--err-fg);
+}
+
+/* Something is broken or absent, which is not the same as dangerous. */
+.callout-failure,
+.callout-fail,
+.callout-missing,
+.callout-bug {
+  --callout-accent: var(--co-fail);
 }
 
 /* Pull-quote (rendered from [!quote] and [!cite] callouts) */
@@ -919,23 +925,57 @@
 }
 
 .note-properties-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
+  margin: 0 0 0.6rem;
   padding: 0 0 0.4rem;
   border-bottom: 1px solid var(--rule-strong);
-  margin-bottom: 0.6rem;
 }
 
-.note-properties-head h3 {
-  margin: 0;
+/* The whole heading line is the toggle, so the hit area is the full width
+   rather than a small button at the end of it. */
+.note-properties-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
   font-family: var(--font-sans);
   font-weight: 600;
   font-size: 0.66rem;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--muted);
+  transition: color var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .note-properties-toggle:hover {
+    color: var(--ink);
+  }
+}
+
+.note-properties-toggle:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 2px;
+}
+
+/* Same caret as the sidebar folder rows. */
+.note-properties-caret {
+  width: 0;
+  height: 0;
+  flex: 0 0 auto;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--muted);
+  transition: transform var(--dur) var(--ease);
+}
+
+.note-properties-toggle[data-open="true"] .note-properties-caret {
+  transform: rotate(90deg);
+  border-left-color: var(--hot);
 }
 
 .note-properties-grid {
@@ -943,6 +983,16 @@
   padding: 0;
   display: grid;
   gap: 0;
+}
+
+/*
+ * `display: grid` above is author-origin and beats the user-agent's
+ * `[hidden] { display: none }`, so without this the collapsed grid stays fully
+ * visible and the disclosure does nothing. jsdom does not reproduce the real
+ * cascade here, so no unit test catches its absence.
+ */
+.note-properties-grid[hidden] {
+  display: none;
 }
 
 .note-property-row {
@@ -1007,4 +1057,210 @@
 .tag-chip:focus-visible {
   outline: 2px solid var(--hot);
   outline-offset: 1px;
+}
+
+/* ── Inline editing ─────────────────────────────────────────────────────────
+   The affordance is a rule in the left gutter, not a fill or a box. It reuses
+   the device the list bullet already uses, so it reads as "this is a line of
+   your content" rather than as a control, and it costs no horizontal space, so
+   nothing reflows when a block is entered.
+
+   It is drawn with ::after because ::before is already the list marker, and
+   .editable-block is the rendered element itself: wrapping blocks in a div
+   would sit between a ul and its li children and break every marker rule.
+
+   The gutter is borrowed from .note-pane's padding, which is 56px on desktop
+   and 16px on a phone, so the offset is a token rather than a constant. */
+:root {
+  --edit-gutter: 0.75rem;
+  /* The bullet inset on .note-body li. */
+  --li-inset: 1.4rem;
+}
+
+.note-body .editable-block {
+  position: relative;
+  cursor: text;
+  /* Entry on touch is a double tap, and the viewport does not disable
+     double-tap-to-zoom, so without this iOS zooms the page instead of opening
+     the block. `manipulation` drops double-tap zoom and the legacy click delay
+     while leaving panning and pinch-zoom alone, so scrolling from a paragraph
+     and zooming for legibility both still work. */
+  touch-action: manipulation;
+}
+
+.note-body .editable-block::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--edit-gutter) * -1);
+  top: 0.15em;
+  bottom: 0.15em;
+  width: 1px;
+  background: var(--hot);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.note-body .editable-block:hover::after {
+  opacity: 0.45;
+}
+
+/* The active block: same device at full weight, no ring and no fill, so it
+   does not fight the borders .callout and .table-wrap already carry. */
+.note-body .editable-block.is-active::after {
+  width: 2px;
+  opacity: 1;
+}
+
+/* Touch gets no resting rule. A phone is where reading dominates, and a mark
+   beside every block reads as clutter on a narrow column rather than as an
+   affordance. The rule still appears on the block being edited, which is the
+   only moment it carries information. */
+
+@media (prefers-reduced-motion: reduce) {
+  .note-body .editable-block::after {
+    transition: none;
+  }
+}
+
+.block-input {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  outline: none;
+  /* Visible, because the editor inside is pulled left by the width of the
+     line's markdown prefix so the prose stays put when a block is entered.
+     That overhang is the `- ` or `1.` itself: clipping it hides the one thing
+     telling the writer they are still in a list. The editor does its own
+     scrolling, so nothing here needs to. */
+  overflow: visible;
+
+  /* Metrics are inherited from the block being replaced. Transforms are not:
+     h1, h3, h6, callout titles and table headers all uppercase their text, and
+     an editor that inherited that would show the typist a different string
+     than the one being written to the file. */
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: none;
+  text-indent: 0;
+  caret-color: var(--hot);
+}
+
+/* A list item's marker is drawn by ::before and the revealed source carries
+   its own "- ", so the drawn marker steps aside while the line is being
+   edited. The input hangs by the marker inset, which puts the typed marker
+   exactly where the drawn one was, so nothing shifts. */
+/* The hang is measured per line by BlockInput, because the typed prefix and
+   the drawn marker it replaces are different widths. */
+
+.note-body li.is-active::before {
+  display: none;
+}
+
+/* A wrapped item's lines sit inside the li's bullet inset (D25a), so their
+   gutter rule has to be pulled back out of it to land in the same column as a
+   whole item's. A task item has no inset, so it needs no correction. */
+.note-body .li-line::after {
+  left: calc((var(--edit-gutter) + var(--li-inset)) * -1);
+}
+
+.note-body li.task-list-item .li-line::after {
+  left: calc(var(--edit-gutter) * -1);
+}
+
+/* Only an item's first line reveals the `- ` or `1.` marker, so only that line
+   replaces the drawn one. A continuation line reveals its indent and leaves the
+   bullet where it is. */
+.note-body li:has(> .li-line:first-child.is-active)::before {
+  display: none;
+}
+
+/* The click target for the space between blocks. It reaches past the last one
+   so the run-out at the end of a note is clickable too, which is where writing
+   usually continues. 8rem rather than the full pane height: enough to land in
+   without turning a click well below a short note into an edit. */
+.note-body .block-gap {
+  padding-bottom: 8rem;
+  cursor: text;
+}
+
+.note-inline-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.note-inline-actions .close-note {
+  white-space: nowrap;
+}
+
+/* A table row's cells stay in the flow while it is edited, so the columns keep
+   their widths, and the input is laid over the row instead of replacing it. */
+.note-body tr.editable-block.is-active {
+  position: relative;
+}
+
+.note-body .block-input-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 0.7rem;
+  background: var(--paper);
+}
+
+.note-body .block-input-overlay .block-input {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+.save-state {
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  align-self: center;
+}
+
+.save-state.is-error {
+  color: var(--err-fg);
+}
+
+.note-property-value {
+  cursor: text;
+}
+
+.note-property-input {
+  width: 100%;
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  padding: 0.15rem 0.35rem;
+}
+
+.note-body-drop.drag-active {
+  outline: 2px dashed var(--hot);
+  outline-offset: 0.5rem;
+}
+
+.note-property-edit {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  padding: 0 0.3rem;
+}
+
+.note-property-edit:hover {
+  color: var(--hot);
 }

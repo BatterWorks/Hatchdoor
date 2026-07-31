@@ -12,35 +12,52 @@
   --rule-strong: #c4beab;
   --hot: #ff4d1c;
   --hot-soft: #ffeae0;
-  --info-bg: #eaf3ef;
-  --info-fg: #2c6b52;
-  --info-border: #b8ddd0;
-  --tip-bg: #eef4e4;
-  --tip-fg: #4a6428;
-  --tip-border: #c4d89e;
   --warn-bg: #fff6e7;
-  --warn-fg: #7d5b1a;
+  --warn-fg: #755415;
   --warn-border: #f0ddb7;
-  --success-bg: #eef4e4;
-  --success-fg: #4a6428;
-  --success-border: #c4d89e;
   --err-bg: #faeee7;
-  --err-fg: #8c3620;
+  --err-fg: #903f2b;
   --err-border: #e8bfaa;
-  --failure-bg: #faeee7;
-  --failure-fg: #8c3620;
-  --failure-border: #e8bfaa;
-  --question-bg: #f4eef1;
-  --question-fg: #7a3a55;
-  --question-border: #e0c0cc;
-  --abstract-bg: #eaf3ef;
-  --abstract-fg: #2c6b52;
-  --abstract-border: #b8ddd0;
-  --example-bg: #f4eef1;
-  --example-fg: #7a3a55;
-  --example-border: #e0c0cc;
+  /* Callout accents — one hue per meaning, not one per kind name. A callout's
+     spine, label, and lead rule are all this colour; its surface tint is mixed
+     from it, so each kind needs a single value and nothing else. Sibling kinds
+     that mean the same thing (tip/hint/important) share an accent, but kinds
+     that mean different things never do: repeated colour across unrelated
+     kinds is colour that carries no information.
+
+     These are mixed like press inks cut from a common base, not picked as UI
+     status colours, because Forge owns an unusually narrow band: every other
+     chromatic token sits between 35° and 95° in OKLCh, from --hot through
+     ochre to cream. Telling nine kinds apart needs more hue spread than that
+     wedge holds, so the hues that fall outside it earn their place by giving
+     up chroma — a pressman's blue on cream is a dusty slate, never a process
+     blue. Hence --co-info at C 0.048 against oxblood's 0.115: the further a
+     hue sits from the house wedge, the greyer it has to be. Danger keeps the
+     most chroma and sits on --hot's own hue, so it stays the loudest thing a
+     note can say.
+
+     Every accent shares one lightness (L 0.470 light, 0.720 dark) so no
+     kind's label outweighs another's, and every one clears 4.5:1 as small
+     text on its own tinted surface — 5.15:1 at worst in light, 6.14:1 in
+     dark. --warn-fg and --err-fg double as badge tokens in the chrome, and
+     clear 6.3:1 on their badge surfaces too. Re-run docs/design/palette.py
+     after touching any of these. */
+  --co-info: #465d75;
+  --co-abstract: #5e5b51;
+  --co-tip: #2f6753;
+  --co-success: #4d642c;
+  --co-question: #6a4f73;
+  --co-example: #7b4862;
+  --co-fail: #7f4d30;
   --highlight: #f7ebbf;
   --highlight-active: #f1d779;
+  /* Code surface stays a dark slab in both themes. It must not be built from
+     --ink/--bg, which swap on theme change and would flip the code block to a
+     cream slab on a dark page. */
+  --code-surface: #0c0c0a;
+  --code-ink: #f4f1e8;
+  --code-ink-soft: rgba(244, 241, 232, 0.6);
+  --code-rule: rgba(255, 255, 255, 0.14);
   --shadow-soft: 0 1px 0 rgba(12, 12, 10, 0.04);
   --shadow-float: 0 14px 32px rgba(12, 12, 10, 0.18);
   --shadow-overlay: 0 24px 60px rgba(12, 12, 10, 0.28);
@@ -60,35 +77,29 @@
   --rule-strong: #3a3933;
   --hot: #ff5a2b;
   --hot-soft: #2a1410;
-  --info-bg: #0e231e;
-  --info-fg: #6abf9f;
-  --info-border: #1c3e32;
-  --tip-bg: #161f0e;
-  --tip-fg: #98be5a;
-  --tip-border: #283616;
   --warn-bg: #2a2014;
-  --warn-fg: #d9a850;
+  --warn-fg: #c29e63;
   --warn-border: #4a3a1f;
-  --success-bg: #161f0e;
-  --success-fg: #98be5a;
-  --success-border: #283616;
   --err-bg: #271410;
-  --err-fg: #d47858;
+  --err-fg: #e38973;
   --err-border: #472618;
-  --failure-bg: #271410;
-  --failure-fg: #d47858;
-  --failure-border: #472618;
-  --question-bg: #221018;
-  --question-fg: #c07898;
-  --question-border: #3e1e2e;
-  --abstract-bg: #0e231e;
-  --abstract-fg: #6abf9f;
-  --abstract-border: #1c3e32;
-  --example-bg: #221018;
-  --example-fg: #c07898;
-  --example-border: #3e1e2e;
+  /* Same hues and the same chroma ranking as light, at L 0.720 so they read as
+     small text off a near-black page. */
+  --co-info: #8ea8c2;
+  --co-abstract: #a8a49a;
+  --co-tip: #7ab39c;
+  --co-success: #95af75;
+  --co-question: #b698c0;
+  --co-example: #ca91ac;
+  --co-fail: #ce9677;
   --highlight: #4a3f15;
   --highlight-active: #6b5a1f;
+  /* Lifted off the page background so the slab still reads as a distinct
+     block once the page itself is near-black. */
+  --code-surface: #1a1a17;
+  --code-ink: #ece8d8;
+  --code-ink-soft: rgba(236, 232, 216, 0.6);
+  --code-rule: rgba(255, 255, 255, 0.12);
   --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
   --shadow-float: 0 14px 32px rgba(0, 0, 0, 0.6);
   --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.7);
@@ -108,35 +119,29 @@
     --rule-strong: #3a3933;
     --hot: #ff5a2b;
     --hot-soft: #2a1410;
-    --info-bg: #0e231e;
-    --info-fg: #6abf9f;
-    --info-border: #1c3e32;
-    --tip-bg: #161f0e;
-    --tip-fg: #98be5a;
-    --tip-border: #283616;
     --warn-bg: #2a2014;
-    --warn-fg: #d9a850;
+    --warn-fg: #c29e63;
     --warn-border: #4a3a1f;
-    --success-bg: #161f0e;
-    --success-fg: #98be5a;
-    --success-border: #283616;
     --err-bg: #271410;
-    --err-fg: #d47858;
+    --err-fg: #e38973;
     --err-border: #472618;
-    --failure-bg: #271410;
-    --failure-fg: #d47858;
-    --failure-border: #472618;
-    --question-bg: #221018;
-    --question-fg: #c07898;
-    --question-border: #3e1e2e;
-    --abstract-bg: #0e231e;
-    --abstract-fg: #6abf9f;
-    --abstract-border: #1c3e32;
-    --example-bg: #221018;
-    --example-fg: #c07898;
-    --example-border: #3e1e2e;
+    /* Same hues and the same chroma ranking as light, at L 0.720 so they read as
+       small text off a near-black page. */
+    --co-info: #8ea8c2;
+    --co-abstract: #a8a49a;
+    --co-tip: #7ab39c;
+    --co-success: #95af75;
+    --co-question: #b698c0;
+    --co-example: #ca91ac;
+    --co-fail: #ce9677;
     --highlight: #4a3f15;
     --highlight-active: #6b5a1f;
+    /* Lifted off the page background so the slab still reads as a distinct
+     block once the page itself is near-black. */
+    --code-surface: #1a1a17;
+    --code-ink: #ece8d8;
+    --code-ink-soft: rgba(236, 232, 216, 0.6);
+    --code-rule: rgba(255, 255, 255, 0.12);
     --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
     --shadow-float: 0 14px 32px rgba(0, 0, 0, 0.6);
     --shadow-overlay: 0 24px 60px rgba(0, 0, 0, 0.7);
