@@ -14,7 +14,7 @@ You are continuing a multi-group backend implementation of configurable vault la
 
 ## Branch and current state
 
-- Branch: `feature/vault-layers` (pushed to `origin` = both Forgejo and GitHub; the branch is public on GitHub).
+- Branch: `feature/vault-layers` (pushed to GitHub; the branch is public).
 - Base of the whole feature: `06bd3c0` on `development`.
 - Phase-1 (walk-level classification) + Groups A/B/C are committed. As of writing, HEAD is `26a9583`.
 - **Green:** `cargo test` passes (~355 lib + 7 eval + 3 main), `cargo clippy --all-targets -- -D warnings` is clean, `cargo fmt --check` clean. Keep it that way at every group boundary.
