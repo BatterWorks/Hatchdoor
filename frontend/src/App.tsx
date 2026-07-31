@@ -14,6 +14,7 @@ import { AppTopbar } from "./app/AppTopbar";
 import {
   DRAWER_OPEN_KEY,
   EXPLORER_SCROLL_TOP_KEY,
+  RECENT_NOTES_COLLAPSED_KEY,
   EXPANDED_FOLDERS_KEY,
   LAST_NOTE_KEY,
   NOTE_PROPERTIES_COLLAPSED_KEY,
@@ -124,7 +125,12 @@ export function VaultApp() {
     null,
   );
   const topbarRef = useRef<HTMLElement | null>(null);
-  const explorerPaneRef = useRef<HTMLElement | null>(null);
+  const explorerScrollRef = useRef<HTMLElement | null>(null);
+  // Recently viewed remembers whether it is folded away; the design is
+  // explicit that leaving it closed is a fine way to use the sidebar.
+  const [recentCollapsed, setRecentCollapsed] = useState<boolean>(
+    () => window.localStorage.getItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
+  );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
 
@@ -332,7 +338,7 @@ export function VaultApp() {
     if (restoredExplorerScrollRef.current || !tree) {
       return;
     }
-    const container = explorerPaneRef.current;
+    const container = explorerScrollRef.current;
     if (!container) {
       return;
     }
@@ -429,7 +435,7 @@ export function VaultApp() {
 
       <div className="app-layout">
         <ExplorerPane
-          explorerPaneRef={explorerPaneRef}
+          explorerScrollRef={explorerScrollRef}
           drawerOpen={drawerOpen}
           writeEnabled={writeEnabled}
           onCreateNoteInFolder={openCreateDialog}
@@ -440,6 +446,14 @@ export function VaultApp() {
           treeError={treeError}
           tree={tree}
           expandedFolders={expandedFolders}
+          recentCollapsed={recentCollapsed}
+          onRecentCollapsedChange={(next) => {
+            setRecentCollapsed(next);
+            window.localStorage.setItem(
+              RECENT_NOTES_COLLAPSED_KEY,
+              next ? "1" : "0",
+            );
+          }}
           onExpandedFoldersChange={setExpandedFolders}
           onCloseDrawer={() => setDrawerOpen(false)}
           onRefreshTree={() => {

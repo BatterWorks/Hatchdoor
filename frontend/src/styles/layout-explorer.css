@@ -8,25 +8,139 @@
   overflow: hidden;
 }
 
-/* Sidebar / Explorer pane */
+/*
+ * Sidebar / Explorer pane — three zones.
+ *
+ * A fixed rail, a scrolling nav, a fixed footer. Only the middle scrolls, so
+ * the whole-vault destinations and the create action never scroll away. The
+ * pane itself was the scroll container before this; `.explorer-nav` is now.
+ */
 .explorer-pane {
   background: var(--bg);
   border-right: 1px solid var(--rule);
-  padding: 1.25rem 1rem 1.5rem;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
-/* Section header with number + label + rule + count */
-.explorer-header {
+.explorer-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.25rem 1rem 1.5rem;
+}
+
+/* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */
+.explorer-rail {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  flex: 0 0 auto;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.explorer-rail-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+@media (hover: hover) {
+  .explorer-rail-item:hover {
+    background: var(--paper-2);
+    color: var(--ink);
+  }
+}
+
+.explorer-rail-item.active,
+.explorer-rail-item[data-open="true"] {
+  color: var(--hot);
+}
+
+.explorer-rail-item:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+
+/* Settings reserves its slot until issue #13 exists. Dimmed, never clickable. */
+.explorer-rail-item.is-disabled {
+  margin-left: auto;
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+@media (hover: hover) {
+  .explorer-rail-item.is-disabled:hover {
+    background: transparent;
+    color: var(--ink-soft);
+  }
+}
+
+/* Footer — the single global create action, and nothing else. */
+.explorer-footer {
+  flex: 0 0 auto;
+  padding: 0.75rem;
+  border-top: 1px solid var(--rule);
+}
+
+.explorer-new-note {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Changes panel — opened from the rail. */
+.explorer-changes {
+  margin: 0 0 1.5rem;
+  padding: 0 0 1rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.explorer-changes-empty,
+.explorer-changes-more {
+  margin: 0.35rem 0 0 0.45rem;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+/* Section head — `RECENT · ──── · 04`, per §05. */
+.side-head {
   display: flex;
   align-items: center;
   gap: 0.55rem;
+  width: 100%;
   margin-bottom: 0.7rem;
   padding: 0 0.3rem;
+  border: 0;
+  background: transparent;
+  text-align: left;
 }
 
-.explorer-header p {
-  margin: 0;
+button.side-head {
+  cursor: pointer;
+}
+
+button.side-head:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 1px;
+}
+
+.side-label {
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 84,
@@ -35,12 +149,46 @@
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--ink);
-  flex: 1;
 }
 
-.explorer-actions {
-  display: flex;
-  gap: 0.35rem;
+.side-rule {
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+.side-count {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+/* Same caret affordance as folder rows, so a collapsible section reads the
+   same way whichever kind of thing it holds. */
+.side-caret {
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--muted);
+  transition: transform var(--dur) var(--ease);
+}
+
+button.side-head[data-open="true"] .side-caret {
+  transform: rotate(90deg);
+  border-left-color: var(--hot);
+}
+
+/* Mono index on note rows. Folders carry the caret, notes carry this. */
+.idx {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.active-note .idx {
+  color: var(--hot);
 }
 
 /* Recent notes panel */
@@ -49,16 +197,6 @@
   border: 0;
   background: transparent;
   padding: 0;
-}
-
-.recent-notes-title {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
-  color: var(--hot);
-  font-weight: 500;
-  margin: 0 0 0.45rem 0.4rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
 }
 
 /* Note links in sidebar */

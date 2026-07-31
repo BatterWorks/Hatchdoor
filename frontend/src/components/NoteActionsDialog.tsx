@@ -133,23 +133,74 @@ export function NoteActionsDialog({
   );
 }
 
-function FolderSuggestions({
+/** Sentinel option value; not a path, so it cannot collide with a real folder. */
+const NEW_FOLDER = "//new-folder";
+
+/**
+ * Folder chooser, shared by create and move.
+ *
+ * Replaces a free-text box plus every folder rendered as a chip, which did not
+ * scale and gave no hint that the field wanted a path. Folder names are shown
+ * verbatim, numeric prefixes included: those prefixes are the real names and
+ * encode a deliberate order.
+ *
+ * Typing a new folder name stays possible through the last option. The string
+ * is passed straight through — `useNoteActions` runs `validateNotePath` on it
+ * and the backend's `vault/write` path checks remain authoritative. Nothing
+ * here is a safety boundary.
+ */
+function FolderPicker({
+  label,
   folderPaths,
-  onSelect,
+  value,
+  onChange,
 }: {
+  label: string;
   folderPaths: string[];
-  onSelect: (path: string) => void;
+  value: string;
+  onChange: (next: string) => void;
 }) {
-  if (folderPaths.length === 0) {
-    return null;
-  }
+  const [creating, setCreating] = useState(
+    value !== "" && !folderPaths.includes(value),
+  );
+
   return (
-    <div className="folder-suggestions" aria-label="Folder suggestions">
-      {folderPaths.map((path) => (
-        <button key={path} type="button" onClick={() => onSelect(path)}>
-          {path}
-        </button>
-      ))}
+    <div className="field">
+      <label className="field-label" htmlFor="folder-picker">
+        {label}
+      </label>
+      <select
+        id="folder-picker"
+        className="field-input"
+        aria-label={label}
+        value={creating ? NEW_FOLDER : value}
+        onChange={(event) => {
+          if (event.target.value === NEW_FOLDER) {
+            setCreating(true);
+            onChange("");
+            return;
+          }
+          setCreating(false);
+          onChange(event.target.value);
+        }}
+      >
+        <option value="">Vault root</option>
+        {folderPaths.map((path) => (
+          <option key={path} value={path}>
+            {path}
+          </option>
+        ))}
+        <option value={NEW_FOLDER}>New folder…</option>
+      </select>
+      {creating ? (
+        <input
+          className="field-input field-input-nested"
+          aria-label="New folder name"
+          placeholder="10-topics/subfolder"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -195,29 +246,22 @@ function CreateForm({
       }}
     >
       <h2>Create note</h2>
-      <label>
-        Folder
-        <input
-          name="folder"
-          aria-label="Folder"
-          value={folder}
-          onChange={(event) => {
-            setFolder(event.target.value);
-            persist({ folder: event.target.value, name, content });
-          }}
-          placeholder="Vault root"
-        />
-      </label>
-      <FolderSuggestions
+      <FolderPicker
+        label="Folder"
         folderPaths={folderPaths}
-        onSelect={(path) => {
-          setFolder(path);
-          persist({ folder: path, name, content });
+        value={folder}
+        onChange={(next) => {
+          setFolder(next);
+          persist({ folder: next, name, content });
         }}
       />
-      <label>
-        Note name
+      <div className="field">
+        <label className="field-label" htmlFor="create-note-name">
+          Note name
+        </label>
         <input
+          id="create-note-name"
+          className="field-input"
           name="name"
           aria-label="Note name"
           value={name}
@@ -227,10 +271,20 @@ function CreateForm({
           }}
           placeholder="My Note"
         />
-      </label>
-      <label>
-        Markdown content
+      </div>
+      {/* Nothing previously said what you were about to make or where. This
+          also surfaces the numeric folder prefixes at the moment they matter. */}
+      <p className="field-path">
+        {folder.trim() ? `${folder.trim()} / ` : ""}
+        {name.trim() || "Untitled"}.md
+      </p>
+      <div className="field">
+        <label className="field-label" htmlFor="create-note-content">
+          Content
+        </label>
         <textarea
+          id="create-note-content"
+          className="field-input"
           name="content"
           aria-label="Markdown content"
           dir="auto"
@@ -240,7 +294,7 @@ function CreateForm({
             persist({ folder, name, content: event.target.value });
           }}
         />
-      </label>
+      </div>
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
         <UiButton type="submit">Create</UiButton>
@@ -270,10 +324,17 @@ function RenameForm({
       }}
     >
       <h2>Rename note</h2>
-      <label>
-        New title
-        <input name="newTitle" aria-label="New title" />
-      </label>
+      <div className="field">
+        <label className="field-label" htmlFor="rename-note-title">
+          New title
+        </label>
+        <input
+          id="rename-note-title"
+          className="field-input"
+          name="newTitle"
+          aria-label="New title"
+        />
+      </div>
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
         <UiButton type="submit">Rename</UiButton>
@@ -305,17 +366,12 @@ function MoveForm({
       }}
     >
       <h2>Move note</h2>
-      <label>
-        Target folder
-        <input
-          name="targetFolder"
-          aria-label="Target folder"
-          value={targetFolder}
-          onChange={(event) => setTargetFolder(event.target.value)}
-          placeholder="Vault root"
-        />
-      </label>
-      <FolderSuggestions folderPaths={folderPaths} onSelect={setTargetFolder} />
+      <FolderPicker
+        label="Target folder"
+        folderPaths={folderPaths}
+        value={targetFolder}
+        onChange={setTargetFolder}
+      />
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
         <UiButton type="submit">Move</UiButton>

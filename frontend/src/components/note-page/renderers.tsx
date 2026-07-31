@@ -4,8 +4,12 @@ import { slugifyHeading } from "../../lib/noteHeadings";
 import {
   CalloutOrQuote,
   CodeBlock,
+  ListItem,
   MermaidDiagram,
 } from "./RendererComponents";
+import { markAsParagraph } from "./paragraphs";
+import { EditableBlock } from "./EditableBlock";
+import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
@@ -13,8 +17,9 @@ import { resolveAssetHref } from "./wikilinks";
 export function createNoteMarkdownComponents(
   noteRelativePath: string,
   headingIdsBySourceLine: Map<number, string>,
+  options: { editable?: boolean } = {},
 ) {
-  return {
+  const components = {
     pre(props: { children?: ReactNode }) {
       const first = Children.toArray(props.children)[0];
       if (
@@ -88,6 +93,21 @@ export function createNoteMarkdownComponents(
       }
       return <a href={href}>{children}</a>;
     },
+    p: markAsParagraph(function NoteParagraph(props: {
+      children?: ReactNode;
+      node?: MarkdownElementNode;
+    }) {
+      // A lone PDF embed parses as a paragraph wrapping an image, but
+      // PdfPreview renders block content. Leaving the paragraph produces
+      // invalid nesting, which the browser resolves by splitting the paragraph
+      // and detaching the preview from it. Decided from the source node,
+      // because by the time children are React elements they carry the mapped
+      // img component as their type, not PdfPreview.
+      if (holdsOnlyPdfEmbed(props.node, noteRelativePath)) {
+        return <>{props.children}</>;
+      }
+      return <p>{props.children}</p>;
+    }),
     img(props: { src?: string; alt?: string }) {
       const source =
         typeof props.src === "string"
@@ -105,16 +125,43 @@ export function createNoteMarkdownComponents(
         />
       );
     },
-    li(props: { children?: ReactNode; className?: string }) {
-      const isTask = props.className?.includes("task-list-item") ?? false;
+    input(props: { type?: string; checked?: boolean; className?: string }) {
+      // mdast-util-to-hast emits task checkboxes disabled, and a disabled input
+      // fires no click events at all, so the toggle on the li would never be
+      // reached. Enabling it also gives the checkbox a keyboard path: Space
+      // fires a click, which bubbles to the same handler.
+      if (props.type !== "checkbox") {
+        return <input {...props} />;
+      }
       return (
-        <li className={isTask ? "task-list-item" : undefined}>
-          {props.children}
-        </li>
+        <input
+          type="checkbox"
+          className={props.className}
+          checked={props.checked ?? false}
+          disabled={!options.editable}
+          aria-label={options.editable ? "Toggle task" : undefined}
+          onChange={() => {}}
+        />
       );
     },
-    blockquote(props: { children?: ReactNode }) {
-      return <CalloutOrQuote>{props.children}</CalloutOrQuote>;
+    li(props: { children?: ReactNode; className?: string; node?: unknown }) {
+      // Absent from EDITABLE_UNITS on purpose: a wrapped item is addressed one
+      // line at a time (D25a), which only this renderer can see, so it owns
+      // its own EditableBlock rather than being wrapped in one.
+      return (
+        <ListItem
+          node={props.node}
+          className={props.className}
+          editable={options.editable ?? false}
+        >
+          {props.children}
+        </ListItem>
+      );
+    },
+    blockquote(props: { children?: ReactNode; node?: unknown }) {
+      return (
+        <CalloutOrQuote node={props.node}>{props.children}</CalloutOrQuote>
+      );
     },
     table(props: { children?: ReactNode }) {
       return (
@@ -172,6 +219,87 @@ export function createNoteMarkdownComponents(
       );
     },
   };
+
+  return options.editable ? withEditableBlocks(components) : components;
+}
+
+// Block-level entries get wrapped so each rendered block can be swapped for its
+// own source lines. Inline entries (a, code, img) are deliberately absent: they
+// belong to the block that contains them, not to a range of their own.
+const EDITABLE_UNITS: Record<string, UnitType> = {
+  p: "paragraph",
+  h1: "heading",
+  h2: "heading",
+  h3: "heading",
+  h4: "heading",
+  h5: "heading",
+  h6: "heading",
+  // D27: the tr is the unit, not the td. mdast gives tr and td identical
+  // ranges, and the delimiter row belongs to no node at all.
+  tr: "table row",
+  pre: "code block",
+};
+
+type ComponentMap = Record<string, (props: never) => ReactNode>;
+
+function withEditableBlocks<T extends ComponentMap>(components: T): T {
+  const wrapped = { ...components } as ComponentMap;
+
+  for (const [tag, unitType] of Object.entries(EDITABLE_UNITS)) {
+    const Original = components[tag];
+    const Wrapped = (props: { node?: unknown; children?: ReactNode }) => (
+      <EditableBlock node={props.node} unitType={unitType}>
+        {/* Called rather than rendered, deliberately: this has to yield the
+            intrinsic element (a <p>, an <li>) so EditableBlock can clone the
+            handlers straight onto it. Rendering it as a component would make
+            the child a component element, which falls back to a wrapper div
+            and takes the tabIndex off the real element. The cost is that a
+            wrapped renderer may not use hooks; none do, and the keyboard-entry
+            tests fail loudly if this changes. */}
+        {Original
+          ? (Original as (p: unknown) => ReactNode)(props)
+          : createElement(tag, null, props.children)}
+      </EditableBlock>
+    );
+    wrapped[tag] = Wrapped as (props: never) => ReactNode;
+  }
+
+  // The paragraph marker must survive wrapping, or callout detection stops
+  // recognising its own first child.
+  if (wrapped.p) {
+    markAsParagraph(wrapped.p);
+  }
+
+  return wrapped as T;
+}
+
+type MarkdownElementNode = {
+  children?: Array<{
+    type?: string;
+    tagName?: string;
+    value?: string;
+    properties?: { src?: unknown };
+  }>;
+};
+
+function holdsOnlyPdfEmbed(
+  node: MarkdownElementNode | undefined,
+  noteRelativePath: string,
+): boolean {
+  const meaningful = (node?.children ?? []).filter(
+    (child) => !(child.type === "text" && (child.value ?? "").trim() === ""),
+  );
+
+  if (meaningful.length !== 1) {
+    return false;
+  }
+
+  const only = meaningful[0];
+  if (only.tagName !== "img" || typeof only.properties?.src !== "string") {
+    return false;
+  }
+
+  return isPdfHref(resolveAssetHref(only.properties.src, noteRelativePath));
 }
 
 function isPdfHref(href: string): boolean {

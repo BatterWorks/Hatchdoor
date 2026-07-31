@@ -11,7 +11,6 @@ import ReactMarkdown from "react-markdown";
 import { useLocation, useParams } from "react-router-dom";
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
-import { normalizeImageForUpload } from "../lib/imageUpload";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -22,6 +21,14 @@ import {
   stripVaultNoteLinks,
 } from "../lib/markdown";
 import { extractMarkdownHeadings, slugifyHeading } from "../lib/noteHeadings";
+import {
+  frontmatterLineOffset,
+  linesMatch,
+  placeholderForBlankRange,
+  type LineRange,
+} from "../lib/sourceMap";
+import { useNoteAutosave } from "../hooks/useNoteAutosave";
+import { createEditHistory } from "../lib/editHistory";
 import {
   createSearchHighlightPlugin,
   normalizeSearchQuery,
@@ -47,6 +54,15 @@ import {
 } from "../lib/writeDrafts";
 import { NoteEditor } from "./NoteEditor";
 import { NoteSkeleton, StateBlock, StatusBadge, UiButton } from "./ui";
+import { SaveState } from "./note-page/SaveState";
+import {
+  attachmentRejection,
+  insertEmbedAt,
+  insertionLineForDrop,
+  uploadNoteAttachment,
+} from "./note-page/attachmentDrop";
+import { BlockGap } from "./note-page/BlockGap";
+import { InlineEditorProvider } from "./note-page/InlineEditorProvider";
 import { jumpToHeading, scrollElementIntoView } from "./note-page/dom";
 import { NotePreview } from "./note-page/NotePreview";
 import { createNoteMarkdownComponents } from "./note-page/renderers";
@@ -58,6 +74,17 @@ import {
   SearchHitNavigator,
 } from "./note-page/sections";
 import { useResolvedWikilinks } from "./note-page/wikilinks";
+
+const TOUCH_EDIT_HINT_KEY = "hatchdoor.touchEditHintSeen";
+
+/**
+ * Whether the primary pointer cannot hover, which is what makes the double tap
+ * the entry gesture and the hint worth showing. Guarded because jsdom and older
+ * WebKit do not implement matchMedia.
+ */
+function isCoarsePointer(): boolean {
+  return window.matchMedia?.("(pointer: coarse)").matches ?? false;
+}
 
 export function NotePage({
   onActiveNoteChange,
@@ -94,12 +121,22 @@ export function NotePage({
   const [conflictNote, setConflictNote] = useState<Note | null>(null);
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [inlineDirty, setInlineDirty] = useState(false);
+  const [activeUnit, setActiveUnit] = useState<string | null>(null);
+  const [activeRange, setActiveRange] = useState<LineRange | null>(null);
   const [saving, setSaving] = useState(false);
   const [propertiesCollapsed, setPropertiesCollapsed] = useState<boolean>(
     () => {
       return window.localStorage.getItem(propertiesCollapsedStorageKey) !== "0";
     },
   );
+  // Entering a block on touch is a double tap, which is invisible: the gutter
+  // rule signals "something is here" without saying what gesture reaches it.
+  // Shown once per install, on coarse pointers only, and retired as soon as the
+  // gesture has demonstrably been learned.
+  const [touchEditHintSeen, setTouchEditHintSeen] = useState<boolean>(() => {
+    return window.localStorage.getItem(TOUCH_EDIT_HINT_KEY) === "1";
+  });
   const [searchHitCount, setSearchHitCount] = useState(0);
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
@@ -107,6 +144,9 @@ export function NotePage({
   const currentSlugRef = useRef(slug);
   const lastEditRequestIdRef = useRef(editRequestId);
   const lastHandledRevisionRef = useRef(0);
+  const autosaveStatusRef = useRef<string>("idle");
+  const activeUnitRef = useRef<string | null>(null);
+  const latestContentRef = useRef("");
   currentSlugRef.current = slug;
 
   const loadNote = useCallback(
@@ -180,6 +220,7 @@ export function NotePage({
     setNoteChangedOnDisk(false);
     setEditorError(null);
     setSaving(false);
+    setInlineDirty(false);
   }, [slug]);
 
   useEffect(() => {
@@ -195,14 +236,29 @@ export function NotePage({
     // the content hash the editor saves against and silently defeat the
     // optimistic-concurrency guard. Flag the change instead so the user can
     // reload deliberately.
+    // D16: our own writes bump the revision twice. Refetching while the
+    // document is dirty or a write is in flight would move the hash the next
+    // save is made against and defeat the concurrency guard.
     if (isEditing) {
       setNoteChangedOnDisk(true);
       return;
     }
 
+    // Our own writes bump the revision twice, so a bump arriving while a save
+    // is in flight or the document is dirty is almost always ours. Flagging it
+    // leaves a warning that never clears; a genuine external change is caught
+    // by the next bump once things are quiet.
+    if (
+      inlineDirty ||
+      activeUnitRef.current !== null ||
+      autosaveStatusRef.current === "saving"
+    ) {
+      return;
+    }
+
     void loadNote(false);
     void loadNoteLinks();
-  }, [loadNote, loadNoteLinks, vaultRevision, isEditing]);
+  }, [loadNote, loadNoteLinks, vaultRevision, isEditing, inlineDirty]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -210,13 +266,6 @@ export function NotePage({
       propertiesCollapsed ? "1" : "0",
     );
   }, [propertiesCollapsed, propertiesCollapsedStorageKey]);
-
-  useEffect(() => {
-    const onToggle = () => setPropertiesCollapsed((prev) => !prev);
-    window.addEventListener("hatchdoor:toggle-note-properties", onToggle);
-    return () =>
-      window.removeEventListener("hatchdoor:toggle-note-properties", onToggle);
-  }, []);
 
   const startEditing = useCallback(() => {
     if (!writeEnabled || !note || isEditing) {
@@ -289,10 +338,14 @@ export function NotePage({
     });
   }, [note, onActiveNoteChange, parsed.body]);
 
-  const markdown = useResolvedWikilinks(
-    stripBlockIds(parsed.body),
+  const renderInput = stripBlockIds(parsed.body);
+  const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
+    renderInput,
     note?.relative_path ?? "",
   );
+  // While resolution is in flight the rendered tree still describes the
+  // previous document, so every block range on screen is stale (D28).
+  const settling = resolvedFor !== renderInput;
   const searchQuery = useMemo(
     () => normalizeSearchQuery(new URLSearchParams(location.search).get("q")),
     [location.search],
@@ -313,14 +366,275 @@ export function NotePage({
     () => new Map(tocHeadings.map(({ sourceLine, id }) => [sourceLine, id])),
     [tocHeadings],
   );
+  // blockRange addresses blocks by line number, so inline editing is only safe
+  // while the rendered body has exactly one line per source line. If a
+  // transform ever collapses lines, editing would write to the wrong place and
+  // confirm the hash, so the feature turns itself off for that note instead.
+  const lineMappingIntact = useMemo(
+    () => linesMatch(parsed.body, markdown),
+    [parsed.body, markdown],
+  );
+  const inlineEditingEnabled =
+    writeEnabled && !isEditing && lineMappingIntact && !!note;
+
+  // Applied after wikilink resolution rather than before it: the resolver is
+  // keyed on its input, so editing that input would mark the tree as settling
+  // and disable editing for exactly as long as the caret sat on a blank line.
+  //
+  // The range arrives in file coordinates, and this is the body, so the
+  // frontmatter offset comes back off.
+  const frontmatterOffset = frontmatterLineOffset(note?.content ?? "");
+  const renderedMarkdown = useMemo(
+    () =>
+      placeholderForBlankRange(
+        markdown,
+        activeRange
+          ? {
+              startLine: activeRange.startLine - frontmatterOffset,
+              endLine: activeRange.endLine - frontmatterOffset,
+            }
+          : null,
+      ),
+    [markdown, activeRange, frontmatterOffset],
+  );
+
   const markdownComponents = useMemo(
     () =>
       createNoteMarkdownComponents(
         note?.relative_path ?? "",
         headingIdsBySourceLine,
+        { editable: inlineEditingEnabled },
       ),
-    [note?.relative_path, headingIdsBySourceLine],
+    [note?.relative_path, headingIdsBySourceLine, inlineEditingEnabled],
   );
+
+  const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
+  // Stable per note: a ref an effect depends on cannot be reassigned, and the
+  // history object mutates internally rather than being swapped out.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const history = useMemo(() => createEditHistory(""), [slug]);
+
+  const dismissTouchEditHint = useCallback(() => {
+    setTouchEditHintSeen((seen) => {
+      if (!seen) {
+        window.localStorage.setItem(TOUCH_EDIT_HINT_KEY, "1");
+      }
+      return true;
+    });
+  }, []);
+
+  const handleInlineChange = (nextContent: string) => {
+    if (!note) {
+      return;
+    }
+    // Readable before React re-renders. A block committed inside an async
+    // handler has to be visible to the rest of that handler, which still holds
+    // the document this render closed over.
+    latestContentRef.current = nextContent;
+    // An edit landed, so the gesture has been learned and the hint has done its
+    // job. Retiring it here rather than on entry means an accidental double tap
+    // does not count as having taught anything.
+    dismissTouchEditHint();
+    history.record(nextContent, Date.now());
+    // Moving between units always ends a run, so undo steps line up with
+    // blocks rather than with arbitrary pauses.
+    history.breakRun();
+    if (!inlineDirty) {
+      setEditBaseHash(note.content_hash);
+      setInlineDirty(true);
+    }
+    setDraftContent(nextContent);
+    setNote((prev) => (prev ? { ...prev, content: nextContent } : prev));
+    autosaveRef.current?.commit(nextContent);
+  };
+
+  const autosave = useNoteAutosave({
+    baseHash: note?.content_hash ?? "",
+    enabled: inlineEditingEnabled,
+    save: async (nextContent, expectedHash) => {
+      const outcome = await updateNote(slug, nextContent, expectedHash);
+      if (outcome.git_sync_warning) {
+        onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
+      }
+      return outcome;
+    },
+    onSaved: (result) => {
+      setNote((prev) =>
+        prev && result.content_hash
+          ? { ...prev, content_hash: result.content_hash }
+          : prev,
+      );
+      setInlineDirty(false);
+    },
+  });
+
+  useEffect(() => {
+    autosaveRef.current = autosave;
+    autosaveStatusRef.current = autosave.status;
+  }, [autosave]);
+
+  // Seed once per note. Without this, undo before the first edit would restore
+  // the empty string the history was constructed with and blank the note.
+  const seededSlugRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (note && seededSlugRef.current !== slug) {
+      seededSlugRef.current = slug;
+      history.reset(note.content);
+    }
+  }, [note, slug, history]);
+
+  useEffect(() => {
+    latestContentRef.current = note?.content ?? "";
+  }, [note?.content]);
+
+  const [externalChange, setExternalChange] = useState(0);
+
+  const applyHistory = useCallback((next: string | null) => {
+    if (next === null) {
+      return;
+    }
+    // The open block, if any, is seeded from the pre-undo document.
+    setExternalChange((n) => n + 1);
+    latestContentRef.current = next;
+    setNote((prev) => (prev ? { ...prev, content: next } : prev));
+    setDraftContent(next);
+    setInlineDirty(true);
+    autosaveRef.current?.commit(next);
+  }, []);
+
+  useEffect(() => {
+    if (!inlineEditingEnabled) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      const meta = event.metaKey || event.ctrlKey;
+      if (!meta || event.isComposing) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const isUndo = key === "z" && !event.shiftKey;
+      const isRedo = (key === "z" && event.shiftKey) || key === "y";
+      if (!isUndo && !isRedo) {
+        return;
+      }
+      // Always prevented: mixing our stack with the browser's native textarea
+      // undo produces behaviour neither of them can explain.
+      event.preventDefault();
+      applyHistory((isUndo ? history.undo() : history.redo())?.content ?? null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [inlineEditingEnabled, applyHistory, history]);
+
+  // Text sitting in an open block exists nowhere else, so it is flushed after
+  // an idle pause and on the way out of the page rather than waiting for blur.
+  const handleInProgressChange = (nextContent: string) => {
+    autosaveRef.current?.touch(nextContent);
+  };
+
+  const handleActiveRangeChange = useCallback(
+    (range: { startLine: number; endLine: number } | null) => {
+      const key = range ? `${range.startLine}:${range.endLine}` : null;
+      activeUnitRef.current = key;
+      setActiveUnit(key);
+      setActiveRange(range);
+    },
+    [],
+  );
+
+  const [dropActive, setDropActive] = useState(false);
+
+  const handleBodyDrop = async (event: React.DragEvent<HTMLDivElement>) => {
+    setDropActive(false);
+    if (!inlineEditingEnabled || !note) {
+      return;
+    }
+    const file = event.dataTransfer.files[0];
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+
+    const rejection = attachmentRejection(file);
+    if (rejection) {
+      onWriteNotice?.(rejection);
+      return;
+    }
+
+    // An open block holds its text nowhere else, and its commit rewrites the
+    // whole document from the copy it was seeded with. A drop does not move
+    // focus, so left open it would commit after the write below and overwrite
+    // it, dropping the embed and orphaning the file that was just uploaded.
+    // Blurring commits it synchronously, so everything after this works from
+    // one document rather than two.
+    const focused = document.activeElement;
+    if (
+      focused instanceof HTMLElement &&
+      event.currentTarget.contains(focused)
+    ) {
+      focused.blur();
+    }
+
+    // Where it lands is decided before the upload, so the insertion point is
+    // the one the user aimed at rather than wherever the page has scrolled to
+    // by the time the request comes back. The commit above replaces a block's
+    // lines in place, so the line numbers collected here still hold.
+    const blocks = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(".editable-block"),
+    )
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return { el, top: rect.top, bottom: rect.bottom };
+      })
+      .flatMap(({ el, top, bottom }) => {
+        const start = Number(el.dataset.startLine);
+        const end = Number(el.dataset.endLine);
+        return Number.isFinite(start) && Number.isFinite(end)
+          ? [{ startLine: start, endLine: end, top, bottom }]
+          : [];
+      });
+    const line = insertionLineForDrop(blocks, event.clientY);
+
+    try {
+      const result = await uploadNoteAttachment(
+        file,
+        note.relative_path,
+        uploadAttachment,
+      );
+      if (result.gitSyncWarning) {
+        onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
+      }
+      // Not note.content: that is the document this render closed over, and a
+      // block committed above has already moved past it.
+      handleInlineChange(
+        insertEmbedAt(latestContentRef.current, line, result.embedPath),
+      );
+    } catch (uploadError) {
+      onWriteNotice?.(
+        uploadError instanceof Error ? uploadError.message : "Upload failed.",
+      );
+    }
+  };
+
+  const reviewConflict = () => {
+    // The conflict review lives in source mode, which already knows how to
+    // show the disk version beside the draft.
+    setDraftContent(note?.content ?? "");
+    setEditBaseHash(editBaseHash || (note?.content_hash ?? ""));
+    setConflict(true);
+    setIsEditing(true);
+    void (async () => {
+      try {
+        const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
+        if (res.ok) {
+          const json = (await res.json()) as { note: Note };
+          setConflictNote(json.note);
+        }
+      } catch {
+        // The banner already said what happened; source mode still holds the draft.
+      }
+    })();
+  };
 
   useLayoutEffect(() => {
     const root = noteBodyRef.current;
@@ -338,6 +652,26 @@ export function NotePage({
     setSearchHitCount(hits.length);
     setActiveSearchHit(0);
 
+    return () => {
+      searchHitsRef.current = [];
+    };
+    // activeUnit is a dependency because entering a block removes its marks:
+    // without recounting, SearchHitNavigator's indices silently shift.
+  }, [markdown, note?.slug, searchQuery, matchHeading, activeUnit]);
+
+  // Jumping to the first hit is a landing gesture, so it is deliberately not
+  // tied to activeUnit the way the recount above is. Entering a block changes
+  // the active unit, and scrolling on that would throw the reader back to the
+  // top of the note the moment they clicked something near the bottom.
+  //
+  // Runs after the recount effect, which is what fills searchHitsRef: layout
+  // effects fire in declaration order within a commit.
+  useLayoutEffect(() => {
+    if (!noteBodyRef.current) {
+      return;
+    }
+
+    const hits = searchHitsRef.current;
     if (hits.length > 0) {
       setActiveSearchHitClass(hits, 0);
       scrollElementIntoView(hits[0], { block: "center", inline: "nearest" });
@@ -346,10 +680,6 @@ export function NotePage({
       const lastSegment = parts[parts.length - 1] ?? matchHeading;
       jumpToHeading(slugifyHeading(lastSegment));
     }
-
-    return () => {
-      searchHitsRef.current = [];
-    };
   }, [markdown, note?.slug, searchQuery, matchHeading]);
 
   useEffect(() => {
@@ -456,6 +786,7 @@ export function NotePage({
       setDraftStale(false);
       setDraftNotice(null);
       setIsEditing(false);
+      setInlineDirty(false);
       onWriteNotice?.(describeWriteOutcome(outcome));
       // Patch the saved content in place so the reader updates instantly without
       // a skeleton flash, then reconcile title/links in the background.
@@ -542,16 +873,15 @@ export function NotePage({
   };
 
   const handleUploadAttachment = async (file: File): Promise<string> => {
-    const normalizedFile = await normalizeImageForUpload(file);
-    const filename = safeAttachmentFilename(normalizedFile.name);
-    const outcome = await uploadAttachment(
-      normalizedFile,
-      `Attachments/${filename}`,
+    const result = await uploadNoteAttachment(
+      file,
+      note.relative_path,
+      uploadAttachment,
     );
-    if (outcome.git_sync_warning) {
-      onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
+    if (result.gitSyncWarning) {
+      onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
     }
-    return outcome.attachment.relative_path;
+    return result.embedPath;
   };
 
   return (
@@ -560,15 +890,55 @@ export function NotePage({
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>
           {writeEnabled && !isEditing ? (
-            <UiButton
-              className="close-note note-edit-button"
-              onClick={startEditing}
-            >
-              Edit
-            </UiButton>
+            <div className="note-inline-actions">
+              <SaveState status={autosave.status} savedAt={autosave.savedAt} />
+              <UiButton
+                className="close-note note-edit-button"
+                onClick={startEditing}
+              >
+                Edit
+              </UiButton>
+            </div>
           ) : null}
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
+        {autosave.status === "conflict" || autosave.status === "error" ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              {autosave.status === "conflict"
+                ? "Edits aren't saving. This note changed somewhere else."
+                : "Edits aren't saving. Hatchdoor could not reach the vault."}
+            </div>
+            <UiButton className="close-note" onClick={reviewConflict}>
+              Review
+            </UiButton>
+          </div>
+        ) : null}
+        {writeEnabled && !isEditing && !lineMappingIntact ? (
+          <p className="note-editor-notice">
+            This note&rsquo;s source and rendered lines don&rsquo;t line up, so
+            inline editing is off here. Use Edit to open source mode.
+          </p>
+        ) : null}
+        {inlineEditingEnabled && !touchEditHintSeen && isCoarsePointer() ? (
+          // The same shell the write notice uses, so the × is a device already
+          // established here. A notice that is silently its own dismiss target
+          // has no affordance at all on touch, where there is no cursor to
+          // change.
+          <div className="write-notice touch-edit-hint" role="status">
+            <div className="write-notice-messages">
+              Double-tap a line to edit it.
+            </div>
+            <button
+              type="button"
+              className="write-notice-dismiss"
+              aria-label="Dismiss hint"
+              onClick={dismissTouchEditHint}
+            >
+              ×
+            </button>
+          </div>
+        ) : null}
         {searchHitCount > 0 ? (
           <SearchHitNavigator
             totalHits={searchHitCount}
@@ -585,6 +955,9 @@ export function NotePage({
         ) : null}
         <NoteProperties
           properties={parsed.properties}
+          content={note.content}
+          editable={inlineEditingEnabled}
+          onChange={handleInlineChange}
           collapsed={propertiesCollapsed}
           onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
           onTagSelect={onTagSelect}
@@ -624,13 +997,41 @@ export function NotePage({
           />
         ) : (
           <div ref={noteBodyRef} className="note-body" dir="auto">
-            <ReactMarkdown
-              remarkPlugins={[remarkGfm, remarkMath]}
-              rehypePlugins={rehypePlugins}
-              components={markdownComponents}
+            <div
+              className={`note-body-drop${dropActive ? " drag-active" : ""}`}
+              onDragOver={(event) => {
+                if (
+                  inlineEditingEnabled &&
+                  event.dataTransfer.types.includes("Files")
+                ) {
+                  event.preventDefault();
+                  setDropActive(true);
+                }
+              }}
+              onDragLeave={() => setDropActive(false)}
+              onDrop={(event) => void handleBodyDrop(event)}
             >
-              {markdown}
-            </ReactMarkdown>
+              <InlineEditorProvider
+                content={note.content}
+                frontmatterOffset={frontmatterLineOffset(note.content)}
+                writeEnabled={inlineEditingEnabled}
+                settling={settling}
+                externalChangeSignal={externalChange}
+                onChange={handleInlineChange}
+                onInProgressChange={handleInProgressChange}
+                onActiveRangeChange={handleActiveRangeChange}
+              >
+                <BlockGap>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm, remarkMath]}
+                    rehypePlugins={rehypePlugins}
+                    components={markdownComponents}
+                  >
+                    {renderedMarkdown}
+                  </ReactMarkdown>
+                </BlockGap>
+              </InlineEditorProvider>
+            </div>
           </div>
         )}
       </article>
@@ -638,9 +1039,4 @@ export function NotePage({
       <NoteTocDesktop headings={tocHeadings} />
     </div>
   );
-}
-
-function safeAttachmentFilename(filename: string): string {
-  const basename = filename.split(/[\\/]/).pop()?.trim() || "attachment";
-  return basename.replace(/[^A-Za-z0-9._ -]/g, "-");
 }

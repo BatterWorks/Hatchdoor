@@ -528,66 +528,6 @@
   animation: shimmer 1.2s linear infinite;
 }
 
-/* ── EXPLORER NAV LINKS ──────────────────────────────────────── */
-.explorer-page-links {
-  display: flex;
-  gap: 0.35rem;
-  margin-bottom: 1.1rem;
-}
-
-.explorer-page-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-family: var(--font-display);
-  font-variation-settings:
-    "wdth" 92,
-    "wght" 600;
-  font-size: 0.72rem;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  padding: 0.38rem 0.7rem;
-  border: 1px solid var(--rule);
-  background: var(--bg);
-  color: var(--ink-soft);
-  text-decoration: none;
-  transition:
-    background var(--dur) var(--ease),
-    color var(--dur) var(--ease),
-    border-color var(--dur) var(--ease);
-}
-
-.explorer-page-link:hover {
-  background: var(--paper-2);
-  color: var(--ink);
-  border-color: var(--rule-strong);
-}
-
-.explorer-page-link.active {
-  background: var(--hot-soft);
-  color: var(--ink);
-  border-color: var(--rule-strong);
-  box-shadow: inset 3px 0 0 var(--hot);
-}
-
-/* ── EXPLORER NOTES LABEL ────────────────────────────────────── */
-.explorer-notes-label {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
-  color: var(--hot);
-  font-weight: 500;
-  margin: 0 0 0.45rem 0.4rem;
-  text-transform: uppercase;
-  letter-spacing: 0.14em;
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-}
-
-.explorer-notes-count {
-  color: var(--muted);
-}
-
 /* ── RESPONSIVE ──────────────────────────────────────────────── */
 @media (max-width: 700px) {
   .stats-metric-strip {

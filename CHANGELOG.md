@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- A **New note** button now sits at the bottom of the sidebar, always reachable
+  without scrolling. The per-folder `+` stays for creating in a specific folder.
+- A **changes panel**, opened from the sidebar rail, listing notes that changed
+  on disk. It replaces the old "Last Modified" sidebar list. It deliberately
+  carries no unread count yet: Hatchdoor cannot currently tell an agent's write
+  from your own, and a count that ticked up every time you saved a note would
+  mean the opposite of what it should.
+- Recently viewed is now collapsible, and remembers whether you folded it away.
+
+### Changed
+- **The sidebar is restructured into three zones**: a fixed rail of whole-vault
+  destinations at top, the scrolling note navigation in the middle, and the
+  create action pinned at the bottom. Only the middle scrolls.
+- **Stats and Graph moved** out of the sidebar header into that rail, as icons.
+  Settings sits alongside them, dimmed, until it has somewhere to go.
+- Notes in the tree now carry a small index, so note rows and folder rows no
+  longer look identical.
+- The topbar's `···` menu on desktop is left-aligned sentence case with
+  borderless rows, grouped into create/edit, utilities, and destructive actions
+  — with Archive and Delete last. Mobile already looked like this; desktop did
+  not.
+- Interface icons are now Material Symbols Sharp rather than typed unicode
+  characters, so they render consistently across platforms. Attribution is in
+  the new `THIRD_PARTY_NOTICES.md`.
+- The note **Properties** heading is now the disclosure itself; the separate
+  Show/Hide button is gone.
+- **The create-note dialog is rebuilt.** Labels are distinguishable from the
+  fields, the fields are actually visible, the folder chooser is a dropdown with
+  a "New folder…" option instead of a free-text box beside a wall of chips, and
+  a live line shows the path you are about to create.
+
+### Fixed
+- Opening a note highlighted it in up to three sidebar lists at once. The
+  highlight is now canonical in the folder tree only.
+
+No upgrade action required. Nothing changes on disk, in configuration, or in the
+API; the cache is not rebuilt.
+
 ## v2.4.0 - 2026-07-27
 
 ### ⚠️ Breaking changes — action required on upgrade

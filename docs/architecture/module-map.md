@@ -556,8 +556,10 @@ packet names the route, callback, shortcut, or state integration. A large prop
 surface is a coordination seam, not permission to move feature behavior into
 the shell.
 
-**Validation:** the applicable `App.*.test.tsx`, `useTheme.test.tsx`, storage
-tests, then full frontend checks.
+**Validation:** the applicable `App.*.test.tsx`, `app/ExplorerPane.test.tsx`,
+`useTheme.test.tsx`, storage tests, then full frontend checks. Layout changes to
+the explorer pane need a browser as well as the suite: its zone structure
+depends on real cascade behavior that jsdom does not reproduce.
 
 ### Frontend API, authentication, and shared wire contracts
 
@@ -617,13 +619,19 @@ frontend checks.
 **Owned paths:**
 
 - `frontend/src/components/Explorer.tsx`
+- `frontend/src/components/ChangesPanel.tsx`
 - `frontend/src/hooks/useVaultTree.ts`
 - `frontend/src/lib/folderPaths.ts`
 - `frontend/src/lib/noteCandidates.ts`
 - `frontend/src/styles/layout-explorer.css`
 
 **Public contract:** `useVaultTree`, explorer tree/list components, derived
-folder paths, and flattened note candidates.
+folder paths, and flattened note candidates. The sidebar is three zones — a
+fixed rail, a scrolling nav, a fixed footer — and `.explorer-nav` is the scroll
+container the shell restores scroll position against, not the pane itself.
+`ChangesPanel` lists notes changed on disk; it deliberately carries no unread
+count, because distinguishing external changes from the user's own edits needs
+backend data that does not exist yet.
 
 **Consumed dependencies:** shared API/error utilities, shared wire types,
 router links, and shared UI components.
@@ -632,7 +640,9 @@ router links, and shared UI components.
 `lib/stateCompare.ts`, responsive CSS, and backend tree/recent/event endpoints.
 
 **Validation:** folder/note-candidate/state comparison tests and affected App
-navigation tests; the hook currently needs focused coverage.
+navigation tests; `app/ExplorerPane.test.tsx` covers the tree and list
+components in composition, including the single-active-highlight invariant. The
+hook still needs focused coverage.
 
 ### Search dialog
 
@@ -684,6 +694,7 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/components/note-page/PdfPreview.tsx`
 - `frontend/src/components/note-page/RendererComponents.tsx`
 - `frontend/src/components/note-page/dom.ts`
+- `frontend/src/components/note-page/paragraphs.ts`
 - `frontend/src/components/note-page/renderers.tsx`
 - `frontend/src/components/note-page/sections.tsx`
 - `frontend/src/components/note-page/text.ts`
@@ -696,7 +707,10 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 
 **Public contract:** `NotePage`, note preview/rendering behavior, safe asset and
 wikilink resolution, heading/search-hit navigation, Markdown transformations,
-and note navigation/rendering behavior.
+note navigation/rendering behavior, the editable-block component map produced by
+`createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
+recognise its own first child, and the soft-break splitter that reconstructs one
+source line per rendered line for the two unit types addressed per line.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, and note editing.
@@ -706,7 +720,15 @@ handlers, `NoteEditor.tsx`, Search query navigation, shared and responsive CSS.
 
 **Invariants:** vault Markdown remains the rendered source; vault content is
 data rather than trusted executable instructions; asset URLs retain auth and
-path safety.
+path safety; **the rendered body keeps one line per source line**, since inline
+editing addresses blocks by line number and a transform that collapses lines
+would write to the wrong place (`linesMatch` enforces this at runtime and
+disables inline editing for that note); a callout body and a wrapped list item
+are rebuilt rather than passed through, so their positions do not survive and a
+line's **index** is the only thing mapping it back to the file, which is why no
+interior line is dropped while splitting and why a list item whose rendered line
+count disagrees with the span it claims is addressed whole rather than written to
+a guessed line.
 
 **Validation:** note-page unit tests, Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
@@ -722,18 +744,37 @@ path safety.
 - `frontend/src/components/NoteEditor.tsx`
 - `frontend/src/components/NoteActionsDialog.tsx`
 - `frontend/src/hooks/useNoteActions.ts`
+- `frontend/src/hooks/useNoteAutosave.ts`
 - `frontend/src/hooks/useWriteMode.ts`
+- `frontend/src/lib/blockOps.ts`
+- `frontend/src/lib/caretMap.ts`
+- `frontend/src/lib/editHistory.ts`
 - `frontend/src/lib/imageUpload.ts`
+- `frontend/src/lib/linePrefix.ts`
+- `frontend/src/lib/sourceMap.ts`
 - `frontend/src/lib/writeDrafts.ts`
 - `frontend/src/lib/writePaths.ts`
+- `frontend/src/components/note-page/BlockGap.tsx`
+- `frontend/src/components/note-page/BlockInput.tsx`
+- `frontend/src/components/note-page/EditableBlock.tsx`
+- `frontend/src/components/note-page/InlineEditorProvider.tsx`
+- `frontend/src/components/note-page/blockEditorSetup.ts`
+- `frontend/src/components/note-page/SaveState.tsx`
+- `frontend/src/components/note-page/attachmentDrop.ts`
 - `frontend/src/components/note-page/autocomplete.ts`
 - `frontend/src/components/note-page/conflictDiff.ts`
 - `frontend/src/components/note-page/frontmatter.ts`
+- `frontend/src/components/note-page/inlineEditorContext.ts`
 
 **Public contract:** write capability discovery and operations, editor/action
 components, note-action/write-mode hooks, local draft behavior, client path
-validation, upload normalization, frontmatter editing, conflict display, and
-wikilink autocomplete.
+validation, upload normalization, frontmatter editing, conflict display,
+wikilink autocomplete, inline block editing (the editor provider/context, the
+per-block wrapper, the CodeMirror block input and its markdown syntax
+highlighting, click-to-write in the space between blocks, structural block
+operations, document-level undo, autosave scheduling and save state), line
+mapping between rendered nodes and file lines, and attachment acceptance and
+insertion.
 
 **Consumed dependencies:** shared API/types/UI, router navigation, vault tree
 note candidates, and backend HTTP write endpoints.
@@ -744,10 +785,16 @@ note candidates, and backend HTTP write endpoints.
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
-safety; every mutation continues through backend `vault/write` (ADR-03/11).
+safety; every mutation continues through backend `vault/write` (ADR-03/11);
+**nothing re-serializes a note** — edits replace only the lines a block owns and
+reproduce the file's own line endings; **block operations refuse rather than
+guess** when a range no block owns lies between them, or when the rendered tree
+is still settling behind a wikilink resolve.
 
 **Validation:** write API, editor, action dialog, upload, draft, path,
-frontmatter, conflict, and autocomplete tests plus `App.write-mode.test.tsx`
+frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
+`caretMap`, `editHistory`, `linePrefix`, `useNoteAutosave`, `attachmentDrop`,
+`inlineEditing`, and `properties` tests; plus `App.write-mode.test.tsx`
 and full frontend checks.
 
 ### Graph
@@ -800,6 +847,7 @@ route tests, and full frontend checks.
 **Paths:**
 
 - `frontend/src/components/ui.tsx`
+- `frontend/src/components/icons.tsx`
 - `frontend/src/index.css`
 - `frontend/src/App.css`
 - `frontend/src/styles/base.css`
@@ -809,6 +857,9 @@ route tests, and full frontend checks.
 
 **Contract and responsibility:** shared primitives, global tokens/base rules,
 style aggregation, topbar/shell styles, and cross-feature responsive overrides.
+`icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
+and paint with `currentColor`, so callers control them through font-size and
+color. Attribution lives in `THIRD_PARTY_NOTICES.md`.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected

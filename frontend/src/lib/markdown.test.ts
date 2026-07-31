@@ -89,3 +89,30 @@ describe("stripVaultNoteLinks", () => {
     );
   });
 });
+
+describe("stripVaultNoteLinks line counts", () => {
+  // The wikilink pattern used [^\]]+, which excludes ] but not newline, so an
+  // unclosed [[ matched across lines until it found ]] anywhere later and
+  // collapsed everything between into one line. A dangling [[ is exactly what
+  // the autocomplete leaves behind mid-typing.
+  it("preserves line count when a note contains a dangling open bracket", () => {
+    const input =
+      "TODO link to [[\n\nAnother paragraph with [[Real Note]] here.";
+
+    const output = stripVaultNoteLinks(input);
+
+    expect(output.split("\n")).toHaveLength(input.split("\n").length);
+  });
+
+  it("does not treat a dangling open bracket as a link", () => {
+    const output = stripVaultNoteLinks("TODO link to [[\n\nSee [[Real Note]].");
+
+    expect(output).toBe("TODO link to [[\n\nSee Real Note.");
+  });
+
+  it("leaves a wikilink split across lines as literal text", () => {
+    const input = "See [[Real\nNote]] there.";
+
+    expect(stripVaultNoteLinks(input)).toBe(input);
+  });
+});

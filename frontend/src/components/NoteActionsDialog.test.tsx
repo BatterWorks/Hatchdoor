@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { NoteActionsDialog } from "./NoteActionsDialog";
@@ -26,13 +32,13 @@ function renderCreateDialog() {
   );
 }
 
-describe("NoteActionsDialog folder suggestions", () => {
-  it("uses a custom folder suggestion list instead of datalist", () => {
+describe("NoteActionsDialog folder picker", () => {
+  function renderWithFolders() {
     render(
       <NoteActionsDialog
         kind="create"
         error={null}
-        folderPaths={["Projects", "Projects/Launch"]}
+        folderPaths={["10-topics", "10-topics/Launch"]}
         initialFolder=""
         onClose={() => {}}
         onCreate={() => {}}
@@ -42,13 +48,49 @@ describe("NoteActionsDialog folder suggestions", () => {
         onDelete={() => {}}
       />,
     );
+  }
 
-    expect(document.querySelector("datalist")).toBeNull();
+  it("offers existing folders verbatim, prefixes included", () => {
+    renderWithFolders();
+
+    // Numeric prefixes are the real folder names and encode a deliberate
+    // order, so they are never stripped or prettified.
+    const select = screen.getByLabelText("Folder");
     expect(
-      screen.getByRole("button", { name: "Projects" }),
+      within(select).getByRole("option", { name: "Vault root" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Projects/Launch" }),
+      within(select).getByRole("option", { name: "10-topics" }),
+    ).toBeInTheDocument();
+    expect(
+      within(select).getByRole("option", { name: "10-topics/Launch" }),
+    ).toBeInTheDocument();
+  });
+
+  it("reveals a name field when creating a new folder", () => {
+    renderWithFolders();
+
+    expect(screen.queryByLabelText("New folder name")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Folder"), {
+      target: { value: "//new-folder" },
+    });
+
+    expect(screen.getByLabelText("New folder name")).toBeInTheDocument();
+  });
+
+  it("previews the path that will be created", () => {
+    renderWithFolders();
+
+    fireEvent.change(screen.getByLabelText("Folder"), {
+      target: { value: "10-topics" },
+    });
+    fireEvent.change(screen.getByLabelText("Note name"), {
+      target: { value: "Weekly review" },
+    });
+
+    expect(
+      screen.getByText("10-topics / Weekly review.md"),
     ).toBeInTheDocument();
   });
 });
