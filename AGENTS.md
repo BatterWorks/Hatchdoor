@@ -1,5 +1,12 @@
 # Agent Instructions
 
+## Local-only instructions
+
+If `AGENTS.local.md` exists at the repository root, read it before interacting
+with external repositories, issue trackers, deployment systems, or credentials.
+It contains machine-local operator context, must remain untracked, and must
+never be staged or committed.
+
 ## Running dev servers
 
 Use `just dev-start` / `just dev-stop` (see `justfile`) instead of backgrounding
