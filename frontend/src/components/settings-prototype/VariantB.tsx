@@ -325,23 +325,27 @@ export function VariantB({ sb }: { sb: Sandbox }) {
             </h2>
             <p className="sp-sec-blurb">{section.blurb}</p>
           </div>
-          <div className="sp-b-sec-actions">
-            {sb.saved ? <span className="sp-ok">{sb.saved}</span> : null}
-            <button
-              className="sp-btn"
-              onClick={sb.discard}
-              disabled={sectionDirty.length === 0}
-            >
-              Discard
-            </button>
-            <button
-              className="sp-btn sp-btn-hot"
-              onClick={() => sb.save(sectionDirty)}
-              disabled={sectionDirty.length === 0 || sb.saving}
-            >
-              {sb.saving ? "Saving…" : `Save ${section.title.toLowerCase()}`}
-            </button>
-          </div>
+          {/* A section with nothing to edit is a record, not a form: no dead
+              save button above a plaque holding all its content. */}
+          {editable.length === 0 ? null : (
+            <div className="sp-b-sec-actions">
+              {sb.saved ? <span className="sp-ok">{sb.saved}</span> : null}
+              <button
+                className="sp-btn"
+                onClick={sb.discard}
+                disabled={sectionDirty.length === 0}
+              >
+                Discard
+              </button>
+              <button
+                className="sp-btn sp-btn-hot"
+                onClick={() => sb.save(sectionDirty)}
+                disabled={sectionDirty.length === 0 || sb.saving}
+              >
+                {sb.saving ? "Saving…" : `Save ${section.title.toLowerCase()}`}
+              </button>
+            </div>
+          )}
         </div>
 
         {sb.refusal?.kind === "invalid" ? (
@@ -351,15 +355,10 @@ export function VariantB({ sb }: { sb: Sandbox }) {
           <div className="sp-notice sp-notice-warn">{sb.refusal.message}</div>
         ) : null}
 
-        <div className="sp-b-rows">
+        <div className="sp-b-rows" data-empty={editable.length === 0}>
           {editable.map((s) => (
             <Row key={s.key} setting={s} sb={sb} />
           ))}
-          {editable.length === 0 ? (
-            <p className="sp-b-empty">
-              Nothing in this section can be changed here — see below.
-            </p>
-          ) : null}
         </div>
 
         <Plaque settings={locked} />
