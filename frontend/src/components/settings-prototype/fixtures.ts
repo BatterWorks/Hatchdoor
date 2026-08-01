@@ -96,7 +96,7 @@ export const SECTIONS: {
   {
     id: "agents",
     num: "02",
-    title: "Agent access",
+    title: "Agent access (MCP)",
     blurb: "Whether AI assistants can reach this vault, and what they may do.",
   },
   {
@@ -137,13 +137,13 @@ export const COPY: Record<string, Copy> = {
   },
   HATCHDOOR_EMBED_LAYERS: {
     section: "vault",
-    label: "Deep search for older notes",
-    help: "Spends more disk and startup time so that notes further down the pile still match on meaning, not just on words.",
+    label: "Meaning search in demoted layers",
+    help: "Folders marked with a .hatchdoor-layer file stay out of the browser and out of normal search; assistants can still ask for them by name. On, those notes can also be found by meaning. Off, only by exact words, which saves disk space and indexing time.",
     hint: "Changing this rebuilds the search index",
   },
   HATCHDOOR_MCP_ENABLED: {
     section: "agents",
-    label: "Let assistants connect",
+    label: "Let assistants connect (MCP)",
     help: "Opens a second door into this vault for AI assistants such as Claude. Off means the door does not exist.",
   },
   HATCHDOOR_MCP_WRITE_ENABLED: {
@@ -153,7 +153,7 @@ export const COPY: Record<string, Copy> = {
   },
   HATCHDOOR_MCP_BEARER_TOKEN: {
     section: "agents",
-    label: "Assistant password",
+    label: "MCP password",
     help: "The password an assistant must send to get in. Required whenever assistants are allowed to connect.",
   },
   HATCHDOOR_MCP_ALLOWED_ORIGINS: {
@@ -177,11 +177,6 @@ export const COPY: Record<string, Copy> = {
     section: "versioning",
     label: "Keep a history of changes",
     help: "Off keeps no history. On this machine records every change locally. Send elsewhere also pushes it to a server you already set up.",
-  },
-  HATCHDOOR_GIT_REMOTE: {
-    section: "versioning",
-    label: "Server nickname",
-    help: "The short name your vault folder already uses for the server it sends to. Almost always origin.",
   },
   HATCHDOOR_GIT_HTTPS_USERNAME: {
     section: "versioning",
@@ -218,7 +213,6 @@ export const COPY: Record<string, Copy> = {
 
 /** Remote-only fields: hidden, not locked, when the mode is not remote (#61). */
 export const REMOTE_ONLY = [
-  "HATCHDOOR_GIT_REMOTE",
   "HATCHDOOR_GIT_HTTPS_USERNAME",
   "HATCHDOOR_GIT_HTTPS_TOKEN",
 ];
@@ -315,14 +309,6 @@ function base(): Setting[] {
       cls: "instant",
       value: "remote",
       source: "stored",
-      locked: null,
-    },
-    {
-      key: "HATCHDOOR_GIT_REMOTE",
-      kind: "text",
-      cls: "instant",
-      value: "origin",
-      source: "default",
       locked: null,
     },
     {

@@ -760,6 +760,10 @@
   padding: 1rem 0;
 }
 
+.sp-b-rows[data-empty="true"] + .sp-b-plaque {
+  margin-top: 0;
+}
+
 .sp-b-plaque {
   margin-top: 1.6rem;
   border: 1px dashed var(--rule-strong);
