@@ -38,6 +38,7 @@ import { NoteActionsDialog } from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/graph/GraphPage";
+import { SettingsPrototypePage } from "./components/settings-prototype/SettingsPrototypePage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
@@ -511,6 +512,12 @@ export function VaultApp() {
             <Route path="/" element={<EmptyState />} />
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/graph" element={<GraphPage />} />
+            {/* PROTOTYPE — throwaway route for issue #58. Remove with the
+                settings-prototype directory once a variant wins. */}
+            <Route
+              path="/settings-prototype"
+              element={<SettingsPrototypePage />}
+            />
             <Route
               path="/n/:slug"
               element={
