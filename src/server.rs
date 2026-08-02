@@ -34,6 +34,7 @@ use crate::handlers::{
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
+use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
 use crate::vault_watcher::spawn_vault_watcher;
 
@@ -413,12 +414,23 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                 let index_state = state.clone();
                 let index_result = tokio::task::spawn_blocking(move || {
                     let sqlite = index_state.cache.blocking_read().sqlite.clone();
+                    let runtime_snapshot = index_state.runtime_config.snapshot();
+                    let embed_layers = runtime_snapshot
+                        .setting("HATCHDOOR_EMBED_LAYERS")
+                        .map(|setting| {
+                            matches!(
+                                setting.value.trim().to_ascii_lowercase().as_str(),
+                                "1" | "true" | "yes" | "on"
+                            )
+                        })
+                        .unwrap_or(true);
                     build_cache_with_sqlite_and_progress(
                         &index_state.vault_path,
                         sqlite,
                         index_state.embedder.as_ref(),
                         Some(on_progress),
                         &index_state.scan_config,
+                        embed_layers,
                     )
                 })
                 .await;
@@ -536,15 +548,39 @@ async fn reject_demo_layer_query(
 }
 
 pub async fn run_server() {
-    let config = AppConfig::from_env().unwrap_or_else(|e| {
+    let mut config = AppConfig::from_env().unwrap_or_else(|e| {
         error!("Configuration error: {e}");
         std::process::exit(1);
     });
 
-    let mcp_config = Arc::new(McpConfig::from_env_validated().unwrap_or_else(|e| {
-        error!("MCP configuration error: {e}");
+    let settings_file_override = std::env::var("HATCHDOOR_SETTINGS_FILE").ok();
+    let runtime_config = RuntimeConfig::load_from_process(
+        settings_file_path(&config.cache_db_path, settings_file_override.as_deref()),
+        live_settings_defaults(),
+    )
+    .unwrap_or_else(|e| {
+        error!("Settings configuration error: {e}");
         std::process::exit(1);
-    }));
+    });
+    let startup_snapshot = runtime_config.snapshot();
+    config
+        .apply_runtime_snapshot(&startup_snapshot)
+        .unwrap_or_else(|e| {
+            error!("Application settings configuration error: {e}");
+            std::process::exit(1);
+        });
+
+    let mcp_config = Arc::new(
+        McpConfig::from_snapshot(&startup_snapshot)
+            .and_then(|config| {
+                config.validate()?;
+                Ok(config)
+            })
+            .unwrap_or_else(|e| {
+                error!("MCP configuration error: {e}");
+                std::process::exit(1);
+            }),
+    );
 
     if let Err(message) = check_web_auth_posture(
         &config.host,
@@ -555,10 +591,11 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    let git_sync_config = GitConfig::from_env(config.vault_path.clone()).unwrap_or_else(|e| {
-        error!("Git sync configuration error: {e}");
-        std::process::exit(1);
-    });
+    let git_sync_config = GitConfig::from_snapshot(config.vault_path.clone(), &startup_snapshot)
+        .unwrap_or_else(|e| {
+            error!("Git sync configuration error: {e}");
+            std::process::exit(1);
+        });
 
     if let Err(message) = check_demo_mode_posture(
         config.demo_mode,
@@ -639,6 +676,7 @@ pub async fn run_server() {
         archive_prefix: Arc::from(config.archive_prefix.as_str()),
         scan_config: scan_config.clone(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        runtime_config,
         startup,
     };
 
@@ -799,6 +837,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
 
@@ -843,6 +882,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
 
@@ -1197,6 +1237,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
         let app = build_router(state, None);
@@ -1979,6 +2020,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
         let app = build_router(state, None);

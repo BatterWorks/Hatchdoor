@@ -99,7 +99,10 @@ that production inventory are still checked for stale paths and duplicates.
   to place in `.env`.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
-- `AppConfig` is the environment-derived deployment contract.
+  `AppState::runtime_config` supplies the immutable settings snapshot each
+  reindex binds before it starts.
+- `AppConfig` is the environment-derived deployment contract and interprets the
+  live values from the startup `RuntimeConfig` snapshot.
 - `StartupTracker` exposes startup/model/indexing readiness.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records.
@@ -124,6 +127,38 @@ specific field, route, startup phase, or integration being changed. Adding an
 **Validation:** `cargo test server`, `cargo test app_state`,
 `cargo test config`, `cargo test startup`, `cargo test model_setup`,
 `cargo test vault_watcher`, followed by the full backend checks.
+
+### Live configuration foundation
+
+**Kind:** infrastructure/runtime state.
+
+**Owned paths:** `src/runtime_config.rs`.
+
+**Public contract:** `RuntimeConfig`, `ConfigSnapshot`, `ResolvedSetting`,
+`SettingSource`, `Environment`, `SETTINGS_SCHEMA`, `live_settings_defaults`,
+`settings_file_path`, and the versioned
+`settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
+lock-free configuration view to bind at the start of an operation;
+`RuntimeConfig::save` serializes writes, persists first, then publishes the
+new view.
+
+**Consumers:** runtime composition constructs the startup instance. The
+settings HTTP API and the archive, index, MCP, and git live consumers bind a
+snapshot in their respective capability boundaries.
+
+**Coordination paths:** `src/lib.rs` exports the boundary. Runtime composition,
+`src/config.rs`, `src/mcp/config.rs`, `src/git/config.rs`, and `src/app_state.rs`
+consume it as live settings are integrated; no consumer may re-read process
+environment variables after startup.
+
+**Invariants:** environment values that are non-empty after trimming are
+captured once and remain pinned above stored values. The store lives beside the
+cache database unless the deployment-only override selects another path; it is
+created with `0600` permissions on Unix. Corrupt, unsupported, and future
+schemas fail with recovery guidance and are never overwritten.
+
+**Validation:** `cargo test runtime_config`, followed by the full backend
+checks.
 
 ### Web authentication
 
@@ -419,7 +454,8 @@ superseding ADR-05.
 errors, status, repository operations, `GitSyncHandle`, `SyncOps`, and
 `spawn_sync_task`.
 
-**Consumed dependencies:** local Git repository through `git2`.
+**Consumed dependencies:** local Git repository through `git2` and the live
+configuration snapshot for startup parsing.
 
 **Consumers:** server startup, write adapters, status handlers/tools, and
 `AppState`.
@@ -484,7 +520,8 @@ version negotiation, server instructions, tool names/schemas/results, and
 `mcp_get_handler`/`mcp_post_handler`.
 
 **Consumed dependencies:** `AppState`, Search, vault reads, `vault/write`, Git
-status, model setup, cache refresh, and attachment limits.
+status, model setup, cache refresh, attachment limits, and the live
+configuration snapshot for startup parsing.
 
 **Coordination paths:** `src/server.rs`, domains exposed as tools, and
 documentation describing agent behavior.

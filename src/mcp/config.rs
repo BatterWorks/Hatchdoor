@@ -1,5 +1,3 @@
-use std::env;
-
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
 /// Protocol revisions this server can speak, newest first. The first entry is
@@ -50,41 +48,34 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    pub fn from_env() -> Self {
-        let enabled = env::var("HATCHDOOR_MCP_ENABLED")
-            .map(|value| is_truthy(&value))
-            .unwrap_or(false);
-        let write_enabled = env::var("HATCHDOOR_MCP_WRITE_ENABLED")
-            .map(|value| is_truthy(&value))
-            .unwrap_or(false);
-        let max_attachment_bytes = env::var("HATCHDOOR_MAX_ATTACHMENT_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
+    pub fn from_snapshot(snapshot: &crate::runtime_config::ConfigSnapshot) -> Result<Self, String> {
+        let enabled = is_truthy(setting(snapshot, "HATCHDOOR_MCP_ENABLED")?);
+        let write_enabled = is_truthy(setting(snapshot, "HATCHDOOR_MCP_WRITE_ENABLED")?);
+        let max_attachment_bytes = setting(snapshot, "HATCHDOOR_MAX_ATTACHMENT_BYTES")?
+            .parse::<u64>()
             .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES);
-        let max_base64_bytes = env::var("HATCHDOOR_MCP_MAX_BASE64_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
+        let max_base64_bytes = setting(snapshot, "HATCHDOOR_MCP_MAX_BASE64_BYTES")?
+            .parse::<u64>()
             .unwrap_or(DEFAULT_MAX_BASE64_BYTES);
-        let bearer_token = env::var("HATCHDOOR_MCP_BEARER_TOKEN")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let allowed_origins = env::var("HATCHDOOR_MCP_ALLOWED_ORIGINS")
-            .unwrap_or_else(|_| "http://127.0.0.1,http://localhost".to_string())
+        let bearer_token = setting(snapshot, "HATCHDOOR_MCP_BEARER_TOKEN")?
+            .trim()
+            .to_string();
+        let bearer_token = (!bearer_token.is_empty()).then_some(bearer_token);
+        let allowed_origins = setting(snapshot, "HATCHDOOR_MCP_ALLOWED_ORIGINS")?
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
             .collect();
 
-        Self {
+        Ok(Self {
             enabled,
             write_enabled,
             max_attachment_bytes,
             max_base64_bytes,
             bearer_token,
             allowed_origins,
-        }
+        })
     }
 
     /// A fully disabled configuration, used as a default in tests and when MCP
@@ -100,15 +91,6 @@ impl McpConfig {
         }
     }
 
-    /// Parse and validate the configuration once, failing fast on misconfiguration
-    /// (e.g. write mode enabled without a bearer token) instead of surfacing the
-    /// error on every request.
-    pub fn from_env_validated() -> Result<Self, String> {
-        let config = Self::from_env();
-        config.validate()?;
-        Ok(config)
-    }
-
     pub fn validate(&self) -> Result<(), String> {
         // Read-only MCP still exposes the entire vault (get_tree/get_note/
         // search_notes/...) with no other credential, and /mcp bypasses the web
@@ -122,6 +104,16 @@ impl McpConfig {
         }
         Ok(())
     }
+}
+
+fn setting<'a>(
+    snapshot: &'a crate::runtime_config::ConfigSnapshot,
+    key: &str,
+) -> Result<&'a str, String> {
+    snapshot
+        .setting(key)
+        .map(|setting| setting.value.as_str())
+        .ok_or_else(|| format!("runtime configuration is missing {key}"))
 }
 
 fn is_truthy(value: &str) -> bool {

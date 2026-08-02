@@ -44,18 +44,6 @@ impl AppConfig {
         let demo_mode = env::var("HATCHDOOR_DEMO_MODE")
             .map(|value| is_truthy(&value))
             .unwrap_or(false);
-        let archive_prefix = env::var("HATCHDOOR_ARCHIVE_PREFIX")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "90-archive/".to_string());
-        let exclude_patterns = env::var("HATCHDOOR_EXCLUDE")
-            .map(|value| parse_exclude_patterns(&value))
-            .unwrap_or_default();
-        let embed_layers = env::var("HATCHDOOR_EMBED_LAYERS")
-            .map(|value| is_truthy(&value))
-            .unwrap_or(true);
-
         let port = parse_port(&port_raw)?;
 
         Ok(Self {
@@ -65,10 +53,26 @@ impl AppConfig {
             port,
             web_bearer_token,
             demo_mode,
-            archive_prefix,
-            exclude_patterns,
-            embed_layers,
+            archive_prefix: "90-archive/".to_string(),
+            exclude_patterns: Vec::new(),
+            embed_layers: true,
         })
+    }
+
+    /// Apply the already-resolved live settings. Environment capture and store
+    /// precedence live in `RuntimeConfig`; this layer retains only typed
+    /// interpretation of the values it consumes.
+    pub fn apply_runtime_snapshot(
+        &mut self,
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<(), String> {
+        self.archive_prefix = required_setting(snapshot, "HATCHDOOR_ARCHIVE_PREFIX")?
+            .trim()
+            .to_string();
+        self.exclude_patterns =
+            parse_exclude_patterns(required_setting(snapshot, "HATCHDOOR_EXCLUDE")?);
+        self.embed_layers = is_truthy(required_setting(snapshot, "HATCHDOOR_EMBED_LAYERS")?);
+        Ok(())
     }
 
     pub fn socket_addr(&self) -> Result<SocketAddr, String> {
@@ -76,6 +80,16 @@ impl AppConfig {
             .parse::<SocketAddr>()
             .map_err(|e| format!("invalid bind address: {e}"))
     }
+}
+
+fn required_setting<'a>(
+    snapshot: &'a crate::runtime_config::ConfigSnapshot,
+    key: &str,
+) -> Result<&'a str, String> {
+    snapshot
+        .setting(key)
+        .map(|setting| setting.value.as_str())
+        .ok_or_else(|| format!("runtime configuration is missing {key}"))
 }
 
 pub fn parse_port(input: &str) -> Result<u16, String> {

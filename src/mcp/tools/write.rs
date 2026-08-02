@@ -206,19 +206,23 @@ pub(super) async fn archive_note_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
-    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let snapshot = state.runtime_snapshot();
+    let archive_prefix =
+        AppState::runtime_archive_prefix(&snapshot).map_err(JsonRpcFailure::internal)?;
+    let scan_config = AppState::runtime_scan_config(&snapshot).map_err(JsonRpcFailure::internal)?;
+    let archive_folder = archive_prefix.trim().trim_matches('/');
     let file_name = entry
         .relative_path
         .rsplit('/')
         .next()
         .unwrap_or(&entry.relative_path);
     let target = format!("{archive_folder}/{file_name}");
-    refuse_noise_write(&state.scan_config.exclude, &target)?;
+    refuse_noise_write(&scan_config.exclude, &target)?;
     let outcome = archive_note(
         &state.vault_path,
         &index,
         &entry,
-        &state.archive_prefix,
+        &archive_prefix,
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
