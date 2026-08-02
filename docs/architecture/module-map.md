@@ -93,7 +93,10 @@ that production inventory are still checked for stale paths and duplicates.
   binaries.
 - `main.rs` selects serve, model-prefetch, and container-healthcheck modes.
 - `server.rs` is the HTTP composition root: it validates startup posture,
-  constructs `AppState`, builds routes, and starts background work.
+  constructs `AppState`, builds routes, and starts background work. Unsafe
+  public startup without web authentication remains a refusal; its error
+  includes a freshly generated, non-persisted recovery token for the operator
+  to place in `.env`.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
 - `AppConfig` is the environment-derived deployment contract.
