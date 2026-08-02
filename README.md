@@ -376,7 +376,10 @@ to API calls. For image, download, and server-sent-event URLs where headers
 cannot be set, the frontend appends an `access_token` query parameter.
 
 Hatchdoor refuses to start with `HOST=0.0.0.0` or another non-loopback bind
-unless `HATCHDOOR_WEB_BEARER_TOKEN` is set.
+unless `HATCHDOOR_WEB_BEARER_TOKEN` is set. On this refusal it prints a freshly
+generated token and the `.env` assignment to use; copy it into `.env` and
+restart. The token is not persisted, so use the value printed by that refusal
+or generate a new long random token yourself.
 
 For a public test instance that people can browse without credentials, use demo
 mode:

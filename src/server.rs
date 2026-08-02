@@ -12,6 +12,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use base64::Engine;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
@@ -54,13 +55,22 @@ pub fn check_web_auth_posture(
         return Ok(());
     }
     if !is_loopback_host(host) && !has_web_token {
+        let token = generate_web_bearer_token()?;
         return Err(format!(
             "HOST={host} is non-loopback but HATCHDOOR_WEB_BEARER_TOKEN is unset: refusing to \
-             start unauthenticated on a public interface. Set HATCHDOOR_WEB_BEARER_TOKEN, or bind \
-             to 127.0.0.1. For a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
+             start unauthenticated on a public interface. Paste this freshly generated token into \
+             .env, then restart: HATCHDOOR_WEB_BEARER_TOKEN={token} . Or bind to 127.0.0.1. For \
+             a read-only public demo, set HATCHDOOR_DEMO_MODE=true."
         ));
     }
     Ok(())
+}
+
+fn generate_web_bearer_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("could not generate a web bearer token: {error}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 pub fn check_demo_mode_posture(
@@ -672,9 +682,26 @@ mod tests {
     #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
         // Non-loopback host with no web token must refuse to start.
-        assert!(check_web_auth_posture("0.0.0.0", false, false).is_err());
-        assert!(check_web_auth_posture("192.168.1.50", false, false).is_err());
-        assert!(check_web_auth_posture("::", false, false).is_err());
+        for host in ["0.0.0.0", "192.168.1.50", "::"] {
+            let error =
+                check_web_auth_posture(host, false, false).expect_err("public bind rejected");
+
+            assert!(error.contains(&format!("HOST={host}")));
+            assert!(error.contains("HATCHDOOR_WEB_BEARER_TOKEN="));
+            assert!(error.contains("Paste this freshly generated token into .env"));
+
+            let generated_token = error
+                .split("HATCHDOOR_WEB_BEARER_TOKEN=")
+                .nth(1)
+                .and_then(|value| value.split_whitespace().next())
+                .expect("generated token in .env assignment");
+            assert_eq!(generated_token.len(), 43);
+            assert!(
+                generated_token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            );
+        }
         // A token makes any host acceptable.
         assert!(check_web_auth_posture("0.0.0.0", true, false).is_ok());
         // Loopback is fine without a token (only reachable from this machine).
