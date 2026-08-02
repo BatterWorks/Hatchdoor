@@ -15,7 +15,11 @@ use super::protocol::{
 use super::tools::{handle_tools_call, setup_tools_list, tools_list};
 
 pub async fn mcp_get_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let config = state.mcp_config.clone();
+    let snapshot = state.runtime_snapshot();
+    let config = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
     handle_mcp_get(&headers, &config).await
 }
 
@@ -24,7 +28,11 @@ pub async fn mcp_post_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let config = state.mcp_config.clone();
+    let snapshot = state.runtime_snapshot();
+    let config = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
     handle_mcp_post(state.clone(), &headers, body, &config).await
 }
 
@@ -255,6 +263,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };
         (state, tmp)
@@ -308,6 +317,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };
         (state, tmp)

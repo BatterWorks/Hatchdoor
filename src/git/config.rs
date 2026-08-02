@@ -1,5 +1,3 @@
-use std::env;
-
 /// Static configuration for the git-sync subsystem, read once at startup.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GitConfig {
@@ -39,27 +37,30 @@ impl std::fmt::Debug for GitConfig {
 impl GitConfig {
     /// Returns `Ok(None)` when git sync is disabled, `Ok(Some(_))` when enabled and
     /// fully configured, and `Err(_)` when enabled but a required value is missing.
-    pub fn from_env(vault_path: std::path::PathBuf) -> Result<Option<Self>, String> {
-        let enabled = env::var("HATCHDOOR_GIT_SYNC_ENABLED")
-            .map(|v| is_truthy(&v))
-            .unwrap_or(false);
+    pub fn from_snapshot(
+        vault_path: std::path::PathBuf,
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Option<Self>, String> {
+        let enabled = is_truthy(setting(snapshot, "HATCHDOOR_GIT_SYNC_ENABLED")?);
         if !enabled {
             return Ok(None);
         }
 
-        let token = non_empty_env("HATCHDOOR_GIT_HTTPS_TOKEN")
+        let token = non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_TOKEN")
             .ok_or("HATCHDOOR_GIT_SYNC_ENABLED is set but HATCHDOOR_GIT_HTTPS_TOKEN is missing")?;
-        let remote = non_empty_env("HATCHDOOR_GIT_REMOTE").unwrap_or_else(|| "origin".to_string());
-        let branch = non_empty_env("HATCHDOOR_GIT_BRANCH").unwrap_or_else(|| "main".to_string());
-        let username = non_empty_env("HATCHDOOR_GIT_HTTPS_USERNAME")
+        let remote = non_empty_setting(snapshot, "HATCHDOOR_GIT_REMOTE")
+            .unwrap_or_else(|| "origin".to_string());
+        let branch = non_empty_setting(snapshot, "HATCHDOOR_GIT_BRANCH")
+            .unwrap_or_else(|| "main".to_string());
+        let username = non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_USERNAME")
             .unwrap_or_else(|| "hatchdoor".to_string());
-        let debounce_seconds = env::var("HATCHDOOR_GIT_DEBOUNCE_SECONDS")
+        let debounce_seconds = setting(snapshot, "HATCHDOOR_GIT_DEBOUNCE_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
-        let author_name =
-            non_empty_env("HATCHDOOR_GIT_AUTHOR_NAME").unwrap_or_else(|| "Hatchdoor".to_string());
-        let author_email = non_empty_env("HATCHDOOR_GIT_AUTHOR_EMAIL")
+        let author_name = non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
+            .unwrap_or_else(|| "Hatchdoor".to_string());
+        let author_email = non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
             .unwrap_or_else(|| "hatchdoor@localhost".to_string());
 
         Ok(Some(Self {
@@ -75,11 +76,24 @@ impl GitConfig {
     }
 }
 
-fn non_empty_env(key: &str) -> Option<String> {
-    env::var(key)
+fn non_empty_setting(
+    snapshot: &crate::runtime_config::ConfigSnapshot,
+    key: &str,
+) -> Option<String> {
+    setting(snapshot, key)
         .ok()
-        .map(|v| v.trim().to_string())
+        .map(|value| value.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn setting<'a>(
+    snapshot: &'a crate::runtime_config::ConfigSnapshot,
+    key: &str,
+) -> Result<&'a str, String> {
+    snapshot
+        .setting(key)
+        .map(|setting| setting.value.as_str())
+        .ok_or_else(|| format!("runtime configuration is missing {key}"))
 }
 
 fn is_truthy(value: &str) -> bool {
@@ -93,53 +107,45 @@ fn is_truthy(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
-    // Env access is process-global; serialize these tests.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn clear_env() {
-        for key in [
-            "HATCHDOOR_GIT_SYNC_ENABLED",
-            "HATCHDOOR_GIT_HTTPS_TOKEN",
-            "HATCHDOOR_GIT_REMOTE",
-            "HATCHDOOR_GIT_BRANCH",
-            "HATCHDOOR_GIT_HTTPS_USERNAME",
-            "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
-            "HATCHDOOR_GIT_AUTHOR_NAME",
-            "HATCHDOOR_GIT_AUTHOR_EMAIL",
-        ] {
-            unsafe { env::remove_var(key) };
-        }
+    fn snapshot(
+        values: impl IntoIterator<Item = (&'static str, &'static str)>,
+    ) -> std::sync::Arc<crate::runtime_config::ConfigSnapshot> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        crate::runtime_config::RuntimeConfig::load(
+            dir.path().join("settings.json"),
+            crate::runtime_config::Environment::from_values(
+                values
+                    .into_iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string())),
+            ),
+            crate::runtime_config::live_settings_defaults(),
+        )
+        .expect("runtime config")
+        .snapshot()
     }
 
     #[test]
     fn disabled_when_flag_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        let cfg = GitConfig::from_env(PathBuf::from("/vault")).expect("ok");
+        let snapshot = snapshot([]);
+        let cfg = GitConfig::from_snapshot(PathBuf::from("/vault"), &snapshot).expect("ok");
         assert_eq!(cfg, None);
     }
 
     #[test]
     fn enabled_requires_token() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        unsafe { env::set_var("HATCHDOOR_GIT_SYNC_ENABLED", "true") };
-        let result = GitConfig::from_env(PathBuf::from("/vault"));
+        let snapshot = snapshot([("HATCHDOOR_GIT_SYNC_ENABLED", "true")]);
+        let result = GitConfig::from_snapshot(PathBuf::from("/vault"), &snapshot);
         assert!(result.is_err());
-        clear_env();
     }
 
     #[test]
     fn applies_defaults_when_enabled_with_token() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_env();
-        unsafe {
-            env::set_var("HATCHDOOR_GIT_SYNC_ENABLED", "1");
-            env::set_var("HATCHDOOR_GIT_HTTPS_TOKEN", "secret");
-        }
-        let cfg = GitConfig::from_env(PathBuf::from("/vault"))
+        let snapshot = snapshot([
+            ("HATCHDOOR_GIT_SYNC_ENABLED", "1"),
+            ("HATCHDOOR_GIT_HTTPS_TOKEN", "secret"),
+        ]);
+        let cfg = GitConfig::from_snapshot(PathBuf::from("/vault"), &snapshot)
             .expect("ok")
             .expect("enabled");
         assert_eq!(cfg.remote, "origin");
@@ -148,6 +154,5 @@ mod tests {
         assert_eq!(cfg.debounce_seconds, 30);
         assert_eq!(cfg.author_email, "hatchdoor@localhost");
         assert_eq!(cfg.token, "secret");
-        clear_env();
     }
 }

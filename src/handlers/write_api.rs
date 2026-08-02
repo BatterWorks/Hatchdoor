@@ -248,7 +248,11 @@ pub async fn upload_attachment_handler(
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
     let vault_path = state.vault_path.clone();
-    let max_attachment_bytes = state.mcp_config.max_attachment_bytes;
+    let snapshot = state.runtime_snapshot();
+    let max_attachment_bytes = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config.max_attachment_bytes,
+        Err(error) => return internal_error(error).into_response(),
+    };
     let outcome = match run_write_op(move || {
         import_attachment_bytes(
             &vault_path,
@@ -541,7 +545,12 @@ pub async fn archive_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let snapshot = state.runtime_snapshot();
+    let archive_prefix = match AppState::runtime_archive_prefix(&snapshot) {
+        Ok(prefix) => prefix,
+        Err(error) => return internal_error(error).into_response(),
+    };
+    let archive_folder = archive_prefix.trim().trim_matches('/');
     let file_name = entry
         .relative_path
         .rsplit('/')
@@ -552,7 +561,6 @@ pub async fn archive_note_handler(
         return response;
     }
     let vault_path = state.vault_path.clone();
-    let archive_prefix = state.archive_prefix.clone();
     let outcome = match run_write_op(move || {
         archive_note(
             &vault_path,

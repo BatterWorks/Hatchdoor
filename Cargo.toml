@@ -12,6 +12,7 @@ categories = ["command-line-utilities", "web-programming::http-server"]
 
 [dependencies]
 ahash = "0.8"
+arc-swap = "1"
 axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 blake3 = "1"

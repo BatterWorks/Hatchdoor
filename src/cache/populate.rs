@@ -80,11 +80,28 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     ) -> Result<(), String> {
+        self.replace_from_index_with_embedder_and_progress_with_embed_layers(
+            index,
+            embedder,
+            on_progress,
+            true,
+        )
+    }
+
+    /// Server runtime configuration supplies `embed_layers`; standalone callers
+    /// retain the historical default of embedding every layer.
+    pub fn replace_from_index_with_embedder_and_progress_with_embed_layers(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        embed_layers: bool,
+    ) -> Result<(), String> {
         self.replace_with_options(
             index,
             embedder,
             on_progress,
-            embed_layers_enabled(),
+            embed_layers,
             &BuildOptions::default(),
         )
     }
@@ -97,7 +114,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         opts: &BuildOptions,
     ) -> Result<(), String> {
-        self.replace_with_options(index, embedder, None, embed_layers_enabled(), opts)
+        self.replace_with_options(index, embedder, None, true, opts)
     }
 
     /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
@@ -1808,19 +1825,6 @@ fn preserve_existing_vectors(
         }
     }
     Ok(out)
-}
-
-/// Whether demoted-layer vectors are built. `HATCHDOOR_EMBED_LAYERS` (default
-/// true); any non-truthy value turns it off.
-fn embed_layers_enabled() -> bool {
-    std::env::var("HATCHDOOR_EMBED_LAYERS")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
 }
 
 #[cfg(test)]

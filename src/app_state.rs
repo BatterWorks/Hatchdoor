@@ -52,10 +52,45 @@ pub struct AppState {
     pub scan_config: Arc<VaultScanConfig>,
     /// Held while a reindex runs so concurrent refreshes coalesce into one.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Captured environment plus durable live-applicable settings. Consumers
+    /// bind an immutable snapshot once per operation.
+    pub runtime_config: crate::runtime_config::RuntimeConfig,
     pub startup: StartupTracker,
 }
 
 impl AppState {
+    /// Bind the current live configuration once at an operation boundary.
+    pub fn runtime_snapshot(&self) -> Arc<crate::runtime_config::ConfigSnapshot> {
+        self.runtime_config.snapshot()
+    }
+
+    pub fn runtime_mcp_config(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<crate::mcp::McpConfig, String> {
+        crate::mcp::McpConfig::from_snapshot(snapshot)
+    }
+
+    pub fn runtime_archive_prefix(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Arc<str>, String> {
+        snapshot
+            .setting("HATCHDOOR_ARCHIVE_PREFIX")
+            .map(|setting| Arc::from(setting.value.as_str()))
+            .ok_or_else(|| "runtime configuration is missing HATCHDOOR_ARCHIVE_PREFIX".to_string())
+    }
+
+    pub fn runtime_scan_config(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Arc<VaultScanConfig>, String> {
+        let patterns = snapshot
+            .setting("HATCHDOOR_EXCLUDE")
+            .map(|setting| crate::config::parse_exclude_patterns(&setting.value))
+            .ok_or_else(|| "runtime configuration is missing HATCHDOOR_EXCLUDE".to_string())?;
+        Ok(Arc::new(VaultScanConfig {
+            exclude: crate::vault::ExcludeMatcher::new(&patterns)?,
+        }))
+    }
+
     /// Record a vault write for git sync. No-op when sync is disabled.
     pub fn record_vault_write(&self, record: crate::git::WriteRecord) {
         if let Some(handle) = self.git_sync.get() {
@@ -84,6 +119,7 @@ pub fn build_cache_with_sqlite(
         embedder,
         None,
         &VaultScanConfig::default(),
+        true,
     )
 }
 
@@ -93,6 +129,7 @@ pub fn build_cache_with_sqlite_and_progress(
     embedder: &dyn Embedder,
     on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     scan_config: &VaultScanConfig,
+    embed_layers: bool,
 ) -> Result<VaultCache, String> {
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     if seed_empty_vault(vault_path, &scan_config.exclude).map_err(|e| e.to_string())? {
@@ -110,7 +147,12 @@ pub fn build_cache_with_sqlite_and_progress(
         elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
         "Vault scan performance"
     );
-    sqlite.replace_from_index_with_embedder_and_progress(&index, embedder, on_progress)?;
+    sqlite.replace_from_index_with_embedder_and_progress_with_embed_layers(
+        &index,
+        embedder,
+        on_progress,
+        embed_layers,
+    )?;
 
     Ok(VaultCache { sqlite })
 }
@@ -175,7 +217,12 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     let sqlite = state.cache.read().await.sqlite.clone();
     let vault_path = state.vault_path.clone();
     let embedder = state.embedder.clone();
-    let scan_config = state.scan_config.clone();
+    let runtime_snapshot = state.runtime_snapshot();
+    let scan_config = AppState::runtime_scan_config(&runtime_snapshot).map_err(internal_error)?;
+    let embed_layers = runtime_snapshot
+        .setting("HATCHDOOR_EMBED_LAYERS")
+        .map(|setting| is_truthy(&setting.value))
+        .unwrap_or(true);
 
     // The marker-set hash the last build persisted. Compared against the value
     // after this reindex to detect a runtime layer change (a marker added,
@@ -196,7 +243,12 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
             elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
             "Vault scan performance"
         );
-        sqlite.replace_from_index_with_embedder(&index, embedder.as_ref())
+        sqlite.replace_from_index_with_embedder_and_progress_with_embed_layers(
+            &index,
+            embedder.as_ref(),
+            None,
+            embed_layers,
+        )
     })
     .await?;
 
@@ -231,6 +283,13 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
 
     broadcast_vault_revision(state);
     Ok(())
+}
+
+fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 fn broadcast_vault_revision(state: &AppState) {
@@ -269,6 +328,7 @@ mod tests {
             embedder.as_ref(),
             None,
             &scan_config,
+            true,
         )
         .expect("build cache");
 
@@ -336,6 +396,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         }
     }
@@ -394,6 +455,34 @@ mod tests {
         assert!(
             tools_changed.try_recv().is_ok(),
             "adding a layer marker must signal a tools/list change"
+        );
+    }
+
+    #[tokio::test]
+    async fn reindex_binds_the_current_exclude_snapshot() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write home");
+        std::fs::write(vault_path.join("Ignored.md"), "ignored").expect("write ignored");
+        let state = state_with_vault(vault_path);
+
+        state
+            .runtime_config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string())])
+            .expect("save exclude setting");
+        refresh_now(&state).await.expect("refresh");
+
+        assert!(
+            state
+                .cache
+                .read()
+                .await
+                .sqlite
+                .read_note_by_slug("ignored")
+                .expect("read")
+                .is_none(),
+            "the reindex must bind the saved exclusion snapshot"
         );
     }
 
