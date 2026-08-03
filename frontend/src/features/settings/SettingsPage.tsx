@@ -193,6 +193,8 @@ export function SettingsPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [message, setMessage] = useState<string | null>(null);
   const [webToken, setWebToken] = useState<string | null>(null);
+  const [mcpTokenCandidate, setMcpTokenCandidate] = useState<string | null>(null);
+  const [revealedMcpToken, setRevealedMcpToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
@@ -205,6 +207,8 @@ export function SettingsPage() {
     setSettings(payload.settings);
     setDrafts({});
     setErrors({});
+    setMcpTokenCandidate(null);
+    setRevealedMcpToken(null);
   };
 
   useEffect(() => {
@@ -327,6 +331,45 @@ export function SettingsPage() {
       setWebToken(payload.value ?? null);
     } catch {
       setMessage("The web access token could not be revealed.");
+    }
+  };
+
+  const generateMcpToken = async () => {
+    setMessage(null);
+    try {
+      const response = await apiFetch("/api/settings/mcp-token/generate", {
+        method: "POST",
+      });
+      if (!response.ok) throw new Error("The MCP password could not be generated.");
+      const payload = (await response.json()) as { value?: string };
+      if (!payload.value) throw new Error("The MCP password could not be generated.");
+      setDrafts((old) => ({ ...old, HATCHDOOR_MCP_BEARER_TOKEN: payload.value! }));
+      setMcpTokenCandidate(payload.value);
+      setRevealedMcpToken(null);
+      setMessage("A new MCP password is ready to save. It is not active yet.");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "The MCP password could not be generated.",
+      );
+    }
+  };
+
+  const revealMcpToken = async () => {
+    setMessage(null);
+    try {
+      const response = await apiFetch("/api/settings/mcp-token/reveal", {
+        method: "POST",
+      });
+      if (!response.ok) {
+        setMessage("This MCP password cannot be revealed to this session.");
+        return;
+      }
+      const payload = (await response.json()) as { value?: string };
+      setRevealedMcpToken(payload.value ?? null);
+    } catch {
+      setMessage("The MCP password could not be revealed.");
     }
   };
 
@@ -477,15 +520,34 @@ export function SettingsPage() {
                       : ""
                   }
                   onChange={(event) =>
-                    setDrafts((old) => ({
-                      ...old,
-                      [setting.key]: event.target.value,
-                    }))
+                    {
+                      if (setting.key === "HATCHDOOR_MCP_BEARER_TOKEN") {
+                        setMcpTokenCandidate(null);
+                      }
+                      setDrafts((old) => ({
+                        ...old,
+                        [setting.key]: event.target.value,
+                      }));
+                    }
                   }
                 />
               )}
               {COPY[setting.key].unit ? (
                 <em>{COPY[setting.key].unit}</em>
+              ) : null}
+              {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
+                <span>
+                  <button type="button" onClick={() => void generateMcpToken()}>
+                    Generate MCP password
+                  </button>
+                  {setting.configured ? (
+                    <button type="button" onClick={() => void revealMcpToken()}>
+                      Reveal MCP password
+                    </button>
+                  ) : null}
+                  {mcpTokenCandidate ? <code>{mcpTokenCandidate}</code> : null}
+                  {revealedMcpToken ? <code>{revealedMcpToken}</code> : null}
+                </span>
               ) : null}
               <small>{COPY[setting.key].help}</small>
               {setting.class === "reindex" ? (

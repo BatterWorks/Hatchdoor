@@ -107,6 +107,46 @@ pub async fn reveal_web_token_handler(Extension(token): Extension<Option<Arc<str
     response
 }
 
+/// Produce an MCP token candidate for the browser to place in its current
+/// draft. It is intentionally neither saved nor made live by this endpoint.
+pub async fn generate_mcp_token_handler() -> Response {
+    match crate::auth::generate_bearer_token() {
+        Ok(value) => no_store_json(serde_json::json!({ "value": value })),
+        Err(error) => crate::app_state::internal_error(error).into_response(),
+    }
+}
+
+/// A settings viewer may see the MCP token only when its web credential is the
+/// same credential, which means revealing it gives the viewer no new access.
+pub async fn reveal_mcp_token_handler(
+    State(state): State<AppState>,
+    Extension(web_token): Extension<Option<Arc<str>>>,
+) -> Response {
+    let Some(web_token) = web_token else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let config = match AppState::runtime_mcp_config(&state.runtime_snapshot()) {
+        Ok(config) => config,
+        Err(error) => return crate::app_state::internal_error(error).into_response(),
+    };
+    let may_reveal = config.bearer_token.as_deref().is_some_and(|mcp_token| {
+        crate::auth::constant_time_eq(mcp_token.as_bytes(), web_token.as_bytes())
+    });
+    if !may_reveal {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    no_store_json(serde_json::json!({ "value": web_token.to_string() }))
+}
+
+fn no_store_json(value: serde_json::Value) -> Response {
+    let mut response = Json(value).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 pub async fn patch_settings_handler(
     State(state): State<AppState>,
     request: Result<Json<PatchSettingsRequest>, JsonRejection>,
@@ -259,6 +299,25 @@ fn validate_updates(
             });
         }
     }
+    if updates.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "HATCHDOOR_MCP_ENABLED"
+                | "HATCHDOOR_MCP_WRITE_ENABLED"
+                | "HATCHDOOR_MCP_BEARER_TOKEN"
+                | "HATCHDOOR_MCP_ALLOWED_ORIGINS"
+        )
+    }) {
+        let prospective = snapshot.with_updates(updates);
+        if let Err(message) =
+            AppState::runtime_mcp_config(&prospective).and_then(|config| config.validate())
+        {
+            errors.push(FieldError {
+                key: "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+                message,
+            });
+        }
+    }
     errors
 }
 
@@ -312,5 +371,22 @@ mod tests {
             )]),
         );
         assert_eq!(errors.len(), 1);
+    }
+
+    #[test]
+    fn enabled_mcp_requires_a_token_in_the_prospective_transaction() {
+        let config = RuntimeConfig::load(
+            std::env::temp_dir().join("hatchdoor-settings-handler-test-mcp.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime config");
+        let errors = validate_updates(
+            &config.snapshot(),
+            &BTreeMap::from([("HATCHDOOR_MCP_ENABLED".into(), "true".into())]),
+        );
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].key, "HATCHDOOR_MCP_BEARER_TOKEN");
     }
 }

@@ -4,6 +4,7 @@ use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 
 use crate::api_types::ErrorResponse;
 
@@ -19,6 +20,15 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+/// Produce a URL-safe, 256-bit bearer token. Callers decide whether a token is
+/// merely a candidate or should be persisted as configuration.
+pub(crate) fn generate_bearer_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| format!("could not generate a bearer token: {error}"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
 /// Token required to access protected web routes, shared into the auth layer.
@@ -75,20 +85,26 @@ pub fn redact_query_token(query: &str) -> String {
         .join("&")
 }
 
-/// Either token accepted, shared into the auth layer for routes (like
-/// attachment upload) that an MCP agent needs to reach without provisioning a
-/// second, web-only credential just for that one route.
+/// Tokens accepted by the attachment route. The web credential is fixed at
+/// startup, while the MCP credential is read from a live snapshot per request
+/// so an operator can rotate it without leaving the old one authorized.
+#[derive(Clone)]
+pub(crate) struct WebOrLiveMcpToken {
+    pub(crate) web: Option<Arc<str>>,
+    pub(crate) runtime_config: crate::runtime_config::RuntimeConfig,
+}
+
+/// Backwards-compatible static-token middleware state for embedders that build
+/// their own routes. Hatchdoor's attachment route uses
+/// [`WebOrLiveMcpToken`] so runtime token rotation takes effect immediately.
 #[derive(Clone)]
 pub struct WebOrMcpToken {
     pub web: Option<Arc<str>>,
     pub mcp: Option<Arc<str>>,
 }
 
-/// Middleware enforcing either the web bearer token or the MCP bearer token.
-/// Unlike [`require_web_token`], this does not fall back to an `access_token`
-/// query parameter — the routes it guards are hit by out-of-band HTTP clients
-/// (e.g. `curl`), not `<img>`/download navigations, so there is no need to
-/// carry the token in the URL.
+/// Middleware enforcing either of two fixed bearer tokens. The application
+/// uses [`require_web_or_live_mcp_token`] for its own attachment route.
 pub async fn require_web_or_mcp_token(
     State(tokens): State<WebOrMcpToken>,
     request: Request,
@@ -99,21 +115,62 @@ pub async fn require_web_or_mcp_token(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
+    let authorized = presented.is_some_and(|presented| {
+        tokens
+            .web
+            .as_deref()
+            .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+            || tokens
+                .mcp
+                .as_deref()
+                .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+    });
 
+    if authorized {
+        next.run(request).await
+    } else {
+        unauthorized()
+    }
+}
+
+/// Middleware enforcing either the web bearer token or the current MCP bearer
+/// token. Unlike [`require_web_token`], this does not fall back to an
+/// `access_token` query parameter — the routes it guards are hit by
+/// out-of-band HTTP clients (e.g. `curl`), not `<img>`/download navigations.
+pub(crate) async fn require_web_or_live_mcp_token(
+    State(tokens): State<WebOrLiveMcpToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    let mcp = match crate::mcp::McpConfig::from_snapshot(&tokens.runtime_config.snapshot()) {
+        Ok(config) => config,
+        // A malformed runtime configuration must never turn this security gate
+        // into an unauthenticated attachment route.
+        Err(_) => return unauthorized(),
+    };
+    let configured = tokens.web.is_some() || mcp.bearer_token.is_some();
     let authorized = match presented {
         Some(presented) => {
             let matches_web = tokens.web.as_deref().is_some_and(|expected| {
                 constant_time_eq(presented.as_bytes(), expected.as_bytes())
             });
-            let matches_mcp = tokens.mcp.as_deref().is_some_and(|expected| {
-                constant_time_eq(presented.as_bytes(), expected.as_bytes())
-            });
+            let matches_mcp = mcp.enabled
+                && mcp.write_enabled
+                && mcp.bearer_token.as_deref().is_some_and(|expected| {
+                    constant_time_eq(presented.as_bytes(), expected.as_bytes())
+                });
             matches_web || matches_mcp
         }
         None => false,
     };
 
-    if authorized {
+    if !configured || authorized {
         next.run(request).await
     } else {
         unauthorized()
