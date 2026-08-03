@@ -269,7 +269,8 @@ pub(super) async fn layer_diagnostics_tool(
 }
 
 pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailure> {
-    let status = match state.git_sync.get() {
+    let sync = state.git_sync.read().await;
+    let status = match sync.as_ref() {
         Some(handle) => {
             let guard = handle.status();
             let snapshot = guard.read().await;
@@ -278,12 +279,13 @@ pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, J
         }
         None => json!({
             "enabled": false,
+            "state": "disabled",
+            "mode": "off",
             "last_sync_at": null,
             "last_ok": false,
             "last_error": null,
             "last_error_kind": null,
-            "pending": 0,
-            "unpushed": 0
+            "pending": 0
         }),
     };
     Ok(tool_success(status))
@@ -588,7 +590,7 @@ fn read_tools_list_base() -> Vec<Value> {
         }),
         json!({
             "name": "get_git_sync_status",
-            "description": "Report the status of automatic git sync: whether it is enabled, the last sync time, whether the last attempt succeeded, the last error (if any), and how many writes are pending. Use to check whether your changes have been committed and pushed.",
+            "description": "Report local or remote versioning lifecycle state, the last attempt, failures, and pending writes. In remote mode it also reports commits not yet pushed; that field is absent for local history.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},

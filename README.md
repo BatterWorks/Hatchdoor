@@ -238,7 +238,8 @@ truth.
 - Browser write actions are available only when the vault is writable.
 - MCP is disabled by default.
 - MCP requires its own bearer token whenever it is enabled.
-- Git sync is disabled by default.
+- Versioning is off by default; it can keep local Git history or safely sync an
+  existing remote.
 
 If `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
 vault before the first index build. Existing vaults are not seeded or modified
@@ -604,13 +605,18 @@ HATCHDOOR_MAX_ATTACHMENT_BYTES=10485760
 Agents can call `get_attachment_import_config` to discover both methods, their
 size limits, and which to use.
 
-## Git Sync
+## Versioning and Git Sync
 
-Git sync is optional and disabled by default. When enabled, successful Hatchdoor
-write tools commit and push vault changes to the configured remote.
+Versioning is optional and off by default. Set `HATCHDOOR_GIT_SYNC_ENABLED` to
+`local` to commit vault changes without a network remote, or `remote` to retain
+the safe commit/fetch/merge/push flow. Legacy truthy values still mean `remote`.
+Local mode can initialise an untouched vault from Settings after one explicit
+confirmation; this permanently creates its `.git` history folder and ignores
+Hatchdoor's `data/` cache and `settings.json`. Switching away from remote mode
+also asks for one confirmation before future commits stop being sent remotely.
 
 ```env
-HATCHDOOR_GIT_SYNC_ENABLED=true
+HATCHDOOR_GIT_SYNC_ENABLED=remote
 HATCHDOOR_GIT_REMOTE=origin
 HATCHDOOR_GIT_BRANCH=main
 HATCHDOOR_GIT_HTTPS_USERNAME=hatchdoor
@@ -622,11 +628,14 @@ HATCHDOOR_GIT_AUTHOR_EMAIL=hatchdoor@localhost
 
 Requirements:
 
-- The vault directory must be a git repository root.
-- The checked-out branch must match `HATCHDOOR_GIT_BRANCH`.
-- The remote URL comes from the repository's existing remote config.
-- Authentication uses HTTPS username/token credentials.
-- Merge conflicts are kept for human resolution on the server.
+- Local mode needs only a vault Git repository (Settings can create one).
+- Remote mode additionally requires the checked-out branch to match
+  `HATCHDOOR_GIT_BRANCH`, an existing remote named by `HATCHDOOR_GIT_REMOTE`,
+  and HTTPS username/token credentials.
+- `HATCHDOOR_GIT_BRANCH` and `HATCHDOOR_GIT_REMOTE` are deployment-owned: the
+  Settings page reports the active branch but does not edit either value.
+- Merge conflicts are kept for human resolution on the server; Hatchdoor never
+  force-checks out over uncommitted manual vault edits.
 
 Use the `get_git_sync_status` MCP tool to check whether recent writes were
 committed and pushed.
@@ -723,7 +732,7 @@ Check:
 - Browser-originated MCP requests come from an allowed origin in
   `HATCHDOOR_MCP_ALLOWED_ORIGINS`
 
-### Git sync does not push
+### Remote versioning does not push
 
 Check:
 
@@ -742,6 +751,7 @@ Common routes:
 | `GET` | `/health` | Health check |
 | `GET` | `/api/tree` | Folder and note tree |
 | `GET` | `/api/recently-modified` | Recently modified notes |
+| `GET` | `/api/git-status` | Current versioning lifecycle and failure status |
 | `GET` | `/api/note/:slug` | Read a note |
 | `GET` | `/api/note/:slug/links` | Outbound links and backlinks |
 | `GET` | `/api/note/:slug/download` | Download a Markdown export |

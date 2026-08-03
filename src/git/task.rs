@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock, mpsc};
@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 
 use std::path::PathBuf;
 
-use super::config::GitConfig;
+use super::config::{GitConfig, GitMode};
 use super::message::{WriteRecord, build_commit_message};
 use super::status::GitSyncStatus;
 use super::sync::{CommitOutcome, GitError, SyncOutcome, has_unpushed, unpushed_count};
@@ -45,19 +45,50 @@ const RETRY_MAX: Duration = Duration::from_secs(300);
 /// observe status. `None` everywhere when git sync is disabled.
 #[derive(Clone)]
 pub struct GitSyncHandle {
-    sender: mpsc::UnboundedSender<WriteRecord>,
+    sender: Arc<StdMutex<Option<mpsc::UnboundedSender<WriteRecord>>>>,
     status: Arc<RwLock<GitSyncStatus>>,
+    task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl GitSyncHandle {
     /// Enqueue a write for the next debounced sync. Never blocks; drops silently
     /// if the background task has stopped (it will be retried by later writes).
     pub fn record(&self, record: WriteRecord) {
-        let _ = self.sender.send(record);
+        if let Some(sender) = self
+            .sender
+            .lock()
+            .expect("git task sender poisoned")
+            .as_ref()
+        {
+            let _ = sender.send(record);
+        }
     }
 
     pub fn status(&self) -> Arc<RwLock<GitSyncStatus>> {
         self.status.clone()
+    }
+
+    /// Stop after closing the producer side of the record channel. The worker
+    /// drains the accumulated debounce batch before returning. A bounded wait
+    /// leaves this handle usable for a later retry rather than allowing a
+    /// replacement task to race it.
+    pub async fn stop(&self, timeout: Duration) -> Result<(), String> {
+        self.status.write().await.state = "stopping".to_string();
+        self.sender.lock().expect("git task sender poisoned").take();
+        let mut task = self.task.lock().await;
+        let Some(join) = task.as_mut() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(timeout, join).await {
+            Ok(Ok(())) => {
+                task.take();
+                Ok(())
+            }
+            Ok(Err(error)) => Err(format!("Versioning task failed while stopping: {error}")),
+            Err(_) => {
+                Err("Versioning is still draining its current sync. Retry shortly.".to_string())
+            }
+        }
     }
 }
 
@@ -70,7 +101,8 @@ pub fn spawn_sync_task(
     ops: SyncOps,
 ) -> GitSyncHandle {
     let (sender, receiver) = mpsc::unbounded_channel();
-    let status = Arc::new(RwLock::new(GitSyncStatus::enabled()));
+    let sender = Arc::new(StdMutex::new(Some(sender)));
+    let status = Arc::new(RwLock::new(GitSyncStatus::starting(config.mode.as_str())));
     let task_status = status.clone();
     let debounce = Duration::from_secs(config.debounce_seconds.max(1));
     let ops = Arc::new(ops);
@@ -78,9 +110,9 @@ pub fn spawn_sync_task(
     // Decide up front whether to flush commits stranded by an earlier outage.
     // This is a cheap local check; if it can't read git state (e.g. no repo, as
     // in unit tests) we simply don't flush.
-    let startup_flush = matches!(has_unpushed(&config), Ok(true));
+    let startup_flush = config.mode == GitMode::Remote && matches!(has_unpushed(&config), Ok(true));
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         run_loop(
             config,
             debounce,
@@ -93,7 +125,11 @@ pub fn spawn_sync_task(
         .await;
     });
 
-    GitSyncHandle { sender, status }
+    GitSyncHandle {
+        sender,
+        status,
+        task: Arc::new(Mutex::new(Some(task))),
+    }
 }
 
 async fn run_loop(
@@ -105,6 +141,7 @@ async fn run_loop(
     ops: Arc<SyncOps>,
     startup_flush: bool,
 ) {
+    status.write().await.state = "running".to_string();
     let mut batch: Vec<WriteRecord> = Vec::new();
     // When a sync fails transiently, `retry_after` holds the backoff before the
     // next unprompted re-attempt (empty batch). `None` means nothing to retry.
@@ -215,6 +252,11 @@ async fn run_sync_phases(
         let cfg = config.clone();
         run_blocking(move || (ops.commit)(&cfg, &paths, &message)).await?
     };
+    if config.mode == GitMode::Local {
+        return Ok(SyncOutcome::Committed {
+            committed: commit.committed,
+        });
+    }
     if !commit.needs_remote {
         return Ok(SyncOutcome::NoChanges);
     }
@@ -282,17 +324,19 @@ async fn run_one_sync(
 
     // Best-effort: read how many local commits remain unpushed afterward. This
     // is a local read (no working-tree change), so it needs no lock.
-    let config_clone = config.clone();
-    let unpushed = tokio::task::spawn_blocking(move || unpushed_count(&config_clone).ok())
-        .await
-        .ok()
-        .flatten();
+    let unpushed = if config.mode == GitMode::Remote {
+        let config_clone = config.clone();
+        tokio::task::spawn_blocking(move || unpushed_count(&config_clone).ok())
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
 
     let mut guard = status.write().await;
     guard.last_sync_at = Some(now_rfc3339());
-    if let Some(unpushed) = unpushed {
-        guard.unpushed = unpushed;
-    }
+    guard.unpushed = unpushed;
     match result {
         Ok(outcome) => {
             guard.last_ok = true;
@@ -302,6 +346,9 @@ async fn run_one_sync(
                 SyncOutcome::NoChanges => info!("git sync: no changes"),
                 SyncOutcome::Pushed { committed } => {
                     info!(committed, "git sync: pushed")
+                }
+                SyncOutcome::Committed { committed } => {
+                    info!(committed, "git versioning: committed locally")
                 }
             }
             false
@@ -342,6 +389,7 @@ mod tests {
     fn unused_config(debounce_seconds: u64) -> GitConfig {
         GitConfig {
             vault_path: std::path::PathBuf::from("/unused"),
+            mode: crate::git::config::GitMode::Remote,
             remote: "origin".into(),
             branch: "main".into(),
             username: "u".into(),
@@ -423,6 +471,7 @@ mod tests {
 
         let config = GitConfig {
             vault_path: std::path::PathBuf::from("/unused"),
+            mode: crate::git::config::GitMode::Remote,
             remote: "origin".into(),
             branch: "main".into(),
             username: "u".into(),
@@ -525,6 +574,7 @@ mod tests {
     async fn records_error_in_status() {
         let config = GitConfig {
             vault_path: std::path::PathBuf::from("/unused"),
+            mode: crate::git::config::GitMode::Remote,
             remote: "origin".into(),
             branch: "main".into(),
             username: "u".into(),
@@ -560,5 +610,38 @@ mod tests {
         let guard = status.read().await;
         assert!(!guard.last_ok);
         assert_eq!(guard.last_error.as_deref(), Some("git remote error: boom"));
+    }
+
+    #[tokio::test]
+    async fn stopping_drains_the_queued_batch_before_the_task_exits() {
+        let commits = Arc::new(AtomicUsize::new(0));
+        let committed = commits.clone();
+        let handle = spawn_sync_task(
+            unused_config(60),
+            Arc::new(Mutex::new(())),
+            SyncOps {
+                commit: Box::new(move |_config, _paths, _message| {
+                    committed.fetch_add(1, Ordering::SeqCst);
+                    Ok(CommitOutcome {
+                        committed: true,
+                        needs_remote: false,
+                    })
+                }),
+                fetch: Box::new(|_| Ok(())),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(|_| Ok(())),
+            },
+        );
+        handle.record(WriteRecord {
+            op: "update".into(),
+            target: "note".into(),
+            affected_paths: vec![PathBuf::from("/vault/note.md")],
+            summary: None,
+        });
+        handle
+            .stop(Duration::from_secs(2))
+            .await
+            .expect("drained stop");
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
     }
 }

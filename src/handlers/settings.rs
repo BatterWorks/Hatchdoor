@@ -43,6 +43,10 @@ pub struct PatchSettingsRequest {
     pub updates: BTreeMap<String, String>,
     #[serde(default)]
     pub confirm_reindex: bool,
+    #[serde(default)]
+    pub confirm_git_init: bool,
+    #[serde(default)]
+    pub confirm_git_downgrade: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +94,35 @@ pub async fn get_index_status_handler(State(state): State<AppState>) -> Response
         header::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+/// Versioning has its own live surface because the settings document is the
+/// durable desired configuration, while this reports the task that is applying
+/// it right now.
+pub async fn get_git_status_handler(State(state): State<AppState>) -> Response {
+    let status = match state.git_sync.try_read() {
+        Ok(sync) => match sync.as_ref() {
+            Some(handle) => handle.status().read().await.clone(),
+            None => crate::git::GitSyncStatus::disabled(),
+        },
+        Err(_) => {
+            let mode = crate::git::GitConfig::from_snapshot(
+                state.vault_path.clone(),
+                &state.runtime_snapshot(),
+            )
+            .ok()
+            .flatten()
+            .map(|config| config.mode.as_str().to_string())
+            .unwrap_or_else(|| "off".to_string());
+            crate::git::GitSyncStatus {
+                enabled: mode != "off",
+                state: "stopping".to_string(),
+                mode,
+                ..Default::default()
+            }
+        }
+    };
+    no_store_json(serde_json::to_value(status).expect("git status serializes"))
 }
 
 /// A viewer who already authenticated with the web bearer token gains no new
@@ -190,6 +223,103 @@ pub async fn patch_settings_handler(
             .into_response();
     }
 
+    let git_changed = request
+        .updates
+        .keys()
+        .any(|key| key.starts_with("HATCHDOOR_GIT_"));
+    if git_changed {
+        let prospective = snapshot.with_updates(&request.updates);
+        let git_config =
+            match crate::git::GitConfig::from_snapshot(state.vault_path.clone(), &prospective) {
+                Ok(config) => config,
+                Err(message) => {
+                    return validation_response(vec![FieldError {
+                        key: "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                        message,
+                    }]);
+                }
+            };
+        let old_git_config =
+            crate::git::GitConfig::from_snapshot(state.vault_path.clone(), &snapshot)
+                .expect("current git configuration was validated when saved");
+        if old_git_config
+            .as_ref()
+            .is_some_and(|config| config.mode == crate::git::GitMode::Remote)
+            && git_config
+                .as_ref()
+                .is_none_or(|config| config.mode != crate::git::GitMode::Remote)
+            && !request.confirm_git_downgrade
+        {
+            return confirmation_required(
+                "git_downgrade",
+                "Switching away from remote versioning stops sending future commits to the remote. Confirm before continuing.",
+            );
+        }
+        if let Some(config) = &git_config {
+            let preflight = match config.mode {
+                crate::git::GitMode::Local => crate::git::validate_local_repo(config),
+                crate::git::GitMode::Remote => crate::git::validate_repo(config),
+            };
+            if let Err(error) = preflight {
+                if config.mode == crate::git::GitMode::Local && !request.confirm_git_init {
+                    return confirmation_required(
+                        "git_init",
+                        "Local versioning will create a permanent .git history folder in this vault. Confirm before continuing.",
+                    );
+                }
+                if config.mode == crate::git::GitMode::Local {
+                    if let Err(error) = crate::git::init_local_repo(config) {
+                        return validation_response(vec![FieldError {
+                            key: "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                            message: error.to_string(),
+                        }]);
+                    }
+                } else {
+                    return validation_response(vec![FieldError {
+                        key: "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                        message: error.to_string(),
+                    }]);
+                }
+            }
+        }
+
+        let mut active = state.git_sync.write().await;
+        if let Some(handle) = active.as_ref()
+            && let Err(message) = handle.stop(std::time::Duration::from_secs(15)).await
+        {
+            let status = handle.status();
+            let mut status = status.write().await;
+            status.last_ok = false;
+            status.last_error = Some(message.clone());
+            return busy_response(message);
+        }
+        active.take();
+        let saved = match state.runtime_config.save(request.updates) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if let Some(config) = old_git_config {
+                    *active = Some(crate::git::spawn_sync_task(
+                        config,
+                        state.vault_write_lock.clone(),
+                        production_sync_ops(),
+                    ));
+                }
+                return crate::app_state::internal_error(error).into_response();
+            }
+        };
+        if let Some(config) = git_config {
+            *active = Some(crate::git::spawn_sync_task(
+                config,
+                state.vault_write_lock.clone(),
+                production_sync_ops(),
+            ));
+        }
+        if reindex_changed {
+            schedule_settings_reindex(state.clone());
+        }
+        return Json(settings_response(&saved)).into_response();
+    }
+
     match state.runtime_config.save(request.updates) {
         Ok(snapshot) => {
             if reindex_changed {
@@ -199,6 +329,45 @@ pub async fn patch_settings_handler(
         }
         Err(error) => crate::app_state::internal_error(error).into_response(),
     }
+}
+
+fn production_sync_ops() -> crate::git::SyncOps {
+    crate::git::SyncOps {
+        commit: Box::new(crate::git::commit_local),
+        fetch: Box::new(crate::git::fetch_remote),
+        integrate: Box::new(crate::git::integrate_fetched),
+        push: Box::new(crate::git::push_branch),
+    }
+}
+
+fn validation_response(errors: Vec<FieldError>) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(SettingsValidationError {
+            error: "Nothing was saved. Check the highlighted settings.".to_string(),
+            fields: errors,
+        }),
+    )
+        .into_response()
+}
+
+fn confirmation_required(kind: &str, message: &str) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": message,
+            "confirmation_required": kind,
+        })),
+    )
+        .into_response()
+}
+
+fn busy_response(message: String) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": message, "state": "stopping" })),
+    )
+        .into_response()
 }
 
 fn reindex_setting_changed(snapshot: &ConfigSnapshot, updates: &BTreeMap<String, String>) -> bool {
@@ -296,6 +465,17 @@ fn validate_updates(
             errors.push(FieldError {
                 key: key.clone(),
                 message: "Choose on or off.".to_string(),
+            });
+        }
+        if key == "HATCHDOOR_GIT_SYNC_ENABLED"
+            && !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "off" | "local" | "remote" | "false" | "true" | "0" | "1" | "no" | "yes" | "on"
+            )
+        {
+            errors.push(FieldError {
+                key: key.clone(),
+                message: "Choose off, local, or remote.".to_string(),
             });
         }
     }

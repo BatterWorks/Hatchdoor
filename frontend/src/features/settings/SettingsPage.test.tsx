@@ -15,6 +15,31 @@ const mockedApiFetch = vi.mocked(apiFetch);
 
 const settings = [
   {
+    key: "HATCHDOOR_GIT_SYNC_ENABLED",
+    value: "off",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "mode",
+  },
+  {
+    key: "HATCHDOOR_GIT_HTTPS_USERNAME",
+    value: "hatchdoor",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "text",
+  },
+  {
+    key: "HATCHDOOR_GIT_HTTPS_TOKEN",
+    value: null,
+    configured: false,
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "secret",
+  },
+  {
     key: "HATCHDOOR_ARCHIVE_PREFIX",
     value: "90-archive/",
     source: "default",
@@ -95,9 +120,11 @@ afterEach(() => {
 describe("SettingsPage", () => {
   it("renders server metadata and saves only changes from the active section", async () => {
     mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "disabled", mode: "off" }));
     mockedApiFetch.mockResolvedValueOnce(
       json({ state: "up_to_date", stale: false, drift: false }),
     );
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "running", mode: "remote", unpushed: 0 }));
     mockedApiFetch.mockResolvedValueOnce(
       json({
         settings: [{ ...settings[0], value: "archive/" }, ...settings.slice(1)],
@@ -107,9 +134,9 @@ describe("SettingsPage", () => {
     const input = await screen.findByDisplayValue("90-archive/");
     fireEvent.change(input, { target: { value: "archive/" } });
     fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
-    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(3));
-    expect(mockedApiFetch.mock.calls[2]?.[0]).toBe("/api/settings");
-    expect(JSON.parse(String(mockedApiFetch.mock.calls[2]?.[1]?.body))).toEqual(
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(4));
+    expect(mockedApiFetch.mock.calls[3]?.[0]).toBe("/api/settings");
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[3]?.[1]?.body))).toEqual(
       { updates: { HATCHDOOR_ARCHIVE_PREFIX: "archive/" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /Versioning/ }));
@@ -147,7 +174,7 @@ describe("SettingsPage", () => {
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining("rebuild the search index"),
     );
-    expect(JSON.parse(String(mockedApiFetch.mock.calls[2]?.[1]?.body))).toEqual(
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[3]?.[1]?.body))).toEqual(
       {
         updates: { HATCHDOOR_EXCLUDE: ".git/**, build/**" },
         confirm_reindex: true,
@@ -168,6 +195,7 @@ describe("SettingsPage", () => {
 
   it("generates an MCP token candidate without saving it, then includes it in one enable transaction", async () => {
     mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "disabled", mode: "off" }));
     mockedApiFetch.mockResolvedValueOnce(
       json({ state: "up_to_date", stale: false, drift: false }),
     );
@@ -181,21 +209,62 @@ describe("SettingsPage", () => {
       screen.getByRole("button", { name: "Generate MCP password" }),
     );
 
-    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(3));
-    expect(mockedApiFetch.mock.calls[2]?.[0]).toBe(
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(4));
+    expect(mockedApiFetch.mock.calls[3]?.[0]).toBe(
       "/api/settings/mcp-token/generate",
     );
-    expect(mockedApiFetch.mock.calls[2]?.[1]?.method).toBe("POST");
+    expect(mockedApiFetch.mock.calls[3]?.[1]?.method).toBe("POST");
     expect(await screen.findByDisplayValue("candidate-token")).toBeVisible();
 
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(screen.getByRole("button", { name: "Save Agent access (MCP)" }));
-    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(4));
-    expect(JSON.parse(String(mockedApiFetch.mock.calls[3]?.[1]?.body))).toEqual({
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(5));
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[4]?.[1]?.body))).toEqual({
       updates: {
         HATCHDOOR_MCP_ENABLED: "true",
         HATCHDOOR_MCP_BEARER_TOKEN: "candidate-token",
       },
+    });
+  });
+
+  it("hides remote credentials when local history is selected", async () => {
+    mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "disabled", mode: "off" }));
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "up_to_date", stale: false, drift: false }));
+    render(<SettingsPage />);
+    await screen.findByDisplayValue("90-archive/");
+    fireEvent.click(screen.getByRole("button", { name: /Versioning/ }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "local" } });
+    expect(screen.queryByText("Username")).not.toBeInTheDocument();
+    expect(screen.getByText("Branch")).toBeVisible();
+  });
+
+  it("confirms a remote downgrade before saving it", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const remoteSettings = settings.map((setting) =>
+      setting.key === "HATCHDOOR_GIT_SYNC_ENABLED"
+        ? { ...setting, value: "remote" }
+        : setting,
+    );
+    mockedApiFetch.mockResolvedValueOnce(json({ settings: remoteSettings }));
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "running", mode: "remote" }));
+    mockedApiFetch.mockResolvedValueOnce(json({ state: "up_to_date", stale: false, drift: false }));
+    mockedApiFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        error: "Switching away from remote versioning stops sending future commits to the remote.",
+        confirmation_required: "git_downgrade",
+      }), { status: 409, headers: { "content-type": "application/json" } }),
+    );
+    mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    render(<SettingsPage />);
+    await screen.findByDisplayValue("90-archive/");
+    fireEvent.click(screen.getByRole("button", { name: /Versioning/ }));
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "off" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Versioning" }));
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(5));
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[4]?.[1]?.body))).toEqual({
+      updates: { HATCHDOOR_GIT_SYNC_ENABLED: "off" },
+      confirm_git_downgrade: true,
     });
   });
 });

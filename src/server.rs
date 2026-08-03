@@ -2,8 +2,8 @@
 //! checks, and the `serve` run loop. Kept in the library (rather than the binary
 //! root) so the HTTP surface is reachable from integration tests.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use axum::Extension;
 use axum::extract::DefaultBodyLimit;
@@ -26,13 +26,13 @@ use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, archive_note_handler, create_note_handler, delete_note_handler,
-    diagnostics_handler, generate_mcp_token_handler, get_index_status_handler,
-    get_settings_handler, graph_handler, health_handler, move_note_handler,
-    move_rename_note_handler, note_download_handler, note_handler, note_links_handler,
-    patch_settings_handler, recently_modified_handler, refresh_handler, rename_note_handler,
-    resolve_batch_handler, resolve_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    search_handler, spa_index_handler, stats_handler, tree_handler, update_note_handler,
-    upload_attachment_handler, vault_asset_handler, vault_events_handler,
+    diagnostics_handler, generate_mcp_token_handler, get_git_status_handler,
+    get_index_status_handler, get_settings_handler, graph_handler, health_handler,
+    move_note_handler, move_rename_note_handler, note_download_handler, note_handler,
+    note_links_handler, patch_settings_handler, recently_modified_handler, refresh_handler,
+    rename_note_handler, resolve_batch_handler, resolve_handler, reveal_mcp_token_handler,
+    reveal_web_token_handler, search_handler, spa_index_handler, stats_handler, tree_handler,
+    update_note_handler, upload_attachment_handler, vault_asset_handler, vault_events_handler,
     write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
@@ -224,6 +224,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 get(get_settings_handler).patch(patch_settings_handler),
             )
             .route("/api/index-status", get(get_index_status_handler))
+            .route("/api/git-status", get(get_git_status_handler))
             .route(
                 "/api/settings/web-token/reveal",
                 post(reveal_web_token_handler),
@@ -465,7 +466,18 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                             model = model_name,
                             "Model setup and vault indexing complete"
                         );
-                        if let Some(git_config) = state.startup_git_config.as_ref().clone() {
+                        let git_config = GitConfig::from_snapshot(
+                            state.vault_path.clone(),
+                            &state.runtime_snapshot(),
+                        )
+                        .unwrap_or_else(|error| {
+                            warn!("Git versioning configuration changed before startup: {error}");
+                            None
+                        });
+                        let mut active_git_sync = state.git_sync.write().await;
+                        if active_git_sync.is_none()
+                            && let Some(git_config) = git_config
+                        {
                             let handle = git::spawn_sync_task(
                                 git_config,
                                 state.vault_write_lock.clone(),
@@ -476,7 +488,7 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                                     push: Box::new(git::push_branch),
                                 },
                             );
-                            let _ = state.git_sync.set(handle);
+                            *active_git_sync = Some(handle);
                             info!("Git sync enabled");
                         }
                         spawn_vault_watcher(
@@ -662,11 +674,15 @@ pub async fn run_server() {
     );
 
     let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
-    if let Some(git_config) = &git_sync_config
-        && let Err(e) = git::validate_repo(git_config)
-    {
-        error!("Git sync configuration invalid: {e}");
-        std::process::exit(1);
+    if let Some(git_config) = &git_sync_config {
+        let validation = match git_config.mode {
+            crate::git::GitMode::Local => git::validate_local_repo(git_config),
+            crate::git::GitMode::Remote => git::validate_repo(git_config),
+        };
+        if let Err(error) = validation {
+            error!("Git versioning configuration invalid: {error}");
+            std::process::exit(1);
+        }
     }
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
@@ -693,7 +709,7 @@ pub async fn run_server() {
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
         vault_write_lock,
-        git_sync: Arc::new(OnceLock::new()),
+        git_sync: Arc::new(RwLock::new(None)),
         archive_prefix: Arc::from(config.archive_prefix.as_str()),
         scan_config: scan_config.clone(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -854,7 +870,7 @@ mod tests {
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(OnceLock::new()),
+            git_sync: Arc::new(RwLock::new(None)),
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -910,7 +926,7 @@ mod tests {
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(OnceLock::new()),
+            git_sync: Arc::new(RwLock::new(None)),
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1591,7 +1607,7 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(OnceLock::new()),
+            git_sync: Arc::new(RwLock::new(None)),
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -1748,6 +1764,7 @@ mod tests {
 
         state.index_status.queue_rebuild();
         let index_status = protected
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/index-status")
@@ -1759,6 +1776,20 @@ mod tests {
             .expect("response");
         assert_eq!(index_status.status(), StatusCode::OK);
         assert_eq!(index_status.headers()["cache-control"], "no-store");
+
+        let git_status = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/git-status")
+                    .header("authorization", "Bearer web-secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(git_status.status(), StatusCode::OK);
+        assert_eq!(git_status.headers()["cache-control"], "no-store");
 
         let (demo, _tmp, _) = app_for_tests_with_web_auth_and_demo_mode(None, true);
         let absent = demo
@@ -1773,6 +1804,7 @@ mod tests {
             .expect("response");
         assert_eq!(absent.status(), StatusCode::NOT_FOUND);
         let index_status_absent = demo
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/index-status")
@@ -1782,6 +1814,16 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(index_status_absent.status(), StatusCode::NOT_FOUND);
+        let git_status_absent = demo
+            .oneshot(
+                Request::builder()
+                    .uri("/api/git-status")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(git_status_absent.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2523,7 +2565,7 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: true,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(OnceLock::new()),
+            git_sync: Arc::new(RwLock::new(None)),
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),

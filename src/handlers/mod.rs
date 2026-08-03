@@ -15,9 +15,9 @@ pub use assets::vault_asset_handler;
 pub use diagnostics::diagnostics_handler;
 pub use downloads::note_download_handler;
 pub use settings::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, generate_mcp_token_handler, get_index_status_handler,
-    get_settings_handler, patch_settings_handler, reveal_mcp_token_handler,
-    reveal_web_token_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, generate_mcp_token_handler, get_git_status_handler,
+    get_index_status_handler, get_settings_handler, patch_settings_handler,
+    reveal_mcp_token_handler, reveal_web_token_handler,
 };
 pub use spa::spa_index_handler;
 pub use write_api::{
