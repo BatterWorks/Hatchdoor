@@ -27,7 +27,13 @@ pub(super) async fn create_note_tool(
     })?;
     let relative_path = non_empty_argument("relative_path", args.relative_path)?;
     refuse_marker_write(&relative_path)?;
-    refuse_noise_write(&state.scan_config.exclude, &relative_path)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &relative_path,
+    )?;
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&state.vault_path, &relative_path, &args.content, overwrite)
         .map_err(write_error_to_jsonrpc)?;
@@ -130,7 +136,13 @@ pub(super) async fn rename_note_tool(
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let target = replace_filename(&entry.relative_path, &new_title);
-    refuse_noise_write(&state.scan_config.exclude, &target)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &target,
+    )?;
     let outcome = move_or_rename_note(
         &state.vault_path,
         &index,
@@ -162,7 +174,13 @@ pub(super) async fn move_note_tool(
     } else {
         format!("{target_folder}/{file_name}")
     };
-    refuse_noise_write(&state.scan_config.exclude, &target)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &target,
+    )?;
     let outcome = move_or_rename_note(
         &state.vault_path,
         &index,
@@ -183,7 +201,13 @@ pub(super) async fn move_rename_note_tool(
     })?;
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
-    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &target_relative_path,
+    )?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = move_or_rename_note(
@@ -206,19 +230,23 @@ pub(super) async fn archive_note_tool(
     })?;
     let index = current_index(&state).await?;
     let entry = note_entry(&index, &args.slug)?;
-    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let snapshot = state.runtime_snapshot();
+    let archive_prefix =
+        AppState::runtime_archive_prefix(&snapshot).map_err(JsonRpcFailure::internal)?;
+    let scan_config = AppState::runtime_scan_config(&snapshot).map_err(JsonRpcFailure::internal)?;
+    let archive_folder = archive_prefix.trim().trim_matches('/');
     let file_name = entry
         .relative_path
         .rsplit('/')
         .next()
         .unwrap_or(&entry.relative_path);
     let target = format!("{archive_folder}/{file_name}");
-    refuse_noise_write(&state.scan_config.exclude, &target)?;
+    refuse_noise_write(&scan_config.exclude, &target)?;
     let outcome = archive_note(
         &state.vault_path,
         &index,
         &entry,
-        &state.archive_prefix,
+        &archive_prefix,
         &args.expected_content_hash,
     )
     .map_err(write_error_to_jsonrpc)?;
@@ -257,7 +285,13 @@ pub(super) async fn import_attachment_tool(
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     refuse_marker_write(&target_relative_path)?;
-    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &target_relative_path,
+    )?;
     let overwrite = args.overwrite.unwrap_or(false);
 
     // Whitespace-tolerant so line-wrapped base64 still decodes.
@@ -297,7 +331,7 @@ pub(super) async fn import_attachment_tool(
         overwrite,
     )
     .map_err(write_error_to_jsonrpc)?;
-    record_attachment_write(&state, "import_attachment", &outcome, args.commit_summary);
+    record_attachment_write(&state, "import_attachment", &outcome, args.commit_summary).await;
     let warning = git_sync_warning(&state).await;
     Ok(attachment_success(outcome, warning))
 }
@@ -315,7 +349,13 @@ pub(super) async fn move_attachment_tool(
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     refuse_marker_write(&source_relative_path)?;
     refuse_marker_write(&target_relative_path)?;
-    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &target_relative_path,
+    )?;
     let index = current_index(&state).await?;
     let outcome = move_attachment(
         &state.vault_path,
@@ -325,7 +365,7 @@ pub(super) async fn move_attachment_tool(
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
-    record_attachment_write(&state, "move_attachment", &outcome, args.commit_summary);
+    record_attachment_write(&state, "move_attachment", &outcome, args.commit_summary).await;
     let warning = git_sync_warning(&state).await;
     Ok(attachment_success(outcome, warning))
 }
@@ -343,7 +383,13 @@ pub(super) async fn rename_attachment_tool(
     refuse_marker_write(&source_relative_path)?;
     refuse_marker_write(&new_filename)?;
     let target_relative_path = replace_filename(&source_relative_path, &new_filename);
-    refuse_noise_write(&state.scan_config.exclude, &target_relative_path)?;
+    refuse_noise_write(
+        &state
+            .live_scan_config()
+            .map_err(JsonRpcFailure::internal)?
+            .exclude,
+        &target_relative_path,
+    )?;
     let index = current_index(&state).await?;
     let outcome = rename_attachment(
         &state.vault_path,
@@ -353,7 +399,7 @@ pub(super) async fn rename_attachment_tool(
     )
     .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
-    record_attachment_write(&state, "rename_attachment", &outcome, args.commit_summary);
+    record_attachment_write(&state, "rename_attachment", &outcome, args.commit_summary).await;
     let warning = git_sync_warning(&state).await;
     Ok(attachment_success(outcome, warning))
 }
@@ -371,7 +417,7 @@ pub(super) async fn delete_attachment_tool(
     let outcome = delete_attachment(&state.vault_path, &index, &source_relative_path)
         .map_err(write_error_to_jsonrpc)?;
     refresh_after_write(&state).await?;
-    record_attachment_write(&state, "delete_attachment", &outcome, args.commit_summary);
+    record_attachment_write(&state, "delete_attachment", &outcome, args.commit_summary).await;
     let warning = git_sync_warning(&state).await;
     Ok(attachment_success(outcome, warning))
 }
@@ -395,7 +441,7 @@ pub(super) async fn list_note_attachments_tool(
 /// tokio worker.
 async fn current_index(state: &AppState) -> Result<VaultIndex, JsonRpcFailure> {
     let vault_path = state.vault_path.clone();
-    let scan_config = state.scan_config.clone();
+    let scan_config = state.live_scan_config().map_err(JsonRpcFailure::internal)?;
     match tokio::task::spawn_blocking(move || {
         VaultIndex::build_with_config(&vault_path, &scan_config)
     })
@@ -449,7 +495,7 @@ async fn finalize_note_write(
             ));
         }
     }
-    record_note_write(state, op, &outcome, commit_summary);
+    record_note_write(state, op, &outcome, commit_summary).await;
     let warning = git_sync_warning(state).await;
     // Report the note's resulting layer (None = default surface) so a caller
     // sees which surface a create/move/rename/archive landed on. Read from the
@@ -479,7 +525,8 @@ fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<Str
 
 /// Returns the last sync error message when the most recent sync failed.
 async fn git_sync_warning(state: &AppState) -> Option<String> {
-    let handle = state.git_sync.get()?;
+    let sync = state.git_sync.read().await;
+    let handle = sync.as_ref()?;
     let guard = handle.status();
     let snapshot = guard.read().await;
     if snapshot.last_ok {
@@ -571,7 +618,7 @@ fn attachment_success(outcome: AttachmentOutcome, git_sync_warning: Option<Strin
 }
 
 /// Build a WriteRecord from a note outcome and enqueue it for git sync (no-op when disabled).
-fn record_note_write(
+async fn record_note_write(
     state: &AppState,
     op: &str,
     outcome: &WriteOutcome,
@@ -582,27 +629,31 @@ fn record_note_write(
         .clone()
         .or_else(|| outcome.slug.clone())
         .unwrap_or_else(|| "note".to_string());
-    state.record_vault_write(crate::git::WriteRecord {
-        op: op.to_string(),
-        target,
-        affected_paths: outcome.affected_paths.clone(),
-        summary: commit_summary,
-    });
+    state
+        .record_vault_write(crate::git::WriteRecord {
+            op: op.to_string(),
+            target,
+            affected_paths: outcome.affected_paths.clone(),
+            summary: commit_summary,
+        })
+        .await;
 }
 
 /// Build a WriteRecord from an attachment outcome and enqueue it for git sync (no-op when disabled).
-fn record_attachment_write(
+async fn record_attachment_write(
     state: &AppState,
     op: &str,
     outcome: &AttachmentOutcome,
     commit_summary: Option<String>,
 ) {
-    state.record_vault_write(crate::git::WriteRecord {
-        op: op.to_string(),
-        target: outcome.attachment.relative_path.clone(),
-        affected_paths: outcome.affected_paths.clone(),
-        summary: commit_summary,
-    });
+    state
+        .record_vault_write(crate::git::WriteRecord {
+            op: op.to_string(),
+            target: outcome.attachment.relative_path.clone(),
+            affected_paths: outcome.affected_paths.clone(),
+            summary: commit_summary,
+        })
+        .await;
 }
 
 fn replace_filename(relative_path: &str, new_title: &str) -> String {

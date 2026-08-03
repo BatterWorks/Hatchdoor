@@ -15,7 +15,11 @@ use super::protocol::{
 use super::tools::{handle_tools_call, setup_tools_list, tools_list};
 
 pub async fn mcp_get_handler(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let config = state.mcp_config.clone();
+    let snapshot = state.runtime_snapshot();
+    let config = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
     handle_mcp_get(&headers, &config).await
 }
 
@@ -24,7 +28,11 @@ pub async fn mcp_post_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let config = state.mcp_config.clone();
+    let snapshot = state.runtime_snapshot();
+    let config = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
     handle_mcp_post(state.clone(), &headers, body, &config).await
 }
 
@@ -250,11 +258,11 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(std::sync::OnceLock::new()),
-            mcp_config: Arc::new(McpConfig::disabled()),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            git_sync: Arc::new(tokio::sync::RwLock::new(None)),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };
         (state, tmp)
@@ -303,11 +311,11 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(std::sync::OnceLock::new()),
-            mcp_config: Arc::new(McpConfig::disabled()),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            git_sync: Arc::new(tokio::sync::RwLock::new(None)),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };
         (state, tmp)

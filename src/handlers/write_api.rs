@@ -63,6 +63,7 @@ pub struct DeleteNoteRequest {
 #[derive(Debug, Serialize)]
 pub struct WriteCapabilitiesResponse {
     pub enabled: bool,
+    pub settings_enabled: bool,
     pub warnings: Vec<String>,
 }
 
@@ -97,6 +98,7 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
             StatusCode::OK,
             Json(WriteCapabilitiesResponse {
                 enabled: false,
+                settings_enabled: false,
                 warnings: vec![
                     "Hatchdoor demo mode is read-only; browser write features are disabled."
                         .to_string(),
@@ -121,6 +123,7 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
         StatusCode::OK,
         Json(WriteCapabilitiesResponse {
             enabled: vault_writable,
+            settings_enabled: true,
             warnings,
         }),
     )
@@ -150,8 +153,11 @@ pub(crate) fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
 /// applies the same matcher, so the file would land on disk yet be invisible to
 /// every read surface. Mirrors the MCP write path's `refuse_noise_write`.
 fn reject_noise_write(state: &AppState, path: &str) -> Option<Response> {
-    state
-        .scan_config
+    let scan_config = match state.live_scan_config() {
+        Ok(scan_config) => scan_config,
+        Err(error) => return Some(crate::app_state::internal_error(error).into_response()),
+    };
+    scan_config
         .exclude
         .is_excluded(std::path::Path::new(path.trim()), false)
         .then(|| {
@@ -248,7 +254,11 @@ pub async fn upload_attachment_handler(
 
     let _guard = state.vault_write_lock.clone().lock_owned().await;
     let vault_path = state.vault_path.clone();
-    let max_attachment_bytes = state.mcp_config.max_attachment_bytes;
+    let snapshot = state.runtime_snapshot();
+    let max_attachment_bytes = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config.max_attachment_bytes,
+        Err(error) => return internal_error(error).into_response(),
+    };
     let outcome = match run_write_op(move || {
         import_attachment_bytes(
             &vault_path,
@@ -541,7 +551,12 @@ pub async fn archive_note_handler(
         Ok(entry) => entry,
         Err(err) => return err.into_response(),
     };
-    let archive_folder = state.archive_prefix.trim().trim_matches('/');
+    let snapshot = state.runtime_snapshot();
+    let archive_prefix = match AppState::runtime_archive_prefix(&snapshot) {
+        Ok(prefix) => prefix,
+        Err(error) => return internal_error(error).into_response(),
+    };
+    let archive_folder = archive_prefix.trim().trim_matches('/');
     let file_name = entry
         .relative_path
         .rsplit('/')
@@ -552,7 +567,6 @@ pub async fn archive_note_handler(
         return response;
     }
     let vault_path = state.vault_path.clone();
-    let archive_prefix = state.archive_prefix.clone();
     let outcome = match run_write_op(move || {
         archive_note(
             &vault_path,
@@ -630,7 +644,7 @@ where
 
 async fn current_index(state: &AppState) -> Result<VaultIndex, (StatusCode, Json<ErrorResponse>)> {
     let vault_path = state.vault_path.clone();
-    let scan_config = state.scan_config.clone();
+    let scan_config = state.live_scan_config().map_err(internal_error)?;
     match tokio::task::spawn_blocking(move || {
         VaultIndex::build_with_config(&vault_path, &scan_config)
     })
@@ -666,7 +680,7 @@ async fn finalize_note_write_response(
     op: &str,
     outcome: WriteOutcome,
 ) -> Result<(StatusCode, Json<WriteOutcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
-    record_note_write(state, op, &outcome);
+    record_note_write(state, op, &outcome).await;
     refresh_after_write(state).await?;
     let refreshed_index = current_index(state).await?;
     let response =
@@ -678,12 +692,14 @@ async fn finalize_attachment_write_response(
     state: &AppState,
     outcome: AttachmentOutcome,
 ) -> Result<(StatusCode, Json<AttachmentOutcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
-    state.record_vault_write(WriteRecord {
-        op: "upload_attachment".to_string(),
-        target: outcome.attachment.relative_path.clone(),
-        affected_paths: outcome.affected_paths.clone(),
-        summary: None,
-    });
+    state
+        .record_vault_write(WriteRecord {
+            op: "upload_attachment".to_string(),
+            target: outcome.attachment.relative_path.clone(),
+            affected_paths: outcome.affected_paths.clone(),
+            summary: None,
+        })
+        .await;
     refresh_after_write(state).await?;
     Ok((
         StatusCode::OK,
@@ -705,7 +721,8 @@ async fn refresh_after_write(state: &AppState) -> Result<(), (StatusCode, Json<E
 }
 
 async fn git_sync_warning(state: &AppState) -> Option<String> {
-    let handle = state.git_sync.get()?;
+    let sync = state.git_sync.read().await;
+    let handle = sync.as_ref()?;
     let guard = handle.status();
     let snapshot = guard.read().await;
     if snapshot.last_ok {
@@ -718,18 +735,20 @@ async fn git_sync_warning(state: &AppState) -> Option<String> {
     }
 }
 
-fn record_note_write(state: &AppState, op: &str, outcome: &WriteOutcome) {
+async fn record_note_write(state: &AppState, op: &str, outcome: &WriteOutcome) {
     let target = outcome
         .relative_path
         .clone()
         .or_else(|| outcome.slug.clone())
         .unwrap_or_else(|| "note".to_string());
-    state.record_vault_write(WriteRecord {
-        op: op.to_string(),
-        target,
-        affected_paths: outcome.affected_paths.clone(),
-        summary: None,
-    });
+    state
+        .record_vault_write(WriteRecord {
+            op: op.to_string(),
+            target,
+            affected_paths: outcome.affected_paths.clone(),
+            summary: None,
+        })
+        .await;
 }
 
 fn write_response_from_outcome(

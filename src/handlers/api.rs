@@ -163,7 +163,17 @@ pub async fn resolve_batch_handler(
         Ok(cache) => cache,
         Err(err) => return err.into_response(),
     };
-    let archive_prefix = state.archive_prefix.clone();
+    let snapshot = state.runtime_snapshot();
+    let archive_prefix = match AppState::runtime_archive_prefix(&snapshot) {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error }),
+            )
+                .into_response();
+        }
+    };
     let demo_mode = state.demo_mode;
 
     let result = run_blocking(move || {

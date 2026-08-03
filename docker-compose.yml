@@ -5,9 +5,13 @@ services:
     env_file:
       - .env
     environment:
-      # The process must bind the container interface for Docker port publishing
-      # to work. Set HATCHDOOR_WEB_BEARER_TOKEN in .env before running compose.
+      # This is the Docker deployment contract. Keep container paths and port
+      # aligned with the mounts and published port below; optional operator
+      # overrides belong in .env only when they intentionally pin a setting.
       HOST: 0.0.0.0
+      PORT: "42824"
+      VAULT_PATH: /data/vault
+      HATCHDOOR_CACHE_DB: /data/cache/hatchdoor-cache.sqlite3
     ports:
       - "42824:42824"
     volumes:

@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Instant;
 
 use axum::Json;
 use axum::http::StatusCode;
+use serde::Serialize;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info};
 
@@ -40,25 +41,260 @@ pub struct AppState {
     pub demo_mode: bool,
     /// Serializes vault file mutations against git sync tree operations.
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Present only when git sync is enabled.
-    pub git_sync: Arc<OnceLock<crate::git::GitSyncHandle>>,
-    /// Validated MCP configuration, parsed once at startup.
-    pub mcp_config: Arc<crate::mcp::McpConfig>,
-    /// Folder prefix treated as archived in resolve results.
-    pub archive_prefix: Arc<str>,
-    /// Noise-exclusion configuration (built-in defaults plus `HATCHDOOR_EXCLUDE`),
-    /// applied to every index build on the server path so the watcher, writes and
-    /// startup all see the same excluded set.
-    pub scan_config: Arc<VaultScanConfig>,
+    /// The one active versioning task, if any. A write lock serializes drain →
+    /// replacement so two tasks can never touch the repository together.
+    pub git_sync: Arc<RwLock<Option<crate::git::GitSyncHandle>>>,
+    /// Cache for [`AppState::live_scan_config`], keyed by the snapshot pointer
+    /// it was built from. Every live consumer of noise-exclusion configuration
+    /// (the watcher, MCP/HTTP writes, reads, diagnostics) must derive its scan
+    /// config from the *current* runtime snapshot rather than a boot-time copy,
+    /// so a saved `HATCHDOOR_EXCLUDE` change takes effect immediately outside a
+    /// reindex. Rebuilding the underlying `ExcludeMatcher` on every request
+    /// would be wasteful, so this caches the last built config and only
+    /// rebuilds when the bound snapshot has actually changed.
+    #[allow(clippy::type_complexity)]
+    pub scan_config_cache: Arc<
+        StdRwLock<
+            Option<(
+                Arc<crate::runtime_config::ConfigSnapshot>,
+                Arc<VaultScanConfig>,
+            )>,
+        >,
+    >,
     /// Held while a reindex runs so concurrent refreshes coalesce into one.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Dedicated status for reindexes triggered by live indexing settings.
+    /// Unlike startup readiness, this never gates a coherent existing index.
+    pub index_status: IndexStatusTracker,
+    /// Captured environment plus durable live-applicable settings. Consumers
+    /// bind an immutable snapshot once per operation.
+    pub runtime_config: crate::runtime_config::RuntimeConfig,
     pub startup: StartupTracker,
 }
 
+#[derive(Clone)]
+pub struct IndexStatusTracker(Arc<StdRwLock<IndexStatus>>);
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IndexStatusResponse {
+    pub state: &'static str,
+    /// True means the last coherent index was built with older indexing settings.
+    /// `state` distinguishes *why* it is stale: `"rebuilding"` (in progress,
+    /// self-clearing) vs `"failed"` (stuck until a change or restart retries
+    /// it) — there is no separate drift/health axis to track, so this is the
+    /// only field a client needs.
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexStatusPhase {
+    UpToDate,
+    Rebuilding,
+    Failed,
+}
+
+#[derive(Debug)]
+struct IndexStatus {
+    phase: IndexStatusPhase,
+    target_generation: u64,
+    active_generation: Option<u64>,
+    progress: Option<IndexingProgressSnapshot>,
+    last_failure: Option<String>,
+}
+
+impl IndexStatusTracker {
+    pub(crate) fn up_to_date() -> Self {
+        Self(Arc::new(StdRwLock::new(IndexStatus {
+            phase: IndexStatusPhase::UpToDate,
+            target_generation: 0,
+            active_generation: None,
+            progress: None,
+            last_failure: None,
+        })))
+    }
+
+    /// Record a persisted reindex-setting change before the background task is spawned.
+    pub(crate) fn queue_rebuild(&self) -> u64 {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        status.target_generation += 1;
+        status.phase = IndexStatusPhase::Rebuilding;
+        status.target_generation
+    }
+
+    pub(crate) fn start_rebuild(&self, generation: u64) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        status.phase = IndexStatusPhase::Rebuilding;
+        status.active_generation = Some(generation);
+        status.progress = None;
+    }
+
+    pub(crate) fn report_progress(&self, generation: u64, progress: IndexingProgressSnapshot) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        if status.active_generation == Some(generation) {
+            status.progress = Some(progress);
+        }
+    }
+
+    pub(crate) fn finish_rebuild(&self, generation: u64) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        if status.active_generation == Some(generation) {
+            status.active_generation = None;
+            status.progress = None;
+        }
+        if status.target_generation == generation {
+            status.phase = IndexStatusPhase::UpToDate;
+            status.last_failure = None;
+        } else {
+            status.phase = IndexStatusPhase::Rebuilding;
+        }
+    }
+
+    pub(crate) fn fail_rebuild(&self, generation: u64, error: impl Into<String>) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        if status.active_generation == Some(generation) {
+            status.active_generation = None;
+            status.progress = None;
+        }
+        status.last_failure = Some(error.into());
+        status.phase = if status.target_generation == generation {
+            IndexStatusPhase::Failed
+        } else {
+            IndexStatusPhase::Rebuilding
+        };
+    }
+
+    pub fn status(&self) -> IndexStatusResponse {
+        let status = self.0.read().expect("index status tracker poisoned");
+        let (state, stale) = match status.phase {
+            IndexStatusPhase::UpToDate => ("up_to_date", false),
+            IndexStatusPhase::Rebuilding => ("rebuilding", true),
+            IndexStatusPhase::Failed => ("failed", true),
+        };
+        let progress = status.progress;
+        IndexStatusResponse {
+            state,
+            stale,
+            notes_completed: progress.map(|value| value.notes_completed),
+            notes_total: progress.map(|value| value.notes_total),
+            chunks_completed: progress.map(|value| value.chunks_completed),
+            chunks_total: progress.map(|value| value.chunks_total),
+            tokens_completed: progress.map(|value| value.tokens_completed),
+            tokens_total: progress.map(|value| value.tokens_total),
+            percent: progress.map(progress_percent),
+            eta_seconds: progress.and_then(progress_eta_seconds),
+            last_failure: status.last_failure.clone(),
+        }
+    }
+}
+
+fn progress_percent(progress: IndexingProgressSnapshot) -> u8 {
+    if progress.tokens_total == 0 {
+        return 0;
+    }
+    ((progress.tokens_completed.saturating_mul(100) / progress.tokens_total).min(100)) as u8
+}
+
+fn progress_eta_seconds(progress: IndexingProgressSnapshot) -> Option<u64> {
+    if progress.tokens_completed == 0 || progress.tokens_completed >= progress.tokens_total {
+        return None;
+    }
+    let remaining = progress.tokens_total - progress.tokens_completed;
+    Some(
+        progress.elapsed_seconds.saturating_mul(remaining as u64)
+            / progress.tokens_completed as u64,
+    )
+}
+
 impl AppState {
+    /// Bind the current live configuration once at an operation boundary.
+    pub fn runtime_snapshot(&self) -> Arc<crate::runtime_config::ConfigSnapshot> {
+        self.runtime_config.snapshot()
+    }
+
+    pub fn runtime_mcp_config(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<crate::mcp::McpConfig, String> {
+        crate::mcp::McpConfig::from_snapshot(snapshot)
+    }
+
+    pub fn runtime_archive_prefix(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Arc<str>, String> {
+        snapshot
+            .setting("HATCHDOOR_ARCHIVE_PREFIX")
+            .map(|setting| Arc::from(setting.value.as_str()))
+            .ok_or_else(|| "runtime configuration is missing HATCHDOOR_ARCHIVE_PREFIX".to_string())
+    }
+
+    pub fn runtime_scan_config(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Arc<VaultScanConfig>, String> {
+        let patterns = snapshot
+            .setting("HATCHDOOR_EXCLUDE")
+            .map(|setting| crate::config::parse_exclude_patterns(&setting.value))
+            .ok_or_else(|| "runtime configuration is missing HATCHDOOR_EXCLUDE".to_string())?;
+        Ok(Arc::new(VaultScanConfig {
+            exclude: crate::vault::ExcludeMatcher::new(&patterns)?,
+        }))
+    }
+
+    /// Derive the noise-exclusion scan config from the *current* runtime
+    /// snapshot. Every live consumer (the watcher, MCP/HTTP write refusals,
+    /// reads, diagnostics) must call this instead of caching a boot-time copy,
+    /// so a saved `HATCHDOOR_EXCLUDE` change is honored immediately. The
+    /// underlying `ExcludeMatcher` is only rebuilt when the bound snapshot
+    /// actually changed since the last call.
+    pub fn live_scan_config(&self) -> Result<Arc<VaultScanConfig>, String> {
+        let snapshot = self.runtime_snapshot();
+        {
+            let cache = self
+                .scan_config_cache
+                .read()
+                .expect("scan config cache poisoned");
+            if let Some((cached_snapshot, cached_config)) = cache.as_ref()
+                && Arc::ptr_eq(cached_snapshot, &snapshot)
+            {
+                return Ok(cached_config.clone());
+            }
+        }
+        let config = Self::runtime_scan_config(&snapshot)?;
+        let mut cache = self
+            .scan_config_cache
+            .write()
+            .expect("scan config cache poisoned");
+        *cache = Some((snapshot, config.clone()));
+        Ok(config)
+    }
+
     /// Record a vault write for git sync. No-op when sync is disabled.
-    pub fn record_vault_write(&self, record: crate::git::WriteRecord) {
-        if let Some(handle) = self.git_sync.get() {
+    ///
+    /// Awaits the read lock directly rather than spawning a detached task: a
+    /// spawned task races a concurrent stop-drain with no ordering guarantee
+    /// (a record enqueued "before" a stop could be applied "after" it from the
+    /// scheduler's point of view), and needlessly required a Tokio runtime for
+    /// what used to be a synchronous call. Awaiting here keeps every write's
+    /// enqueue ordered with respect to the git lifecycle that guards the same
+    /// lock.
+    pub async fn record_vault_write(&self, record: crate::git::WriteRecord) {
+        if let Some(handle) = self.git_sync.read().await.as_ref() {
             handle.record(record);
         }
     }
@@ -84,6 +320,7 @@ pub fn build_cache_with_sqlite(
         embedder,
         None,
         &VaultScanConfig::default(),
+        true,
     )
 }
 
@@ -93,6 +330,7 @@ pub fn build_cache_with_sqlite_and_progress(
     embedder: &dyn Embedder,
     on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
     scan_config: &VaultScanConfig,
+    embed_layers: bool,
 ) -> Result<VaultCache, String> {
     debug!(vault_path = %vault_path.display(), "Building SQLite vault cache");
     if seed_empty_vault(vault_path, &scan_config.exclude).map_err(|e| e.to_string())? {
@@ -110,7 +348,7 @@ pub fn build_cache_with_sqlite_and_progress(
         elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
         "Vault scan performance"
     );
-    sqlite.replace_from_index_with_embedder_and_progress(&index, embedder, on_progress)?;
+    sqlite.replace_from_index_with_progress(&index, embedder, on_progress, embed_layers)?;
 
     Ok(VaultCache { sqlite })
 }
@@ -161,21 +399,54 @@ pub async fn refresh_coalescing(state: &AppState) -> Result<(), (StatusCode, Jso
             return Ok(());
         }
     };
-    run_reindex(state).await
+    run_reindex(state, None).await.map_err(internal_error)
 }
 
 /// Guaranteed refresh for paths that must see their own change reflected (MCP
 /// writes, the vault watcher): waits for any in-flight reindex, then reindexes.
 pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let _refresh_guard = state.refresh_lock.lock().await;
-    run_reindex(state).await
+    run_reindex(state, None).await.map_err(internal_error)
 }
 
-async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+/// Spawn an index-settings rebuild after its new settings have been persisted.
+/// Each request receives a generation; queued requests run serially and the
+/// final completed generation always reflects the latest stored configuration.
+pub fn schedule_settings_reindex(state: AppState) {
+    let generation = state.index_status.queue_rebuild();
+    tokio::spawn(async move {
+        let _refresh_guard = state.refresh_lock.lock().await;
+        state.index_status.start_rebuild(generation);
+        let progress_tracker = state.index_status.clone();
+        let on_progress = Arc::new(move |progress| {
+            progress_tracker.report_progress(generation, progress);
+        });
+        match run_reindex(&state, Some(on_progress)).await {
+            Ok(()) => state.index_status.finish_rebuild(generation),
+            Err(error) => {
+                error!(generation, %error, "Settings-triggered index rebuild failed");
+                state.index_status.fail_rebuild(
+                    generation,
+                    "The index rebuild failed. Check the Hatchdoor logs for details.",
+                );
+            }
+        }
+    });
+}
+
+async fn run_reindex(
+    state: &AppState,
+    on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+) -> Result<(), String> {
     let sqlite = state.cache.read().await.sqlite.clone();
     let vault_path = state.vault_path.clone();
     let embedder = state.embedder.clone();
-    let scan_config = state.scan_config.clone();
+    let runtime_snapshot = state.runtime_snapshot();
+    let scan_config = state.live_scan_config()?;
+    let embed_layers = runtime_snapshot
+        .setting("HATCHDOOR_EMBED_LAYERS")
+        .map(|setting| crate::runtime_config::is_truthy(&setting.value))
+        .unwrap_or(true);
 
     // The marker-set hash the last build persisted. Compared against the value
     // after this reindex to detect a runtime layer change (a marker added,
@@ -186,7 +457,7 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     // The reindex writes inside a single SQLite transaction; WAL lets readers on
     // pooled connections keep serving the prior snapshot until it commits, so we
     // no longer hold the cache write lock for the whole rebuild (F-03).
-    run_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         info!("Scanning vault for notes…");
         let scan_started = Instant::now();
         let index =
@@ -196,9 +467,15 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
             elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
             "Vault scan performance"
         );
-        sqlite.replace_from_index_with_embedder(&index, embedder.as_ref())
+        sqlite.replace_from_index_with_progress(
+            &index,
+            embedder.as_ref(),
+            on_progress,
+            embed_layers,
+        )
     })
-    .await?;
+    .await
+    .map_err(|error| format!("background reindex task panicked: {error}"))??;
 
     debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
 
@@ -246,7 +523,58 @@ pub fn test_embedder() -> Arc<dyn Embedder> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::tempdir;
+
+    #[test]
+    fn index_status_keeps_search_stale_until_the_latest_queued_rebuild_finishes() {
+        let status = IndexStatusTracker::up_to_date();
+        let first = status.queue_rebuild();
+        status.start_rebuild(first);
+        let second = status.queue_rebuild();
+
+        status.finish_rebuild(first);
+        let during_second = status.status();
+        assert_eq!(during_second.state, "rebuilding");
+        assert!(during_second.stale);
+
+        status.start_rebuild(second);
+        status.finish_rebuild(second);
+        let current = status.status();
+        assert_eq!(current.state, "up_to_date");
+        assert!(!current.stale);
+    }
+
+    #[test]
+    fn index_status_exposes_progress_eta_and_the_last_background_failure() {
+        let status = IndexStatusTracker::up_to_date();
+        let generation = status.queue_rebuild();
+        status.start_rebuild(generation);
+        status.report_progress(
+            generation,
+            IndexingProgressSnapshot {
+                notes_completed: 12,
+                notes_total: 40,
+                chunks_completed: 18,
+                chunks_total: 70,
+                tokens_completed: 4_000,
+                tokens_total: 20_000,
+                elapsed_seconds: 20,
+            },
+        );
+
+        let rebuilding = status.status();
+        assert_eq!(rebuilding.state, "rebuilding");
+        assert_eq!(rebuilding.percent, Some(20));
+        assert_eq!(rebuilding.eta_seconds, Some(80));
+        assert!(rebuilding.last_failure.is_none());
+
+        status.fail_rebuild(generation, "embedding failed");
+        let failed = status.status();
+        assert_eq!(failed.state, "failed");
+        assert!(failed.stale);
+        assert_eq!(failed.last_failure.as_deref(), Some("embedding failed"));
+    }
 
     #[test]
     fn build_cache_honours_user_exclude_pattern_on_the_real_build_path() {
@@ -269,6 +597,7 @@ mod tests {
             embedder.as_ref(),
             None,
             &scan_config,
+            true,
         )
         .expect("build cache");
 
@@ -331,11 +660,11 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(OnceLock::new()),
-            mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(VaultScanConfig::default()),
+            git_sync: Arc::new(RwLock::new(None)),
+            scan_config_cache: Arc::new(StdRwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: IndexStatusTracker::up_to_date(),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         }
     }
@@ -398,6 +727,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reindex_binds_the_current_exclude_snapshot() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write home");
+        std::fs::write(vault_path.join("Ignored.md"), "ignored").expect("write ignored");
+        let state = state_with_vault(vault_path);
+
+        state
+            .runtime_config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string())])
+            .expect("save exclude setting");
+        refresh_now(&state).await.expect("refresh");
+
+        assert!(
+            state
+                .cache
+                .read()
+                .await
+                .sqlite
+                .read_note_by_slug("ignored")
+                .expect("read")
+                .is_none(),
+            "the reindex must bind the saved exclusion snapshot"
+        );
+    }
+
+    #[tokio::test]
     async fn a_successful_reindex_clears_a_failed_startup_state() {
         // Mirrors E3's recovery path: a startup that failed (e.g. a malformed
         // .hatchdoor-layer marker) leaves the tracker Failed; the watcher's next
@@ -453,5 +810,33 @@ mod tests {
         refresh_coalescing(&state).await.expect("refresh");
 
         assert_eq!(events.recv().await.expect("revision"), 1);
+    }
+
+    #[test]
+    fn live_scan_config_reflects_a_saved_exclude_change_without_a_reindex() {
+        // S1 regression: a saved HATCHDOOR_EXCLUDE must reach every live
+        // consumer (watcher, write refusals, reads, diagnostics) through
+        // `live_scan_config`, not only through the boot-time snapshot the
+        // reindex binds.
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        let state = state_with_vault(vault_path);
+
+        let before = state.live_scan_config().expect("scan config");
+        assert!(!before.exclude.is_excluded(Path::new("Secret.md"), false));
+
+        state
+            .runtime_config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "Secret.md".to_string())])
+            .expect("save exclude setting");
+
+        let after = state
+            .live_scan_config()
+            .expect("scan config reflects the save");
+        assert!(
+            after.exclude.is_excluded(Path::new("Secret.md"), false),
+            "the saved HATCHDOOR_EXCLUDE pattern must take effect immediately"
+        );
     }
 }

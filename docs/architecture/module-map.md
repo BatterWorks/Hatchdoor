@@ -93,10 +93,18 @@ that production inventory are still checked for stale paths and duplicates.
   binaries.
 - `main.rs` selects serve, model-prefetch, and container-healthcheck modes.
 - `server.rs` is the HTTP composition root: it validates startup posture,
-  constructs `AppState`, builds routes, and starts background work.
+  constructs `AppState`, builds routes, and starts background work. Unsafe
+  public startup without web authentication remains a refusal; its error
+  includes a freshly generated, non-persisted recovery token for the operator
+  to place in `.env`.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
-- `AppConfig` is the environment-derived deployment contract.
+  `AppState::index_status` separately tracks setting-triggered rebuild drift,
+  progress, ETA, and the last failure without changing startup readiness, while
+  `AppState::runtime_config` supplies the immutable settings snapshot each
+  reindex binds before it starts.
+- `AppConfig` is the environment-derived deployment contract and interprets the
+  live values from the startup `RuntimeConfig` snapshot.
 - `StartupTracker` exposes startup/model/indexing readiness.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records.
@@ -122,16 +130,63 @@ specific field, route, startup phase, or integration being changed. Adding an
 `cargo test config`, `cargo test startup`, `cargo test model_setup`,
 `cargo test vault_watcher`, followed by the full backend checks.
 
+### Live configuration foundation
+
+**Kind:** infrastructure/runtime state.
+
+**Owned paths:** `src/runtime_config.rs`.
+
+**Public contract:** `RuntimeConfig`, `ConfigSnapshot`, `ResolvedSetting`,
+`SettingSource`, `Environment`, `SETTINGS_SCHEMA`, `live_settings_defaults`,
+`settings_file_path`, `is_truthy`, and the versioned
+`settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
+lock-free configuration view to bind at the start of an operation;
+`RuntimeConfig::save` serializes writes, persists first, then publishes the
+new view. `RuntimeConfig::validate_and_save` runs a caller-supplied decision
+against the snapshot current at the moment the write lock is taken and only
+persists on success, so validation and persistence serialize behind the same
+lock (no separate read-then-write race). `ConfigSnapshot::required` is the one
+accessor for "this key's value, or a descriptive error" that `src/config.rs`,
+`src/mcp/config.rs`, and `src/git/config.rs` all call rather than each keeping
+its own copy; `ConfigSnapshot::pinned_count` and `RuntimeConfig::settings_path`
+support the startup pinned-setting log line and local-versioning `.gitignore`
+setup respectively.
+
+**Consumers:** runtime composition constructs the startup instance. The
+settings HTTP API and the archive, index, MCP, and git live consumers bind a
+snapshot in their respective capability boundaries.
+
+**Coordination paths:** `src/lib.rs` exports the boundary. Runtime composition,
+`src/config.rs`, `src/mcp/config.rs`, `src/git/config.rs`, and `src/app_state.rs`
+consume it as live settings are integrated; no consumer may re-read process
+environment variables after startup.
+
+**Invariants:** environment values that are non-empty after trimming are
+captured once and remain pinned above stored values. The store lives beside the
+cache database unless the deployment-only override selects another path; it is
+created with `0600` permissions on Unix. Corrupt, unsupported, and future
+schemas fail with recovery guidance and are never overwritten.
+
+**Validation:** `cargo test runtime_config`, followed by the full backend
+checks.
+
 ### Web authentication
 
 **Kind:** infrastructure/security.
 
 **Owned paths:** `src/auth.rs`.
 
-**Public contract:** `WebToken`, `WebOrMcpToken`,
-`require_web_token`, and `require_web_or_mcp_token`.
+**Public contract:** `WebToken`, `WebOrLiveMcpToken`,
+`require_web_token`, and `require_web_or_live_mcp_token`. Hatchdoor's internal
+attachment middleware binds the MCP token from the current runtime snapshot
+instead of retaining a token captured at startup; it accepts that token only
+while MCP itself is enabled. Disabling MCP at runtime immediately revokes that
+token for attachment uploads; MCP write mode does not affect this authorization.
 
 **Consumers:** `server.rs` and protected HTTP routes.
+
+**Consumed dependencies:** live runtime configuration and `McpConfig` parsing
+for per-request attachment authorization.
 
 **Coordination paths:** `src/server.rs`, `src/config.rs`, frontend
 `frontend/src/api/api.ts`, and any route whose authentication requirements
@@ -412,20 +467,37 @@ superseding ADR-05.
 - `src/git/sync.rs`
 - `src/git/task.rs`
 
-**Public contract:** `GitConfig`, write-record/message types, sync outcomes and
-errors, status, repository operations, `GitSyncHandle`, `SyncOps`, and
-`spawn_sync_task`.
+**Public contract:** `GitMode` (`off`/`local`/`remote` through the existing
+runtime setting), `GitConfig`, write-record/message types, sync outcomes and
+errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
+and `spawn_sync_task`. Local mode commits without network access; remote mode
+retains the safe fetch/integrate/push phases. The settings HTTP boundary owns
+the preflight → bounded drain → replacement protocol and exposes it through
+`GET /api/git-status`. `GitSyncHandle::stop` timing out withdraws its stop
+request rather than leaving the handle dead: the still-running task keeps
+accepting and committing records, and only a `stop` that truly returns `Ok`
+lets a caller install a replacement task. Spawning a task flushes any
+drift accumulated while versioning was off (uncommitted working-tree changes
+in either mode, or unpushed commits in remote mode) under its own
+distinguishable commit message. `init_local_repo` takes the vault's configured
+cache-database and settings-file paths and derives `.gitignore` entries from
+them (only when those paths live inside the vault), appending to an existing
+`.gitignore` rather than skipping it.
 
-**Consumed dependencies:** local Git repository through `git2`.
+**Consumed dependencies:** local Git repository through `git2` and the live
+configuration snapshot for startup parsing.
 
 **Consumers:** server startup, write adapters, status handlers/tools, and
 `AppState`.
 
-**Coordination paths:** `src/app_state.rs`, `src/server.rs`, HTTP/MCP write
-adapters, configuration, and vault watcher Git exclusions.
+**Coordination paths:** `src/app_state.rs`, `src/server.rs`,
+`src/handlers/settings.rs`, HTTP/MCP write adapters, configuration, frontend
+settings UI, and vault watcher Git exclusions.
 
-**Invariants:** optional and debounced; writes do not block on sync; never
-force-checkout over uncommitted manual vault edits (ADR-10).
+**Invariants:** optional and debounced; writes do not block on sync; task
+replacement drains before another task can start; local mode never contacts a
+remote; remote mode never force-checks out over uncommitted manual vault edits
+(ADR-10).
 
 **Validation:** `cargo test git` and affected adapter/server tests.
 
@@ -440,12 +512,27 @@ force-checkout over uncommitted manual vault edits (ADR-10).
 - `src/handlers/assets.rs`
 - `src/handlers/diagnostics.rs`
 - `src/handlers/downloads.rs`
+- `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
 - `src/handlers/write_api.rs`
 
 **Public contract:** handler functions intentionally re-exported by
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
-behavior.
+behavior. `settings.rs` owns the additive `/api/settings` document: effective
+value/provenance/lock/class/kind metadata and partial PATCH saves returning the
+full refreshed document. MCP enablement and its bearer token validate together
+against one prospective snapshot, so an invalid combination saves nothing and
+reports field errors. Its candidate-token and capability-safe secret-reveal
+endpoints are `no-store`; the ordinary settings document never exposes secret
+values. A save whose consequence needs consent (a reindex, initializing local
+history, or downgrading away from remote versioning) is refused with `409` and
+a machine-readable `confirmation_required` consequence — the server is the
+authority, and sends no prose; the page owns the words and resends with a
+`confirm` list that accumulates every consequence accepted so far, so a save
+needing two consents does not ping-pong between them. Saves persist before
+asynchronously rebuilding; `/api/index-status` reports that dedicated
+rebuild's staleness, progress, ETA, and last failure without reusing startup
+readiness.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, and auth.
@@ -481,13 +568,16 @@ version negotiation, server instructions, tool names/schemas/results, and
 `mcp_get_handler`/`mcp_post_handler`.
 
 **Consumed dependencies:** `AppState`, Search, vault reads, `vault/write`, Git
-status, model setup, cache refresh, and attachment limits.
+status, model setup, cache refresh, attachment limits, and the live
+configuration snapshot bound at each request.
 
 **Coordination paths:** `src/server.rs`, domains exposed as tools, and
 documentation describing agent behavior.
 
 **Invariants:** MCP is disabled by default, uses its own token, validates
-Origins, and keeps read-only access credentialed (ADR-09). Write tools use
+Origins, and keeps read-only access credentialed (ADR-09). Token changes,
+write enablement, Origins, and attachment limits apply to the next request;
+attachment authorization never retains a rotated MCP token. Write tools use
 `vault/write` and retain optimistic concurrency and path protections (ADR-03).
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes, and
@@ -837,6 +927,43 @@ and responsive CSS.
 
 **Validation:** add focused component coverage for behavioral changes, affected
 route tests, and full frontend checks.
+
+### Settings
+
+**Kind:** product capability/adapter.
+
+**Owned paths:**
+
+- `frontend/src/features/settings/SettingsPage.tsx`
+- `frontend/src/features/settings/settings.css`
+- `frontend/src/features/settings/SettingsPage.test.tsx`
+
+**Public contract:** the Settings page presents server-provided setting metadata
+at `/settings`, keeps copy and section layout in the browser, confirms saves
+that rebuild indexing, generates an MCP token candidate without persisting it,
+reveals an MCP secret only when it grants the authenticated viewer no new
+capability, PATCHes only the active section's changed keys to `/api/settings`
+before replacing its state with the complete response, confirms local Git
+initialisation and remote downgrades when the server requests it, and polls
+`/api/index-status` plus `/api/git-status` for dedicated background progress
+without using the startup gate.
+
+**Consumed dependencies:** authenticated `apiFetch` and the settings HTTP
+contract.
+
+**Coordination paths:** `frontend/src/App.tsx` (route),
+`frontend/src/app/ExplorerPane.tsx` (normal-deployment navigation),
+`frontend/src/App.css` (stylesheet aggregation), `src/server.rs` (SPA/API
+routes), and `src/handlers/settings.rs` (settings, index-status, and git-status
+wire producer).
+
+**Invariants:** demo mode exposes no Settings navigation or endpoints;
+environment-managed and permanently unavailable values are records rather than
+disabled form controls; secret values are never rendered from the settings
+document.
+
+**Validation:** `SettingsPage.test.tsx`, affected shell tests, frontend
+typecheck, then full frontend checks.
 
 ### Shared UI and styling
 

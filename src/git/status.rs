@@ -3,8 +3,12 @@ use serde::Serialize;
 /// Shared, observable state of the git-sync subsystem.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GitSyncStatus {
-    /// Whether the subsystem is enabled.
+    /// Kept for existing MCP consumers; `state` is the richer lifecycle.
     pub enabled: bool,
+    /// `disabled`, `starting`, `running`, or `stopping`.
+    pub state: String,
+    /// `off`, `local`, or `remote`.
+    pub mode: String,
     /// RFC3339 timestamp of the last completed sync attempt, if any.
     pub last_sync_at: Option<String>,
     /// True when the last attempt succeeded (pushed or no-op).
@@ -20,13 +24,25 @@ pub struct GitSyncStatus {
     pub pending: usize,
     /// Local commits on the branch not yet pushed to the remote. Non-zero after
     /// a conflict abort or an outage; zero after a successful push.
-    pub unpushed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unpushed: Option<usize>,
 }
 
 impl GitSyncStatus {
-    pub fn enabled() -> Self {
+    pub fn starting(mode: &str) -> Self {
         Self {
             enabled: true,
+            state: "starting".to_string(),
+            mode: mode.to_string(),
+            ..Default::default()
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            state: "disabled".to_string(),
+            mode: "off".to_string(),
             ..Default::default()
         }
     }

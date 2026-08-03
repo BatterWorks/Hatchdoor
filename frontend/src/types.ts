@@ -41,6 +41,8 @@ export type NoteLinksResponse = {
 
 export type WriteCapabilities = {
   enabled: boolean;
+  /** Absent only while talking to a pre-settings server. */
+  settings_enabled?: boolean;
   warnings: string[];
 };
 
