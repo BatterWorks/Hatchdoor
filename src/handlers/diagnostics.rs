@@ -13,7 +13,7 @@ use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, run_blocking, sqlite_cache};
+use crate::app_state::{AppState, internal_error, run_blocking, sqlite_cache};
 use crate::cache::SqliteCache;
 use crate::vault::{LayerMap, MARKER_FILE_NAME, VaultScanConfig};
 
@@ -226,7 +226,10 @@ pub async fn diagnostics_handler(
         Err(err) => return err.into_response(),
     };
     let vault_path = state.vault_path.clone();
-    let scan_config = state.scan_config.clone();
+    let scan_config = match state.live_scan_config() {
+        Ok(scan_config) => scan_config,
+        Err(error) => return internal_error(error).into_response(),
+    };
     let path = query.path;
 
     match run_blocking(move || {

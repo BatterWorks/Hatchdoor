@@ -153,8 +153,11 @@ pub(crate) fn reject_demo_mode_write(state: &AppState) -> Option<Response> {
 /// applies the same matcher, so the file would land on disk yet be invisible to
 /// every read surface. Mirrors the MCP write path's `refuse_noise_write`.
 fn reject_noise_write(state: &AppState, path: &str) -> Option<Response> {
-    state
-        .scan_config
+    let scan_config = match state.live_scan_config() {
+        Ok(scan_config) => scan_config,
+        Err(error) => return Some(crate::app_state::internal_error(error).into_response()),
+    };
+    scan_config
         .exclude
         .is_excluded(std::path::Path::new(path.trim()), false)
         .then(|| {
@@ -641,7 +644,7 @@ where
 
 async fn current_index(state: &AppState) -> Result<VaultIndex, (StatusCode, Json<ErrorResponse>)> {
     let vault_path = state.vault_path.clone();
-    let scan_config = state.scan_config.clone();
+    let scan_config = state.live_scan_config().map_err(internal_error)?;
     match tokio::task::spawn_blocking(move || {
         VaultIndex::build_with_config(&vault_path, &scan_config)
     })
@@ -677,7 +680,7 @@ async fn finalize_note_write_response(
     op: &str,
     outcome: WriteOutcome,
 ) -> Result<(StatusCode, Json<WriteOutcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
-    record_note_write(state, op, &outcome);
+    record_note_write(state, op, &outcome).await;
     refresh_after_write(state).await?;
     let refreshed_index = current_index(state).await?;
     let response =
@@ -689,12 +692,14 @@ async fn finalize_attachment_write_response(
     state: &AppState,
     outcome: AttachmentOutcome,
 ) -> Result<(StatusCode, Json<AttachmentOutcomeResponse>), (StatusCode, Json<ErrorResponse>)> {
-    state.record_vault_write(WriteRecord {
-        op: "upload_attachment".to_string(),
-        target: outcome.attachment.relative_path.clone(),
-        affected_paths: outcome.affected_paths.clone(),
-        summary: None,
-    });
+    state
+        .record_vault_write(WriteRecord {
+            op: "upload_attachment".to_string(),
+            target: outcome.attachment.relative_path.clone(),
+            affected_paths: outcome.affected_paths.clone(),
+            summary: None,
+        })
+        .await;
     refresh_after_write(state).await?;
     Ok((
         StatusCode::OK,
@@ -730,18 +735,20 @@ async fn git_sync_warning(state: &AppState) -> Option<String> {
     }
 }
 
-fn record_note_write(state: &AppState, op: &str, outcome: &WriteOutcome) {
+async fn record_note_write(state: &AppState, op: &str, outcome: &WriteOutcome) {
     let target = outcome
         .relative_path
         .clone()
         .or_else(|| outcome.slug.clone())
         .unwrap_or_else(|| "note".to_string());
-    state.record_vault_write(WriteRecord {
-        op: op.to_string(),
-        target,
-        affected_paths: outcome.affected_paths.clone(),
-        summary: None,
-    });
+    state
+        .record_vault_write(WriteRecord {
+            op: op.to_string(),
+            target,
+            affected_paths: outcome.affected_paths.clone(),
+            summary: None,
+        })
+        .await;
 }
 
 fn write_response_from_outcome(

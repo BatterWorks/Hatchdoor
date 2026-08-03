@@ -61,7 +61,7 @@ impl GitConfig {
         vault_path: std::path::PathBuf,
         snapshot: &crate::runtime_config::ConfigSnapshot,
     ) -> Result<Option<Self>, String> {
-        let mode = parse_mode(setting(snapshot, "HATCHDOOR_GIT_SYNC_ENABLED")?)?;
+        let mode = parse_mode(snapshot.required("HATCHDOOR_GIT_SYNC_ENABLED")?)?;
         let Some(mode) = mode else {
             return Ok(None);
         };
@@ -78,7 +78,8 @@ impl GitConfig {
             .unwrap_or_else(|| "main".to_string());
         let username = non_empty_setting(snapshot, "HATCHDOOR_GIT_HTTPS_USERNAME")
             .unwrap_or_else(|| "hatchdoor".to_string());
-        let debounce_seconds = setting(snapshot, "HATCHDOOR_GIT_DEBOUNCE_SECONDS")
+        let debounce_seconds = snapshot
+            .required("HATCHDOOR_GIT_DEBOUNCE_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30);
@@ -105,20 +106,11 @@ fn non_empty_setting(
     snapshot: &crate::runtime_config::ConfigSnapshot,
     key: &str,
 ) -> Option<String> {
-    setting(snapshot, key)
+    snapshot
+        .required(key)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-fn setting<'a>(
-    snapshot: &'a crate::runtime_config::ConfigSnapshot,
-    key: &str,
-) -> Result<&'a str, String> {
-    snapshot
-        .setting(key)
-        .map(|setting| setting.value.as_str())
-        .ok_or_else(|| format!("runtime configuration is missing {key}"))
 }
 
 fn parse_mode(value: &str) -> Result<Option<GitMode>, String> {

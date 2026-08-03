@@ -248,7 +248,7 @@ pub(super) async fn layer_diagnostics_tool(
         .await
         .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
     let vault_path = state.vault_path.clone();
-    let scan_config = state.scan_config.clone();
+    let scan_config = state.live_scan_config().map_err(JsonRpcFailure::internal)?;
     let diagnostics = tokio::task::spawn_blocking(move || {
         crate::handlers::diagnostics::build_layer_diagnostics(
             &vault_path,

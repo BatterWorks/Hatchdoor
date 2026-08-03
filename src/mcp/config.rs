@@ -49,19 +49,24 @@ pub struct McpConfig {
 
 impl McpConfig {
     pub fn from_snapshot(snapshot: &crate::runtime_config::ConfigSnapshot) -> Result<Self, String> {
-        let enabled = is_truthy(setting(snapshot, "HATCHDOOR_MCP_ENABLED")?);
-        let write_enabled = is_truthy(setting(snapshot, "HATCHDOOR_MCP_WRITE_ENABLED")?);
-        let max_attachment_bytes = setting(snapshot, "HATCHDOOR_MAX_ATTACHMENT_BYTES")?
+        let enabled = crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_MCP_ENABLED")?);
+        let write_enabled =
+            crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_MCP_WRITE_ENABLED")?);
+        let max_attachment_bytes = snapshot
+            .required("HATCHDOOR_MAX_ATTACHMENT_BYTES")?
             .parse::<u64>()
             .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES);
-        let max_base64_bytes = setting(snapshot, "HATCHDOOR_MCP_MAX_BASE64_BYTES")?
+        let max_base64_bytes = snapshot
+            .required("HATCHDOOR_MCP_MAX_BASE64_BYTES")?
             .parse::<u64>()
             .unwrap_or(DEFAULT_MAX_BASE64_BYTES);
-        let bearer_token = setting(snapshot, "HATCHDOOR_MCP_BEARER_TOKEN")?
+        let bearer_token = snapshot
+            .required("HATCHDOOR_MCP_BEARER_TOKEN")?
             .trim()
             .to_string();
         let bearer_token = (!bearer_token.is_empty()).then_some(bearer_token);
-        let allowed_origins = setting(snapshot, "HATCHDOOR_MCP_ALLOWED_ORIGINS")?
+        let allowed_origins = snapshot
+            .required("HATCHDOOR_MCP_ALLOWED_ORIGINS")?
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -104,23 +109,6 @@ impl McpConfig {
         }
         Ok(())
     }
-}
-
-fn setting<'a>(
-    snapshot: &'a crate::runtime_config::ConfigSnapshot,
-    key: &str,
-) -> Result<&'a str, String> {
-    snapshot
-        .setting(key)
-        .map(|setting| setting.value.as_str())
-        .ok_or_else(|| format!("runtime configuration is missing {key}"))
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 #[cfg(test)]

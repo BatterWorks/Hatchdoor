@@ -66,31 +66,21 @@ const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 impl SqliteCache {
+    /// Convenience entry point for callers with no progress reporting, who
+    /// retain the historical default of embedding every layer.
     pub fn replace_from_index_with_embedder(
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
     ) -> Result<(), String> {
-        self.replace_from_index_with_embedder_and_progress(index, embedder, None)
+        self.replace_from_index_with_progress(index, embedder, None, true)
     }
 
-    pub fn replace_from_index_with_embedder_and_progress(
-        &self,
-        index: &VaultIndex,
-        embedder: &dyn Embedder,
-        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
-    ) -> Result<(), String> {
-        self.replace_from_index_with_embedder_and_progress_with_embed_layers(
-            index,
-            embedder,
-            on_progress,
-            true,
-        )
-    }
-
-    /// Server runtime configuration supplies `embed_layers`; standalone callers
-    /// retain the historical default of embedding every layer.
-    pub fn replace_from_index_with_embedder_and_progress_with_embed_layers(
+    /// Populate with optional progress reporting and an explicit
+    /// `embed_layers` (`HATCHDOOR_EMBED_LAYERS`) toggle. This is the entry
+    /// point the server runtime uses; other callers pass `true` for the
+    /// historical default of embedding every layer.
+    pub fn replace_from_index_with_progress(
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
@@ -2048,11 +2038,7 @@ mod tests {
         });
 
         cache
-            .replace_from_index_with_embedder_and_progress(
-                &index,
-                &StubEmbedder::new(384),
-                Some(observer),
-            )
+            .replace_from_index_with_progress(&index, &StubEmbedder::new(384), Some(observer), true)
             .expect("populate cache");
 
         let snapshots = snapshots.lock().expect("snapshots lock");

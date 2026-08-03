@@ -138,11 +138,19 @@ specific field, route, startup phase, or integration being changed. Adding an
 
 **Public contract:** `RuntimeConfig`, `ConfigSnapshot`, `ResolvedSetting`,
 `SettingSource`, `Environment`, `SETTINGS_SCHEMA`, `live_settings_defaults`,
-`settings_file_path`, and the versioned
+`settings_file_path`, `is_truthy`, and the versioned
 `settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
 lock-free configuration view to bind at the start of an operation;
 `RuntimeConfig::save` serializes writes, persists first, then publishes the
-new view.
+new view. `RuntimeConfig::validate_and_save` runs a caller-supplied decision
+against the snapshot current at the moment the write lock is taken and only
+persists on success, so validation and persistence serialize behind the same
+lock (no separate read-then-write race). `ConfigSnapshot::required` is the one
+accessor for "this key's value, or a descriptive error" that `src/config.rs`,
+`src/mcp/config.rs`, and `src/git/config.rs` all call rather than each keeping
+its own copy; `ConfigSnapshot::pinned_count` and `RuntimeConfig::settings_path`
+support the startup pinned-setting log line and local-versioning `.gitignore`
+setup respectively.
 
 **Consumers:** runtime composition constructs the startup instance. The
 settings HTTP API and the archive, index, MCP, and git live consumers bind a
@@ -168,11 +176,12 @@ checks.
 
 **Owned paths:** `src/auth.rs`.
 
-**Public contract:** `WebToken`, `WebOrMcpToken`,
-`require_web_token`, and `require_web_or_mcp_token`. Hatchdoor's internal
+**Public contract:** `WebToken`, `WebOrLiveMcpToken`,
+`require_web_token`, and `require_web_or_live_mcp_token`. Hatchdoor's internal
 attachment middleware binds the MCP token from the current runtime snapshot
 instead of retaining a token captured at startup; it accepts that token only
-while MCP write access is enabled.
+while MCP itself is enabled. Disabling MCP at runtime immediately revokes that
+token for attachment uploads; MCP write mode does not affect this authorization.
 
 **Consumers:** `server.rs` and protected HTTP routes.
 
@@ -464,7 +473,16 @@ errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
 and `spawn_sync_task`. Local mode commits without network access; remote mode
 retains the safe fetch/integrate/push phases. The settings HTTP boundary owns
 the preflight → bounded drain → replacement protocol and exposes it through
-`GET /api/git-status`.
+`GET /api/git-status`. `GitSyncHandle::stop` timing out withdraws its stop
+request rather than leaving the handle dead: the still-running task keeps
+accepting and committing records, and only a `stop` that truly returns `Ok`
+lets a caller install a replacement task. Spawning a task flushes any
+drift accumulated while versioning was off (uncommitted working-tree changes
+in either mode, or unpushed commits in remote mode) under its own
+distinguishable commit message. `init_local_repo` takes the vault's configured
+cache-database and settings-file paths and derives `.gitignore` entries from
+them (only when those paths live inside the vault), appending to an existing
+`.gitignore` rather than skipping it.
 
 **Consumed dependencies:** local Git repository through `git2` and the live
 configuration snapshot for startup parsing.
@@ -506,9 +524,14 @@ full refreshed document. MCP enablement and its bearer token validate together
 against one prospective snapshot, so an invalid combination saves nothing and
 reports field errors. Its candidate-token and capability-safe secret-reveal
 endpoints are `no-store`; the ordinary settings document never exposes secret
-values. Reindex-class saves require an explicit confirmation, then persist
-before asynchronously rebuilding; `/api/index-status` reports that dedicated
-rebuild's stale drift, progress, ETA, and last failure without reusing startup
+values. A save whose consequence needs consent (a reindex, initializing local
+history, or downgrading away from remote versioning) is refused with `409` and
+a machine-readable `confirmation_required` consequence — the server is the
+authority, and sends no prose; the page owns the words and resends with a
+`confirm` list that accumulates every consequence accepted so far, so a save
+needing two consents does not ping-pong between them. Saves persist before
+asynchronously rebuilding; `/api/index-status` reports that dedicated
+rebuild's staleness, progress, ETA, and last failure without reusing startup
 readiness.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
