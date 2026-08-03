@@ -11,6 +11,7 @@ import { getWriteCapabilities } from "../api/writeApi";
 export function useWriteMode() {
   const [writeEnabled, setWriteEnabled] = useState(false);
   const [writeWarnings, setWriteWarnings] = useState<string[]>([]);
+  const [settingsEnabled, setSettingsEnabled] = useState(false);
   const [writeNotice, setWriteNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -21,6 +22,7 @@ export function useWriteMode() {
         const capabilities = await getWriteCapabilities();
         if (!cancelled) {
           setWriteEnabled(Boolean(capabilities.enabled));
+          setSettingsEnabled(Boolean(capabilities.settings_enabled));
           setWriteWarnings(
             Array.isArray(capabilities.warnings) ? capabilities.warnings : [],
           );
@@ -28,6 +30,7 @@ export function useWriteMode() {
       } catch {
         if (!cancelled) {
           setWriteEnabled(false);
+          setSettingsEnabled(false);
           setWriteWarnings([]);
         }
       }
@@ -41,6 +44,7 @@ export function useWriteMode() {
   return {
     writeEnabled,
     writeWarnings,
+    settingsEnabled,
     setWriteWarnings,
     writeNotice,
     setWriteNotice,

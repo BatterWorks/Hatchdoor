@@ -38,6 +38,7 @@ import { NoteActionsDialog } from "./components/NoteActionsDialog";
 import { NotePage } from "./components/NotePage";
 import { TokenPrompt } from "./components/TokenPrompt";
 import { GraphPage } from "./components/graph/GraphPage";
+import { SettingsPage } from "./features/settings/SettingsPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
@@ -89,6 +90,7 @@ export function VaultApp() {
   } = useVaultTree();
   const {
     writeEnabled,
+    settingsEnabled,
     writeWarnings,
     setWriteWarnings,
     writeNotice,
@@ -438,6 +440,7 @@ export function VaultApp() {
           explorerScrollRef={explorerScrollRef}
           drawerOpen={drawerOpen}
           writeEnabled={writeEnabled}
+          settingsEnabled={settingsEnabled}
           onCreateNoteInFolder={openCreateDialog}
           locationPathname={location.pathname}
           recentNotes={recentNotes}
@@ -511,6 +514,7 @@ export function VaultApp() {
             <Route path="/" element={<EmptyState />} />
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/graph" element={<GraphPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
             <Route
               path="/n/:slug"
               element={

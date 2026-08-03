@@ -66,25 +66,32 @@ const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
 const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 impl SqliteCache {
+    /// Convenience entry point for callers with no progress reporting, who
+    /// retain the historical default of embedding every layer.
     pub fn replace_from_index_with_embedder(
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
     ) -> Result<(), String> {
-        self.replace_from_index_with_embedder_and_progress(index, embedder, None)
+        self.replace_from_index_with_progress(index, embedder, None, true)
     }
 
-    pub fn replace_from_index_with_embedder_and_progress(
+    /// Populate with optional progress reporting and an explicit
+    /// `embed_layers` (`HATCHDOOR_EMBED_LAYERS`) toggle. This is the entry
+    /// point the server runtime uses; other callers pass `true` for the
+    /// historical default of embedding every layer.
+    pub fn replace_from_index_with_progress(
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        embed_layers: bool,
     ) -> Result<(), String> {
         self.replace_with_options(
             index,
             embedder,
             on_progress,
-            embed_layers_enabled(),
+            embed_layers,
             &BuildOptions::default(),
         )
     }
@@ -97,7 +104,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         opts: &BuildOptions,
     ) -> Result<(), String> {
-        self.replace_with_options(index, embedder, None, embed_layers_enabled(), opts)
+        self.replace_with_options(index, embedder, None, true, opts)
     }
 
     /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
@@ -1810,19 +1817,6 @@ fn preserve_existing_vectors(
     Ok(out)
 }
 
-/// Whether demoted-layer vectors are built. `HATCHDOOR_EMBED_LAYERS` (default
-/// true); any non-truthy value turns it off.
-fn embed_layers_enabled() -> bool {
-    std::env::var("HATCHDOOR_EMBED_LAYERS")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2044,11 +2038,7 @@ mod tests {
         });
 
         cache
-            .replace_from_index_with_embedder_and_progress(
-                &index,
-                &StubEmbedder::new(384),
-                Some(observer),
-            )
+            .replace_from_index_with_progress(&index, &StubEmbedder::new(384), Some(observer), true)
             .expect("populate cache");
 
         let snapshots = snapshots.lock().expect("snapshots lock");

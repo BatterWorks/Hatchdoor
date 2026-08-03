@@ -5,7 +5,7 @@ use git2::{
     ResetType, Signature,
 };
 
-use super::config::GitConfig;
+use super::config::{GitConfig, GitMode};
 
 /// What a sync attempt did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,8 @@ pub enum SyncOutcome {
     NoChanges,
     /// A commit was created and pushed (possibly after a clean merge).
     Pushed { committed: bool },
+    /// A local-only versioning run committed without contacting a remote.
+    Committed { committed: bool },
 }
 
 /// Result of a sync attempt, suitable for status reporting.
@@ -144,6 +146,120 @@ pub fn validate_repo(config: &GitConfig) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Local mode needs only a non-bare repository rooted at the vault. Branch and
+/// remote checks are deliberately remote-only: local history follows whatever
+/// branch the operator has checked out.
+pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
+    let repo = Repository::open(&config.vault_path).map_err(|e| {
+        GitError::Validation(format!("cannot open vault as git repo: {}", e.message()))
+    })?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| GitError::Validation("repository is bare".to_string()))?;
+    if !same_path(workdir, &config.vault_path) {
+        return Err(GitError::Validation(format!(
+            "vault path {} is not the repository root {}",
+            config.vault_path.display(),
+            workdir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Initialise a vault for explicitly-confirmed local versioning. The ignore
+/// entries keep Hatchdoor's disposable cache database and durable settings
+/// file out of the user's Markdown history — derived from the *actual
+/// configured paths*, not a hardcoded guess, and only when those paths live
+/// inside the vault. Appends to an existing `.gitignore` rather than skipping
+/// it, so a vault that already has one still gets the cache database excluded
+/// (issue #61).
+pub fn init_local_repo(
+    config: &GitConfig,
+    cache_db_path: &Path,
+    settings_file_path: &Path,
+) -> Result<(), GitError> {
+    let repo = Repository::init(&config.vault_path)?;
+    drop(repo);
+    ensure_gitignore_entries(&config.vault_path, cache_db_path, settings_file_path)
+        .map_err(|error| GitError::Other(format!("cannot write .gitignore: {error}")))?;
+    validate_local_repo(config)
+}
+
+fn ensure_gitignore_entries(
+    vault_path: &Path,
+    cache_db_path: &Path,
+    settings_file_path: &Path,
+) -> Result<(), String> {
+    let mut entries = Vec::new();
+    if let Some(cache_dir) = cache_db_path.parent()
+        && let Some(entry) = vault_relative_ignore_entry(vault_path, cache_dir, true)
+    {
+        entries.push(entry);
+    }
+    if let Some(entry) = vault_relative_ignore_entry(vault_path, settings_file_path, false) {
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let ignore_path = vault_path.join(".gitignore");
+    let existing = std::fs::read_to_string(&ignore_path).unwrap_or_default();
+    let existing_lines: std::collections::HashSet<&str> = existing.lines().collect();
+    let missing: Vec<&String> = entries
+        .iter()
+        .filter(|entry| !existing_lines.contains(entry.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    for entry in missing {
+        updated.push_str(entry);
+        updated.push('\n');
+    }
+    std::fs::write(&ignore_path, updated).map_err(|error| error.to_string())
+}
+
+fn absolutize(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+/// A gitignore-style entry for `target` relative to `vault_path`, or `None`
+/// when `target` does not live inside the vault (nothing to ignore: the file
+/// is already outside the repository).
+fn vault_relative_ignore_entry(
+    vault_path: &Path,
+    target: &Path,
+    trailing_slash: bool,
+) -> Option<String> {
+    let vault_abs = absolutize(vault_path);
+    let target_abs = absolutize(target);
+    let relative = target_abs.strip_prefix(&vault_abs).ok()?;
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    let mut pattern = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    if trailing_slash {
+        pattern.push('/');
+    }
+    Some(pattern)
+}
+
 /// True when the local branch has commits the remote tracking ref lacks.
 /// Used at startup to flush commits stranded by an earlier outage.
 pub fn has_unpushed(config: &GitConfig) -> Result<bool, GitError> {
@@ -181,6 +297,19 @@ pub fn unpushed_count(config: &GitConfig) -> Result<usize, GitError> {
             Ok(walk.count())
         }
     }
+}
+
+/// True when the working tree has uncommitted drift (new, modified, or
+/// deleted files, tracked or not — anything `.gitignore` does not already
+/// exclude). Used at startup so turning versioning on for a vault with
+/// existing edits commits that drift immediately, in both local and remote
+/// mode, rather than waiting for the next write (issue #56).
+pub fn has_uncommitted_changes(config: &GitConfig) -> Result<bool, GitError> {
+    let repo = Repository::open(&config.vault_path)?;
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses = repo.statuses(Some(&mut opts))?;
+    Ok(!statuses.is_empty())
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -232,7 +361,7 @@ pub fn commit_local(
     }
 
     let committed = commit_working_tree(&repo, config, message)?;
-    let needs_remote = committed || has_unpushed(config)?;
+    let needs_remote = config.mode == GitMode::Remote && (committed || has_unpushed(config)?);
     Ok(CommitOutcome {
         committed,
         needs_remote,
@@ -297,6 +426,13 @@ pub fn push_branch(config: &GitConfig) -> Result<(), GitError> {
 /// it across the network phases (`fetch_remote`, `push_branch`).
 pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<SyncReport, GitError> {
     let commit = commit_local(config, paths, message)?;
+    if config.mode == GitMode::Local {
+        return Ok(SyncReport {
+            outcome: SyncOutcome::Committed {
+                committed: commit.committed,
+            },
+        });
+    }
     if !commit.needs_remote {
         return Ok(SyncReport {
             outcome: SyncOutcome::NoChanges,
@@ -430,6 +566,7 @@ mod tests {
     fn base_config(vault: &Path) -> GitConfig {
         GitConfig {
             vault_path: vault.to_path_buf(),
+            mode: super::super::config::GitMode::Remote,
             remote: "origin".to_string(),
             branch: "main".to_string(),
             username: "hatchdoor".to_string(),
@@ -575,6 +712,79 @@ mod tests {
         let config = base_config(&work);
         let report = sync(&config, &[], "nothing").unwrap();
         assert_eq!(report.outcome, SyncOutcome::NoChanges);
+    }
+
+    #[test]
+    fn local_mode_initializes_and_commits_without_a_remote() {
+        let temp = TempDir::new().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let mut config = base_config(&vault);
+        config.mode = GitMode::Local;
+        config.token.clear();
+        let cache_db_path = vault.join("data/cache/hatchdoor-cache.sqlite3");
+        let settings_file_path = vault.join("data/cache/settings.json");
+        init_local_repo(&config, &cache_db_path, &settings_file_path)
+            .expect("initialize local history");
+        std::fs::write(vault.join("Home.md"), "# Home\n").unwrap();
+
+        let report = sync(&config, &[vault.join("Home.md")], "hatchdoor: local Home")
+            .expect("commit locally");
+        assert_eq!(report.outcome, SyncOutcome::Committed { committed: true });
+        assert!(vault.join(".git").exists());
+        assert_eq!(
+            std::fs::read_to_string(vault.join(".gitignore")).unwrap(),
+            "data/cache/\ndata/cache/settings.json\n"
+        );
+    }
+
+    #[test]
+    fn init_local_repo_appends_to_an_existing_gitignore_instead_of_skipping_it() {
+        // Issue #61: a vault that already has its own .gitignore must not end
+        // up committing the cache database just because Hatchdoor declined to
+        // touch a file that already existed.
+        let temp = TempDir::new().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        std::fs::write(vault.join(".gitignore"), "*.tmp\n").unwrap();
+        let mut config = base_config(&vault);
+        config.mode = GitMode::Local;
+        config.token.clear();
+
+        let cache_db_path = vault.join("data/cache/hatchdoor-cache.sqlite3");
+        let settings_file_path = vault.join("data/cache/settings.json");
+        init_local_repo(&config, &cache_db_path, &settings_file_path)
+            .expect("initialize local history");
+
+        let contents = std::fs::read_to_string(vault.join(".gitignore")).unwrap();
+        assert!(contents.contains("*.tmp"), "kept the operator's own entry");
+        assert!(
+            contents.contains("data/cache/"),
+            "appended the cache directory entry: {contents}"
+        );
+        assert!(
+            contents.contains("data/cache/settings.json"),
+            "appended the settings file entry: {contents}"
+        );
+    }
+
+    #[test]
+    fn init_local_repo_ignores_nothing_when_cache_and_settings_live_outside_the_vault() {
+        let temp = TempDir::new().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let mut config = base_config(&vault);
+        config.mode = GitMode::Local;
+        config.token.clear();
+
+        let outside = temp.path().join("data/cache/hatchdoor-cache.sqlite3");
+        let outside_settings = temp.path().join("data/cache/settings.json");
+        init_local_repo(&config, &outside, &outside_settings).expect("initialize local history");
+
+        assert!(
+            !vault.join(".gitignore").exists(),
+            "nothing inside the vault needs ignoring"
+        );
     }
 
     #[test]
