@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use axum::Extension;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -25,10 +26,11 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
-    archive_note_handler, create_note_handler, delete_note_handler, diagnostics_handler,
-    graph_handler, health_handler, move_note_handler, move_rename_note_handler,
-    note_download_handler, note_handler, note_links_handler, recently_modified_handler,
-    refresh_handler, rename_note_handler, resolve_batch_handler, resolve_handler, search_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, archive_note_handler, create_note_handler, delete_note_handler,
+    diagnostics_handler, get_settings_handler, graph_handler, health_handler, move_note_handler,
+    move_rename_note_handler, note_download_handler, note_handler, note_links_handler,
+    patch_settings_handler, recently_modified_handler, refresh_handler, rename_note_handler,
+    resolve_batch_handler, resolve_handler, reveal_web_token_handler, search_handler,
     spa_index_handler, stats_handler, tree_handler, update_note_handler, upload_attachment_handler,
     vault_asset_handler, vault_events_handler, write_capabilities_handler,
 };
@@ -117,9 +119,9 @@ fn initial_model_for_startup(demo_mode: bool, selected: SelectedModel) -> Select
 const ATTACHMENT_MULTIPART_OVERHEAD: u64 = 64 * 1024;
 
 pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Router {
-    let attachment_body_limit = state
-        .mcp_config
-        .max_attachment_bytes
+    // This is only an outer DoS guard. The upload handler binds the current
+    // runtime snapshot and enforces the operator-selected limit precisely.
+    let attachment_body_limit = MAX_IN_MEMORY_UPLOAD_BYTES
         .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
         .min(usize::MAX as u64) as usize;
     // The base64 import_attachment tool carries file bytes inside the JSON-RPC
@@ -224,6 +226,30 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         reject_demo_model_setup,
     ));
 
+    // Settings deliberately do not exist in demo mode, rather than existing
+    // and refusing writes. They are operator controls, not demo content.
+    let settings = if state.demo_mode {
+        Router::new()
+    } else {
+        let settings = Router::new()
+            .route(
+                "/api/settings",
+                get(get_settings_handler).patch(patch_settings_handler),
+            )
+            .route(
+                "/api/settings/web-token/reveal",
+                post(reveal_web_token_handler),
+            )
+            .layer(Extension(web_bearer_token.clone()));
+        match web_bearer_token.clone() {
+            Some(token) => settings.layer(axum::middleware::from_fn_with_state(
+                WebToken(token),
+                require_web_token,
+            )),
+            None => settings,
+        }
+    };
+
     // MCP remains reachable during initial setup. It advertises the full stable
     // tool list, while tools::dispatch blocks vault operations until ready.
     let mcp = Router::new()
@@ -235,6 +261,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/ready", get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
         .merge(model_setup)
+        .merge(settings)
         .merge(mcp)
         .merge(protected)
         .merge(attachment)
@@ -242,6 +269,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/n/{slug}", get(spa_index_handler))
         .route("/stats", get(spa_index_handler))
         .route("/graph", get(spa_index_handler))
+        .route("/settings", get(spa_index_handler))
         .route_service(
             "/manifest.webmanifest",
             ServeFile::new("frontend/dist/manifest.webmanifest"),
@@ -1358,6 +1386,45 @@ mod tests {
             .await
             .expect("response");
         assert_ne!(root.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn settings_routes_require_web_auth_and_are_absent_in_demo_mode() {
+        let (protected, _tmp, _) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let unauthenticated = protected
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let authenticated = protected
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .header("authorization", "Bearer web-secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+
+        let (demo, _tmp, _) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let absent = demo
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

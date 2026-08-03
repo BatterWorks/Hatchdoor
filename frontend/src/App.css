@@ -8,6 +8,7 @@
 @import "./styles/stats.css";
 @import "./styles/graph.css";
 @import "./styles/startup.css";
+@import "./features/settings/settings.css";
 
 .write-notice {
   display: flex;

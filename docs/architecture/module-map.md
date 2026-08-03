@@ -479,12 +479,15 @@ force-checkout over uncommitted manual vault edits (ADR-10).
 - `src/handlers/assets.rs`
 - `src/handlers/diagnostics.rs`
 - `src/handlers/downloads.rs`
+- `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
 - `src/handlers/write_api.rs`
 
 **Public contract:** handler functions intentionally re-exported by
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
-behavior.
+behavior. `settings.rs` owns the additive `/api/settings` document: effective
+value/provenance/lock/class/kind metadata and partial PATCH saves returning the
+full refreshed document. It never exposes secret values.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, and auth.
@@ -877,6 +880,37 @@ and responsive CSS.
 
 **Validation:** add focused component coverage for behavioral changes, affected
 route tests, and full frontend checks.
+
+### Settings
+
+**Kind:** product capability/adapter.
+
+**Owned paths:**
+
+- `frontend/src/features/settings/SettingsPage.tsx`
+- `frontend/src/features/settings/settings.css`
+- `frontend/src/features/settings/SettingsPage.test.tsx`
+
+**Public contract:** the Settings page presents server-provided setting metadata
+at `/settings`, keeps copy and section layout in the browser, and PATCHes only
+the active section's changed keys to `/api/settings` before replacing its state
+with the complete response.
+
+**Consumed dependencies:** authenticated `apiFetch` and the settings HTTP
+contract.
+
+**Coordination paths:** `frontend/src/App.tsx` (route),
+`frontend/src/app/ExplorerPane.tsx` (normal-deployment navigation),
+`frontend/src/App.css` (stylesheet aggregation), `src/server.rs` (SPA/API
+routes), and `src/handlers/settings.rs` (wire producer).
+
+**Invariants:** demo mode exposes no Settings navigation or endpoints;
+environment-managed and permanently unavailable values are records rather than
+disabled form controls; secret values are never rendered from the settings
+document.
+
+**Validation:** `SettingsPage.test.tsx`, affected shell tests, frontend
+typecheck, then full frontend checks.
 
 ### Shared UI and styling
 

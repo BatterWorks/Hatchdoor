@@ -63,6 +63,7 @@ pub struct DeleteNoteRequest {
 #[derive(Debug, Serialize)]
 pub struct WriteCapabilitiesResponse {
     pub enabled: bool,
+    pub settings_enabled: bool,
     pub warnings: Vec<String>,
 }
 
@@ -97,6 +98,7 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
             StatusCode::OK,
             Json(WriteCapabilitiesResponse {
                 enabled: false,
+                settings_enabled: false,
                 warnings: vec![
                     "Hatchdoor demo mode is read-only; browser write features are disabled."
                         .to_string(),
@@ -121,6 +123,7 @@ pub async fn write_capabilities_handler(State(state): State<AppState>) -> impl I
         StatusCode::OK,
         Json(WriteCapabilitiesResponse {
             enabled: vault_writable,
+            settings_enabled: true,
             warnings,
         }),
     )
