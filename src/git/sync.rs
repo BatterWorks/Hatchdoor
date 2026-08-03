@@ -5,7 +5,7 @@ use git2::{
     ResetType, Signature,
 };
 
-use super::config::GitConfig;
+use super::config::{GitConfig, GitMode};
 
 /// What a sync attempt did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +14,8 @@ pub enum SyncOutcome {
     NoChanges,
     /// A commit was created and pushed (possibly after a clean merge).
     Pushed { committed: bool },
+    /// A local-only versioning run committed without contacting a remote.
+    Committed { committed: bool },
 }
 
 /// Result of a sync attempt, suitable for status reporting.
@@ -144,6 +146,40 @@ pub fn validate_repo(config: &GitConfig) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Local mode needs only a non-bare repository rooted at the vault. Branch and
+/// remote checks are deliberately remote-only: local history follows whatever
+/// branch the operator has checked out.
+pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
+    let repo = Repository::open(&config.vault_path).map_err(|e| {
+        GitError::Validation(format!("cannot open vault as git repo: {}", e.message()))
+    })?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| GitError::Validation("repository is bare".to_string()))?;
+    if !same_path(workdir, &config.vault_path) {
+        return Err(GitError::Validation(format!(
+            "vault path {} is not the repository root {}",
+            config.vault_path.display(),
+            workdir.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Initialise a vault for explicitly-confirmed local versioning. The generated
+/// ignore file keeps Hatchdoor's disposable cache and durable settings out of
+/// the user's Markdown history.
+pub fn init_local_repo(config: &GitConfig) -> Result<(), GitError> {
+    let repo = Repository::init(&config.vault_path)?;
+    let ignore = config.vault_path.join(".gitignore");
+    if !ignore.exists() {
+        std::fs::write(&ignore, "data/\nsettings.json\n")
+            .map_err(|error| GitError::Other(format!("cannot write .gitignore: {error}")))?;
+    }
+    drop(repo);
+    validate_local_repo(config)
+}
+
 /// True when the local branch has commits the remote tracking ref lacks.
 /// Used at startup to flush commits stranded by an earlier outage.
 pub fn has_unpushed(config: &GitConfig) -> Result<bool, GitError> {
@@ -232,7 +268,7 @@ pub fn commit_local(
     }
 
     let committed = commit_working_tree(&repo, config, message)?;
-    let needs_remote = committed || has_unpushed(config)?;
+    let needs_remote = config.mode == GitMode::Remote && (committed || has_unpushed(config)?);
     Ok(CommitOutcome {
         committed,
         needs_remote,
@@ -297,6 +333,13 @@ pub fn push_branch(config: &GitConfig) -> Result<(), GitError> {
 /// it across the network phases (`fetch_remote`, `push_branch`).
 pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<SyncReport, GitError> {
     let commit = commit_local(config, paths, message)?;
+    if config.mode == GitMode::Local {
+        return Ok(SyncReport {
+            outcome: SyncOutcome::Committed {
+                committed: commit.committed,
+            },
+        });
+    }
     if !commit.needs_remote {
         return Ok(SyncReport {
             outcome: SyncOutcome::NoChanges,
@@ -430,6 +473,7 @@ mod tests {
     fn base_config(vault: &Path) -> GitConfig {
         GitConfig {
             vault_path: vault.to_path_buf(),
+            mode: super::super::config::GitMode::Remote,
             remote: "origin".to_string(),
             branch: "main".to_string(),
             username: "hatchdoor".to_string(),
@@ -575,6 +619,27 @@ mod tests {
         let config = base_config(&work);
         let report = sync(&config, &[], "nothing").unwrap();
         assert_eq!(report.outcome, SyncOutcome::NoChanges);
+    }
+
+    #[test]
+    fn local_mode_initializes_and_commits_without_a_remote() {
+        let temp = TempDir::new().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let mut config = base_config(&vault);
+        config.mode = GitMode::Local;
+        config.token.clear();
+        init_local_repo(&config).expect("initialize local history");
+        std::fs::write(vault.join("Home.md"), "# Home\n").unwrap();
+
+        let report = sync(&config, &[vault.join("Home.md")], "hatchdoor: local Home")
+            .expect("commit locally");
+        assert_eq!(report.outcome, SyncOutcome::Committed { committed: true });
+        assert!(vault.join(".git").exists());
+        assert_eq!(
+            std::fs::read_to_string(vault.join(".gitignore")).unwrap(),
+            "data/\nsettings.json\n"
+        );
     }
 
     #[test]

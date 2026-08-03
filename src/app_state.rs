@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Instant;
 
 use axum::Json;
@@ -41,8 +41,9 @@ pub struct AppState {
     pub demo_mode: bool,
     /// Serializes vault file mutations against git sync tree operations.
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Present only when git sync is enabled.
-    pub git_sync: Arc<OnceLock<crate::git::GitSyncHandle>>,
+    /// The one active versioning task, if any. A write lock serializes drain →
+    /// replacement so two tasks can never touch the repository together.
+    pub git_sync: Arc<RwLock<Option<crate::git::GitSyncHandle>>>,
     /// Folder prefix treated as archived in resolve results.
     pub archive_prefix: Arc<str>,
     /// Noise-exclusion configuration (built-in defaults plus `HATCHDOOR_EXCLUDE`),
@@ -245,9 +246,12 @@ impl AppState {
 
     /// Record a vault write for git sync. No-op when sync is disabled.
     pub fn record_vault_write(&self, record: crate::git::WriteRecord) {
-        if let Some(handle) = self.git_sync.get() {
-            handle.record(record);
-        }
+        let sync = self.git_sync.clone();
+        tokio::spawn(async move {
+            if let Some(handle) = sync.read().await.as_ref() {
+                handle.record(record);
+            }
+        });
     }
 }
 
@@ -624,7 +628,7 @@ mod tests {
             web_auth_enabled: false,
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(OnceLock::new()),
+            git_sync: Arc::new(RwLock::new(None)),
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),

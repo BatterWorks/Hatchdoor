@@ -458,9 +458,13 @@ superseding ADR-05.
 - `src/git/sync.rs`
 - `src/git/task.rs`
 
-**Public contract:** `GitConfig`, write-record/message types, sync outcomes and
-errors, status, repository operations, `GitSyncHandle`, `SyncOps`, and
-`spawn_sync_task`.
+**Public contract:** `GitMode` (`off`/`local`/`remote` through the existing
+runtime setting), `GitConfig`, write-record/message types, sync outcomes and
+errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
+and `spawn_sync_task`. Local mode commits without network access; remote mode
+retains the safe fetch/integrate/push phases. The settings HTTP boundary owns
+the preflight → bounded drain → replacement protocol and exposes it through
+`GET /api/git-status`.
 
 **Consumed dependencies:** local Git repository through `git2` and the live
 configuration snapshot for startup parsing.
@@ -468,11 +472,14 @@ configuration snapshot for startup parsing.
 **Consumers:** server startup, write adapters, status handlers/tools, and
 `AppState`.
 
-**Coordination paths:** `src/app_state.rs`, `src/server.rs`, HTTP/MCP write
-adapters, configuration, and vault watcher Git exclusions.
+**Coordination paths:** `src/app_state.rs`, `src/server.rs`,
+`src/handlers/settings.rs`, HTTP/MCP write adapters, configuration, frontend
+settings UI, and vault watcher Git exclusions.
 
-**Invariants:** optional and debounced; writes do not block on sync; never
-force-checkout over uncommitted manual vault edits (ADR-10).
+**Invariants:** optional and debounced; writes do not block on sync; task
+replacement drains before another task can start; local mode never contacts a
+remote; remote mode never force-checks out over uncommitted manual vault edits
+(ADR-10).
 
 **Validation:** `cargo test git` and affected adapter/server tests.
 
@@ -913,9 +920,10 @@ at `/settings`, keeps copy and section layout in the browser, confirms saves
 that rebuild indexing, generates an MCP token candidate without persisting it,
 reveals an MCP secret only when it grants the authenticated viewer no new
 capability, PATCHes only the active section's changed keys to `/api/settings`
-before replacing its state with the complete response, and polls
-`/api/index-status` for dedicated stale-index progress without using the
-startup gate.
+before replacing its state with the complete response, confirms local Git
+initialisation and remote downgrades when the server requests it, and polls
+`/api/index-status` plus `/api/git-status` for dedicated background progress
+without using the startup gate.
 
 **Consumed dependencies:** authenticated `apiFetch` and the settings HTTP
 contract.
@@ -923,7 +931,8 @@ contract.
 **Coordination paths:** `frontend/src/App.tsx` (route),
 `frontend/src/app/ExplorerPane.tsx` (normal-deployment navigation),
 `frontend/src/App.css` (stylesheet aggregation), `src/server.rs` (SPA/API
-routes), and `src/handlers/settings.rs` (settings and index-status wire producer).
+routes), and `src/handlers/settings.rs` (settings, index-status, and git-status
+wire producer).
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than

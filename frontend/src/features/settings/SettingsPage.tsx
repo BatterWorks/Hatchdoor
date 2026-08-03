@@ -28,7 +28,22 @@ type IndexStatus = {
   last_failure?: string | null;
 };
 
+type GitStatus = {
+  state: "disabled" | "starting" | "running" | "stopping";
+  mode: "off" | "local" | "remote";
+  last_sync_at?: string | null;
+  last_ok?: boolean;
+  last_error?: string | null;
+  pending?: number;
+  unpushed?: number;
+};
+
 const INDEX_STATUS_POLL_MS = 2_000;
+const GIT_REMOTE_KEYS = new Set([
+  "HATCHDOOR_GIT_HTTPS_USERNAME",
+  "HATCHDOOR_GIT_HTTPS_TOKEN",
+  "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
+]);
 
 const SECTIONS = [
   {
@@ -199,6 +214,7 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [indexStatusError, setIndexStatusError] = useState<string | null>(null);
+  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
 
   const load = async () => {
     const response = await apiFetch("/api/settings");
@@ -221,6 +237,25 @@ export function SettingsPage() {
         ),
       )
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const poll = async () => {
+      try {
+        const response = await apiFetch("/api/git-status");
+        if (!response.ok) throw new Error();
+        if (active) setGitStatus((await response.json()) as GitStatus);
+      } catch {
+        if (active) setGitStatus(null);
+      }
+    };
+    void poll();
+    const interval = window.setInterval(() => void poll(), INDEX_STATUS_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -253,8 +288,12 @@ export function SettingsPage() {
     () => SECTIONS.find((item) => item.id === section)!,
     [section],
   );
-  const visible = settings.filter(
-    (setting) => COPY[setting.key]?.section === section,
+  const mode = drafts.HATCHDOOR_GIT_SYNC_ENABLED ?? settings.find(
+    (setting) => setting.key === "HATCHDOOR_GIT_SYNC_ENABLED",
+  )?.value ?? "off";
+  const visible = settings.filter((setting) =>
+    COPY[setting.key]?.section === section &&
+    !(section === "versioning" && mode === "local" && GIT_REMOTE_KEYS.has(setting.key)),
   );
   const editable = visible.filter((setting) => !setting.locked);
   const locked = visible.filter((setting) => setting.locked);
@@ -285,7 +324,7 @@ export function SettingsPage() {
     setErrors({});
     setMessage(null);
     try {
-      const response = await apiFetch("/api/settings", {
+      let response = await apiFetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -293,11 +332,30 @@ export function SettingsPage() {
           ...(changesIndexing ? { confirm_reindex: true } : {}),
         }),
       });
-      const payload = (await response.json()) as {
+      let payload = (await response.json()) as {
         settings?: Setting[];
         error?: string;
         fields?: { key: string; message: string }[];
+        confirmation_required?: string;
       };
+      if (
+        response.status === 409 &&
+        (payload.confirmation_required === "git_init" ||
+          payload.confirmation_required === "git_downgrade")
+      ) {
+        if (!window.confirm(payload.error ?? "Initialize local versioning?")) return;
+        response = await apiFetch("/api/settings", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            updates,
+            ...(payload.confirmation_required === "git_init"
+              ? { confirm_git_init: true }
+              : { confirm_git_downgrade: true }),
+          }),
+        });
+        payload = (await response.json()) as typeof payload;
+      }
       if (!response.ok) {
         setErrors(
           Object.fromEntries(
@@ -441,6 +499,16 @@ export function SettingsPage() {
         </span>
         <span>
           <b>Versioning</b> Status is managed by the server
+          {gitStatus ? (
+            <small>
+              {gitStatus.state === "disabled"
+                ? " Off"
+                : ` ${gitStatus.mode} · ${gitStatus.state}`}
+              {gitStatus.pending ? ` · ${gitStatus.pending} changes waiting` : ""}
+              {gitStatus.unpushed !== undefined ? ` · ${gitStatus.unpushed} not sent` : ""}
+              {gitStatus.last_error ? ` · ${gitStatus.last_error}` : ""}
+            </small>
+          ) : null}
         </span>
       </div>
       <div className="settings-layout">
@@ -499,6 +567,15 @@ export function SettingsPage() {
                     }))
                   }
                 />
+              ) : setting.kind === "mode" ? (
+                <select
+                  value={drafts[setting.key] ?? setting.value ?? "off"}
+                  onChange={(event) => setDrafts((old) => ({ ...old, [setting.key]: event.target.value }))}
+                >
+                  <option value="off">Off</option>
+                  <option value="local">Local history</option>
+                  <option value="remote">Remote sync</option>
+                </select>
               ) : (
                 <input
                   type={
