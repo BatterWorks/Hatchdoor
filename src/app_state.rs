@@ -43,8 +43,6 @@ pub struct AppState {
     pub vault_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Present only when git sync is enabled.
     pub git_sync: Arc<OnceLock<crate::git::GitSyncHandle>>,
-    /// Validated MCP configuration, parsed once at startup.
-    pub mcp_config: Arc<crate::mcp::McpConfig>,
     /// Folder prefix treated as archived in resolve results.
     pub archive_prefix: Arc<str>,
     /// Noise-exclusion configuration (built-in defaults plus `HATCHDOOR_EXCLUDE`),
@@ -627,7 +625,6 @@ mod tests {
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: Arc::new(OnceLock::new()),
-            mcp_config: Arc::new(crate::mcp::McpConfig::disabled()),
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),

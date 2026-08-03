@@ -169,9 +169,15 @@ checks.
 **Owned paths:** `src/auth.rs`.
 
 **Public contract:** `WebToken`, `WebOrMcpToken`,
-`require_web_token`, and `require_web_or_mcp_token`.
+`require_web_token`, and `require_web_or_mcp_token`. Hatchdoor's internal
+attachment middleware binds the MCP token from the current runtime snapshot
+instead of retaining a token captured at startup; it accepts that token only
+while MCP write access is enabled.
 
 **Consumers:** `server.rs` and protected HTTP routes.
+
+**Consumed dependencies:** live runtime configuration and `McpConfig` parsing
+for per-request attachment authorization.
 
 **Coordination paths:** `src/server.rs`, `src/config.rs`, frontend
 `frontend/src/api/api.ts`, and any route whose authentication requirements
@@ -489,10 +495,14 @@ force-checkout over uncommitted manual vault edits (ADR-10).
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
 behavior. `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
-full refreshed document. Reindex-class saves require an explicit confirmation,
-then persist before asynchronously rebuilding; `/api/index-status` reports that
-dedicated rebuild's stale drift, progress, ETA, and last failure without
-reusing startup readiness. It never exposes secret values.
+full refreshed document. MCP enablement and its bearer token validate together
+against one prospective snapshot, so an invalid combination saves nothing and
+reports field errors. Its candidate-token and capability-safe secret-reveal
+endpoints are `no-store`; the ordinary settings document never exposes secret
+values. Reindex-class saves require an explicit confirmation, then persist
+before asynchronously rebuilding; `/api/index-status` reports that dedicated
+rebuild's stale drift, progress, ETA, and last failure without reusing startup
+readiness.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, and auth.
@@ -529,13 +539,15 @@ version negotiation, server instructions, tool names/schemas/results, and
 
 **Consumed dependencies:** `AppState`, Search, vault reads, `vault/write`, Git
 status, model setup, cache refresh, attachment limits, and the live
-configuration snapshot for startup parsing.
+configuration snapshot bound at each request.
 
 **Coordination paths:** `src/server.rs`, domains exposed as tools, and
 documentation describing agent behavior.
 
 **Invariants:** MCP is disabled by default, uses its own token, validates
-Origins, and keeps read-only access credentialed (ADR-09). Write tools use
+Origins, and keeps read-only access credentialed (ADR-09). Token changes,
+write enablement, Origins, and attachment limits apply to the next request;
+attachment authorization never retains a rotated MCP token. Write tools use
 `vault/write` and retain optimistic concurrency and path protections (ADR-03).
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes, and
@@ -898,9 +910,11 @@ route tests, and full frontend checks.
 
 **Public contract:** the Settings page presents server-provided setting metadata
 at `/settings`, keeps copy and section layout in the browser, confirms saves
-that rebuild indexing, PATCHes only the active section's changed keys to
-`/api/settings` before replacing its state with the complete response, and
-polls `/api/index-status` for dedicated stale-index progress without using the
+that rebuild indexing, generates an MCP token candidate without persisting it,
+reveals an MCP secret only when it grants the authenticated viewer no new
+capability, PATCHes only the active section's changed keys to `/api/settings`
+before replacing its state with the complete response, and polls
+`/api/index-status` for dedicated stale-index progress without using the
 startup gate.
 
 **Consumed dependencies:** authenticated `apiFetch` and the settings HTTP

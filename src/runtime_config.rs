@@ -80,6 +80,19 @@ impl ConfigSnapshot {
     pub fn settings(&self) -> &BTreeMap<String, ResolvedSetting> {
         &self.settings
     }
+
+    /// Create a prospective snapshot for all-or-nothing validation before a
+    /// settings save. Provenance is deliberately preserved because this view is
+    /// never published or persisted.
+    pub(crate) fn with_updates(&self, updates: &BTreeMap<String, String>) -> Self {
+        let mut settings = self.settings.clone();
+        for (key, value) in updates {
+            if let Some(setting) = settings.get_mut(key) {
+                setting.value = value.clone();
+            }
+        }
+        Self { settings }
+    }
 }
 
 /// Environment values captured once at startup.
