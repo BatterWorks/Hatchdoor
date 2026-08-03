@@ -49,6 +49,16 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
     .collect()
 }
 
+/// Parse one of the truthy string conventions accepted across live-applicable
+/// boolean settings (`1`, `true`, `yes`, `on`, case-insensitive, surrounding
+/// whitespace ignored). Anything else, including an empty string, is falsy.
+pub fn is_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// Where an effective setting came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingSource {
@@ -77,8 +87,29 @@ impl ConfigSnapshot {
         self.settings.get(key)
     }
 
+    /// Look up a required key's resolved value, or a descriptive error naming
+    /// the missing key. Every live-applicable key has a default (see
+    /// [`live_settings_defaults`]), so this only fails when a caller passes a
+    /// key outside that set.
+    pub fn required(&self, key: &str) -> Result<&str, String> {
+        self.setting(key)
+            .map(|setting| setting.value.as_str())
+            .ok_or_else(|| format!("runtime configuration is missing {key}"))
+    }
+
     pub fn settings(&self) -> &BTreeMap<String, ResolvedSetting> {
         &self.settings
+    }
+
+    /// How many live-applicable settings are pinned by a non-empty environment
+    /// variable in this process (and so cannot be changed from the settings
+    /// page without editing `.env` and restarting). Surfaced in a startup log
+    /// line so an operator can see the count without opening the page.
+    pub fn pinned_count(&self) -> usize {
+        self.settings
+            .values()
+            .filter(|setting| setting.pinned)
+            .count()
     }
 
     /// Create a prospective snapshot for all-or-nothing validation before a
@@ -329,6 +360,13 @@ impl RuntimeConfig {
         self.snapshot.load_full()
     }
 
+    /// The durable settings file's path, so a caller (e.g. local git
+    /// versioning's `.gitignore` setup) can derive ignore entries from the
+    /// actual configured location rather than guessing.
+    pub fn settings_path(&self) -> &Path {
+        &self.store.path
+    }
+
     /// Persist updates before making them live. The writer mutex serializes all
     /// saves and the captured `Environment` means a save never re-reads process
     /// variables at runtime.
@@ -336,18 +374,43 @@ impl RuntimeConfig {
         &self,
         updates: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Arc<ConfigSnapshot>, String> {
+        self.validate_and_save(updates, |_current| Ok(()))
+            .map(|((), snapshot)| snapshot)
+    }
+
+    /// Validate against the *current* snapshot and persist in the same
+    /// critical section, so two concurrent saves can never both validate
+    /// against a snapshot the other is about to invalidate (issue #54: saves
+    /// serialize behind one lock end to end, not just at the point of
+    /// writing the file).
+    ///
+    /// `decide` receives the freshly-resolved current snapshot (reflecting
+    /// every save that committed before this call acquired the lock) and
+    /// returns either a value to hand back alongside the new snapshot, or a
+    /// refusal that aborts before anything is written. `updates` is applied
+    /// only when `decide` succeeds.
+    pub fn validate_and_save<T, E>(
+        &self,
+        updates: impl IntoIterator<Item = (String, String)>,
+        decide: impl FnOnce(&ConfigSnapshot) -> Result<T, E>,
+    ) -> Result<(T, Arc<ConfigSnapshot>), E>
+    where
+        E: From<String>,
+    {
         let mut stored_values = self
             .stored_values
             .lock()
-            .map_err(|_| "configuration save lock was poisoned".to_string())?;
+            .map_err(|_| E::from("configuration save lock was poisoned".to_string()))?;
+        let current = resolve(&self.environment, &stored_values, &self.defaults);
+        let value = decide(&current)?;
+
         let mut next_values = stored_values.clone();
         next_values.extend(updates);
-
-        self.store.persist(&next_values)?;
+        self.store.persist(&next_values).map_err(E::from)?;
         let next_snapshot = Arc::new(resolve(&self.environment, &next_values, &self.defaults));
         self.snapshot.store(next_snapshot.clone());
         *stored_values = next_values;
-        Ok(next_snapshot)
+        Ok((value, next_snapshot))
     }
 
     #[cfg(test)]
@@ -580,6 +643,19 @@ mod tests {
                 .value,
             "archive/"
         );
+    }
+
+    #[test]
+    fn pinned_count_counts_only_environment_sourced_settings() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let environment = Environment::from_values([(
+            "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+            "env-archive/".to_string(),
+        )]);
+        let config = RuntimeConfig::load(&path, environment, defaults()).expect("load");
+
+        assert_eq!(config.snapshot().pinned_count(), 1);
     }
 
     #[test]

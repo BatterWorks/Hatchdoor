@@ -442,19 +442,15 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                     let runtime_snapshot = index_state.runtime_config.snapshot();
                     let embed_layers = runtime_snapshot
                         .setting("HATCHDOOR_EMBED_LAYERS")
-                        .map(|setting| {
-                            matches!(
-                                setting.value.trim().to_ascii_lowercase().as_str(),
-                                "1" | "true" | "yes" | "on"
-                            )
-                        })
+                        .map(|setting| crate::runtime_config::is_truthy(&setting.value))
                         .unwrap_or(true);
+                    let scan_config = index_state.live_scan_config()?;
                     build_cache_with_sqlite_and_progress(
                         &index_state.vault_path,
                         sqlite,
                         index_state.embedder.as_ref(),
                         Some(on_progress),
-                        &index_state.scan_config,
+                        &scan_config,
                         embed_layers,
                     )
                 })
@@ -599,6 +595,16 @@ pub async fn run_server() {
         std::process::exit(1);
     });
     let startup_snapshot = runtime_config.snapshot();
+    // Stated only when it is true of this instance: on a boot with nothing
+    // pinned the sentence describes nothing, and running pinned is a
+    // legitimate posture rather than something to warn about every start.
+    let pinned_count = startup_snapshot.pinned_count();
+    if pinned_count > 0 {
+        info!(
+            pinned_count,
+            "{pinned_count} settings are pinned by environment variables and cannot be changed from the settings page; edit .env and restart to change them"
+        );
+    }
     config
         .apply_runtime_snapshot(&startup_snapshot)
         .unwrap_or_else(|e| {
@@ -659,11 +665,9 @@ pub async fn run_server() {
     let runtime_embedder = Arc::new(RuntimeEmbedder::new());
     let embedder: Arc<dyn Embedder> = runtime_embedder.clone();
 
-    let scan_config = Arc::new(crate::vault::VaultScanConfig {
-        exclude: crate::vault::ExcludeMatcher::new(&config.exclude_patterns).unwrap_or_else(|e| {
-            error!("Invalid HATCHDOOR_EXCLUDE configuration: {e}");
-            std::process::exit(1);
-        }),
+    let scan_config = AppState::runtime_scan_config(&startup_snapshot).unwrap_or_else(|e| {
+        error!("Invalid HATCHDOOR_EXCLUDE configuration: {e}");
+        std::process::exit(1);
     });
     for (pattern, source) in scan_config.exclude.configured_patterns() {
         info!(pattern = %pattern, source, "Noise-exclusion pattern active");
@@ -710,8 +714,10 @@ pub async fn run_server() {
         demo_mode: config.demo_mode,
         vault_write_lock,
         git_sync: Arc::new(RwLock::new(None)),
-        archive_prefix: Arc::from(config.archive_prefix.as_str()),
-        scan_config: scan_config.clone(),
+        scan_config_cache: Arc::new(std::sync::RwLock::new(Some((
+            startup_snapshot.clone(),
+            scan_config.clone(),
+        )))),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         index_status: crate::app_state::IndexStatusTracker::up_to_date(),
         runtime_config,
@@ -871,8 +877,7 @@ mod tests {
             demo_mode,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: Arc::new(RwLock::new(None)),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
@@ -890,6 +895,14 @@ mod tests {
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
     ) -> (Router, TempDir) {
+        app_for_tests_with_web_and_mcp_auth_and_write_mode(web_bearer_token, mcp_bearer_token, true)
+    }
+
+    fn app_for_tests_with_web_and_mcp_auth_and_write_mode(
+        web_bearer_token: Option<Arc<str>>,
+        mcp_bearer_token: Option<String>,
+        mcp_write_enabled: bool,
+    ) -> (Router, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -905,7 +918,7 @@ mod tests {
                     ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
                     (
                         "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
-                        "true".to_string(),
+                        mcp_write_enabled.to_string(),
                     ),
                     ("HATCHDOOR_MCP_BEARER_TOKEN".to_string(), mcp_bearer_token),
                 ])
@@ -927,8 +940,7 @@ mod tests {
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: Arc::new(RwLock::new(None)),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config,
@@ -1009,6 +1021,29 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(with_mcp_token.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn attachment_route_accepts_mcp_token_with_mcp_write_disabled() {
+        // S9 regression: the attachment route's token check must not gate on
+        // `mcp.enabled && mcp.write_enabled` — issue #60 only asked to read the
+        // token per-request and mount the check unconditionally. A token that
+        // worked for `/api/attachment` while MCP write mode is off must keep
+        // working.
+        let (app, _tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+
+        let response = app
+            .oneshot(attachment_upload_request(
+                "Attachments/via-mcp-token.png",
+                Some("mcp-secret"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1134,6 +1169,9 @@ mod tests {
             .expect("response");
         assert_eq!(read_only.status(), StatusCode::OK);
 
+        // S9: the attachment route's token check does not gate on
+        // `mcp.write_enabled` — a token that worked while MCP write mode was
+        // on must keep working with write mode off.
         let read_only_attachment = app
             .clone()
             .oneshot(attachment_upload_request(
@@ -1142,7 +1180,7 @@ mod tests {
             ))
             .await
             .expect("response");
-        assert_eq!(read_only_attachment.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(read_only_attachment.status(), StatusCode::OK);
 
         let limits = app
             .clone()
@@ -1207,6 +1245,10 @@ mod tests {
             .expect("response");
         assert_eq!(disabled.status(), StatusCode::OK);
 
+        // Disabling MCP revokes its bearer token for the attachment route even
+        // when the configured token remains in the live settings snapshot.
+        // Authentication runs before the one-byte limit set above, so this is
+        // `401`, not `400`.
         let disabled_attachment = app
             .clone()
             .oneshot(attachment_upload_request(
@@ -1608,8 +1650,7 @@ mod tests {
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: Arc::new(RwLock::new(None)),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
@@ -1845,7 +1886,17 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(missing_confirmation.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(missing_confirmation.status(), StatusCode::CONFLICT);
+        let missing_confirmation_body =
+            axum::body::to_bytes(missing_confirmation.into_body(), usize::MAX)
+                .await
+                .expect("body");
+        let missing_confirmation_json: serde_json::Value =
+            serde_json::from_slice(&missing_confirmation_body).expect("json");
+        assert_eq!(
+            missing_confirmation_json["confirmation_required"],
+            "reindex"
+        );
 
         let response = app
             .clone()
@@ -1855,7 +1906,7 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"},"confirm_reindex":true}"#,
+                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"},"confirm":["reindex"]}"#,
                     ))
                     .expect("request"),
             )
@@ -1880,7 +1931,7 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"},"confirm_reindex":true}"#,
+                        r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"},"confirm":["reindex"]}"#,
                     ))
                     .expect("request"),
             )
@@ -1908,6 +1959,161 @@ mod tests {
         .await
         .expect("background rebuild finishes");
         assert!(!state.index_status.status().stale);
+    }
+
+    #[tokio::test]
+    async fn enabling_local_versioning_requires_confirmation_then_succeeds() {
+        // S4/S5: the server is the authority on the git_init confirmation (a
+        // 409 carrying only the machine-readable consequence, not prose —
+        // the page owns the words), and a resend with `confirm` containing
+        // it must actually create the local repository.
+        let (app, tmp, state) = app_for_tests_with_state();
+
+        let missing_confirmation = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_confirmation.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(missing_confirmation.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["confirmation_required"], "git_init");
+        assert!(
+            json.get("error").is_none(),
+            "the server must not send prose for this consequence: {json}"
+        );
+        assert!(!tmp.path().join("vault/.git").exists());
+
+        let confirmed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_init"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        assert!(tmp.path().join("vault/.git").exists());
+        assert_eq!(
+            state
+                .runtime_snapshot()
+                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
+                .expect("setting")
+                .value,
+            "local"
+        );
+    }
+
+    #[tokio::test]
+    async fn downgrade_onto_a_non_repo_vault_accumulates_both_consents() {
+        // S4's two-consent case: switching remote -> local when the vault is
+        // no longer a git repository needs both `git_downgrade` (leaving
+        // remote sync) and `git_init` (creating fresh local history).
+        // Accepting one must not drop the other on the next round-trip: the
+        // page is expected to accumulate accepted consequences into one list
+        // across successive 409s, and the server must honor that list rather
+        // than only ever remembering the single most recent consent.
+        let (app, tmp, state) = app_for_tests_with_state();
+        state
+            .runtime_config
+            .save([
+                (
+                    "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                    "remote".to_string(),
+                ),
+                ("HATCHDOOR_GIT_HTTPS_TOKEN".to_string(), "token".to_string()),
+            ])
+            .expect("save initial remote config");
+        // No .git directory exists in this vault at all: remote mode was only
+        // ever configured, never actually initialized on disk.
+        assert!(!tmp.path().join("vault/.git").exists());
+
+        let no_confirmation = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(no_confirmation.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(no_confirmation.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["confirmation_required"], "git_downgrade");
+
+        // Accept the downgrade only: must not silently also accept git_init.
+        let downgrade_only = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_downgrade"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(downgrade_only.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(downgrade_only.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(
+            json["confirmation_required"], "git_init",
+            "the second consequence, not a ping-pong back to git_downgrade"
+        );
+
+        // The page accumulates: resend with BOTH accepted consequences.
+        let both_confirmed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_downgrade","git_init"]}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(both_confirmed.status(), StatusCode::OK);
+        assert!(tmp.path().join("vault/.git").exists());
+        assert_eq!(
+            state
+                .runtime_snapshot()
+                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
+                .expect("setting")
+                .value,
+            "local"
+        );
     }
 
     #[tokio::test]
@@ -2395,12 +2601,12 @@ mod tests {
         // Write routes rebuild a short-lived index for slug/path work. That
         // rebuild must use HATCHDOOR_EXCLUDE too, or an excluded note becomes
         // writable even though it is absent from every read surface.
-        let (_unused_app, _tmp, mut state) = app_for_tests_with_state();
+        let (_unused_app, _tmp, state) = app_for_tests_with_state();
         std::fs::write(state.vault_path.join("Ignored.md"), "# Ignored\n").expect("write note");
-        state.scan_config = Arc::new(crate::vault::VaultScanConfig {
-            exclude: crate::vault::ExcludeMatcher::new(&["Ignored.md".to_string()])
-                .expect("valid exclude"),
-        });
+        state
+            .runtime_config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string())])
+            .expect("save exclude setting");
         let app = build_router(state, None);
         let hash = crate::cache::parse::content_hash("# Ignored\n");
 
@@ -2423,11 +2629,11 @@ mod tests {
 
     #[tokio::test]
     async fn write_api_rejects_archive_to_a_noise_path() {
-        let (_unused_app, tmp, mut state) = app_for_tests_with_state();
-        state.scan_config = Arc::new(crate::vault::VaultScanConfig {
-            exclude: crate::vault::ExcludeMatcher::new(&["90-archive/".to_string()])
-                .expect("valid exclude"),
-        });
+        let (_unused_app, tmp, state) = app_for_tests_with_state();
+        state
+            .runtime_config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "90-archive/".to_string())])
+            .expect("save exclude setting");
         let app = build_router(state, None);
         let hash = crate::cache::parse::content_hash("# Home\n");
 
@@ -2566,8 +2772,7 @@ mod tests {
             demo_mode: true,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: Arc::new(RwLock::new(None)),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),

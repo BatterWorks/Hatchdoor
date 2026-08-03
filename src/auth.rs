@@ -94,49 +94,14 @@ pub(crate) struct WebOrLiveMcpToken {
     pub(crate) runtime_config: crate::runtime_config::RuntimeConfig,
 }
 
-/// Backwards-compatible static-token middleware state for embedders that build
-/// their own routes. Hatchdoor's attachment route uses
-/// [`WebOrLiveMcpToken`] so runtime token rotation takes effect immediately.
-#[derive(Clone)]
-pub struct WebOrMcpToken {
-    pub web: Option<Arc<str>>,
-    pub mcp: Option<Arc<str>>,
-}
-
-/// Middleware enforcing either of two fixed bearer tokens. The application
-/// uses [`require_web_or_live_mcp_token`] for its own attachment route.
-pub async fn require_web_or_mcp_token(
-    State(tokens): State<WebOrMcpToken>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let presented = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    let authorized = presented.is_some_and(|presented| {
-        tokens
-            .web
-            .as_deref()
-            .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
-            || tokens
-                .mcp
-                .as_deref()
-                .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
-    });
-
-    if authorized {
-        next.run(request).await
-    } else {
-        unauthorized()
-    }
-}
-
 /// Middleware enforcing either the web bearer token or the current MCP bearer
 /// token. Unlike [`require_web_token`], this does not fall back to an
 /// `access_token` query parameter — the routes it guards are hit by
 /// out-of-band HTTP clients (e.g. `curl`), not `<img>`/download navigations.
+///
+/// Accepts a matching MCP bearer token only while MCP is enabled. This keeps a
+/// runtime MCP disable as a complete revocation of that credential, while MCP
+/// write mode does not affect the attachment route's authorization.
 pub(crate) async fn require_web_or_live_mcp_token(
     State(tokens): State<WebOrLiveMcpToken>,
     request: Request,
@@ -161,7 +126,6 @@ pub(crate) async fn require_web_or_live_mcp_token(
                 constant_time_eq(presented.as_bytes(), expected.as_bytes())
             });
             let matches_mcp = mcp.enabled
-                && mcp.write_enabled
                 && mcp.bearer_token.as_deref().is_some_and(|expected| {
                     constant_time_eq(presented.as_bytes(), expected.as_bytes())
                 });

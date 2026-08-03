@@ -1,7 +1,8 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tracing::{error, info, warn};
 
 use std::path::PathBuf;
@@ -9,7 +10,9 @@ use std::path::PathBuf;
 use super::config::{GitConfig, GitMode};
 use super::message::{WriteRecord, build_commit_message};
 use super::status::GitSyncStatus;
-use super::sync::{CommitOutcome, GitError, SyncOutcome, has_unpushed, unpushed_count};
+use super::sync::{
+    CommitOutcome, GitError, SyncOutcome, has_uncommitted_changes, has_unpushed, unpushed_count,
+};
 
 /// The four phases of a sync, split so the background task can hold the vault
 /// lock only across the local/working-tree phases (`commit`, `integrate`) and
@@ -48,6 +51,17 @@ pub struct GitSyncHandle {
     sender: Arc<StdMutex<Option<mpsc::UnboundedSender<WriteRecord>>>>,
     status: Arc<RwLock<GitSyncStatus>>,
     task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Requests a graceful stop. The record channel is deliberately never
+    /// closed to signal shutdown (that would be irreversible the moment a
+    /// timed-out `stop` gives up): the task instead polls this flag, and a
+    /// timed-out `stop` clears it again so the still-running task keeps
+    /// accepting and committing records exactly as if it had never been asked
+    /// to stop (S3: a refused stop must not leave a handle that silently
+    /// drops every future write).
+    stop_requested: Arc<AtomicBool>,
+    /// Wakes the task promptly when `stop_requested` changes, instead of
+    /// waiting for the next record or retry timer.
+    shutdown: Arc<Notify>,
 }
 
 impl GitSyncHandle {
@@ -68,13 +82,24 @@ impl GitSyncHandle {
         self.status.clone()
     }
 
-    /// Stop after closing the producer side of the record channel. The worker
-    /// drains the accumulated debounce batch before returning. A bounded wait
-    /// leaves this handle usable for a later retry rather than allowing a
-    /// replacement task to race it.
+    /// Ask the worker to finish its current/queued batch and exit, then wait
+    /// up to `timeout` for it to do so.
+    ///
+    /// On success, the record channel is closed and this handle is spent: a
+    /// caller replaces it (or drops it) rather than reusing it.
+    ///
+    /// On timeout, the stop request is *withdrawn* rather than left pending:
+    /// the still-running task keeps servicing `record()` calls exactly as
+    /// before, so a caller that gives up on this attempt (e.g. to answer an
+    /// HTTP request with `409`) does not strand future vault writes on a
+    /// handle nobody is draining. A later call to `stop` tries again. This
+    /// preserves the #56 invariant (two sync tasks never touch the repository
+    /// together): the caller only installs a replacement task once `stop`
+    /// truly returns `Ok`.
     pub async fn stop(&self, timeout: Duration) -> Result<(), String> {
         self.status.write().await.state = "stopping".to_string();
-        self.sender.lock().expect("git task sender poisoned").take();
+        self.stop_requested.store(true, Ordering::SeqCst);
+        self.shutdown.notify_one();
         let mut task = self.task.lock().await;
         let Some(join) = task.as_mut() else {
             return Ok(());
@@ -82,10 +107,12 @@ impl GitSyncHandle {
         match tokio::time::timeout(timeout, join).await {
             Ok(Ok(())) => {
                 task.take();
+                self.sender.lock().expect("git task sender poisoned").take();
                 Ok(())
             }
             Ok(Err(error)) => Err(format!("Versioning task failed while stopping: {error}")),
             Err(_) => {
+                self.stop_requested.store(false, Ordering::SeqCst);
                 Err("Versioning is still draining its current sync. Retry shortly.".to_string())
             }
         }
@@ -106,11 +133,18 @@ pub fn spawn_sync_task(
     let task_status = status.clone();
     let debounce = Duration::from_secs(config.debounce_seconds.max(1));
     let ops = Arc::new(ops);
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let shutdown = Arc::new(Notify::new());
+    let task_stop_requested = stop_requested.clone();
+    let task_shutdown = shutdown.clone();
 
-    // Decide up front whether to flush commits stranded by an earlier outage.
-    // This is a cheap local check; if it can't read git state (e.g. no repo, as
-    // in unit tests) we simply don't flush.
-    let startup_flush = config.mode == GitMode::Remote && matches!(has_unpushed(&config), Ok(true));
+    // Decide up front whether to flush drift accumulated while versioning was
+    // off: uncommitted working-tree edits in either mode, or commits stranded
+    // by an earlier outage in remote mode. This is a cheap local check; if it
+    // can't read git state (e.g. no repo yet, as in unit tests) we simply
+    // don't flush — the first real write covers it instead.
+    let startup_flush = matches!(has_uncommitted_changes(&config), Ok(true))
+        || (config.mode == GitMode::Remote && matches!(has_unpushed(&config), Ok(true)));
 
     let task = tokio::spawn(async move {
         run_loop(
@@ -121,6 +155,8 @@ pub fn spawn_sync_task(
             task_status,
             ops,
             startup_flush,
+            task_stop_requested,
+            task_shutdown,
         )
         .await;
     });
@@ -129,9 +165,20 @@ pub fn spawn_sync_task(
         sender,
         status,
         task: Arc::new(Mutex::new(Some(task))),
+        stop_requested,
+        shutdown,
     }
 }
 
+/// What made `next_event` return.
+enum NextEvent {
+    Record(WriteRecord),
+    /// The channel closed (handle dropped) or a stop was requested and is
+    /// still in effect.
+    Shutdown,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     config: GitConfig,
     debounce: Duration,
@@ -140,6 +187,8 @@ async fn run_loop(
     status: Arc<RwLock<GitSyncStatus>>,
     ops: Arc<SyncOps>,
     startup_flush: bool,
+    stop_requested: Arc<AtomicBool>,
+    shutdown: Arc<Notify>,
 ) {
     status.write().await.state = "running".to_string();
     let mut batch: Vec<WriteRecord> = Vec::new();
@@ -147,28 +196,41 @@ async fn run_loop(
     // next unprompted re-attempt (empty batch). `None` means nothing to retry.
     let mut retry_after: Option<Duration> = None;
 
-    // Immediately flush any commits stranded by an earlier outage, rather than
-    // waiting for the first write to trigger a debounced sync.
-    if startup_flush && run_one_sync(&config, &vault_lock, &status, &ops, Vec::new()).await {
+    // Immediately flush any drift accumulated while versioning was off, rather
+    // than waiting for the first write to trigger a debounced sync.
+    if startup_flush
+        && run_one_sync_with_message(
+            &config,
+            &vault_lock,
+            &status,
+            &ops,
+            Vec::new(),
+            STARTUP_DRIFT_MESSAGE.to_string(),
+        )
+        .await
+    {
         retry_after = Some(RETRY_BASE);
     }
 
     loop {
-        // Wait for the first record (or channel close). If a previous sync failed
-        // transiently, also race a backoff timer that re-attempts the push with
-        // no new write, so a brief remote outage self-heals.
-        let first = match next_record_or_retry(
+        // Wait for the first record, a stop request, or channel close. If a
+        // previous sync failed transiently, also race a backoff timer that
+        // re-attempts the push with no new write, so a brief remote outage
+        // self-heals.
+        let first = match next_event(
             &mut receiver,
             &config,
             &vault_lock,
             &status,
             &ops,
             &mut retry_after,
+            &stop_requested,
+            &shutdown,
         )
         .await
         {
-            Some(record) => record,
-            None => break,
+            NextEvent::Record(record) => record,
+            NextEvent::Shutdown => break,
         };
         batch.push(first);
         update_pending(&status, batch.len()).await;
@@ -202,34 +264,76 @@ async fn run_loop(
         retry_after = failed.then_some(RETRY_BASE);
         update_pending(&status, 0).await;
     }
+
+    // A stop was requested while we were mid-batch (or right as we returned to
+    // the top of the loop) and any records that arrived in that window are
+    // still sitting in the channel: drain them synchronously and commit once
+    // more before the task truly exits, rather than silently dropping them.
+    let mut trailing = Vec::new();
+    while let Ok(record) = receiver.try_recv() {
+        trailing.push(record);
+    }
+    if !trailing.is_empty() {
+        run_one_sync(&config, &vault_lock, &status, &ops, trailing).await;
+    }
+    // Matches the frontend's `GitStatus.state` union (never surfaced beyond
+    // this point in practice: the caller removes this handle from `AppState`
+    // as soon as `stop` returns `Ok`, replacing or clearing it).
+    status.write().await.state = "disabled".to_string();
 }
 
-/// Await the next queued write. If `retry_after` is set (a previous sync failed
-/// transiently), also race a backoff timer: when it fires first, re-attempt the
-/// sync with an empty batch and either clear the backoff (success) or grow it
-/// toward `RETRY_MAX` (still failing), then keep waiting. Returns `None` only
-/// when the channel closes.
-async fn next_record_or_retry(
+/// Await the next queued write, a withdrawable stop request, or (when a
+/// previous sync failed transiently) a retry backoff timer. Returns
+/// `NextEvent::Shutdown` when the channel closes (the handle was dropped) or
+/// when a stop is currently requested; a stop that is later withdrawn (a
+/// timed-out `GitSyncHandle::stop`) simply lets this keep waiting normally.
+#[allow(clippy::too_many_arguments)]
+async fn next_event(
     receiver: &mut mpsc::UnboundedReceiver<WriteRecord>,
     config: &GitConfig,
     vault_lock: &Arc<Mutex<()>>,
     status: &Arc<RwLock<GitSyncStatus>>,
     ops: &Arc<SyncOps>,
     retry_after: &mut Option<Duration>,
-) -> Option<WriteRecord> {
+    stop_requested: &Arc<AtomicBool>,
+    shutdown: &Arc<Notify>,
+) -> NextEvent {
     loop {
-        let delay = match *retry_after {
-            Some(delay) => delay,
-            None => return receiver.recv().await,
-        };
+        if stop_requested.load(Ordering::SeqCst) {
+            return NextEvent::Shutdown;
+        }
 
-        let timer = tokio::time::sleep(delay);
-        tokio::pin!(timer);
-        tokio::select! {
-            maybe = receiver.recv() => return maybe,
-            _ = &mut timer => {
-                let failed = run_one_sync(config, vault_lock, status, ops, Vec::new()).await;
-                *retry_after = failed.then(|| (delay * 2).min(RETRY_MAX));
+        let notified = shutdown.notified();
+        tokio::pin!(notified);
+
+        match *retry_after {
+            None => {
+                tokio::select! {
+                    maybe = receiver.recv() => {
+                        return match maybe {
+                            Some(record) => NextEvent::Record(record),
+                            None => NextEvent::Shutdown,
+                        };
+                    }
+                    _ = &mut notified => continue,
+                }
+            }
+            Some(delay) => {
+                let timer = tokio::time::sleep(delay);
+                tokio::pin!(timer);
+                tokio::select! {
+                    maybe = receiver.recv() => {
+                        return match maybe {
+                            Some(record) => NextEvent::Record(record),
+                            None => NextEvent::Shutdown,
+                        };
+                    }
+                    _ = &mut notified => continue,
+                    _ = &mut timer => {
+                        let failed = run_one_sync(config, vault_lock, status, ops, Vec::new()).await;
+                        *retry_after = failed.then(|| (delay * 2).min(RETRY_MAX));
+                    }
+                }
             }
         }
     }
@@ -313,6 +417,24 @@ async fn run_one_sync(
     batch: Vec<WriteRecord>,
 ) -> bool {
     let message = build_commit_message(&batch);
+    run_one_sync_with_message(config, vault_lock, status, ops, batch, message).await
+}
+
+/// Startup-drift commit message: distinguishable in history from an ordinary
+/// batch (issue #56), since it was never actually a debounced batch of
+/// specific writes — it is whatever the working tree already held when
+/// versioning was turned on.
+const STARTUP_DRIFT_MESSAGE: &str =
+    "hatchdoor: recorded existing changes from before versioning was turned on";
+
+async fn run_one_sync_with_message(
+    config: &GitConfig,
+    vault_lock: &Arc<Mutex<()>>,
+    status: &Arc<RwLock<GitSyncStatus>>,
+    ops: &Arc<SyncOps>,
+    batch: Vec<WriteRecord>,
+    message: String,
+) -> bool {
     let mut paths: Vec<PathBuf> = batch
         .iter()
         .flat_map(|r| r.affected_paths.clone())
@@ -398,6 +520,116 @@ mod tests {
             author_name: "n".into(),
             author_email: "e".into(),
         }
+    }
+
+    /// A real local git repo with one committed note and one uncommitted
+    /// working-tree edit — the "drift accumulated while versioning was off"
+    /// scenario from issue #56.
+    fn repo_with_drift(mode: GitMode) -> (tempfile::TempDir, GitConfig) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        std::fs::create_dir_all(&vault).expect("create vault");
+        let repo = git2::Repository::init(&vault).expect("init repo");
+        std::fs::write(vault.join("Home.md"), "# Home\n").expect("write note");
+        {
+            let mut index = repo.index().expect("index");
+            index
+                .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+                .expect("stage");
+            index.write().expect("write index");
+            let tree_oid = index.write_tree().expect("write tree");
+            let tree = repo.find_tree(tree_oid).expect("tree");
+            let sig = git2::Signature::now("n", "e").expect("sig");
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[])
+                .expect("initial commit");
+        }
+        // Uncommitted drift: an edit after the last commit, with no batch
+        // ever recorded for it.
+        std::fs::write(vault.join("Home.md"), "# Home\n\ndrift\n").expect("write drift");
+
+        let config = GitConfig {
+            vault_path: vault,
+            mode,
+            remote: "origin".into(),
+            branch: "main".into(),
+            username: "u".into(),
+            token: "t".into(),
+            debounce_seconds: 1,
+            author_name: "n".into(),
+            author_email: "e".into(),
+        };
+        (temp, config)
+    }
+
+    /// S7 regression: turning versioning on for a vault that already has
+    /// uncommitted edits must commit that drift immediately, under its own
+    /// commit message — in both local and remote mode. Before the fix,
+    /// `startup_flush` only ever triggered in remote mode with unpushed
+    /// *commits*, never for uncommitted working-tree drift, and never in
+    /// local mode at all.
+    async fn wait_for_head_message(vault_path: &std::path::Path, expected: &str) -> bool {
+        for _ in 0..400 {
+            let matched = (|| -> Option<bool> {
+                let repo = git2::Repository::open(vault_path).ok()?;
+                let head = repo.head().ok()?;
+                let commit = head.peel_to_commit().ok()?;
+                Some(commit.message().ok() == Some(expected))
+            })()
+            .unwrap_or(false);
+            if matched {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawning_flushes_accumulated_drift_in_local_mode() {
+        let (_temp, config) = repo_with_drift(GitMode::Local);
+        let vault_path = config.vault_path.clone();
+        let handle = spawn_sync_task(
+            config,
+            Arc::new(Mutex::new(())),
+            SyncOps {
+                commit: Box::new(crate::git::commit_local),
+                fetch: Box::new(|_| Ok(())),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(|_| Ok(())),
+            },
+        );
+        let status = handle.status();
+
+        assert!(
+            wait_for_head_message(&vault_path, STARTUP_DRIFT_MESSAGE).await,
+            "startup flush never committed the pre-existing drift"
+        );
+        assert!(status.read().await.last_ok);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawning_flushes_accumulated_drift_in_remote_mode_without_a_remote_configured() {
+        // Remote mode additionally needs the remote phases, which have no
+        // remote to talk to here — assert the *local* commit still happens
+        // (the important S7 behavior) even though the sync as a whole then
+        // fails on the missing remote.
+        let (_temp, config) = repo_with_drift(GitMode::Remote);
+        let vault_path = config.vault_path.clone();
+        let _handle = spawn_sync_task(
+            config,
+            Arc::new(Mutex::new(())),
+            SyncOps {
+                commit: Box::new(crate::git::commit_local),
+                fetch: Box::new(|_| Err(GitError::Remote("no remote in test".into()))),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(|_| Err(GitError::Remote("no remote in test".into()))),
+            },
+        );
+
+        assert!(
+            wait_for_head_message(&vault_path, STARTUP_DRIFT_MESSAGE).await,
+            "startup flush never committed the pre-existing drift"
+        );
     }
 
     /// The vault-write lock must be FREE while a network phase (fetch/push) is in
@@ -643,5 +875,101 @@ mod tests {
             .await
             .expect("drained stop");
         assert_eq!(commits.load(Ordering::SeqCst), 1);
+    }
+
+    /// S3 regression: `stop` timing out while a sync is genuinely still
+    /// running must not permanently strand the handle. Once the in-flight
+    /// sync finishes, the handle must keep accepting `record()` calls and a
+    /// later write must still get committed, instead of every future write
+    /// being silently dropped by a handle nobody is draining.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_timed_out_stop_leaves_the_handle_working_for_a_later_write() {
+        let commits = Arc::new(AtomicUsize::new(0));
+        let commit_entered = Arc::new(AtomicBool::new(false));
+        let release_commit = Arc::new(AtomicBool::new(false));
+
+        let committed = commits.clone();
+        let entered = commit_entered.clone();
+        let release = release_commit.clone();
+        let handle = spawn_sync_task(
+            unused_config(1),
+            Arc::new(Mutex::new(())),
+            SyncOps {
+                commit: Box::new(move |_config, _paths, _message| {
+                    let call = committed.fetch_add(1, Ordering::SeqCst);
+                    if call == 0 {
+                        // Simulate a slow first commit: block until released,
+                        // so a `stop` racing it genuinely cannot drain in time.
+                        entered.store(true, Ordering::SeqCst);
+                        while !release.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    Ok(CommitOutcome {
+                        committed: true,
+                        needs_remote: false,
+                    })
+                }),
+                fetch: Box::new(|_| Ok(())),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(|_| Ok(())),
+            },
+        );
+
+        handle.record(WriteRecord {
+            op: "update".into(),
+            target: "first".into(),
+            affected_paths: vec![PathBuf::from("/vault/first.md")],
+            summary: None,
+        });
+
+        // Wait (real time, past the 1s debounce) until the slow commit is
+        // blocking.
+        let mut entered = false;
+        for _ in 0..400 {
+            if commit_entered.load(Ordering::SeqCst) {
+                entered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(entered, "first commit never started");
+
+        // A short timeout cannot possibly drain a commit that is deliberately
+        // still blocking.
+        let result = handle.stop(Duration::from_millis(50)).await;
+        assert!(result.is_err(), "stop should time out while sync is stuck");
+
+        // Let the first (slow) commit finish.
+        release_commit.store(true, Ordering::SeqCst);
+        for _ in 0..400 {
+            if commits.load(Ordering::SeqCst) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The handle must still be usable: a later write is queued and
+        // eventually committed rather than silently dropped.
+        handle.record(WriteRecord {
+            op: "update".into(),
+            target: "second".into(),
+            affected_paths: vec![PathBuf::from("/vault/second.md")],
+            summary: None,
+        });
+
+        let mut second_committed = false;
+        for _ in 0..400 {
+            if commits.load(Ordering::SeqCst) >= 2 {
+                second_committed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            second_committed,
+            "a write recorded after a timed-out stop must still be committed (got {} commits)",
+            commits.load(Ordering::SeqCst)
+        );
     }
 }

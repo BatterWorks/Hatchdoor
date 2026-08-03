@@ -116,7 +116,7 @@ const idleStatuses = () => {
     json({ state: "disabled", mode: "off" }),
   );
   mockedApiFetch.mockResolvedValueOnce(
-    json({ state: "up_to_date", stale: false, drift: false }),
+    json({ state: "up_to_date", stale: false }),
   );
 };
 
@@ -144,6 +144,7 @@ describe("SettingsPage", () => {
     expect(JSON.parse(String(mockedApiFetch.mock.calls[3]?.[1]?.body))).toEqual(
       {
         updates: { HATCHDOOR_ARCHIVE_PREFIX: "archive/" },
+        confirm: [],
       },
     );
 
@@ -167,7 +168,6 @@ describe("SettingsPage", () => {
       json({
         state: "rebuilding",
         stale: true,
-        drift: true,
         notes_completed: 12,
         notes_total: 40,
         percent: 20,
@@ -192,7 +192,7 @@ describe("SettingsPage", () => {
     expect(JSON.parse(String(mockedApiFetch.mock.calls[3]?.[1]?.body))).toEqual(
       {
         updates: { HATCHDOOR_EXCLUDE: ".git/**, build/**" },
-        confirm_reindex: true,
+        confirm: ["reindex"],
       },
     );
     expect(await screen.findByText("Rebuilding 20%")).toBeVisible();
@@ -200,6 +200,32 @@ describe("SettingsPage", () => {
       screen.getByText(/Still answering from the old setting/),
     ).toBeVisible();
     expect(screen.getByText(/about 80 seconds left/)).toBeVisible();
+  });
+
+  it("keeps the upload-size box readable while editing, in megabytes, and saves in bytes", async () => {
+    // S2 regression: the box used to collapse to "0" on the first keystroke
+    // because the megabyte-typed draft was converted from megabytes a second
+    // time on render.
+    mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    idleStatuses();
+    mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+
+    render(<SettingsPage />);
+    await screen.findByDisplayValue("90-archive/");
+    fireEvent.click(screen.getByRole("button", { name: /Uploads/ }));
+
+    const input = await screen.findByLabelText("Largest file from this app");
+    fireEvent.change(input, { target: { value: "20" } });
+    expect(input).toHaveValue(20);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save uploads" }));
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(4));
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[3]?.[1]?.body))).toEqual(
+      {
+        updates: { HATCHDOOR_MAX_ATTACHMENT_BYTES: "20971520" },
+        confirm: [],
+      },
+    );
   });
 
   it("generates an MCP token candidate without saving it, then includes it in one enable transaction", async () => {
@@ -233,6 +259,7 @@ describe("SettingsPage", () => {
           HATCHDOOR_MCP_ENABLED: "true",
           HATCHDOOR_MCP_BEARER_TOKEN: "candidate-token",
         },
+        confirm: [],
       },
     );
   });
@@ -259,17 +286,13 @@ describe("SettingsPage", () => {
       json({ state: "running", mode: "remote" }),
     );
     mockedApiFetch.mockResolvedValueOnce(
-      json({ state: "up_to_date", stale: false, drift: false }),
+      json({ state: "up_to_date", stale: false }),
     );
     mockedApiFetch.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          error:
-            "Switching away from remote versioning stops sending future commits to the remote.",
-          confirmation_required: "git_downgrade",
-        }),
-        { status: 409, headers: { "content-type": "application/json" } },
-      ),
+      new Response(JSON.stringify({ confirmation_required: "git_downgrade" }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
     );
     mockedApiFetch.mockResolvedValueOnce(json({ settings }));
     render(<SettingsPage />);
@@ -279,12 +302,16 @@ describe("SettingsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save versioning" }));
     await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(4));
     expect(await screen.findByText("Before this is saved")).toBeVisible();
+    // The server sent no prose, only the consequence: the page owns the words.
+    expect(
+      screen.getByText(/Switching away from remote versioning/),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Go ahead" }));
     await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(5));
     expect(JSON.parse(String(mockedApiFetch.mock.calls[4]?.[1]?.body))).toEqual(
       {
         updates: { HATCHDOOR_GIT_SYNC_ENABLED: "off" },
-        confirm_git_downgrade: true,
+        confirm: ["git_downgrade"],
       },
     );
   });
@@ -300,7 +327,7 @@ describe("SettingsPage", () => {
       json({ state: "stopping", mode: "remote" }),
     );
     mockedApiFetch.mockResolvedValueOnce(
-      json({ state: "up_to_date", stale: false, drift: false }),
+      json({ state: "up_to_date", stale: false }),
     );
     mockedApiFetch.mockResolvedValueOnce(
       new Response(

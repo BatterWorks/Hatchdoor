@@ -16,15 +16,16 @@ type Setting = {
   value: string | null;
   configured?: boolean;
   source: "environment" | "stored" | "default";
-  locked: "environment" | "never" | null;
+  locked: "environment" | "never" | "demo" | null;
   class: "instant" | "reindex";
   kind: SettingKind;
 };
 
 type IndexStatus = {
   state: "up_to_date" | "rebuilding" | "failed";
+  /** `state` already distinguishes why: `"rebuilding"` self-clears,
+   * `"failed"` needs a change or restart. There is no separate axis. */
   stale: boolean;
-  drift: boolean;
   notes_completed?: number;
   notes_total?: number;
   chunks_completed?: number;
@@ -49,8 +50,11 @@ type GitStatus = {
 type Consequence = "reindex" | "git_init" | "git_downgrade";
 type Confirmation = {
   consequence: Consequence;
-  message: string;
   updates: Record<string, string>;
+  /** Every consequence already accepted for this same save, so accepting a
+   * second one (e.g. a downgrade onto a vault that also needs fresh local
+   * history) does not forget the first (issue #57). */
+  confirm: Consequence[];
 };
 
 const STATUS_POLL_MS = 2_000;
@@ -132,6 +136,11 @@ const COPY: Record<
     label: "Meaning search in demoted layers",
     help: "Folders marked with a .hatchdoor-layer file stay out of the browser and out of normal search; assistants can still ask for them by name. On, those notes can also be found by meaning. Off, only by exact words, which saves disk space and indexing time.",
   },
+  HATCHDOOR_DEMO_MODE: {
+    section: "vault",
+    label: "Public demo mode",
+    help: "Read-only public browsing with every write surface disabled. Set for this deployment; there is nothing to change from here.",
+  },
   HATCHDOOR_MCP_ENABLED: {
     section: "agents",
     label: "Let assistants connect (MCP)",
@@ -211,15 +220,35 @@ const MODES = [
 const REINDEX_CONFIRMATION =
   "Saving this rebuilds the search index. The setting takes effect right away and search keeps working the whole time — it just keeps answering from the old setting until the rebuild finishes.";
 
+/** Issue #61: the init confirmation must state both that a hidden history
+ * folder is created inside the notes directory, and that it grows
+ * permanently, keeping every image and PDF even after deletion. The server
+ * sends only the machine-readable consequence; this page owns the words
+ * (issue #55, #58). */
+const GIT_INIT_CONFIRMATION =
+  "Local versioning creates a hidden .git folder inside your notes directory to hold its history. That folder grows permanently: every image and PDF you attach stays in it, even after you delete the file from the vault.";
+
+const GIT_DOWNGRADE_CONFIRMATION =
+  "Switching away from remote versioning stops sending future changes to your remote. Anything already sent stays there; only what happens next is affected.";
+
+/** The page's own words for each consequence a save may need consent for
+ * (issue #55, #58): the server sends only the machine-readable identifier. */
+const CONSEQUENCE_COPY: Record<Consequence, string> = {
+  reindex: REINDEX_CONFIRMATION,
+  git_init: GIT_INIT_CONFIRMATION,
+  git_downgrade: GIT_DOWNGRADE_CONFIRMATION,
+};
+
 const BUSY_MESSAGE =
   "Still finishing the last batch of changes. Try again in a few seconds — nothing was lost.";
 
-/** Both lock reasons render the same way and say different things (#47, #56). */
+/** Each lock reason renders the same way and says something different (#47, #56, #55). */
 const LOCK_WHY: Record<NonNullable<Setting["locked"]>, string> = {
   environment:
     "This value comes from your .env file, which always wins. To change it, edit that file and restart Hatchdoor.",
   never:
     "Hatchdoor always follows whichever branch your vault folder is on, so there is nothing to choose.",
+  demo: "This is fixed for the public demo deployment and cannot be changed from here.",
 };
 
 /**
@@ -417,7 +446,7 @@ export function SettingsPage() {
 
   const send = async (
     updates: Record<string, string>,
-    accepted?: Consequence,
+    confirm: Consequence[] = [],
   ) => {
     setSaving(true);
     setErrors({});
@@ -428,14 +457,7 @@ export function SettingsPage() {
       const response = await apiFetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          updates,
-          ...(accepted === "reindex" ? { confirm_reindex: true } : {}),
-          ...(accepted === "git_init" ? { confirm_git_init: true } : {}),
-          ...(accepted === "git_downgrade"
-            ? { confirm_git_downgrade: true }
-            : {}),
-        }),
+        body: JSON.stringify({ updates, confirm }),
       });
       const payload = (await response.json()) as {
         settings?: Setting[];
@@ -446,8 +468,8 @@ export function SettingsPage() {
       if (response.status === 409 && payload.confirmation_required) {
         setConfirmation({
           consequence: payload.confirmation_required,
-          message: payload.error ?? "This change has a consequence.",
           updates,
+          confirm,
         });
         return;
       }
@@ -456,14 +478,25 @@ export function SettingsPage() {
         return;
       }
       if (!response.ok) {
+        const fields = payload.fields ?? [];
         setErrors(
           Object.fromEntries(
-            (payload.fields ?? [])
+            fields
               .filter((field) => field.key)
               .map((field) => [field.key!, field.message]),
           ),
         );
-        setBanner(payload.error ?? "Nothing was saved.");
+        // A refusal with no key belongs to no single setting (issue #55) —
+        // render it as a form-level message near the section actions rather
+        // than dropping it.
+        const general = fields
+          .filter((field) => !field.key)
+          .map((field) => field.message);
+        setBanner(
+          general.length > 0
+            ? general.join(" ")
+            : (payload.error ?? "Nothing was saved."),
+        );
         return;
       }
       setSettings(payload.settings ?? settings);
@@ -494,11 +527,11 @@ export function SettingsPage() {
       (item) => drafts[item.key] !== undefined && item.class === "reindex",
     );
     if (rebuilds) {
-      setConfirmation({
-        consequence: "reindex",
-        message: REINDEX_CONFIRMATION,
-        updates,
-      });
+      // The page's own reindex confirmation, shown before ever contacting the
+      // server: nicer UX, but the server remains the authority (issue #57) —
+      // the save still carries "reindex" in `confirm`, and an API caller that
+      // skips this dialog still gets refused with `409` by the server.
+      setConfirmation({ consequence: "reindex", updates, confirm: [] });
       return;
     }
     void send(updates);
@@ -605,7 +638,14 @@ export function SettingsPage() {
     }
 
     if (setting.kind === "number") {
-      const shown = setting.key.includes("BYTES") ? toMb(value) : value;
+      // Drafts for a BYTES setting are already in megabytes (what the box
+      // shows and what the user types); only the value read straight off the
+      // server (in bytes, before any edit) needs converting. Applying toMb
+      // to an in-progress MB draft double-converts it down to ~0 (S2).
+      const shown =
+        setting.key.includes("BYTES") && drafts[setting.key] === undefined
+          ? toMb(value)
+          : value;
       return (
         <div className="settings-inline">
           <input
@@ -783,7 +823,18 @@ export function SettingsPage() {
                     {formatEta(indexStatus.eta_seconds)}
                   </span>
                 </>
-              ) : indexStatus?.drift || indexStatus?.state === "failed" ? (
+              ) : indexStatus?.state === "failed" ? (
+                <>
+                  <span className="settings-console-val settings-warn">
+                    Rebuild failed
+                  </span>
+                  <span className="settings-muted">
+                    {indexStatus.last_failure ??
+                      "The last rebuild did not finish."}{" "}
+                    The next settings change or restart tries again.
+                  </span>
+                </>
+              ) : indexStatus?.stale ? (
                 <span className="settings-console-val settings-warn">
                   Behind your settings
                 </span>
@@ -938,7 +989,7 @@ export function SettingsPage() {
             aria-label="Before this is saved"
           >
             <h3>Before this is saved</h3>
-            <p>{confirmation.message}</p>
+            <p>{CONSEQUENCE_COPY[confirmation.consequence]}</p>
             <div className="settings-modal-actions">
               <button
                 type="button"
@@ -953,7 +1004,10 @@ export function SettingsPage() {
                 onClick={() => {
                   const pending = confirmation;
                   setConfirmation(null);
-                  void send(pending.updates, pending.consequence);
+                  void send(pending.updates, [
+                    ...pending.confirm,
+                    pending.consequence,
+                  ]);
                 }}
               >
                 Go ahead

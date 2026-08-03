@@ -37,28 +37,104 @@ pub struct SettingResponse {
     pub kind: &'static str,
 }
 
+/// The consequences a save may need explicit consent for. Accumulated by the
+/// page across successive `409`s rather than carried one at a time, so a save
+/// needing two consents (e.g. downgrading remote versioning onto a vault that
+/// is no longer a git repository) does not ping-pong between them forever
+/// (issue #57).
+const KNOWN_CONSEQUENCES: &[&str] = &["reindex", "git_init", "git_downgrade"];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchSettingsRequest {
     pub updates: BTreeMap<String, String>,
     #[serde(default)]
-    pub confirm_reindex: bool,
-    #[serde(default)]
-    pub confirm_git_init: bool,
-    #[serde(default)]
-    pub confirm_git_downgrade: bool,
+    pub confirm: Vec<String>,
+}
+
+impl PatchSettingsRequest {
+    fn confirmed(&self, consequence: &str) -> bool {
+        self.confirm.iter().any(|value| value == consequence)
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct FieldError {
-    key: String,
+    /// `None` for a refusal that belongs to no single setting (issue #55):
+    /// rendered by the page as a form-level message near the section actions
+    /// instead of being silently dropped.
+    key: Option<String>,
     message: String,
+}
+
+impl FieldError {
+    fn on(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            key: Some(key.into()),
+            message: message.into(),
+        }
+    }
+
+    fn general(message: impl Into<String>) -> Self {
+        Self {
+            key: None,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
 struct SettingsValidationError {
     error: String,
     fields: Vec<FieldError>,
+}
+
+/// A refusal from the atomic validate-then-persist decision (see
+/// `RuntimeConfig::validate_and_save`). Nothing is written to disk when this
+/// is returned.
+enum PatchRefusal {
+    /// One or more fields are individually invalid.
+    Validation(Vec<FieldError>),
+    /// The save is otherwise valid but has a consequence the caller has not
+    /// yet accepted. The server sends only the machine-readable consequence;
+    /// the page owns the words describing it (issue #55, #61).
+    Confirmation { kind: &'static str },
+    /// An unexpected internal failure (e.g. the settings file could not be
+    /// written).
+    Internal(String),
+}
+
+impl From<String> for PatchRefusal {
+    fn from(value: String) -> Self {
+        PatchRefusal::Internal(value)
+    }
+}
+
+impl PatchRefusal {
+    fn into_response(self) -> Response {
+        match self {
+            PatchRefusal::Validation(fields) => validation_response(fields),
+            PatchRefusal::Confirmation { kind } => confirmation_required(kind),
+            PatchRefusal::Internal(message) => {
+                crate::app_state::internal_error(message).into_response()
+            }
+        }
+    }
+}
+
+/// What to do once a validated save has been persisted: schedule a reindex,
+/// and/or install a newly spawned versioning task.
+struct PatchPlan {
+    reindex_changed: bool,
+    git_config: Option<crate::git::GitConfig>,
+}
+
+/// The paths a git-touching save needs to preflight a mode change and (for a
+/// fresh local repo) derive `.gitignore` entries from.
+struct GitPaths {
+    vault_path: std::path::PathBuf,
+    cache_db_path: std::path::PathBuf,
+    settings_file_path: std::path::PathBuf,
 }
 
 const SETTINGS: &[(&str, &str, &str)] = &[
@@ -81,7 +157,10 @@ const SETTINGS: &[(&str, &str, &str)] = &[
 ];
 
 pub async fn get_settings_handler(State(state): State<AppState>) -> impl IntoResponse {
-    Json(settings_response(&state.runtime_snapshot()))
+    Json(settings_response(
+        &state.runtime_snapshot(),
+        state.demo_mode,
+    ))
 }
 
 /// Settings-only background reindex state. This deliberately stays separate
@@ -196,139 +275,203 @@ pub async fn patch_settings_handler(
                 .into_response();
         }
     };
-    let snapshot = state.runtime_snapshot();
-    let reindex_changed = reindex_setting_changed(&snapshot, &request.updates);
-    let mut errors = validate_updates(&snapshot, &request.updates);
-    if reindex_changed && !request.confirm_reindex {
-        errors.extend(
-            request
-                .updates
-                .iter()
-                .filter(|(key, value)| is_reindex_setting_changed(&snapshot, key, value))
-                .map(|(key, _)| FieldError {
-                    key: key.clone(),
-                    message: "Confirm the search-index rebuild before saving this setting."
-                        .to_string(),
-                }),
-        );
-    }
-    if !errors.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(SettingsValidationError {
-                error: "Nothing was saved. Check the highlighted settings.".to_string(),
-                fields: errors,
-            }),
-        )
-            .into_response();
+    if let Some(unknown) = request
+        .confirm
+        .iter()
+        .find(|value| !KNOWN_CONSEQUENCES.contains(&value.as_str()))
+    {
+        return validation_response(vec![FieldError::general(format!(
+            "'{unknown}' is not a consequence this save can confirm."
+        ))]);
     }
 
     let git_changed = request
         .updates
         .keys()
         .any(|key| key.starts_with("HATCHDOOR_GIT_"));
+
     if git_changed {
-        let prospective = snapshot.with_updates(&request.updates);
-        let git_config =
-            match crate::git::GitConfig::from_snapshot(state.vault_path.clone(), &prospective) {
-                Ok(config) => config,
-                Err(message) => {
-                    return validation_response(vec![FieldError {
-                        key: "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                        message,
-                    }]);
-                }
-            };
-        let old_git_config =
-            crate::git::GitConfig::from_snapshot(state.vault_path.clone(), &snapshot)
-                .expect("current git configuration was validated when saved");
-        if old_git_config
+        patch_settings_with_git_lifecycle(&state, request).await
+    } else {
+        let result = state
+            .runtime_config
+            .validate_and_save(request.updates.clone(), |snapshot| {
+                decide_patch(snapshot, &request, None)
+            });
+        match result {
+            Ok((plan, saved)) => finish_patch(&state, plan, &saved),
+            Err(refusal) => refusal.into_response(),
+        }
+    }
+}
+
+/// The git-touching path: the versioning task lifecycle (stop the old task,
+/// persist, spawn the new one) is its own function so `patch_settings_handler`
+/// reads as one short dispatch rather than one long function mixing
+/// validation, confirmations, task lifecycle, and persistence together.
+async fn patch_settings_with_git_lifecycle(
+    state: &AppState,
+    request: PatchSettingsRequest,
+) -> Response {
+    let old_git_config = match crate::git::GitConfig::from_snapshot(
+        state.vault_path.clone(),
+        &state.runtime_snapshot(),
+    ) {
+        Ok(config) => config,
+        Err(error) => {
+            return validation_response(vec![FieldError::on("HATCHDOOR_GIT_SYNC_ENABLED", error)]);
+        }
+    };
+
+    let mut active = state.git_sync.write().await;
+    if let Some(handle) = active.as_ref()
+        && let Err(message) = handle.stop(std::time::Duration::from_secs(15)).await
+    {
+        let status = handle.status();
+        let mut status = status.write().await;
+        status.last_ok = false;
+        status.last_error = Some(message.clone());
+        return busy_response(message);
+    }
+    active.take();
+
+    let git_paths = GitPaths {
+        vault_path: state.vault_path.clone(),
+        cache_db_path: state.cache_db_path.clone(),
+        settings_file_path: state.runtime_config.settings_path().to_path_buf(),
+    };
+    let result = state
+        .runtime_config
+        .validate_and_save(request.updates.clone(), |snapshot| {
+            decide_patch(snapshot, &request, Some(git_paths))
+        });
+
+    match result {
+        Ok((plan, saved)) => {
+            if let Some(config) = plan.git_config.clone() {
+                *active = Some(crate::git::spawn_sync_task(
+                    config,
+                    state.vault_write_lock.clone(),
+                    production_sync_ops(),
+                ));
+            }
+            drop(active);
+            finish_patch(state, plan, &saved)
+        }
+        Err(refusal) => {
+            // Nothing was persisted: restore the task we stopped so the
+            // refusal leaves versioning exactly as it was.
+            if let Some(config) = old_git_config {
+                *active = Some(crate::git::spawn_sync_task(
+                    config,
+                    state.vault_write_lock.clone(),
+                    production_sync_ops(),
+                ));
+            }
+            drop(active);
+            refusal.into_response()
+        }
+    }
+}
+
+/// The single authoritative decision for a save: field validation, the
+/// reindex confirmation, and (when `vault_path` is `Some`, i.e. this save
+/// touches `HATCHDOOR_GIT_*`) the downgrade/init confirmations and git
+/// preflight. Runs inside `RuntimeConfig::validate_and_save`'s critical
+/// section, against the snapshot current at the moment of persistence, so two
+/// concurrent PATCHes cannot both validate against a snapshot the other has
+/// already invalidated (issue #54).
+fn decide_patch(
+    snapshot: &ConfigSnapshot,
+    request: &PatchSettingsRequest,
+    git_paths: Option<GitPaths>,
+) -> Result<PatchPlan, PatchRefusal> {
+    let errors = validate_updates(snapshot, &request.updates);
+    if !errors.is_empty() {
+        return Err(PatchRefusal::Validation(errors));
+    }
+
+    let reindex_changed = reindex_setting_changed(snapshot, &request.updates);
+    if reindex_changed && !request.confirmed("reindex") {
+        return Err(PatchRefusal::Confirmation { kind: "reindex" });
+    }
+
+    let Some(git_paths) = git_paths else {
+        return Ok(PatchPlan {
+            reindex_changed,
+            git_config: None,
+        });
+    };
+    let vault_path = git_paths.vault_path;
+
+    let prospective = snapshot.with_updates(&request.updates);
+    let git_config = crate::git::GitConfig::from_snapshot(vault_path.clone(), &prospective)
+        .map_err(|message| {
+            PatchRefusal::Validation(vec![FieldError::on("HATCHDOOR_GIT_SYNC_ENABLED", message)])
+        })?;
+    let old_git_config = crate::git::GitConfig::from_snapshot(vault_path, snapshot)
+        .expect("current git configuration was validated when saved");
+
+    if old_git_config
+        .as_ref()
+        .is_some_and(|config| config.mode == crate::git::GitMode::Remote)
+        && git_config
             .as_ref()
-            .is_some_and(|config| config.mode == crate::git::GitMode::Remote)
-            && git_config
-                .as_ref()
-                .is_none_or(|config| config.mode != crate::git::GitMode::Remote)
-            && !request.confirm_git_downgrade
-        {
-            return confirmation_required(
-                "git_downgrade",
-                "Switching away from remote versioning stops sending future commits to the remote. Confirm before continuing.",
-            );
-        }
-        if let Some(config) = &git_config {
-            let preflight = match config.mode {
-                crate::git::GitMode::Local => crate::git::validate_local_repo(config),
-                crate::git::GitMode::Remote => crate::git::validate_repo(config),
-            };
-            if let Err(error) = preflight {
-                if config.mode == crate::git::GitMode::Local && !request.confirm_git_init {
-                    return confirmation_required(
-                        "git_init",
-                        "Local versioning will create a permanent .git history folder in this vault. Confirm before continuing.",
-                    );
-                }
-                if config.mode == crate::git::GitMode::Local {
-                    if let Err(error) = crate::git::init_local_repo(config) {
-                        return validation_response(vec![FieldError {
-                            key: "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                            message: error.to_string(),
-                        }]);
-                    }
-                } else {
-                    return validation_response(vec![FieldError {
-                        key: "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                        message: error.to_string(),
-                    }]);
-                }
-            }
-        }
+            .is_none_or(|config| config.mode != crate::git::GitMode::Remote)
+        && !request.confirmed("git_downgrade")
+    {
+        return Err(PatchRefusal::Confirmation {
+            kind: "git_downgrade",
+        });
+    }
 
-        let mut active = state.git_sync.write().await;
-        if let Some(handle) = active.as_ref()
-            && let Err(message) = handle.stop(std::time::Duration::from_secs(15)).await
-        {
-            let status = handle.status();
-            let mut status = status.write().await;
-            status.last_ok = false;
-            status.last_error = Some(message.clone());
-            return busy_response(message);
-        }
-        active.take();
-        let saved = match state.runtime_config.save(request.updates) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                if let Some(config) = old_git_config {
-                    *active = Some(crate::git::spawn_sync_task(
-                        config,
-                        state.vault_write_lock.clone(),
-                        production_sync_ops(),
-                    ));
-                }
-                return crate::app_state::internal_error(error).into_response();
-            }
+    if let Some(config) = &git_config {
+        let preflight = match config.mode {
+            crate::git::GitMode::Local => crate::git::validate_local_repo(config),
+            crate::git::GitMode::Remote => crate::git::validate_repo(config),
         };
-        if let Some(config) = git_config {
-            *active = Some(crate::git::spawn_sync_task(
-                config,
-                state.vault_write_lock.clone(),
-                production_sync_ops(),
-            ));
+        if let Err(error) = preflight {
+            if config.mode == crate::git::GitMode::Local {
+                if !request.confirmed("git_init") {
+                    return Err(PatchRefusal::Confirmation { kind: "git_init" });
+                }
+                // Confirmed: create the local history now, still inside the
+                // atomic decision, so a later persist failure cannot leave a
+                // freshly-created .git folder behind an unsaved setting.
+                crate::git::init_local_repo(
+                    config,
+                    &git_paths.cache_db_path,
+                    &git_paths.settings_file_path,
+                )
+                .map_err(|error| {
+                    PatchRefusal::Validation(vec![FieldError::on(
+                        "HATCHDOOR_GIT_SYNC_ENABLED",
+                        error.to_string(),
+                    )])
+                })?;
+            } else {
+                return Err(PatchRefusal::Validation(vec![FieldError::on(
+                    "HATCHDOOR_GIT_SYNC_ENABLED",
+                    error.to_string(),
+                )]));
+            }
         }
-        if reindex_changed {
-            schedule_settings_reindex(state.clone());
-        }
-        return Json(settings_response(&saved)).into_response();
     }
 
-    match state.runtime_config.save(request.updates) {
-        Ok(snapshot) => {
-            if reindex_changed {
-                schedule_settings_reindex(state);
-            }
-            Json(settings_response(&snapshot)).into_response()
-        }
-        Err(error) => crate::app_state::internal_error(error).into_response(),
+    Ok(PatchPlan {
+        reindex_changed,
+        git_config,
+    })
+}
+
+/// The tail every successful save shares: schedule a reindex when needed and
+/// build the response. Previously duplicated at the end of both the git and
+/// non-git branches.
+fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Response {
+    if plan.reindex_changed {
+        schedule_settings_reindex(state.clone());
     }
+    Json(settings_response(saved, state.demo_mode)).into_response()
 }
 
 fn production_sync_ops() -> crate::git::SyncOps {
@@ -351,13 +494,13 @@ fn validation_response(errors: Vec<FieldError>) -> Response {
         .into_response()
 }
 
-fn confirmation_required(kind: &str, message: &str) -> Response {
+/// The server sends only the machine-readable consequence; issue #55 moved
+/// the words describing it (what will happen, and its permanence) onto the
+/// page, keyed off this identifier.
+fn confirmation_required(kind: &'static str) -> Response {
     (
         StatusCode::CONFLICT,
-        Json(serde_json::json!({
-            "error": message,
-            "confirmation_required": kind,
-        })),
+        Json(serde_json::json!({ "confirmation_required": kind })),
     )
         .into_response()
 }
@@ -386,8 +529,8 @@ fn is_reindex_setting_changed(snapshot: &ConfigSnapshot, key: &str, value: &str)
     })
 }
 
-fn settings_response(snapshot: &ConfigSnapshot) -> SettingsResponse {
-    let settings = SETTINGS
+fn settings_response(snapshot: &ConfigSnapshot, demo_mode: bool) -> SettingsResponse {
+    let mut settings: Vec<SettingResponse> = SETTINGS
         .iter()
         .filter_map(|&(key, class, kind)| {
             let setting = snapshot.setting(key)?;
@@ -414,6 +557,23 @@ fn settings_response(snapshot: &ConfigSnapshot) -> SettingsResponse {
             })
         })
         .collect();
+
+    // Not a live-applicable setting at all (it is boot-only: AppConfig reads
+    // it once from the environment and it shapes the whole server's write
+    // posture), so it never goes through RuntimeConfig/validate_updates. It
+    // is surfaced here purely so the page can report it as locked, for a
+    // reason distinct from both "environment" (a live setting pinned by
+    // .env) and "never" (HATCHDOOR_GIT_BRANCH's fixed-by-checkout case).
+    settings.push(SettingResponse {
+        key: "HATCHDOOR_DEMO_MODE",
+        value: Some(demo_mode.to_string()),
+        configured: None,
+        source: "environment",
+        locked: Some("demo"),
+        class: "instant",
+        kind: "switch",
+    });
+
     SettingsResponse { settings }
 }
 
@@ -424,24 +584,21 @@ fn validate_updates(
     let mut errors = Vec::new();
     for (key, value) in updates {
         let Some((_, _, kind)) = SETTINGS.iter().find(|(known, ..)| known == key) else {
-            errors.push(FieldError {
-                key: key.clone(),
-                message: "This setting is not available.".to_string(),
-            });
+            errors.push(FieldError::on(key, "This setting is not available."));
             continue;
         };
         if key == "HATCHDOOR_GIT_BRANCH" {
-            errors.push(FieldError {
-                key: key.clone(),
-                message: "This value is managed by the vault's checked-out branch.".to_string(),
-            });
+            errors.push(FieldError::on(
+                key,
+                "This value is managed by the vault's checked-out branch.",
+            ));
             continue;
         }
         if snapshot.setting(key).is_some_and(|setting| setting.pinned) {
-            errors.push(FieldError {
-                key: key.clone(),
-                message: "This value is managed by your .env file.".to_string(),
-            });
+            errors.push(FieldError::on(
+                key,
+                "This value is managed by your .env file.",
+            ));
             continue;
         }
         if *kind == "number" {
@@ -452,20 +609,17 @@ fn validate_updates(
                         "HATCHDOOR_MAX_ATTACHMENT_BYTES" | "HATCHDOOR_MCP_MAX_BASE64_BYTES"
                     ) && number > MAX_IN_MEMORY_UPLOAD_BYTES
                     {
-                        errors.push(FieldError { key: key.clone(), message: "Choose 512 MB or less: uploads are held in memory while Hatchdoor writes them.".to_string() });
+                        errors.push(FieldError::on(key, "Choose 512 MB or less: uploads are held in memory while Hatchdoor writes them."));
                     }
                 }
-                _ => errors.push(FieldError {
-                    key: key.clone(),
-                    message: "Enter a whole number greater than zero.".to_string(),
-                }),
+                _ => errors.push(FieldError::on(
+                    key,
+                    "Enter a whole number greater than zero.",
+                )),
             }
         }
         if *kind == "switch" && !matches!(value.trim(), "true" | "false") {
-            errors.push(FieldError {
-                key: key.clone(),
-                message: "Choose on or off.".to_string(),
-            });
+            errors.push(FieldError::on(key, "Choose on or off."));
         }
         if key == "HATCHDOOR_GIT_SYNC_ENABLED"
             && !matches!(
@@ -473,10 +627,7 @@ fn validate_updates(
                 "off" | "local" | "remote" | "false" | "true" | "0" | "1" | "no" | "yes" | "on"
             )
         {
-            errors.push(FieldError {
-                key: key.clone(),
-                message: "Choose off, local, or remote.".to_string(),
-            });
+            errors.push(FieldError::on(key, "Choose off, local, or remote."));
         }
     }
     if updates.keys().any(|key| {
@@ -492,10 +643,11 @@ fn validate_updates(
         if let Err(message) =
             AppState::runtime_mcp_config(&prospective).and_then(|config| config.validate())
         {
-            errors.push(FieldError {
-                key: "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
-                message,
-            });
+            // Belongs to no single field: the refusal is that MCP is enabled
+            // with no token, which spans HATCHDOOR_MCP_ENABLED and
+            // HATCHDOOR_MCP_BEARER_TOKEN together, not either one alone
+            // (issue #55).
+            errors.push(FieldError::general(message));
         }
     }
     errors
@@ -518,7 +670,7 @@ mod tests {
         )
         .expect("runtime config")
         .snapshot();
-        let response = settings_response(&snapshot);
+        let response = settings_response(&snapshot, false);
         let archive = response
             .settings
             .iter()
@@ -533,6 +685,27 @@ mod tests {
             .unwrap();
         assert_eq!(token.value, None);
         assert_eq!(token.configured, Some(true));
+    }
+
+    #[test]
+    fn demo_mode_is_reported_as_locked_for_a_reason_distinct_from_environment_and_branch() {
+        let snapshot = RuntimeConfig::load(
+            std::env::temp_dir().join("hatchdoor-settings-handler-test-demo.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime config")
+        .snapshot();
+        let response = settings_response(&snapshot, true);
+        let demo = response
+            .settings
+            .iter()
+            .find(|setting| setting.key == "HATCHDOOR_DEMO_MODE")
+            .expect("demo mode setting present");
+        assert_eq!(demo.locked, Some("demo"));
+        assert_ne!(demo.locked, Some("environment"));
+        assert_ne!(demo.locked, Some("never"));
+        assert_eq!(demo.value.as_deref(), Some("true"));
     }
 
     #[test]
@@ -554,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_mcp_requires_a_token_in_the_prospective_transaction() {
+    fn enabled_mcp_without_a_token_is_a_form_level_refusal_with_no_single_field() {
         let config = RuntimeConfig::load(
             std::env::temp_dir().join("hatchdoor-settings-handler-test-mcp.json"),
             Environment::empty(),
@@ -567,6 +740,9 @@ mod tests {
         );
 
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].key, "HATCHDOOR_MCP_BEARER_TOKEN");
+        assert_eq!(
+            errors[0].key, None,
+            "the refusal spans two fields (enabled + token), so it belongs to neither alone"
+        );
     }
 }

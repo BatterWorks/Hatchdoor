@@ -42,14 +42,22 @@ async fn run_vault_watcher(
         .map_err(|error| format!("failed to watch {}: {error}", vault_path.display()))?;
     info!(vault_path = %vault_path.display(), "Vault watcher started");
 
-    // The same noise matcher the index build uses, so a change under a noise
-    // path (`.obsidian/workspace.json` churn, a `*.tmp` scratch file) does not
-    // trigger a needless reindex. The `.hatchdoor-layer` marker is exempt from
-    // exclusion, so a marker create/modify/delete still refreshes — and a
-    // refresh is a full reindex, which re-classifies via the marker-set hash.
-    let scan_config = state.scan_config.clone();
-
     while let Some(result) = event_rx.recv().await {
+        // The same noise matcher the index build uses, so a change under a noise
+        // path (`.obsidian/workspace.json` churn, a `*.tmp` scratch file) does
+        // not trigger a needless reindex. The `.hatchdoor-layer` marker is
+        // exempt from exclusion, so a marker create/modify/delete still
+        // refreshes — and a refresh is a full reindex, which re-classifies via
+        // the marker-set hash. Derived fresh from the current runtime snapshot
+        // on every event so a saved `HATCHDOOR_EXCLUDE` change takes effect
+        // immediately, without waiting for a reindex.
+        let scan_config = match state.live_scan_config() {
+            Ok(scan_config) => scan_config,
+            Err(error) => {
+                warn!("Vault watcher could not load the current exclude configuration: {error}");
+                continue;
+            }
+        };
         match result {
             Ok(event)
                 if should_refresh_for_event(

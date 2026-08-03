@@ -42,7 +42,7 @@ impl AppConfig {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let demo_mode = env::var("HATCHDOOR_DEMO_MODE")
-            .map(|value| is_truthy(&value))
+            .map(|value| crate::runtime_config::is_truthy(&value))
             .unwrap_or(false);
         let port = parse_port(&port_raw)?;
 
@@ -66,12 +66,13 @@ impl AppConfig {
         &mut self,
         snapshot: &crate::runtime_config::ConfigSnapshot,
     ) -> Result<(), String> {
-        self.archive_prefix = required_setting(snapshot, "HATCHDOOR_ARCHIVE_PREFIX")?
+        self.archive_prefix = snapshot
+            .required("HATCHDOOR_ARCHIVE_PREFIX")?
             .trim()
             .to_string();
-        self.exclude_patterns =
-            parse_exclude_patterns(required_setting(snapshot, "HATCHDOOR_EXCLUDE")?);
-        self.embed_layers = is_truthy(required_setting(snapshot, "HATCHDOOR_EMBED_LAYERS")?);
+        self.exclude_patterns = parse_exclude_patterns(snapshot.required("HATCHDOOR_EXCLUDE")?);
+        self.embed_layers =
+            crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_EMBED_LAYERS")?);
         Ok(())
     }
 
@@ -80,16 +81,6 @@ impl AppConfig {
             .parse::<SocketAddr>()
             .map_err(|e| format!("invalid bind address: {e}"))
     }
-}
-
-fn required_setting<'a>(
-    snapshot: &'a crate::runtime_config::ConfigSnapshot,
-    key: &str,
-) -> Result<&'a str, String> {
-    snapshot
-        .setting(key)
-        .map(|setting| setting.value.as_str())
-        .ok_or_else(|| format!("runtime configuration is missing {key}"))
 }
 
 pub fn parse_port(input: &str) -> Result<u16, String> {
@@ -107,13 +98,6 @@ pub fn parse_exclude_patterns(raw: &str) -> Vec<String> {
         .filter(|pattern| !pattern.is_empty())
         .map(|pattern| pattern.to_string())
         .collect()
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 pub fn init_logging() {

@@ -44,12 +44,23 @@ pub struct AppState {
     /// The one active versioning task, if any. A write lock serializes drain →
     /// replacement so two tasks can never touch the repository together.
     pub git_sync: Arc<RwLock<Option<crate::git::GitSyncHandle>>>,
-    /// Folder prefix treated as archived in resolve results.
-    pub archive_prefix: Arc<str>,
-    /// Noise-exclusion configuration (built-in defaults plus `HATCHDOOR_EXCLUDE`),
-    /// applied to every index build on the server path so the watcher, writes and
-    /// startup all see the same excluded set.
-    pub scan_config: Arc<VaultScanConfig>,
+    /// Cache for [`AppState::live_scan_config`], keyed by the snapshot pointer
+    /// it was built from. Every live consumer of noise-exclusion configuration
+    /// (the watcher, MCP/HTTP writes, reads, diagnostics) must derive its scan
+    /// config from the *current* runtime snapshot rather than a boot-time copy,
+    /// so a saved `HATCHDOOR_EXCLUDE` change takes effect immediately outside a
+    /// reindex. Rebuilding the underlying `ExcludeMatcher` on every request
+    /// would be wasteful, so this caches the last built config and only
+    /// rebuilds when the bound snapshot has actually changed.
+    #[allow(clippy::type_complexity)]
+    pub scan_config_cache: Arc<
+        StdRwLock<
+            Option<(
+                Arc<crate::runtime_config::ConfigSnapshot>,
+                Arc<VaultScanConfig>,
+            )>,
+        >,
+    >,
     /// Held while a reindex runs so concurrent refreshes coalesce into one.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Dedicated status for reindexes triggered by live indexing settings.
@@ -68,9 +79,11 @@ pub struct IndexStatusTracker(Arc<StdRwLock<IndexStatus>>);
 pub struct IndexStatusResponse {
     pub state: &'static str,
     /// True means the last coherent index was built with older indexing settings.
+    /// `state` distinguishes *why* it is stale: `"rebuilding"` (in progress,
+    /// self-clearing) vs `"failed"` (stuck until a change or restart retries
+    /// it) — there is no separate drift/health axis to track, so this is the
+    /// only field a client needs.
     pub stale: bool,
-    /// Kept explicit so clients can distinguish settings drift from generic search health.
-    pub drift: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes_completed: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,7 +192,6 @@ impl IndexStatusTracker {
         IndexStatusResponse {
             state,
             stale,
-            drift: stale,
             notes_completed: progress.map(|value| value.notes_completed),
             notes_total: progress.map(|value| value.notes_total),
             chunks_completed: progress.map(|value| value.chunks_completed),
@@ -244,14 +256,47 @@ impl AppState {
         }))
     }
 
-    /// Record a vault write for git sync. No-op when sync is disabled.
-    pub fn record_vault_write(&self, record: crate::git::WriteRecord) {
-        let sync = self.git_sync.clone();
-        tokio::spawn(async move {
-            if let Some(handle) = sync.read().await.as_ref() {
-                handle.record(record);
+    /// Derive the noise-exclusion scan config from the *current* runtime
+    /// snapshot. Every live consumer (the watcher, MCP/HTTP write refusals,
+    /// reads, diagnostics) must call this instead of caching a boot-time copy,
+    /// so a saved `HATCHDOOR_EXCLUDE` change is honored immediately. The
+    /// underlying `ExcludeMatcher` is only rebuilt when the bound snapshot
+    /// actually changed since the last call.
+    pub fn live_scan_config(&self) -> Result<Arc<VaultScanConfig>, String> {
+        let snapshot = self.runtime_snapshot();
+        {
+            let cache = self
+                .scan_config_cache
+                .read()
+                .expect("scan config cache poisoned");
+            if let Some((cached_snapshot, cached_config)) = cache.as_ref()
+                && Arc::ptr_eq(cached_snapshot, &snapshot)
+            {
+                return Ok(cached_config.clone());
             }
-        });
+        }
+        let config = Self::runtime_scan_config(&snapshot)?;
+        let mut cache = self
+            .scan_config_cache
+            .write()
+            .expect("scan config cache poisoned");
+        *cache = Some((snapshot, config.clone()));
+        Ok(config)
+    }
+
+    /// Record a vault write for git sync. No-op when sync is disabled.
+    ///
+    /// Awaits the read lock directly rather than spawning a detached task: a
+    /// spawned task races a concurrent stop-drain with no ordering guarantee
+    /// (a record enqueued "before" a stop could be applied "after" it from the
+    /// scheduler's point of view), and needlessly required a Tokio runtime for
+    /// what used to be a synchronous call. Awaiting here keeps every write's
+    /// enqueue ordered with respect to the git lifecycle that guards the same
+    /// lock.
+    pub async fn record_vault_write(&self, record: crate::git::WriteRecord) {
+        if let Some(handle) = self.git_sync.read().await.as_ref() {
+            handle.record(record);
+        }
     }
 }
 
@@ -303,12 +348,7 @@ pub fn build_cache_with_sqlite_and_progress(
         elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
         "Vault scan performance"
     );
-    sqlite.replace_from_index_with_embedder_and_progress_with_embed_layers(
-        &index,
-        embedder,
-        on_progress,
-        embed_layers,
-    )?;
+    sqlite.replace_from_index_with_progress(&index, embedder, on_progress, embed_layers)?;
 
     Ok(VaultCache { sqlite })
 }
@@ -402,10 +442,10 @@ async fn run_reindex(
     let vault_path = state.vault_path.clone();
     let embedder = state.embedder.clone();
     let runtime_snapshot = state.runtime_snapshot();
-    let scan_config = AppState::runtime_scan_config(&runtime_snapshot)?;
+    let scan_config = state.live_scan_config()?;
     let embed_layers = runtime_snapshot
         .setting("HATCHDOOR_EMBED_LAYERS")
-        .map(|setting| is_truthy(&setting.value))
+        .map(|setting| crate::runtime_config::is_truthy(&setting.value))
         .unwrap_or(true);
 
     // The marker-set hash the last build persisted. Compared against the value
@@ -427,7 +467,7 @@ async fn run_reindex(
             elapsed_ms = scan_started.elapsed().as_secs_f64() * 1_000.0,
             "Vault scan performance"
         );
-        sqlite.replace_from_index_with_embedder_and_progress_with_embed_layers(
+        sqlite.replace_from_index_with_progress(
             &index,
             embedder.as_ref(),
             on_progress,
@@ -470,13 +510,6 @@ async fn run_reindex(
     Ok(())
 }
 
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
 fn broadcast_vault_revision(state: &AppState) {
     let revision = state.vault_revision.fetch_add(1, Ordering::SeqCst) + 1;
     let _ = state.vault_events.send(revision);
@@ -490,6 +523,7 @@ pub fn test_embedder() -> Arc<dyn Embedder> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::tempdir;
 
     #[test]
@@ -503,14 +537,12 @@ mod tests {
         let during_second = status.status();
         assert_eq!(during_second.state, "rebuilding");
         assert!(during_second.stale);
-        assert!(during_second.drift);
 
         status.start_rebuild(second);
         status.finish_rebuild(second);
         let current = status.status();
         assert_eq!(current.state, "up_to_date");
         assert!(!current.stale);
-        assert!(!current.drift);
     }
 
     #[test]
@@ -629,8 +661,7 @@ mod tests {
             demo_mode: false,
             vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             git_sync: Arc::new(RwLock::new(None)),
-            archive_prefix: Arc::from("90-archive/"),
-            scan_config: Arc::new(VaultScanConfig::default()),
+            scan_config_cache: Arc::new(StdRwLock::new(None)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             index_status: IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
@@ -779,5 +810,33 @@ mod tests {
         refresh_coalescing(&state).await.expect("refresh");
 
         assert_eq!(events.recv().await.expect("revision"), 1);
+    }
+
+    #[test]
+    fn live_scan_config_reflects_a_saved_exclude_change_without_a_reindex() {
+        // S1 regression: a saved HATCHDOOR_EXCLUDE must reach every live
+        // consumer (watcher, write refusals, reads, diagnostics) through
+        // `live_scan_config`, not only through the boot-time snapshot the
+        // reindex binds.
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        let state = state_with_vault(vault_path);
+
+        let before = state.live_scan_config().expect("scan config");
+        assert!(!before.exclude.is_excluded(Path::new("Secret.md"), false));
+
+        state
+            .runtime_config
+            .save([("HATCHDOOR_EXCLUDE".to_string(), "Secret.md".to_string())])
+            .expect("save exclude setting");
+
+        let after = state
+            .live_scan_config()
+            .expect("scan config reflects the save");
+        assert!(
+            after.exclude.is_excluded(Path::new("Secret.md"), false),
+            "the saved HATCHDOOR_EXCLUDE pattern must take effect immediately"
+        );
     }
 }
