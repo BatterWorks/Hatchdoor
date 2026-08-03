@@ -144,25 +144,23 @@ Copy the example environment file:
 cp .env.example .env
 ```
 
-Edit `.env` and set at least these values:
+The defaults create a starter vault beside the Compose file. To use an existing
+vault, uncomment its host path in `.env`:
 
 ```env
 HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
-HOST_CACHE_PATH=./data/cache
-HOST_MODELS_PATH=./models
-HATCHDOOR_WEB_BEARER_TOKEN=choose-a-long-random-token
 ```
 
 What these mean:
 
 - `HOST_VAULT_PATH` is your Markdown vault on the host machine.
-- `HOST_CACHE_PATH` stores Hatchdoor's generated SQLite cache.
-- `HOST_MODELS_PATH` stores downloaded search models and the local Gemma terms receipt.
-- `HATCHDOOR_WEB_BEARER_TOKEN` protects your notes in the browser.
+- `HOST_CACHE_PATH` and `HOST_MODELS_PATH` are optional host-side locations for
+  the generated cache and downloaded models; Compose defaults both beside the
+  project.
 
-Docker Compose binds Hatchdoor to `0.0.0.0` inside the container so the
-published port works. Hatchdoor refuses to start on a non-loopback bind unless
-`HATCHDOOR_WEB_BEARER_TOKEN` is set, except in explicit read-only demo mode.
+Do not add ordinary Settings values to `.env`: an unset value can be changed
+live in Settings. See [Configuration](#configuration) for the few deployment
+values that always remain environment-only.
 
 ### 3. Start Hatchdoor
 
@@ -170,13 +168,19 @@ published port works. Hatchdoor refuses to start on a non-loopback bind unless
 docker compose up -d
 ```
 
-Open:
+Docker Compose binds Hatchdoor to a non-loopback container interface, so a
+first run without a web token stops safely and prints a fresh, recoverable
+token. Retrieve it with:
 
-```text
-http://localhost:42824
+```bash
+docker compose logs hatchdoor
 ```
 
-Enter the web bearer token when prompted.
+Copy the printed `HATCHDOOR_WEB_BEARER_TOKEN=...` assignment into `.env`, then
+start again with `docker compose up -d`. The token is deliberately not stored
+by Hatchdoor; use the one from that refusal or generate a new long random token.
+Once the server is running, open `http://localhost:42824` and enter it in the
+browser prompt.
 
 ### 4. Choose Your Search Model
 
@@ -304,22 +308,19 @@ instructions (for example, `AGENTS.md` or `CLAUDE.md`).
 
 ### Do not confuse layers with exclusions
 
-Use a layer when agents should still be able to read the files separately. Use
-`HATCHDOOR_EXCLUDE` only when Hatchdoor should ignore a path completely:
+Use a layer when agents should still be able to read the files separately. In
+**Settings → Vault → Ignore these files**, add this pattern only when Hatchdoor
+should ignore the path completely:
 
-```env
-HATCHDOOR_EXCLUDE=imports/,*.bak
+```text
+imports/,*.bak
 ```
 
-Do **not** set `HATCHDOOR_EXCLUDE=raw/` if agents need to search or read
-`raw/`: excluded files are absent from Hatchdoor's index.
+Do **not** add `raw/` if agents need to search or read `raw/`: excluded files
+are absent from Hatchdoor's index.
 
 If your raw layer is large and you want to avoid creating vector embeddings for
-it, set:
-
-```env
-HATCHDOOR_EMBED_LAYERS=false
-```
+it, turn off **Settings → Vault → Meaning search in demoted layers**.
 
 The raw layer remains available for keyword lookup when an MCP client selects
 it, without using vector-indexing resources.
@@ -344,29 +345,59 @@ browser session.
 
 ## Configuration
 
-Copy `.env.example` to `.env` and adjust values.
+Copy `.env.example` to `.env`. Its values are all commented out: Docker Compose
+and Hatchdoor supply the ordinary defaults, and Settings owns live
+configuration. A non-empty value for a Settings key in `.env` is an intentional
+**environment pin**: it wins over the saved Settings value for that process.
+Remove the pin and restart to make that setting editable in Settings again.
 
-### Basic Server And Storage
+### Deployment And Environment-Only Values
 
-| Variable | Default | Purpose |
+These values are not Settings controls. In Docker, Compose fixes the container
+bind address, port, vault path, and cache path to match its port and volume
+contract; change `docker-compose.yml` as one deployment change if you need a
+different container layout.
+
+| Variable | Default | How to manage it |
 | --- | --- | --- |
-| `HOST_VAULT_PATH` | `./vault` | Host-side vault path for Docker Compose |
-| `HOST_CACHE_PATH` | `./data/cache` | Host-side cache directory for Docker Compose |
-| `HOST_MODELS_PATH` | `./models` | Persistent downloaded-model directory for Docker Compose |
-| `VAULT_PATH` | `/data/vault` | Runtime vault path read by Hatchdoor |
-| `HATCHDOOR_CACHE_DB` | `/data/cache/hatchdoor-cache.sqlite3` | Runtime SQLite cache file |
-| `HOST` | `127.0.0.1` | Bind host for local `cargo run` |
-| `PORT` | `42824` | HTTP port |
-| `RUST_LOG` | `hatchdoor=info,tower_http=info,axum::rejection=warn` | Backend logging filter |
+| `HOST_VAULT_PATH` | `./vault` | Compose host mount input; set in `.env` for an existing vault |
+| `HOST_CACHE_PATH` | `./data/cache` | Compose host mount input |
+| `HOST_MODELS_PATH` | `./models` | Compose host mount input |
+| `VAULT_PATH` | `./vault` directly; `/data/vault` in Compose | Environment-only runtime path |
+| `HATCHDOOR_CACHE_DB` | `./data/cache/hatchdoor-cache.sqlite3` directly; `/data/cache/hatchdoor-cache.sqlite3` in Compose | Environment-only runtime path |
+| `HOST` / `PORT` | `127.0.0.1` / `42824` directly; `0.0.0.0` / `42824` in Compose | Environment-only bind contract |
+| `HATCHDOOR_SETTINGS_FILE` | beside the cache database | Environment-only override for the durable Settings file |
+| `HATCHDOOR_WEB_BEARER_TOKEN` | empty | Environment-only web credential |
+| `HATCHDOOR_DEMO_MODE` | `false` | Environment-only public read-only mode |
+| `HATCHDOOR_GIT_REMOTE` | `origin` | Environment-only remote name for remote versioning |
+| `HATCHDOOR_GIT_BRANCH` | `main` | Environment-only branch; must match the vault's checked-out branch |
+| `RUST_LOG` | `hatchdoor=info,tower_http=info,axum::rejection=warn` | Environment-only logging filter |
+
+### Settings: Live Values And Environment Pins
+
+The following values are editable in **Settings** and apply to the running
+server without a restart. If a non-empty `.env` value is present, Settings
+shows it as **Set in .env** and does not allow an in-browser edit. That is how
+to deliberately keep a value deployment-managed.
+
+| Settings section | Variables | Apply behavior |
+| --- | --- | --- |
+| Vault | `HATCHDOOR_ARCHIVE_PREFIX` | Applies immediately |
+| Vault | `HATCHDOOR_EXCLUDE`, `HATCHDOOR_EMBED_LAYERS` | Requires confirmation, then rebuilds the search index in the background; search keeps using the previous coherent index until it is ready |
+| Agent access (MCP) | `HATCHDOOR_MCP_ENABLED`, `HATCHDOOR_MCP_WRITE_ENABLED`, `HATCHDOOR_MCP_BEARER_TOKEN`, `HATCHDOOR_MCP_ALLOWED_ORIGINS` | Applies immediately to new MCP requests |
+| Uploads | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, `HATCHDOOR_MCP_MAX_BASE64_BYTES` | Applies immediately |
+| Versioning | `HATCHDOOR_GIT_SYNC_ENABLED`, `HATCHDOOR_GIT_HTTPS_USERNAME`, `HATCHDOOR_GIT_HTTPS_TOKEN`, `HATCHDOOR_GIT_DEBOUNCE_SECONDS`, `HATCHDOOR_GIT_AUTHOR_NAME`, `HATCHDOOR_GIT_AUTHOR_EMAIL` | Applies immediately after the server safely stops and replaces any active sync task |
+
+Settings saves its live values, including configured MCP and Git tokens, in a
+durable `settings.json` beside the cache database (or at
+`HATCHDOOR_SETTINGS_FILE`). The file is created with `0600` permissions on
+Unix; secret values are never returned in the Settings document. The file is an
+implementation detail: use the page, not hand edits, to change live
+configuration.
 
 ### Web Authentication
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `HATCHDOOR_WEB_BEARER_TOKEN` | empty | Protects `/api/*`, `/vault-assets/*`, and note downloads |
-| `HATCHDOOR_DEMO_MODE` | `false` | Allows unauthenticated public browsing while disabling Hatchdoor write features |
-
-When this token is set, protected requests must send:
+When `HATCHDOOR_WEB_BEARER_TOKEN` is set, protected requests must send:
 
 ```text
 Authorization: Bearer <token>
@@ -386,11 +417,7 @@ For a public test instance that people can browse without credentials, use demo
 mode:
 
 ```env
-HOST=0.0.0.0
 HATCHDOOR_DEMO_MODE=true
-HATCHDOOR_WEB_BEARER_TOKEN=
-HATCHDOOR_MCP_ENABLED=false
-HATCHDOOR_GIT_SYNC_ENABLED=false
 ```
 
 Demo mode is intentionally read-only. It disables browser write operations and
@@ -404,13 +431,13 @@ generate real CPU and memory load. Put a public demo behind a rate-limiting
 reverse proxy (e.g. nginx `limit_req`, Caddy `rate_limit`, or Traefik
 `rateLimit` middleware) before exposing it to the internet.
 
-### Vault Behavior
+### Indexing Changes
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | Vault-relative folder prefix used by archive actions and archived-link styling |
-| `HATCHDOOR_EXCLUDE` | empty | Comma-separated gitignore-style paths to omit from indexing, appended after the built-in noise rules |
-| `HATCHDOOR_EMBED_LAYERS` | `true` | Set to `false` to keep demoted layers keyword-searchable but skip their vector embeddings |
+Use the **Vault** section of Settings to choose the archive folder, exclusion
+patterns, and whether demoted layers receive semantic embeddings. Exclusions
+use comma-separated gitignore syntax. Changing exclusions or layer embedding
+requires confirmation because Hatchdoor starts a background reindex; it never
+stops search just to apply the change.
 
 ## Using Hatchdoor
 
@@ -453,18 +480,18 @@ The browser intentionally has no layer selector.
 Noise patterns prevent files from entering the index. Hatchdoor always excludes
 `.obsidian/`, `.trash/`, `.hatchdoor-trash/`, `.DS_Store`, `*.tmp`, and
 `*.sync-conflict-*`; `.hatchdoor-layer` files are always read even if a broad
-pattern would otherwise match them. Add deployment-specific patterns with a
-comma-separated environment value:
+pattern would otherwise match them. Add extra comma-separated patterns in
+**Settings → Vault → Ignore these files**. For example:
 
-```env
-HATCHDOOR_EXCLUDE=imports/,*.bak
+```text
+imports/,*.bak
 ```
 
 Patterns use gitignore syntax and are applied after the built-ins, so a leading
 `!` can reinstate a default pattern when needed:
 
-```env
-HATCHDOOR_EXCLUDE=!*.sync-conflict-*
+```text
+!*.sync-conflict-*
 ```
 
 Writes to an excluded target are refused rather than creating a file that the
@@ -525,18 +552,11 @@ The embedded MCP endpoint is disabled by default. Enable it only for trusted
 clients.
 
 MCP requires a bearer token even in read-only mode because `/mcp` bypasses the
-web auth layer and can expose the full vault.
-
-```env
-HATCHDOOR_MCP_ENABLED=true
-HATCHDOOR_MCP_BEARER_TOKEN=change-me
-```
-
-Enable write tools separately:
-
-```env
-HATCHDOOR_MCP_WRITE_ENABLED=true
-```
+web auth layer and can expose the full vault. In **Settings → Agent access
+(MCP)**, generate or enter an MCP password, turn on assistant access, and save.
+Turn on write access separately only when assistants may create, edit, move,
+delete, or attach files. These changes apply to new MCP requests immediately;
+they do not require editing `.env` or restarting the container.
 
 Register the endpoint with a Streamable HTTP MCP client:
 
@@ -597,34 +617,22 @@ mount. Two paths cover the size/compatibility trade-off:
   gets unreliable as files grow. Capped by `HATCHDOOR_MCP_MAX_BASE64_BYTES`
   (default 5 MiB), measured on the decoded file.
 
-```env
-HATCHDOOR_MCP_MAX_BASE64_BYTES=5242880
-HATCHDOOR_MAX_ATTACHMENT_BYTES=10485760
-```
-
+Use **Settings → Uploads** to change either limit while Hatchdoor is running.
 Agents can call `get_attachment_import_config` to discover both methods, their
-size limits, and which to use.
+current size limits, and which to use.
 
 ## Versioning and Git Sync
 
-Versioning is optional and off by default. Set `HATCHDOOR_GIT_SYNC_ENABLED` to
-`local` to commit vault changes without a network remote, or `remote` to retain
-the safe commit/fetch/merge/push flow. Legacy truthy values still mean `remote`.
-Local mode can initialise an untouched vault from Settings after one explicit
-confirmation; this permanently creates its `.git` history folder and ignores
-Hatchdoor's `data/` cache and `settings.json`. Switching away from remote mode
-also asks for one confirmation before future commits stop being sent remotely.
+Versioning is optional and off by default. In **Settings → Versioning**, choose
+`local` to commit vault changes without a network remote, or `remote` for the
+safe commit/fetch/merge/push flow. Add remote credentials, commit identity, and
+the quiet window there; the server safely replaces any active sync task as it
+applies the saved change. Legacy truthy values still mean `remote`.
 
-```env
-HATCHDOOR_GIT_SYNC_ENABLED=remote
-HATCHDOOR_GIT_REMOTE=origin
-HATCHDOOR_GIT_BRANCH=main
-HATCHDOOR_GIT_HTTPS_USERNAME=hatchdoor
-HATCHDOOR_GIT_HTTPS_TOKEN=your-token
-HATCHDOOR_GIT_DEBOUNCE_SECONDS=30
-HATCHDOOR_GIT_AUTHOR_NAME=Hatchdoor
-HATCHDOOR_GIT_AUTHOR_EMAIL=hatchdoor@localhost
-```
+Local mode can initialise an untouched vault after one explicit confirmation;
+this permanently creates its `.git` history folder and ignores Hatchdoor's
+`data/` cache and `settings.json`. Switching away from remote mode also asks
+for one confirmation before future commits stop being sent remotely.
 
 Requirements:
 
@@ -632,8 +640,10 @@ Requirements:
 - Remote mode additionally requires the checked-out branch to match
   `HATCHDOOR_GIT_BRANCH`, an existing remote named by `HATCHDOOR_GIT_REMOTE`,
   and HTTPS username/token credentials.
-- `HATCHDOOR_GIT_BRANCH` and `HATCHDOOR_GIT_REMOTE` are deployment-owned: the
-  Settings page reports the active branch but does not edit either value.
+- `HATCHDOOR_GIT_BRANCH` and `HATCHDOOR_GIT_REMOTE` are environment-only
+  deployment pins. Set either in `.env` only when its default (`main` or
+  `origin`) is not your vault's checked-out branch or configured remote, then
+  restart the container. Settings never changes them.
 - Merge conflicts are kept for human resolution on the server; Hatchdoor never
   force-checks out over uncommitted manual vault edits.
 
