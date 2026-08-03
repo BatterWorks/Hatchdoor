@@ -2,6 +2,7 @@ mod api;
 mod assets;
 pub mod diagnostics;
 mod downloads;
+mod settings;
 mod spa;
 mod write_api;
 
@@ -13,6 +14,10 @@ pub use api::{
 pub use assets::vault_asset_handler;
 pub use diagnostics::diagnostics_handler;
 pub use downloads::note_download_handler;
+pub use settings::{
+    MAX_IN_MEMORY_UPLOAD_BYTES, get_settings_handler, patch_settings_handler,
+    reveal_web_token_handler,
+};
 pub use spa::spa_index_handler;
 pub use write_api::{
     archive_note_handler, create_note_handler, delete_note_handler, move_note_handler,

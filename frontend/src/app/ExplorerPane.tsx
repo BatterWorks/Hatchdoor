@@ -27,9 +27,11 @@ function countNotes(folder: ExplorerFolder): number {
 function ExplorerRail({
   changesOpen,
   onToggleChanges,
+  settingsEnabled,
 }: {
   changesOpen: boolean;
   onToggleChanges: () => void;
+  settingsEnabled?: boolean;
 }) {
   return (
     <div className="explorer-rail">
@@ -65,25 +67,18 @@ function ExplorerRail({
       >
         <InboxIcon />
       </button>
-      {/*
-       * Settings has no destination until issue #13 exists. It reserves the
-       * slot so the layout does not shift when it becomes real.
-       *
-       * A real <button> with aria-disabled, not `disabled` and not a span: it
-       * stays focusable, so a keyboard user can reach it and hear why it does
-       * nothing. `disabled` would remove it from the tab order and make the
-       * explanation mouse-only, which is how a dead control reads as a bug.
-       */}
-      <button
-        type="button"
-        className="explorer-rail-item is-disabled"
-        aria-disabled="true"
-        aria-label="Settings (not yet available)"
-        title="Settings (not yet available)"
-        onClick={(event) => event.preventDefault()}
-      >
-        <SettingsIcon />
-      </button>
+      {settingsEnabled ? (
+        <NavLink
+          className={({ isActive }) =>
+            `explorer-rail-item${isActive ? " active" : ""}`
+          }
+          to="/settings"
+          aria-label="Settings"
+          title="Settings"
+        >
+          <SettingsIcon />
+        </NavLink>
+      ) : null}
     </div>
   );
 }
@@ -92,6 +87,7 @@ type ExplorerPaneProps = {
   explorerScrollRef: RefObject<HTMLElement | null>;
   drawerOpen: boolean;
   writeEnabled: boolean;
+  settingsEnabled?: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
   locationPathname: string;
   recentNotes: RecentNote[];
@@ -112,6 +108,7 @@ export function ExplorerPane({
   explorerScrollRef,
   drawerOpen,
   writeEnabled,
+  settingsEnabled,
   onCreateNoteInFolder,
   locationPathname,
   recentNotes,
@@ -137,6 +134,7 @@ export function ExplorerPane({
       <ExplorerRail
         changesOpen={changesOpen}
         onToggleChanges={() => setChangesOpen((prev) => !prev)}
+        settingsEnabled={settingsEnabled}
       />
 
       {/* Only this middle zone scrolls; rail and footer stay put. */}

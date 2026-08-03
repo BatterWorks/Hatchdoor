@@ -48,6 +48,7 @@ function renderPane(
     explorerScrollRef: { current: null },
     drawerOpen: false,
     writeEnabled: true,
+    settingsEnabled: true,
     onCreateNoteInFolder: vi.fn(),
     locationPathname: "/n/home",
     recentNotes: RECENT,
@@ -91,9 +92,10 @@ describe("ExplorerPane", () => {
     expect(
       screen.getByRole("button", { name: "Recently changed notes" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Settings (not yet available)" }),
-    ).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
   });
 
   it("hides the footer create action when write mode is off", () => {
