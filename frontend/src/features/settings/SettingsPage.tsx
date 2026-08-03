@@ -1,3 +1,11 @@
+/**
+ * Settings — the structure settled by the Variant B prototype (issue #58):
+ * an index of sections on the left, one section at a time on the right, and
+ * the save action belonging to the section rather than the page. A locked
+ * setting is not a disabled control: it leaves the form entirely and becomes a
+ * record in the "Managed outside this page" plaque below it.
+ */
+
 import { useEffect, useMemo, useState } from "react";
 
 import { apiFetch } from "../../api/api";
@@ -38,13 +46,31 @@ type GitStatus = {
   unpushed?: number;
 };
 
-const INDEX_STATUS_POLL_MS = 2_000;
-const GIT_REMOTE_KEYS = new Set([
+type Consequence = "reindex" | "git_init" | "git_downgrade";
+type Confirmation = {
+  consequence: Consequence;
+  message: string;
+  updates: Record<string, string>;
+};
+
+const STATUS_POLL_MS = 2_000;
+
+/** Remote-only fields: absent, not locked, when the mode is not remote (#61). */
+const REMOTE_ONLY = [
   "HATCHDOOR_GIT_HTTPS_USERNAME",
   "HATCHDOOR_GIT_HTTPS_TOKEN",
-  "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
-]);
+];
 
+/** Shown only while versioning is on at all. */
+const VERSIONING_DETAIL = [
+  ...REMOTE_ONLY,
+  "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
+  "HATCHDOOR_GIT_AUTHOR_NAME",
+  "HATCHDOOR_GIT_AUTHOR_EMAIL",
+  "HATCHDOOR_GIT_BRANCH",
+];
+
+/** Section order mirrors .env.example (#59), so one vocabulary spans both. */
 const SECTIONS = [
   {
     id: "vault",
@@ -74,13 +100,19 @@ const SECTIONS = [
   },
 ] as const;
 
+type SectionId = (typeof SECTIONS)[number]["id"];
+
 const COPY: Record<
   string,
   {
-    section: (typeof SECTIONS)[number]["id"];
+    section: SectionId;
     label: string;
     help: string;
     unit?: string;
+    /** Shown in the empty box, so the shape of a valid answer is visible. */
+    example?: string;
+    /** A quiet line under the help, for a fact the help sentence cannot hold. */
+    note?: string;
   }
 > = {
   HATCHDOOR_ARCHIVE_PREFIX: {
@@ -90,130 +122,185 @@ const COPY: Record<
   },
   HATCHDOOR_EXCLUDE: {
     section: "vault",
-    label: "Ignore these files",
-    help: "Patterns to leave out of search entirely, separated by commas.",
+    label: "Ignore these files and folders",
+    help: "Anything matching these patterns is left out of search entirely. Same syntax as a .gitignore file, separated by commas. End a pattern with / to ignore a whole folder and everything in it.",
+    example: "drafts/, *.excalidraw.md, 99-scratch/",
+    note: "Ignored before your list is read: .obsidian/, .trash/, .hatchdoor-trash/, .DS_Store, *.tmp, *.sync-conflict-*. Start a pattern with ! to bring one of those back.",
   },
   HATCHDOOR_EMBED_LAYERS: {
     section: "vault",
     label: "Meaning search in demoted layers",
-    help: "Whether notes in demoted layers are also searchable by meaning.",
+    help: "Folders marked with a .hatchdoor-layer file stay out of the browser and out of normal search; assistants can still ask for them by name. On, those notes can also be found by meaning. Off, only by exact words, which saves disk space and indexing time.",
   },
   HATCHDOOR_MCP_ENABLED: {
     section: "agents",
     label: "Let assistants connect (MCP)",
-    help: "Opens a second, token-protected door into this vault for AI assistants.",
+    help: "Opens a second door into this vault for AI assistants such as Claude. Off means the door does not exist.",
   },
   HATCHDOOR_MCP_WRITE_ENABLED: {
     section: "agents",
     label: "Let assistants change notes",
-    help: "Allows connected assistants to create, edit, move and delete notes and attachments.",
+    help: "Assistants can create, edit, move and delete notes and attachments. Off means they can only read.",
   },
   HATCHDOOR_MCP_BEARER_TOKEN: {
     section: "agents",
     label: "MCP password",
-    help: "Required whenever assistants are allowed to connect.",
+    help: "The password an assistant must send to get in. Required whenever assistants are allowed to connect.",
   },
   HATCHDOOR_MCP_ALLOWED_ORIGINS: {
     section: "agents",
     label: "Websites allowed to connect",
-    help: "Browser-based assistants may connect only from these addresses.",
+    help: "Assistants running inside a browser must come from one of these addresses. Separated by commas.",
   },
   HATCHDOOR_MAX_ATTACHMENT_BYTES: {
     section: "uploads",
     label: "Largest file from this app",
     help: "The biggest file you can drop into a note from your browser.",
-    unit: "MB",
+    unit: "in megabytes",
   },
   HATCHDOOR_MCP_MAX_BASE64_BYTES: {
     section: "uploads",
     label: "Largest file from an assistant",
-    help: "The biggest file an assistant can send inline.",
-    unit: "MB",
+    help: "The biggest file an assistant can send inline. Assistants that can make a normal upload are not limited by this.",
+    unit: "in megabytes",
   },
   HATCHDOOR_GIT_SYNC_ENABLED: {
     section: "versioning",
     label: "Keep a history of changes",
-    help: "Whether Hatchdoor records changes to your vault.",
+    help: "Off keeps no history. This machine records every change locally. Send elsewhere also pushes it to a server you already set up.",
   },
   HATCHDOOR_GIT_HTTPS_USERNAME: {
     section: "versioning",
     label: "Username",
-    help: "The username paired with the access token.",
+    help: "The username that goes with the access token below.",
   },
   HATCHDOOR_GIT_HTTPS_TOKEN: {
     section: "versioning",
     label: "Access token",
-    help: "The token that lets Hatchdoor send changes to the server.",
+    help: "The token that lets Hatchdoor send changes to the server. Required when sending elsewhere.",
   },
   HATCHDOOR_GIT_DEBOUNCE_SECONDS: {
     section: "versioning",
     label: "Wait before recording",
-    help: "How long Hatchdoor waits after activity before recording a batch.",
-    unit: "seconds",
+    help: "How long Hatchdoor waits after you stop typing before recording a batch of changes.",
+    unit: "in seconds",
   },
   HATCHDOOR_GIT_AUTHOR_NAME: {
     section: "versioning",
     label: "Recorded as (name)",
-    help: "The name attached to recorded changes.",
+    help: "The name attached to every recorded change.",
   },
   HATCHDOOR_GIT_AUTHOR_EMAIL: {
     section: "versioning",
     label: "Recorded as (email)",
-    help: "The email attached to recorded changes.",
+    help: "The email attached to every recorded change.",
   },
   HATCHDOOR_GIT_BRANCH: {
     section: "versioning",
     label: "Branch",
-    help: "The line of history the vault is currently on.",
+    help: "Which line of history changes are recorded on. Hatchdoor always uses whichever one your vault folder is already on.",
   },
 };
 
-function mbValue(value: string | null): string {
-  const bytes = Number(value);
-  return Number.isFinite(bytes) ? String(bytes / (1024 * 1024)) : "";
+const MODES = [
+  { id: "off", label: "Off" },
+  { id: "local", label: "This machine" },
+  { id: "remote", label: "Send elsewhere" },
+];
+
+const REINDEX_CONFIRMATION =
+  "Saving this rebuilds the search index. The setting takes effect right away and search keeps working the whole time — it just keeps answering from the old setting until the rebuild finishes.";
+
+const BUSY_MESSAGE =
+  "Still finishing the last batch of changes. Try again in a few seconds — nothing was lost.";
+
+/** Both lock reasons render the same way and say different things (#47, #56). */
+const LOCK_WHY: Record<NonNullable<Setting["locked"]>, string> = {
+  environment:
+    "This value comes from your .env file, which always wins. To change it, edit that file and restart Hatchdoor.",
+  never:
+    "Hatchdoor always follows whichever branch your vault folder is on, so there is nothing to choose.",
+};
+
+/**
+ * The wire still carries the boolean spellings versioning had before it grew a
+ * third position, so the segmented control normalises what it is given rather
+ * than showing nothing selected for a value it does not recognise.
+ */
+function normalizeMode(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "local") return "local";
+  if (["remote", "true", "1", "yes", "on"].includes(normalized))
+    return "remote";
+  return "off";
 }
 
-function wireValue(setting: Setting, value: string): string {
-  return setting.key.includes("BYTES")
-    ? String(Math.round(Number(value) * 1024 * 1024))
-    : value;
+function toMb(bytes: string | null): string {
+  if (!bytes) return "";
+  const value = Number(bytes);
+  if (!Number.isFinite(value)) return bytes;
+  return String(Math.round((value / (1024 * 1024)) * 10) / 10);
 }
 
-function sourceLabel(source: Setting["source"]): string {
-  return source === "environment"
-    ? "Set in .env"
-    : source === "stored"
-      ? "Saved here"
-      : "Using the default";
+function fromMb(mb: string): string {
+  const value = Number(mb);
+  if (!Number.isFinite(value)) return mb;
+  return String(Math.round(value * 1024 * 1024));
 }
 
-function lockExplanation(lock: NonNullable<Setting["locked"]>): string {
-  return lock === "environment"
-    ? "This value comes from your .env file, which always wins. To change it, edit that file and restart Hatchdoor."
-    : "Hatchdoor always follows whichever branch your vault folder is on, so there is nothing to choose.";
+/**
+ * A locked setting is a record of the same thing the control would have shown,
+ * so it is spelled in the same words: On rather than true, a megabyte count
+ * rather than a byte count, the segment's name rather than the wire's alias.
+ */
+function plaqueValue(setting: Setting): string {
+  if (setting.kind === "secret") return setting.configured ? "set" : "not set";
+  const value = setting.value ?? "";
+  if (setting.kind === "switch") return value === "true" ? "On" : "Off";
+  if (setting.kind === "mode") {
+    const selected = normalizeMode(value);
+    return MODES.find((item) => item.id === selected)!.label;
+  }
+  if (setting.key.includes("BYTES")) return `${toMb(value)} MB`;
+  return value || "empty";
 }
 
-function formatEta(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  if (minutes === 0) return `${remainingSeconds}s`;
-  return `${minutes}m ${remainingSeconds}s`;
+function formatEta(seconds: number | undefined): string {
+  if (seconds === undefined) return "estimating";
+  if (seconds < 90) return `about ${seconds} seconds left`;
+  return `about ${Math.round(seconds / 60)} minutes left`;
+}
+
+function formatWhen(timestamp: string | null | undefined): string | null {
+  if (!timestamp) return null;
+  const then = Date.parse(timestamp);
+  if (!Number.isFinite(then)) return null;
+  const minutes = Math.round((Date.now() - then) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes === 1) return "1 minute ago";
+  if (minutes < 60) return `${minutes} minutes ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours === 1) return "1 hour ago";
+  if (hours < 24) return `${hours} hours ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<Setting[]>([]);
-  const [section, setSection] =
-    useState<(typeof SECTIONS)[number]["id"]>("vault");
+  const [active, setActive] = useState<SectionId>("vault");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [message, setMessage] = useState<string | null>(null);
+  const [banner, setBanner] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [saved, setSaved] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [webToken, setWebToken] = useState<string | null>(null);
-  const [mcpTokenCandidate, setMcpTokenCandidate] = useState<string | null>(null);
-  const [revealedMcpToken, setRevealedMcpToken] = useState<string | null>(null);
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [replacing, setReplacing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
-  const [indexStatusError, setIndexStatusError] = useState<string | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
 
   const load = async () => {
@@ -223,14 +310,14 @@ export function SettingsPage() {
     setSettings(payload.settings);
     setDrafts({});
     setErrors({});
-    setMcpTokenCandidate(null);
-    setRevealedMcpToken(null);
+    setRevealed({});
+    setReplacing({});
   };
 
   useEffect(() => {
     void load()
       .catch((error: unknown) =>
-        setMessage(
+        setBanner(
           error instanceof Error
             ? error.message
             : "Settings could not be loaded.",
@@ -240,438 +327,641 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    let active = true;
+    let live = true;
     const poll = async () => {
       try {
         const response = await apiFetch("/api/git-status");
         if (!response.ok) throw new Error();
-        if (active) setGitStatus((await response.json()) as GitStatus);
+        if (live) setGitStatus((await response.json()) as GitStatus);
       } catch {
-        if (active) setGitStatus(null);
+        if (live) setGitStatus(null);
       }
     };
     void poll();
-    const interval = window.setInterval(() => void poll(), INDEX_STATUS_POLL_MS);
+    const interval = window.setInterval(() => void poll(), STATUS_POLL_MS);
     return () => {
-      active = false;
+      live = false;
       window.clearInterval(interval);
     };
   }, []);
 
   useEffect(() => {
-    let active = true;
-    const loadIndexStatus = async () => {
+    let live = true;
+    const poll = async () => {
       try {
         const response = await apiFetch("/api/index-status");
-        if (!response.ok) throw new Error("Index status could not be loaded.");
-        const payload = (await response.json()) as IndexStatus;
-        if (active) {
-          setIndexStatus(payload);
-          setIndexStatusError(null);
-        }
+        if (!response.ok) throw new Error();
+        if (live) setIndexStatus((await response.json()) as IndexStatus);
       } catch {
-        if (active) setIndexStatusError("Index status could not be loaded.");
+        if (live) setIndexStatus(null);
       }
     };
-    void loadIndexStatus();
-    const interval = window.setInterval(
-      () => void loadIndexStatus(),
-      INDEX_STATUS_POLL_MS,
-    );
+    void poll();
+    const interval = window.setInterval(() => void poll(), STATUS_POLL_MS);
     return () => {
-      active = false;
+      live = false;
       window.clearInterval(interval);
     };
   }, []);
 
-  const current = useMemo(
-    () => SECTIONS.find((item) => item.id === section)!,
-    [section],
+  const section = useMemo(
+    () => SECTIONS.find((item) => item.id === active)!,
+    [active],
   );
-  const mode = drafts.HATCHDOOR_GIT_SYNC_ENABLED ?? settings.find(
-    (setting) => setting.key === "HATCHDOOR_GIT_SYNC_ENABLED",
-  )?.value ?? "off";
-  const visible = settings.filter((setting) =>
-    COPY[setting.key]?.section === section &&
-    !(section === "versioning" && mode === "local" && GIT_REMOTE_KEYS.has(setting.key)),
-  );
-  const editable = visible.filter((setting) => !setting.locked);
-  const locked = visible.filter((setting) => setting.locked);
-  const changed = (setting: Setting) => drafts[setting.key] !== undefined;
 
-  const save = async () => {
-    const updates = Object.fromEntries(
-      editable
-        .filter(changed)
-        .map((setting) => [
-          setting.key,
-          wireValue(setting, drafts[setting.key]),
-        ]),
-    );
-    if (Object.keys(updates).length === 0) return;
-    const changesIndexing = editable.some(
-      (setting) => changed(setting) && setting.class === "reindex",
-    );
-    if (
-      changesIndexing &&
-      !window.confirm(
-        "This change will rebuild the search index in the background. Search stays available from its current index until the rebuild finishes. Continue?",
-      )
-    ) {
-      return;
-    }
+  const effective = (setting: Setting) =>
+    drafts[setting.key] ?? setting.value ?? "";
+  const mode = normalizeMode(
+    drafts.HATCHDOOR_GIT_SYNC_ENABLED ??
+      settings.find((item) => item.key === "HATCHDOOR_GIT_SYNC_ENABLED")
+        ?.value ??
+      "off",
+  );
+
+  const visible = (setting: Setting) => {
+    if (!COPY[setting.key]) return false;
+    if (mode === "off" && VERSIONING_DETAIL.includes(setting.key)) return false;
+    if (mode === "local" && REMOTE_ONLY.includes(setting.key)) return false;
+    return true;
+  };
+  const inSection = (id: SectionId) =>
+    settings.filter((item) => COPY[item.key]?.section === id && visible(item));
+
+  const fields = inSection(active);
+  const editable = fields.filter((item) => !item.locked);
+  const locked = fields.filter((item) => item.locked);
+  const dirtyKeys = editable
+    .filter((item) => drafts[item.key] !== undefined)
+    .map((item) => item.key);
+
+  const editableCount = settings.filter(
+    (item) => COPY[item.key] && !item.locked,
+  ).length;
+  const pinnedCount = settings.filter(
+    (item) => COPY[item.key] && item.locked === "environment",
+  ).length;
+
+  const edit = (key: string, value: string) => {
+    setSaved(null);
+    setDrafts((old) => ({ ...old, [key]: value }));
+  };
+
+  const discard = () => {
+    setDrafts({});
+    setErrors({});
+    setBanner(null);
+    setBusy(null);
+    setSaved(null);
+    setReplacing({});
+  };
+
+  const send = async (
+    updates: Record<string, string>,
+    accepted?: Consequence,
+  ) => {
     setSaving(true);
     setErrors({});
-    setMessage(null);
+    setBanner(null);
+    setBusy(null);
+    setSaved(null);
     try {
-      let response = await apiFetch("/api/settings", {
+      const response = await apiFetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           updates,
-          ...(changesIndexing ? { confirm_reindex: true } : {}),
+          ...(accepted === "reindex" ? { confirm_reindex: true } : {}),
+          ...(accepted === "git_init" ? { confirm_git_init: true } : {}),
+          ...(accepted === "git_downgrade"
+            ? { confirm_git_downgrade: true }
+            : {}),
         }),
       });
-      let payload = (await response.json()) as {
+      const payload = (await response.json()) as {
         settings?: Setting[];
         error?: string;
-        fields?: { key: string; message: string }[];
-        confirmation_required?: string;
+        fields?: { key: string | null; message: string }[];
+        confirmation_required?: Consequence;
       };
-      if (
-        response.status === 409 &&
-        (payload.confirmation_required === "git_init" ||
-          payload.confirmation_required === "git_downgrade")
-      ) {
-        if (!window.confirm(payload.error ?? "Initialize local versioning?")) return;
-        response = await apiFetch("/api/settings", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            updates,
-            ...(payload.confirmation_required === "git_init"
-              ? { confirm_git_init: true }
-              : { confirm_git_downgrade: true }),
-          }),
+      if (response.status === 409 && payload.confirmation_required) {
+        setConfirmation({
+          consequence: payload.confirmation_required,
+          message: payload.error ?? "This change has a consequence.",
+          updates,
         });
-        payload = (await response.json()) as typeof payload;
+        return;
+      }
+      if (response.status === 409) {
+        setBusy(BUSY_MESSAGE);
+        return;
       }
       if (!response.ok) {
         setErrors(
           Object.fromEntries(
-            (payload.fields ?? []).map((field) => [field.key, field.message]),
+            (payload.fields ?? [])
+              .filter((field) => field.key)
+              .map((field) => [field.key!, field.message]),
           ),
         );
-        setMessage(payload.error ?? "Nothing was saved.");
+        setBanner(payload.error ?? "Nothing was saved.");
         return;
       }
       setSettings(payload.settings ?? settings);
       setDrafts({});
-      setMessage("Saved and applied from server truth.");
+      setRevealed({});
+      setReplacing({});
+      setSaved("Saved");
     } catch {
-      setMessage("Settings could not be saved. Try again.");
+      setBanner("Settings could not be saved. Try again.");
     } finally {
       setSaving(false);
     }
   };
 
+  const save = () => {
+    const updates = Object.fromEntries(
+      editable
+        .filter((item) => drafts[item.key] !== undefined)
+        .map((item) => [
+          item.key,
+          item.key.includes("BYTES")
+            ? fromMb(drafts[item.key])
+            : drafts[item.key],
+        ]),
+    );
+    if (Object.keys(updates).length === 0) return;
+    const rebuilds = editable.some(
+      (item) => drafts[item.key] !== undefined && item.class === "reindex",
+    );
+    if (rebuilds) {
+      setConfirmation({
+        consequence: "reindex",
+        message: REINDEX_CONFIRMATION,
+        updates,
+      });
+      return;
+    }
+    void send(updates);
+  };
+
+  const generateMcpToken = async () => {
+    setBanner(null);
+    try {
+      const response = await apiFetch("/api/settings/mcp-token/generate", {
+        method: "POST",
+      });
+      const payload = (await response.json()) as { value?: string };
+      if (!response.ok || !payload.value) throw new Error();
+      setRevealed((old) => ({
+        ...old,
+        HATCHDOOR_MCP_BEARER_TOKEN: payload.value!,
+      }));
+      edit("HATCHDOOR_MCP_BEARER_TOKEN", payload.value);
+      setSaved("A new password is ready. It is not in use until you save.");
+    } catch {
+      setBanner("The MCP password could not be generated.");
+    }
+  };
+
+  const revealMcpToken = async () => {
+    setBanner(null);
+    try {
+      const response = await apiFetch("/api/settings/mcp-token/reveal", {
+        method: "POST",
+      });
+      const payload = (await response.json()) as { value?: string };
+      if (!response.ok || !payload.value) {
+        setBanner("This MCP password cannot be shown to this session.");
+        return;
+      }
+      setRevealed((old) => ({
+        ...old,
+        HATCHDOOR_MCP_BEARER_TOKEN: payload.value!,
+      }));
+    } catch {
+      setBanner("The MCP password could not be shown.");
+    }
+  };
+
   const revealWebToken = async () => {
-    setMessage(null);
+    setBanner(null);
     try {
       const response = await apiFetch("/api/settings/web-token/reveal", {
         method: "POST",
       });
       if (!response.ok) {
-        setMessage("No web access token is configured for this server.");
+        setBanner("No web access token is set for this server.");
         return;
       }
       const payload = (await response.json()) as { value?: string };
       setWebToken(payload.value ?? null);
     } catch {
-      setMessage("The web access token could not be revealed.");
+      setBanner("The web access token could not be shown.");
     }
   };
 
-  const generateMcpToken = async () => {
-    setMessage(null);
-    try {
-      const response = await apiFetch("/api/settings/mcp-token/generate", {
-        method: "POST",
-      });
-      if (!response.ok) throw new Error("The MCP password could not be generated.");
-      const payload = (await response.json()) as { value?: string };
-      if (!payload.value) throw new Error("The MCP password could not be generated.");
-      setDrafts((old) => ({ ...old, HATCHDOOR_MCP_BEARER_TOKEN: payload.value! }));
-      setMcpTokenCandidate(payload.value);
-      setRevealedMcpToken(null);
-      setMessage("A new MCP password is ready to save. It is not active yet.");
-    } catch (error) {
-      setMessage(
-        error instanceof Error
-          ? error.message
-          : "The MCP password could not be generated.",
+  const control = (setting: Setting) => {
+    const copy = COPY[setting.key];
+    const value = effective(setting);
+
+    if (setting.kind === "switch") {
+      const on = value === "true";
+      return (
+        <button
+          type="button"
+          className="settings-toggle"
+          aria-label={copy.label}
+          aria-pressed={on}
+          onClick={() => edit(setting.key, on ? "false" : "true")}
+        >
+          <span className="settings-toggle-track">
+            <span className="settings-toggle-knob" />
+          </span>
+          <span>{on ? "On" : "Off"}</span>
+        </button>
       );
     }
-  };
 
-  const revealMcpToken = async () => {
-    setMessage(null);
-    try {
-      const response = await apiFetch("/api/settings/mcp-token/reveal", {
-        method: "POST",
-      });
-      if (!response.ok) {
-        setMessage("This MCP password cannot be revealed to this session.");
-        return;
-      }
-      const payload = (await response.json()) as { value?: string };
-      setRevealedMcpToken(payload.value ?? null);
-    } catch {
-      setMessage("The MCP password could not be revealed.");
-    }
-  };
-
-  if (loading)
-    return (
-      <main className="settings-page">
-        <p>Loading settings…</p>
-      </main>
-    );
-  return (
-    <main className="settings-page">
-      <header className="settings-header">
-        <p className="settings-eyebrow">Server settings</p>
-        <h1>Settings</h1>
-        <p>Changes apply to this running Hatchdoor server.</p>
-        <p className="settings-web-token">
-          <button
-            onClick={() => {
-              if (webToken) setWebToken(null);
-              else void revealWebToken();
-            }}
-          >
-            {webToken ? "Hide web access token" : "Show web access token"}
-          </button>
-          {webToken ? <code>{webToken}</code> : null}
-        </p>
-      </header>
-      <div className="settings-live">
-        <span className="settings-index-status">
-          <b>Search index</b>
-          {indexStatusError ? " Status unavailable" : null}
-          {!indexStatus && !indexStatusError ? " Checking status…" : null}
-          {indexStatus?.state === "up_to_date" ? " Up to date" : null}
-          {indexStatus?.state === "rebuilding" ? (
-            <>
-              <strong>Rebuilding in the background</strong>
-              <small>
-                Search remains available from the previous coherent index while
-                this rebuild runs.
-              </small>
-              {indexStatus.notes_completed !== undefined &&
-              indexStatus.notes_total !== undefined &&
-              indexStatus.percent !== undefined ? (
-                <small>
-                  {indexStatus.notes_completed} / {indexStatus.notes_total}{" "}
-                  notes · {indexStatus.percent}%
-                  {indexStatus.eta_seconds !== undefined
-                    ? ` · about ${formatEta(indexStatus.eta_seconds)} left`
-                    : ""}
-                </small>
-              ) : null}
-              {indexStatus.last_failure ? (
-                <small>
-                  Most recent rebuild failure: {indexStatus.last_failure}
-                </small>
-              ) : null}
-            </>
-          ) : null}
-          {indexStatus?.state === "failed" ? (
-            <>
-              <strong>
-                Rebuild failed; search is using the previous coherent index
-              </strong>
-              {indexStatus.last_failure ? (
-                <small>{indexStatus.last_failure}</small>
-              ) : null}
-            </>
-          ) : null}
-        </span>
-        <span>
-          <b>Versioning</b> Status is managed by the server
-          {gitStatus ? (
-            <small>
-              {gitStatus.state === "disabled"
-                ? " Off"
-                : ` ${gitStatus.mode} · ${gitStatus.state}`}
-              {gitStatus.pending ? ` · ${gitStatus.pending} changes waiting` : ""}
-              {gitStatus.unpushed !== undefined ? ` · ${gitStatus.unpushed} not sent` : ""}
-              {gitStatus.last_error ? ` · ${gitStatus.last_error}` : ""}
-            </small>
-          ) : null}
-        </span>
-      </div>
-      <div className="settings-layout">
-        <nav className="settings-index" aria-label="Settings sections">
-          {SECTIONS.map((item) => {
-            const rows = settings.filter(
-              (setting) => COPY[setting.key]?.section === item.id,
-            );
-            const editableCount = rows.filter(
-              (setting) => !setting.locked,
-            ).length;
-            return (
-              <button
-                key={item.id}
-                data-active={item.id === section}
-                onClick={() => setSection(item.id)}
-              >
-                <span>{item.number}</span>
-                {item.title}
-                <small>
-                  {editableCount} / {rows.length} editable
-                </small>
-              </button>
-            );
-          })}
-        </nav>
-        <section
-          className="settings-section"
-          aria-labelledby="settings-section-title"
+    if (setting.kind === "mode") {
+      const selected = normalizeMode(value);
+      return (
+        <div
+          className="settings-segmented"
+          role="group"
+          aria-label={copy.label}
         >
-          <header>
-            <p>{current.number}</p>
-            <h2 id="settings-section-title">{current.title}</h2>
-            <span>{current.blurb}</span>
-          </header>
-          {message ? (
-            <p className="settings-message" role="status">
-              {message}
-            </p>
+          {MODES.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              aria-pressed={selected === item.id}
+              onClick={() => edit(setting.key, item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      );
+    }
+
+    if (setting.kind === "number") {
+      const shown = setting.key.includes("BYTES") ? toMb(value) : value;
+      return (
+        <div className="settings-inline">
+          <input
+            className="settings-input settings-input-short"
+            type="number"
+            aria-label={copy.label}
+            value={shown}
+            onChange={(event) => edit(setting.key, event.target.value)}
+          />
+          {copy.unit ? (
+            <span className="settings-unit">{copy.unit}</span>
           ) : null}
-          {editable.map((setting) => (
-            <label className="settings-field" key={setting.key}>
-              <span>
-                {COPY[setting.key].label}
-                <code>{setting.key}</code>
-                <small>{sourceLabel(setting.source)}</small>
-              </span>
-              {setting.kind === "switch" ? (
-                <input
-                  type="checkbox"
-                  checked={(drafts[setting.key] ?? setting.value) === "true"}
-                  onChange={(event) =>
-                    setDrafts((old) => ({
-                      ...old,
-                      [setting.key]: event.target.checked ? "true" : "false",
-                    }))
-                  }
-                />
-              ) : setting.kind === "mode" ? (
-                <select
-                  value={drafts[setting.key] ?? setting.value ?? "off"}
-                  onChange={(event) => setDrafts((old) => ({ ...old, [setting.key]: event.target.value }))}
+        </div>
+      );
+    }
+
+    if (setting.kind === "secret") {
+      const isMcp = setting.key === "HATCHDOOR_MCP_BEARER_TOKEN";
+      const draft = drafts[setting.key];
+      const shown = revealed[setting.key];
+      const masked =
+        draft === undefined && shown === undefined && setting.configured;
+      const editing = !masked || replacing[setting.key];
+      return (
+        <div className="settings-inline">
+          <input
+            className="settings-input"
+            type="text"
+            aria-label={copy.label}
+            placeholder="not set"
+            value={draft ?? shown ?? (masked ? "••••••••••••••••" : "")}
+            readOnly={masked && !replacing[setting.key]}
+            onChange={(event) => edit(setting.key, event.target.value)}
+          />
+          {isMcp && setting.configured && shown === undefined ? (
+            <button
+              type="button"
+              className="settings-mini"
+              onClick={() => void revealMcpToken()}
+            >
+              Show
+            </button>
+          ) : null}
+          {shown !== undefined ? (
+            <button
+              type="button"
+              className="settings-mini"
+              onClick={() =>
+                setRevealed((old) => {
+                  const next = { ...old };
+                  delete next[setting.key];
+                  return next;
+                })
+              }
+            >
+              Hide
+            </button>
+          ) : null}
+          {!editing ? (
+            <button
+              type="button"
+              className="settings-mini"
+              onClick={() => {
+                setReplacing((old) => ({ ...old, [setting.key]: true }));
+                edit(setting.key, "");
+              }}
+            >
+              Replace
+            </button>
+          ) : null}
+          {isMcp ? (
+            <button
+              type="button"
+              className="settings-mini"
+              onClick={() => void generateMcpToken()}
+            >
+              Generate
+            </button>
+          ) : null}
+        </div>
+      );
+    }
+
+    return (
+      <input
+        className="settings-input"
+        type="text"
+        aria-label={copy.label}
+        placeholder={copy.example}
+        value={value}
+        onChange={(event) => edit(setting.key, event.target.value)}
+      />
+    );
+  };
+
+  if (loading) {
+    return (
+      <div className="settings-page">
+        <p className="settings-muted">Loading settings…</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-page">
+      <div className="settings-layout">
+        <aside className="settings-index">
+          <p className="settings-eyebrow">Server settings</p>
+          <nav aria-label="Settings sections">
+            {SECTIONS.map((item) => {
+              const rows = inSection(item.id);
+              const dirty = rows.some(
+                (row) => drafts[row.key] !== undefined && !row.locked,
+              );
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="settings-index-item"
+                  data-active={item.id === active}
+                  onClick={() => setActive(item.id)}
                 >
-                  <option value="off">Off</option>
-                  <option value="local">Local history</option>
-                  <option value="remote">Remote sync</option>
-                </select>
-              ) : (
-                <input
-                  type={
-                    setting.kind === "number"
-                      ? "number"
-                      : setting.kind === "secret"
-                        ? "password"
-                        : "text"
-                  }
-                  value={
-                    drafts[setting.key] ??
-                    (setting.key.includes("BYTES")
-                      ? mbValue(setting.value)
-                      : (setting.value ?? ""))
-                  }
-                  placeholder={
-                    setting.kind === "secret" && setting.configured
-                      ? "Configured"
-                      : ""
-                  }
-                  onChange={(event) =>
-                    {
-                      if (setting.key === "HATCHDOOR_MCP_BEARER_TOKEN") {
-                        setMcpTokenCandidate(null);
-                      }
-                      setDrafts((old) => ({
-                        ...old,
-                        [setting.key]: event.target.value,
-                      }));
-                    }
-                  }
-                />
-              )}
-              {COPY[setting.key].unit ? (
-                <em>{COPY[setting.key].unit}</em>
-              ) : null}
-              {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
-                <span>
-                  <button type="button" onClick={() => void generateMcpToken()}>
-                    Generate MCP password
-                  </button>
-                  {setting.configured ? (
-                    <button type="button" onClick={() => void revealMcpToken()}>
-                      Reveal MCP password
-                    </button>
+                  <span className="settings-index-num">{item.number}</span>
+                  <span className="settings-index-title">{item.title}</span>
+                  {dirty ? (
+                    <span className="settings-dirty" aria-label="unsaved" />
                   ) : null}
-                  {mcpTokenCandidate ? <code>{mcpTokenCandidate}</code> : null}
-                  {revealedMcpToken ? <code>{revealedMcpToken}</code> : null}
+                  <span className="settings-index-count">
+                    {rows.filter((row) => !row.locked).length}/{rows.length}
+                  </span>
+                </button>
+              );
+            })}
+          </nav>
+          <div className="settings-index-foot">
+            {editableCount === 0 ? (
+              <p>
+                Every setting is set in <code>.env</code>. Nothing on this page
+                can be changed from here.
+              </p>
+            ) : (
+              <p>
+                {editableCount} editable here, {pinnedCount} set in{" "}
+                <code>.env</code>.
+              </p>
+            )}
+            <button
+              type="button"
+              className="settings-link"
+              onClick={() => {
+                if (webToken) setWebToken(null);
+                else void revealWebToken();
+              }}
+            >
+              {webToken ? "Hide web access token" : "Show web access token"}
+            </button>
+            {webToken ? <code>{webToken}</code> : null}
+          </div>
+        </aside>
+
+        <div className="settings-main">
+          <div className="settings-console">
+            <div className="settings-console-cell">
+              <span className="settings-console-lbl">Search index</span>
+              {indexStatus?.state === "rebuilding" ? (
+                <>
+                  <span className="settings-console-val">
+                    Rebuilding {indexStatus.percent ?? 0}%
+                  </span>
+                  <div className="settings-mini-bar">
+                    <span style={{ width: `${indexStatus.percent ?? 0}%` }} />
+                  </div>
+                  <span className="settings-muted">
+                    Still answering from the old setting ·{" "}
+                    {formatEta(indexStatus.eta_seconds)}
+                  </span>
+                </>
+              ) : indexStatus?.drift || indexStatus?.state === "failed" ? (
+                <span className="settings-console-val settings-warn">
+                  Behind your settings
+                </span>
+              ) : (
+                <span className="settings-console-val">Up to date</span>
+              )}
+            </div>
+            <div className="settings-console-cell">
+              <span className="settings-console-lbl">Versioning</span>
+              <span className="settings-console-val">
+                <span
+                  className={`settings-dot is-${gitStatus?.state ?? "disabled"}`}
+                />
+                {!gitStatus || gitStatus.state === "disabled"
+                  ? "Off"
+                  : gitStatus.state === "starting"
+                    ? "Starting…"
+                    : gitStatus.state === "stopping"
+                      ? "Finishing…"
+                      : gitStatus.mode === "local"
+                        ? "On, this machine"
+                        : "On, sending"}
+              </span>
+              {formatWhen(gitStatus?.last_sync_at) ? (
+                <span className="settings-muted">
+                  last recorded {formatWhen(gitStatus?.last_sync_at)}
                 </span>
               ) : null}
-              <small>{COPY[setting.key].help}</small>
-              {setting.class === "reindex" ? (
-                <small>Saving this rebuilds the search index.</small>
+              {gitStatus?.mode === "remote" && gitStatus.unpushed != null ? (
+                <span className="settings-muted">
+                  {gitStatus.unpushed} waiting to send
+                </span>
               ) : null}
-              {errors[setting.key] ? (
-                <strong>{errors[setting.key]}</strong>
-              ) : null}
-            </label>
-          ))}
-          {editable.length ? (
-            <div className="settings-actions">
-              <button
-                onClick={() => {
-                  setDrafts({});
-                  setErrors({});
-                }}
-                disabled={saving}
-              >
-                Discard
-              </button>
-              <button onClick={() => void save()} disabled={saving}>
-                {saving ? "Saving…" : `Save ${current.title}`}
-              </button>
+            </div>
+          </div>
+
+          <div className="settings-sec-head">
+            <div>
+              <h2 className="settings-sec-title">
+                <span className="settings-sec-num">{section.number}</span>{" "}
+                {section.title}
+              </h2>
+              <p className="settings-sec-blurb">{section.blurb}</p>
+            </div>
+            {/* A section with nothing to edit is a record, not a form: no dead
+                save button above a plaque holding all its content. */}
+            {editable.length === 0 ? null : (
+              <div className="settings-sec-actions">
+                {saved ? <span className="settings-ok">{saved}</span> : null}
+                <button
+                  type="button"
+                  className="settings-btn"
+                  onClick={discard}
+                  disabled={dirtyKeys.length === 0 || saving}
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  className="settings-btn settings-btn-hot"
+                  onClick={save}
+                  disabled={dirtyKeys.length === 0 || saving}
+                >
+                  {saving ? "Saving…" : `Save ${section.title.toLowerCase()}`}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {banner ? (
+            <div className="settings-notice settings-notice-err" role="alert">
+              {banner}
             </div>
           ) : null}
-          {locked.length ? (
-            <aside className="settings-plaque">
-              <h3>Managed outside this page</h3>
-              {locked.map((setting) => (
-                <div key={setting.key}>
-                  <b>{COPY[setting.key].label}</b>
-                  <code>{setting.key}</code>
-                  <span>
-                    {setting.kind === "secret"
-                      ? setting.configured
-                        ? "set"
-                        : "not set"
-                      : setting.value}
-                  </span>
-                  <p>{lockExplanation(setting.locked!)}</p>
-                </div>
-              ))}
-            </aside>
+          {busy ? (
+            <div className="settings-notice settings-notice-warn" role="alert">
+              {busy}
+            </div>
           ) : null}
-        </section>
+
+          <div className="settings-rows" data-empty={editable.length === 0}>
+            {editable.map((setting) => {
+              const copy = COPY[setting.key];
+              const error = errors[setting.key];
+              return (
+                <div
+                  className={`settings-row${error ? " has-error" : ""}`}
+                  key={setting.key}
+                >
+                  <div>
+                    <div className="settings-row-label">
+                      {copy.label}
+                      {drafts[setting.key] !== undefined ? (
+                        <span className="settings-dirty" aria-label="unsaved" />
+                      ) : null}
+                    </div>
+                    <p className="settings-row-help">{copy.help}</p>
+                    {copy.note ? (
+                      <p className="settings-row-note">{copy.note}</p>
+                    ) : null}
+                    {setting.class === "reindex" ? (
+                      <p className="settings-row-class">
+                        Saving this rebuilds the search index.
+                      </p>
+                    ) : null}
+                    {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
+                      <p className="settings-row-class">
+                        This password also controls who can upload files, not
+                        only who can talk to assistants.
+                      </p>
+                    ) : null}
+                    {error ? <p className="settings-error">{error}</p> : null}
+                  </div>
+                  <div>{control(setting)}</div>
+                </div>
+              );
+            })}
+          </div>
+
+          {locked.length ? (
+            <div className="settings-plaque">
+              <p className="settings-plaque-head">Managed outside this page</p>
+              <dl>
+                {locked.map((setting) => (
+                  <div className="settings-plaque-row" key={setting.key}>
+                    <dt>
+                      {COPY[setting.key].label}
+                      <code>{setting.key}</code>
+                    </dt>
+                    <dd>{plaqueValue(setting)}</dd>
+                  </div>
+                ))}
+              </dl>
+              {[...new Set(locked.map((setting) => setting.locked!))].map(
+                (reason) => (
+                  <p className="settings-plaque-why" key={reason}>
+                    {LOCK_WHY[reason]}
+                  </p>
+                ),
+              )}
+            </div>
+          ) : null}
+        </div>
       </div>
-    </main>
+
+      {confirmation ? (
+        <div className="settings-modal-back">
+          <div
+            className="settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Before this is saved"
+          >
+            <h3>Before this is saved</h3>
+            <p>{confirmation.message}</p>
+            <div className="settings-modal-actions">
+              <button
+                type="button"
+                className="settings-btn"
+                onClick={() => setConfirmation(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="settings-btn settings-btn-hot"
+                onClick={() => {
+                  const pending = confirmation;
+                  setConfirmation(null);
+                  void send(pending.updates, pending.consequence);
+                }}
+              >
+                Go ahead
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
