@@ -70,7 +70,7 @@ function ExplorerRail({
       {settingsEnabled ? (
         <NavLink
           className={({ isActive }) =>
-            `explorer-rail-item${isActive ? " active" : ""}`
+            `explorer-rail-item explorer-rail-settings${isActive ? " active" : ""}`
           }
           to="/settings"
           aria-label="Settings"

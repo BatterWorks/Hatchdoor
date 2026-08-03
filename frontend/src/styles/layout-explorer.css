@@ -77,9 +77,12 @@
   outline-offset: 1px;
 }
 
-/* Settings reserves its slot until issue #13 exists. Dimmed, never clickable. */
-.explorer-rail-item.is-disabled {
+/* Settings stays separated at the far edge of the rail. */
+.explorer-rail-settings {
   margin-left: auto;
+}
+
+.explorer-rail-item.is-disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }

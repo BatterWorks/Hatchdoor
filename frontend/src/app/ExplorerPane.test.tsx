@@ -92,10 +92,9 @@ describe("ExplorerPane", () => {
     expect(
       screen.getByRole("button", { name: "Recently changed notes" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute(
-      "href",
-      "/settings",
-    );
+    const settings = screen.getByRole("link", { name: "Settings" });
+    expect(settings).toHaveAttribute("href", "/settings");
+    expect(settings).toHaveClass("explorer-rail-settings");
   });
 
   it("hides the footer create action when write mode is off", () => {
