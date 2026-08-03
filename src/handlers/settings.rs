@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
 use crate::api_types::ErrorResponse;
-use crate::app_state::AppState;
+use crate::app_state::{AppState, schedule_settings_reindex};
 use crate::runtime_config::{ConfigSnapshot, SettingSource};
 
 /// A deliberately generous ceiling: multipart files are buffered while they
@@ -41,6 +41,8 @@ pub struct SettingResponse {
 #[serde(deny_unknown_fields)]
 pub struct PatchSettingsRequest {
     pub updates: BTreeMap<String, String>,
+    #[serde(default)]
+    pub confirm_reindex: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +80,18 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> impl IntoRes
     Json(settings_response(&state.runtime_snapshot()))
 }
 
+/// Settings-only background reindex state. This deliberately stays separate
+/// from startup readiness: search continues to use its prior coherent SQLite
+/// snapshot while this status reports configuration drift.
+pub async fn get_index_status_handler(State(state): State<AppState>) -> Response {
+    let mut response = Json(state.index_status.status()).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 /// A viewer who already authenticated with the web bearer token gains no new
 /// capability by seeing it. The response is deliberately non-cacheable and is
 /// not part of the ordinary settings document, which never contains secrets.
@@ -110,7 +124,21 @@ pub async fn patch_settings_handler(
         }
     };
     let snapshot = state.runtime_snapshot();
-    let errors = validate_updates(&snapshot, &request.updates);
+    let reindex_changed = reindex_setting_changed(&snapshot, &request.updates);
+    let mut errors = validate_updates(&snapshot, &request.updates);
+    if reindex_changed && !request.confirm_reindex {
+        errors.extend(
+            request
+                .updates
+                .iter()
+                .filter(|(key, value)| is_reindex_setting_changed(&snapshot, key, value))
+                .map(|(key, _)| FieldError {
+                    key: key.clone(),
+                    message: "Confirm the search-index rebuild before saving this setting."
+                        .to_string(),
+                }),
+        );
+    }
     if !errors.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -123,9 +151,30 @@ pub async fn patch_settings_handler(
     }
 
     match state.runtime_config.save(request.updates) {
-        Ok(snapshot) => Json(settings_response(&snapshot)).into_response(),
+        Ok(snapshot) => {
+            if reindex_changed {
+                schedule_settings_reindex(state);
+            }
+            Json(settings_response(&snapshot)).into_response()
+        }
         Err(error) => crate::app_state::internal_error(error).into_response(),
     }
+}
+
+fn reindex_setting_changed(snapshot: &ConfigSnapshot, updates: &BTreeMap<String, String>) -> bool {
+    updates
+        .iter()
+        .any(|(key, value)| is_reindex_setting_changed(snapshot, key, value))
+}
+
+fn is_reindex_setting_changed(snapshot: &ConfigSnapshot, key: &str, value: &str) -> bool {
+    SETTINGS.iter().any(|(known, class, _)| {
+        key == *known
+            && *class == "reindex"
+            && snapshot
+                .setting(key)
+                .is_some_and(|setting| setting.value != value)
+    })
 }
 
 fn settings_response(snapshot: &ConfigSnapshot) -> SettingsResponse {

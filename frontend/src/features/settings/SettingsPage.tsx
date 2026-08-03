@@ -13,6 +13,23 @@ type Setting = {
   kind: SettingKind;
 };
 
+type IndexStatus = {
+  state: "up_to_date" | "rebuilding" | "failed";
+  stale: boolean;
+  drift: boolean;
+  notes_completed?: number;
+  notes_total?: number;
+  chunks_completed?: number;
+  chunks_total?: number;
+  tokens_completed?: number;
+  tokens_total?: number;
+  percent?: number;
+  eta_seconds?: number;
+  last_failure?: string | null;
+};
+
+const INDEX_STATUS_POLL_MS = 2_000;
+
 const SECTIONS = [
   {
     id: "vault",
@@ -161,6 +178,13 @@ function lockExplanation(lock: NonNullable<Setting["locked"]>): string {
     : "Hatchdoor always follows whichever branch your vault folder is on, so there is nothing to choose.";
 }
 
+function formatEta(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes === 0) return `${remainingSeconds}s`;
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
 export function SettingsPage() {
   const [settings, setSettings] = useState<Setting[]>([]);
   const [section, setSection] =
@@ -171,6 +195,8 @@ export function SettingsPage() {
   const [webToken, setWebToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  const [indexStatusError, setIndexStatusError] = useState<string | null>(null);
 
   const load = async () => {
     const response = await apiFetch("/api/settings");
@@ -191,6 +217,32 @@ export function SettingsPage() {
         ),
       )
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const loadIndexStatus = async () => {
+      try {
+        const response = await apiFetch("/api/index-status");
+        if (!response.ok) throw new Error("Index status could not be loaded.");
+        const payload = (await response.json()) as IndexStatus;
+        if (active) {
+          setIndexStatus(payload);
+          setIndexStatusError(null);
+        }
+      } catch {
+        if (active) setIndexStatusError("Index status could not be loaded.");
+      }
+    };
+    void loadIndexStatus();
+    const interval = window.setInterval(
+      () => void loadIndexStatus(),
+      INDEX_STATUS_POLL_MS,
+    );
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
   const current = useMemo(
@@ -214,6 +266,17 @@ export function SettingsPage() {
         ]),
     );
     if (Object.keys(updates).length === 0) return;
+    const changesIndexing = editable.some(
+      (setting) => changed(setting) && setting.class === "reindex",
+    );
+    if (
+      changesIndexing &&
+      !window.confirm(
+        "This change will rebuild the search index in the background. Search stays available from its current index until the rebuild finishes. Continue?",
+      )
+    ) {
+      return;
+    }
     setSaving(true);
     setErrors({});
     setMessage(null);
@@ -221,7 +284,10 @@ export function SettingsPage() {
       const response = await apiFetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates }),
+        body: JSON.stringify({
+          updates,
+          ...(changesIndexing ? { confirm_reindex: true } : {}),
+        }),
       });
       const payload = (await response.json()) as {
         settings?: Setting[];
@@ -289,8 +355,46 @@ export function SettingsPage() {
         </p>
       </header>
       <div className="settings-live">
-        <span>
-          <b>Search index</b> Up to date
+        <span className="settings-index-status">
+          <b>Search index</b>
+          {indexStatusError ? " Status unavailable" : null}
+          {!indexStatus && !indexStatusError ? " Checking status…" : null}
+          {indexStatus?.state === "up_to_date" ? " Up to date" : null}
+          {indexStatus?.state === "rebuilding" ? (
+            <>
+              <strong>Rebuilding in the background</strong>
+              <small>
+                Search remains available from the previous coherent index while
+                this rebuild runs.
+              </small>
+              {indexStatus.notes_completed !== undefined &&
+              indexStatus.notes_total !== undefined &&
+              indexStatus.percent !== undefined ? (
+                <small>
+                  {indexStatus.notes_completed} / {indexStatus.notes_total}{" "}
+                  notes · {indexStatus.percent}%
+                  {indexStatus.eta_seconds !== undefined
+                    ? ` · about ${formatEta(indexStatus.eta_seconds)} left`
+                    : ""}
+                </small>
+              ) : null}
+              {indexStatus.last_failure ? (
+                <small>
+                  Most recent rebuild failure: {indexStatus.last_failure}
+                </small>
+              ) : null}
+            </>
+          ) : null}
+          {indexStatus?.state === "failed" ? (
+            <>
+              <strong>
+                Rebuild failed; search is using the previous coherent index
+              </strong>
+              {indexStatus.last_failure ? (
+                <small>{indexStatus.last_failure}</small>
+              ) : null}
+            </>
+          ) : null}
         </span>
         <span>
           <b>Versioning</b> Status is managed by the server
