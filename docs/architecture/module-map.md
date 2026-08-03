@@ -99,6 +99,8 @@ that production inventory are still checked for stale paths and duplicates.
   to place in `.env`.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
+  `AppState::index_status` separately tracks setting-triggered rebuild drift,
+  progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
   reindex binds before it starts.
 - `AppConfig` is the environment-derived deployment contract and interprets the
@@ -487,7 +489,10 @@ force-checkout over uncommitted manual vault edits (ADR-10).
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
 behavior. `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
-full refreshed document. It never exposes secret values.
+full refreshed document. Reindex-class saves require an explicit confirmation,
+then persist before asynchronously rebuilding; `/api/index-status` reports that
+dedicated rebuild's stale drift, progress, ETA, and last failure without
+reusing startup readiness. It never exposes secret values.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, and auth.
@@ -892,9 +897,11 @@ route tests, and full frontend checks.
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
 **Public contract:** the Settings page presents server-provided setting metadata
-at `/settings`, keeps copy and section layout in the browser, and PATCHes only
-the active section's changed keys to `/api/settings` before replacing its state
-with the complete response.
+at `/settings`, keeps copy and section layout in the browser, confirms saves
+that rebuild indexing, PATCHes only the active section's changed keys to
+`/api/settings` before replacing its state with the complete response, and
+polls `/api/index-status` for dedicated stale-index progress without using the
+startup gate.
 
 **Consumed dependencies:** authenticated `apiFetch` and the settings HTTP
 contract.
@@ -902,7 +909,7 @@ contract.
 **Coordination paths:** `frontend/src/App.tsx` (route),
 `frontend/src/app/ExplorerPane.tsx` (normal-deployment navigation),
 `frontend/src/App.css` (stylesheet aggregation), `src/server.rs` (SPA/API
-routes), and `src/handlers/settings.rs` (wire producer).
+routes), and `src/handlers/settings.rs` (settings and index-status wire producer).
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than

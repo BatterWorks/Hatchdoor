@@ -1,10 +1,11 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock as StdRwLock};
 use std::time::Instant;
 
 use axum::Json;
 use axum::http::StatusCode;
+use serde::Serialize;
 use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, error, info};
 
@@ -52,10 +53,163 @@ pub struct AppState {
     pub scan_config: Arc<VaultScanConfig>,
     /// Held while a reindex runs so concurrent refreshes coalesce into one.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Dedicated status for reindexes triggered by live indexing settings.
+    /// Unlike startup readiness, this never gates a coherent existing index.
+    pub index_status: IndexStatusTracker,
     /// Captured environment plus durable live-applicable settings. Consumers
     /// bind an immutable snapshot once per operation.
     pub runtime_config: crate::runtime_config::RuntimeConfig,
     pub startup: StartupTracker,
+}
+
+#[derive(Clone)]
+pub struct IndexStatusTracker(Arc<StdRwLock<IndexStatus>>);
+
+#[derive(Clone, Debug, Serialize)]
+pub struct IndexStatusResponse {
+    pub state: &'static str,
+    /// True means the last coherent index was built with older indexing settings.
+    pub stale: bool,
+    /// Kept explicit so clients can distinguish settings drift from generic search health.
+    pub drift: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunks_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_completed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexStatusPhase {
+    UpToDate,
+    Rebuilding,
+    Failed,
+}
+
+#[derive(Debug)]
+struct IndexStatus {
+    phase: IndexStatusPhase,
+    target_generation: u64,
+    active_generation: Option<u64>,
+    progress: Option<IndexingProgressSnapshot>,
+    last_failure: Option<String>,
+}
+
+impl IndexStatusTracker {
+    pub(crate) fn up_to_date() -> Self {
+        Self(Arc::new(StdRwLock::new(IndexStatus {
+            phase: IndexStatusPhase::UpToDate,
+            target_generation: 0,
+            active_generation: None,
+            progress: None,
+            last_failure: None,
+        })))
+    }
+
+    /// Record a persisted reindex-setting change before the background task is spawned.
+    pub(crate) fn queue_rebuild(&self) -> u64 {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        status.target_generation += 1;
+        status.phase = IndexStatusPhase::Rebuilding;
+        status.target_generation
+    }
+
+    pub(crate) fn start_rebuild(&self, generation: u64) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        status.phase = IndexStatusPhase::Rebuilding;
+        status.active_generation = Some(generation);
+        status.progress = None;
+    }
+
+    pub(crate) fn report_progress(&self, generation: u64, progress: IndexingProgressSnapshot) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        if status.active_generation == Some(generation) {
+            status.progress = Some(progress);
+        }
+    }
+
+    pub(crate) fn finish_rebuild(&self, generation: u64) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        if status.active_generation == Some(generation) {
+            status.active_generation = None;
+            status.progress = None;
+        }
+        if status.target_generation == generation {
+            status.phase = IndexStatusPhase::UpToDate;
+            status.last_failure = None;
+        } else {
+            status.phase = IndexStatusPhase::Rebuilding;
+        }
+    }
+
+    pub(crate) fn fail_rebuild(&self, generation: u64, error: impl Into<String>) {
+        let mut status = self.0.write().expect("index status tracker poisoned");
+        if status.active_generation == Some(generation) {
+            status.active_generation = None;
+            status.progress = None;
+        }
+        status.last_failure = Some(error.into());
+        status.phase = if status.target_generation == generation {
+            IndexStatusPhase::Failed
+        } else {
+            IndexStatusPhase::Rebuilding
+        };
+    }
+
+    pub fn status(&self) -> IndexStatusResponse {
+        let status = self.0.read().expect("index status tracker poisoned");
+        let (state, stale) = match status.phase {
+            IndexStatusPhase::UpToDate => ("up_to_date", false),
+            IndexStatusPhase::Rebuilding => ("rebuilding", true),
+            IndexStatusPhase::Failed => ("failed", true),
+        };
+        let progress = status.progress;
+        IndexStatusResponse {
+            state,
+            stale,
+            drift: stale,
+            notes_completed: progress.map(|value| value.notes_completed),
+            notes_total: progress.map(|value| value.notes_total),
+            chunks_completed: progress.map(|value| value.chunks_completed),
+            chunks_total: progress.map(|value| value.chunks_total),
+            tokens_completed: progress.map(|value| value.tokens_completed),
+            tokens_total: progress.map(|value| value.tokens_total),
+            percent: progress.map(progress_percent),
+            eta_seconds: progress.and_then(progress_eta_seconds),
+            last_failure: status.last_failure.clone(),
+        }
+    }
+}
+
+fn progress_percent(progress: IndexingProgressSnapshot) -> u8 {
+    if progress.tokens_total == 0 {
+        return 0;
+    }
+    ((progress.tokens_completed.saturating_mul(100) / progress.tokens_total).min(100)) as u8
+}
+
+fn progress_eta_seconds(progress: IndexingProgressSnapshot) -> Option<u64> {
+    if progress.tokens_completed == 0 || progress.tokens_completed >= progress.tokens_total {
+        return None;
+    }
+    let remaining = progress.tokens_total - progress.tokens_completed;
+    Some(
+        progress.elapsed_seconds.saturating_mul(remaining as u64)
+            / progress.tokens_completed as u64,
+    )
 }
 
 impl AppState {
@@ -203,22 +357,50 @@ pub async fn refresh_coalescing(state: &AppState) -> Result<(), (StatusCode, Jso
             return Ok(());
         }
     };
-    run_reindex(state).await
+    run_reindex(state, None).await.map_err(internal_error)
 }
 
 /// Guaranteed refresh for paths that must see their own change reflected (MCP
 /// writes, the vault watcher): waits for any in-flight reindex, then reindexes.
 pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let _refresh_guard = state.refresh_lock.lock().await;
-    run_reindex(state).await
+    run_reindex(state, None).await.map_err(internal_error)
 }
 
-async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+/// Spawn an index-settings rebuild after its new settings have been persisted.
+/// Each request receives a generation; queued requests run serially and the
+/// final completed generation always reflects the latest stored configuration.
+pub fn schedule_settings_reindex(state: AppState) {
+    let generation = state.index_status.queue_rebuild();
+    tokio::spawn(async move {
+        let _refresh_guard = state.refresh_lock.lock().await;
+        state.index_status.start_rebuild(generation);
+        let progress_tracker = state.index_status.clone();
+        let on_progress = Arc::new(move |progress| {
+            progress_tracker.report_progress(generation, progress);
+        });
+        match run_reindex(&state, Some(on_progress)).await {
+            Ok(()) => state.index_status.finish_rebuild(generation),
+            Err(error) => {
+                error!(generation, %error, "Settings-triggered index rebuild failed");
+                state.index_status.fail_rebuild(
+                    generation,
+                    "The index rebuild failed. Check the Hatchdoor logs for details.",
+                );
+            }
+        }
+    });
+}
+
+async fn run_reindex(
+    state: &AppState,
+    on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+) -> Result<(), String> {
     let sqlite = state.cache.read().await.sqlite.clone();
     let vault_path = state.vault_path.clone();
     let embedder = state.embedder.clone();
     let runtime_snapshot = state.runtime_snapshot();
-    let scan_config = AppState::runtime_scan_config(&runtime_snapshot).map_err(internal_error)?;
+    let scan_config = AppState::runtime_scan_config(&runtime_snapshot)?;
     let embed_layers = runtime_snapshot
         .setting("HATCHDOOR_EMBED_LAYERS")
         .map(|setting| is_truthy(&setting.value))
@@ -233,7 +415,7 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
     // The reindex writes inside a single SQLite transaction; WAL lets readers on
     // pooled connections keep serving the prior snapshot until it commits, so we
     // no longer hold the cache write lock for the whole rebuild (F-03).
-    run_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         info!("Scanning vault for notes…");
         let scan_started = Instant::now();
         let index =
@@ -246,11 +428,12 @@ async fn run_reindex(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResp
         sqlite.replace_from_index_with_embedder_and_progress_with_embed_layers(
             &index,
             embedder.as_ref(),
-            None,
+            on_progress,
             embed_layers,
         )
     })
-    .await?;
+    .await
+    .map_err(|error| format!("background reindex task panicked: {error}"))??;
 
     debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
 
@@ -306,6 +489,58 @@ pub fn test_embedder() -> Arc<dyn Embedder> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn index_status_keeps_search_stale_until_the_latest_queued_rebuild_finishes() {
+        let status = IndexStatusTracker::up_to_date();
+        let first = status.queue_rebuild();
+        status.start_rebuild(first);
+        let second = status.queue_rebuild();
+
+        status.finish_rebuild(first);
+        let during_second = status.status();
+        assert_eq!(during_second.state, "rebuilding");
+        assert!(during_second.stale);
+        assert!(during_second.drift);
+
+        status.start_rebuild(second);
+        status.finish_rebuild(second);
+        let current = status.status();
+        assert_eq!(current.state, "up_to_date");
+        assert!(!current.stale);
+        assert!(!current.drift);
+    }
+
+    #[test]
+    fn index_status_exposes_progress_eta_and_the_last_background_failure() {
+        let status = IndexStatusTracker::up_to_date();
+        let generation = status.queue_rebuild();
+        status.start_rebuild(generation);
+        status.report_progress(
+            generation,
+            IndexingProgressSnapshot {
+                notes_completed: 12,
+                notes_total: 40,
+                chunks_completed: 18,
+                chunks_total: 70,
+                tokens_completed: 4_000,
+                tokens_total: 20_000,
+                elapsed_seconds: 20,
+            },
+        );
+
+        let rebuilding = status.status();
+        assert_eq!(rebuilding.state, "rebuilding");
+        assert_eq!(rebuilding.percent, Some(20));
+        assert_eq!(rebuilding.eta_seconds, Some(80));
+        assert!(rebuilding.last_failure.is_none());
+
+        status.fail_rebuild(generation, "embedding failed");
+        let failed = status.status();
+        assert_eq!(failed.state, "failed");
+        assert!(failed.stale);
+        assert_eq!(failed.last_failure.as_deref(), Some("embedding failed"));
+    }
 
     #[test]
     fn build_cache_honours_user_exclude_pattern_on_the_real_build_path() {
@@ -396,6 +631,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         }

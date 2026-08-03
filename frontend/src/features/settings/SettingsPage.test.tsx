@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
@@ -15,6 +21,22 @@ const settings = [
     locked: null,
     class: "instant",
     kind: "text",
+  },
+  {
+    key: "HATCHDOOR_EXCLUDE",
+    value: ".git/**",
+    source: "default",
+    locked: null,
+    class: "reindex",
+    kind: "text",
+  },
+  {
+    key: "HATCHDOOR_EMBED_LAYERS",
+    value: "true",
+    source: "default",
+    locked: null,
+    class: "reindex",
+    kind: "switch",
   },
   {
     key: "HATCHDOOR_MAX_ATTACHMENT_BYTES",
@@ -39,11 +61,18 @@ const json = (body: unknown) =>
     headers: { "content-type": "application/json" },
   });
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.clearAllMocks();
+});
 
 describe("SettingsPage", () => {
   it("renders server metadata and saves only changes from the active section", async () => {
     mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    mockedApiFetch.mockResolvedValueOnce(
+      json({ state: "up_to_date", stale: false, drift: false }),
+    );
     mockedApiFetch.mockResolvedValueOnce(
       json({
         settings: [{ ...settings[0], value: "archive/" }, ...settings.slice(1)],
@@ -53,13 +82,62 @@ describe("SettingsPage", () => {
     const input = await screen.findByDisplayValue("90-archive/");
     fireEvent.change(input, { target: { value: "archive/" } });
     fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
-    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(2));
-    expect(mockedApiFetch.mock.calls[1]?.[0]).toBe("/api/settings");
-    expect(JSON.parse(String(mockedApiFetch.mock.calls[1]?.[1]?.body))).toEqual(
+    await waitFor(() => expect(mockedApiFetch).toHaveBeenCalledTimes(3));
+    expect(mockedApiFetch.mock.calls[2]?.[0]).toBe("/api/settings");
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[2]?.[1]?.body))).toEqual(
       { updates: { HATCHDOOR_ARCHIVE_PREFIX: "archive/" } },
     );
     fireEvent.click(screen.getByRole("button", { name: /Versioning/ }));
     expect(await screen.findByText("Managed outside this page")).toBeVisible();
     expect(screen.getByText("HATCHDOOR_GIT_BRANCH")).toBeVisible();
+  });
+
+  it("confirms an index-affecting save and polls the dedicated stale-index status", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+    mockedApiFetch.mockResolvedValueOnce(
+      json({
+        state: "rebuilding",
+        stale: true,
+        drift: true,
+        notes_completed: 12,
+        notes_total: 40,
+        chunks_completed: 18,
+        chunks_total: 70,
+        tokens_completed: 4_000,
+        tokens_total: 20_000,
+        percent: 20,
+        eta_seconds: 80,
+        last_failure: null,
+      }),
+    );
+    mockedApiFetch.mockResolvedValueOnce(json({ settings }));
+
+    render(<SettingsPage />);
+    const exclude = await screen.findByDisplayValue(".git/**");
+    fireEvent.change(exclude, { target: { value: ".git/**, build/**" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+
+    await waitFor(() => expect(window.confirm).toHaveBeenCalledTimes(1));
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining("rebuild the search index"),
+    );
+    expect(JSON.parse(String(mockedApiFetch.mock.calls[2]?.[1]?.body))).toEqual(
+      {
+        updates: { HATCHDOOR_EXCLUDE: ".git/**, build/**" },
+        confirm_reindex: true,
+      },
+    );
+    expect(
+      await screen.findByText("Rebuilding in the background"),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Search remains available from the previous coherent index while this rebuild runs.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("12 / 40 notes · 20% · about 1m 20s left"),
+    ).toBeVisible();
   });
 });

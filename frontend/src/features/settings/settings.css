@@ -39,6 +39,20 @@
   color: var(--ink);
   margin-right: 0.5rem;
 }
+.settings-index-status {
+  display: grid;
+  gap: 0.3rem;
+}
+.settings-index-status b {
+  margin-right: 0;
+}
+.settings-index-status strong {
+  color: var(--ink);
+}
+.settings-index-status small {
+  max-width: 58ch;
+  color: var(--muted);
+}
 .settings-layout {
   display: grid;
   grid-template-columns: 225px minmax(0, 1fr);

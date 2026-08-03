@@ -263,6 +263,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };
@@ -317,6 +318,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };

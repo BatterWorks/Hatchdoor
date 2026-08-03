@@ -27,12 +27,13 @@ use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, archive_note_handler, create_note_handler, delete_note_handler,
-    diagnostics_handler, get_settings_handler, graph_handler, health_handler, move_note_handler,
-    move_rename_note_handler, note_download_handler, note_handler, note_links_handler,
-    patch_settings_handler, recently_modified_handler, refresh_handler, rename_note_handler,
-    resolve_batch_handler, resolve_handler, reveal_web_token_handler, search_handler,
-    spa_index_handler, stats_handler, tree_handler, update_note_handler, upload_attachment_handler,
-    vault_asset_handler, vault_events_handler, write_capabilities_handler,
+    diagnostics_handler, get_index_status_handler, get_settings_handler, graph_handler,
+    health_handler, move_note_handler, move_rename_note_handler, note_download_handler,
+    note_handler, note_links_handler, patch_settings_handler, recently_modified_handler,
+    refresh_handler, rename_note_handler, resolve_batch_handler, resolve_handler,
+    reveal_web_token_handler, search_handler, spa_index_handler, stats_handler, tree_handler,
+    update_note_handler, upload_attachment_handler, vault_asset_handler, vault_events_handler,
+    write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -236,6 +237,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/settings",
                 get(get_settings_handler).patch(patch_settings_handler),
             )
+            .route("/api/index-status", get(get_index_status_handler))
             .route(
                 "/api/settings/web-token/reveal",
                 post(reveal_web_token_handler),
@@ -704,6 +706,7 @@ pub async fn run_server() {
         archive_prefix: Arc::from(config.archive_prefix.as_str()),
         scan_config: scan_config.clone(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        index_status: crate::app_state::IndexStatusTracker::up_to_date(),
         runtime_config,
         startup,
     };
@@ -865,6 +868,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
@@ -910,6 +914,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
@@ -1265,6 +1270,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
@@ -1390,7 +1396,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_routes_require_web_auth_and_are_absent_in_demo_mode() {
-        let (protected, _tmp, _) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let (protected, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
         let unauthenticated = protected
             .clone()
             .oneshot(
@@ -1403,6 +1409,7 @@ mod tests {
             .expect("response");
         assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
         let authenticated = protected
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
@@ -1414,8 +1421,23 @@ mod tests {
             .expect("response");
         assert_eq!(authenticated.status(), StatusCode::OK);
 
+        state.index_status.queue_rebuild();
+        let index_status = protected
+            .oneshot(
+                Request::builder()
+                    .uri("/api/index-status")
+                    .header("authorization", "Bearer web-secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(index_status.status(), StatusCode::OK);
+        assert_eq!(index_status.headers()["cache-control"], "no-store");
+
         let (demo, _tmp, _) = app_for_tests_with_web_auth_and_demo_mode(None, true);
         let absent = demo
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
@@ -1425,6 +1447,100 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+        let index_status_absent = demo
+            .oneshot(
+                Request::builder()
+                    .uri("/api/index-status")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(index_status_absent.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn reindex_settings_persist_before_a_background_rebuild_and_then_converge() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        let held_refresh_lock = state.refresh_lock.lock().await;
+
+        let missing_confirmation = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_confirmation.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_EXCLUDE":"generated/**"},"confirm_reindex":true}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .runtime_snapshot()
+                .setting("HATCHDOOR_EXCLUDE")
+                .expect("setting")
+                .value,
+            "generated/**"
+        );
+        assert_eq!(state.index_status.status().state, "rebuilding");
+        assert!(state.index_status.status().stale);
+
+        let second_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_EMBED_LAYERS":"false"},"confirm_reindex":true}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(second_response.status(), StatusCode::OK);
+        assert_eq!(
+            state
+                .runtime_snapshot()
+                .setting("HATCHDOOR_EMBED_LAYERS")
+                .expect("setting")
+                .value,
+            "false"
+        );
+
+        drop(held_refresh_lock);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.index_status.status().state == "up_to_date" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background rebuild finishes");
+        assert!(!state.index_status.status().stale);
     }
 
     #[tokio::test]
@@ -2087,6 +2203,7 @@ mod tests {
             archive_prefix: Arc::from("90-archive/"),
             scan_config: Arc::new(crate::vault::VaultScanConfig::default()),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
