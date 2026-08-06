@@ -584,15 +584,21 @@ commands when retrieval behavior may change.
 - `src/search/assemble.rs`
 - `src/search/layer_selection.rs`
 - `src/search/retrieve.rs`
+- `src/search/vault_scoped.rs`
 
 **Public contract:** `SearchMode`, `SearchRequest`, `NoteFilters`,
 `LayerSelection`, `LayerInfo`, `SearchResult`, `SearchResponse`, `run`, and
-`query_notes`.
+`query_notes`. The Vault-qualified shared-core contract is `VaultSearchCore`,
+`VaultSearchRequest`, `VaultSearchResponse`, and `VaultSearchResult`; it uses
+the explicit `VaultScope` and common projection/participant envelope from the
+Vault-read core without owning any HTTP, MCP, or frontend adapter.
 
-**Consumed dependencies:** `SqliteCache`, `Embedder`, and vault metadata/types.
+**Consumed dependencies:** `SqliteCache`, its published Vault snapshot/cache
+query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
+scope/envelope, and vault metadata/types.
 
-**Consumers:** HTTP search handler, MCP search/query tools, and offline
-evaluation runners.
+**Consumers:** HTTP search handler, MCP search/query tools, offline evaluation
+runners, and future Vault-scoped adapters.
 
 **Coordination paths:** `src/api_types.rs`, `src/handlers/api.rs`,
 `src/mcp/tools/read.rs`, cache query methods, and frontend Search contracts.
@@ -603,10 +609,14 @@ evaluation runners.
   offline (ADR-05).
 - Layer selection and metadata filters must never widen the eligible result
   set.
+- Vault-qualified search filters before ranking, globally ranks every usable
+  Vault snapshot, caps by `(Vault ID, slug)`, and never deduplicates equal
+  content or note names across Vaults. Staleness is participant status, not a
+  relevance penalty.
 - A structure-only frontend Search pilot must not modify these paths.
 
-**Validation:** `cargo test search`, relevant cache query tests, and evaluation
-only when retrieval semantics change.
+**Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
+and evaluation-only checks when retrieval semantics change.
 
 ### Embeddings and model implementations
 

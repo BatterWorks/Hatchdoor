@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
-use crate::vault::VaultIndex;
+use crate::vault::{NoteMetadata, VaultIndex};
 use crate::vault_registry::VaultId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +30,7 @@ pub(crate) struct VaultSnapshotRead {
     pub(crate) notes: Vec<VaultSnapshotNote>,
     pub(crate) links: Vec<VaultSnapshotLink>,
     pub(crate) tags_by_note: BTreeMap<String, Vec<String>>,
+    pub(crate) chunks: Vec<VaultSnapshotChunk>,
 }
 
 /// A participant state and every row used to project it, read from one pinned
@@ -49,6 +50,17 @@ pub(crate) struct VaultSnapshotNote {
     pub(crate) size_bytes: i64,
     pub(crate) mtime_ns: i64,
     pub(crate) layer: Option<String>,
+    pub(crate) metadata: NoteMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VaultSnapshotChunk {
+    pub(crate) chunk_id: i64,
+    pub(crate) note_slug: String,
+    pub(crate) heading_path: Option<String>,
+    pub(crate) content: String,
+    pub(crate) layer: Option<String>,
+    pub(crate) embedding: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -222,11 +234,12 @@ impl SqliteCache {
         let vault_id = vault_id.to_string();
         let mut notes_statement = conn
             .prepare(
-                "SELECT title, slug, relative_path, content, size_bytes, mtime_ns, layer \
+                "SELECT title, slug, relative_path, content, size_bytes, mtime_ns, layer, \
+                 aliases_json, frontmatter_json \
                  FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path",
             )
             .map_err(|error| format!("prepare Vault snapshot notes: {error}"))?;
-        let notes = notes_statement
+        let mut notes = notes_statement
             .query_map(params![&vault_id], |row| {
                 Ok(VaultSnapshotNote {
                     title: row.get(0)?,
@@ -236,6 +249,27 @@ impl SqliteCache {
                     size_bytes: row.get(4)?,
                     mtime_ns: row.get(5)?,
                     layer: row.get(6)?,
+                    metadata: NoteMetadata {
+                        tags: Vec::new(),
+                        aliases: serde_json::from_str(&row.get::<_, String>(7)?).map_err(
+                            |error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    7,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            },
+                        )?,
+                        properties: serde_json::from_str(&row.get::<_, String>(8)?).map_err(
+                            |error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    8,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            },
+                        )?,
+                    },
                 })
             })
             .map_err(|error| format!("query Vault snapshot notes: {error}"))?
@@ -278,10 +312,42 @@ impl SqliteCache {
             tags_by_note.entry(slug).or_default().push(tag);
         }
 
+        for note in &mut notes {
+            note.metadata.tags = tags_by_note.get(&note.slug).cloned().unwrap_or_default();
+        }
+        drop(tags_statement);
+
+        let mut chunks_statement = conn
+            .prepare(
+                "SELECT c.id, c.note_slug, c.heading_path, c.content, n.layer, \
+                 COALESCE(v.embedding, d.embedding) \
+                 FROM vault_chunks c \
+                 JOIN vault_notes n ON n.vault_id = c.vault_id AND n.slug = c.note_slug \
+                 LEFT JOIN vault_chunk_vectors v ON v.chunk_id = c.id \
+                 LEFT JOIN vault_chunk_vectors_demoted d ON d.chunk_id = c.id \
+                 WHERE c.vault_id = ?1 ORDER BY c.id",
+            )
+            .map_err(|error| format!("prepare Vault snapshot chunks: {error}"))?;
+        let chunks = chunks_statement
+            .query_map(params![&vault_id], |row| {
+                Ok(VaultSnapshotChunk {
+                    chunk_id: row.get(0)?,
+                    note_slug: row.get(1)?,
+                    heading_path: row.get(2)?,
+                    content: row.get(3)?,
+                    layer: row.get(4)?,
+                    embedding: row.get(5)?,
+                })
+            })
+            .map_err(|error| format!("query Vault snapshot chunks: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("read Vault snapshot chunks: {error}"))?;
+
         Ok(VaultSnapshotRead {
             notes,
             links,
             tags_by_note,
+            chunks,
         })
     }
 
