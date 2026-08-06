@@ -79,6 +79,7 @@ impl VaultWorkError {
 pub enum ScheduleResult {
     Queued,
     Coalesced,
+    Rejected,
 }
 
 /// The Vault-qualified result of exactly one worker turn.
@@ -110,6 +111,8 @@ struct SharedQueue {
 
 #[derive(Default)]
 struct QueueState {
+    accepting_work: bool,
+    drained_vaults: BTreeSet<VaultId>,
     fifo: VecDeque<VaultId>,
     vaults: BTreeMap<VaultId, VaultQueueState>,
 }
@@ -125,7 +128,10 @@ struct VaultQueueState {
 impl VaultWorkCoordinator {
     pub fn new() -> (Self, VaultWorkWorker) {
         let shared = Arc::new(SharedQueue {
-            state: Mutex::new(QueueState::default()),
+            state: Mutex::new(QueueState {
+                accepting_work: true,
+                ..QueueState::default()
+            }),
             ready: Notify::new(),
         });
         (
@@ -143,6 +149,9 @@ impl VaultWorkCoordinator {
     /// their request order inside the same Vault's single FIFO position.
     pub fn request(&self, vault_id: VaultId, kind: VaultWorkKind) -> ScheduleResult {
         let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        if !state.accepting_work || state.drained_vaults.contains(&vault_id) {
+            return ScheduleResult::Rejected;
+        }
         let vault = state.vaults.entry(vault_id).or_default();
         if vault.pending_kinds.contains(&kind) {
             return ScheduleResult::Coalesced;
@@ -159,6 +168,72 @@ impl VaultWorkCoordinator {
         self.shared.ready.notify_one();
         ScheduleResult::Queued
     }
+
+    /// Reopen a Vault after runtime activation or restart reconstruction.
+    pub fn activate_vault(&self, vault_id: VaultId) {
+        let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        if state.accepting_work {
+            state.drained_vaults.remove(&vault_id);
+        }
+    }
+
+    /// Stop accepting work for one Vault and discard its queued turns.
+    ///
+    /// A currently active turn is never force-cancelled. It retains the worker
+    /// until it returns at its own safe operation boundary.
+    pub fn drain_vault(&self, vault_id: VaultId) {
+        let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        state.drained_vaults.insert(vault_id);
+        state.discard_pending(vault_id);
+        drop(state);
+        self.shared.ready.notify_waiters();
+    }
+
+    /// Stop scheduling globally and discard all queued turns.
+    ///
+    /// Active work is allowed to complete. The queue itself is disposable and
+    /// is rebuilt from durable Vault state on the next startup.
+    pub fn shutdown(&self) {
+        let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        state.accepting_work = false;
+        state.discard_all_pending();
+        drop(state);
+        self.shared.ready.notify_waiters();
+    }
+
+    /// Wait only for an already-active turn of one drained Vault.
+    pub async fn wait_for_vault_safe_boundary(&self, vault_id: VaultId) {
+        loop {
+            let notified = self.shared.ready.notified();
+            if self
+                .shared
+                .state
+                .lock()
+                .expect("Vault work queue poisoned")
+                .vault_is_idle(vault_id)
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait only for active work after shutdown has discarded the queue.
+    pub async fn wait_for_shutdown_boundary(&self) {
+        loop {
+            let notified = self.shared.ready.notified();
+            if self
+                .shared
+                .state
+                .lock()
+                .expect("Vault work queue poisoned")
+                .shutdown_is_quiescent()
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 impl VaultWorkWorker {
@@ -168,32 +243,33 @@ impl VaultWorkWorker {
     /// the next Vault to proceed. Panics are intentionally outside this
     /// returned-failure contract and remain task failures for the lifecycle
     /// owner to handle.
-    pub async fn run_next<F, Fut>(&mut self, execute: F) -> VaultWorkOutcome
+    pub async fn run_next<F, Fut>(&mut self, execute: F) -> Option<VaultWorkOutcome>
     where
         F: FnOnce(VaultWorkRequest) -> Fut,
         Fut: Future<Output = Result<(), VaultWorkError>>,
     {
-        let request = self.next_request().await;
+        let request = self.next_request().await?;
         let result = execute(request).await;
         self.shared
             .state
             .lock()
             .expect("Vault work queue poisoned")
             .complete(request);
-        VaultWorkOutcome { request, result }
+        self.shared.ready.notify_waiters();
+        Some(VaultWorkOutcome { request, result })
     }
 
-    async fn next_request(&self) -> VaultWorkRequest {
+    async fn next_request(&self) -> Option<VaultWorkRequest> {
         loop {
             let notified = self.shared.ready.notified();
-            if let Some(request) = self
-                .shared
-                .state
-                .lock()
-                .expect("Vault work queue poisoned")
-                .take_next()
             {
-                return request;
+                let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+                if let Some(request) = state.take_next() {
+                    return Some(request);
+                }
+                if !state.accepting_work {
+                    return None;
+                }
             }
             notified.await;
         }
@@ -242,6 +318,40 @@ impl QueueState {
             self.vaults.remove(&request.vault_id);
         }
     }
+
+    fn discard_pending(&mut self, vault_id: VaultId) {
+        self.fifo.retain(|queued_vault| *queued_vault != vault_id);
+        let remove = match self.vaults.get_mut(&vault_id) {
+            Some(vault) => {
+                vault.pending.clear();
+                vault.pending_kinds.clear();
+                vault.queued = false;
+                vault.active.is_none()
+            }
+            None => false,
+        };
+        if remove {
+            self.vaults.remove(&vault_id);
+        }
+    }
+
+    fn discard_all_pending(&mut self) {
+        self.fifo.clear();
+        for vault in self.vaults.values_mut() {
+            vault.pending.clear();
+            vault.pending_kinds.clear();
+            vault.queued = false;
+        }
+        self.vaults.retain(|_, vault| vault.active.is_some());
+    }
+
+    fn vault_is_idle(&self, vault_id: VaultId) -> bool {
+        !self.vaults.contains_key(&vault_id)
+    }
+
+    fn shutdown_is_quiescent(&self) -> bool {
+        !self.accepting_work && self.vaults.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -289,7 +399,8 @@ mod tests {
         for _ in 0..3 {
             let outcome = worker
                 .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
-                .await;
+                .await
+                .expect("queued turn");
             outcome.result.expect("work succeeds");
             observed.push(outcome.request);
         }
@@ -330,7 +441,8 @@ mod tests {
                             Ok::<(), VaultWorkError>(())
                         }
                     })
-                    .await;
+                    .await
+                    .expect("active turn");
                 (worker, outcome)
             }
         });
@@ -359,7 +471,8 @@ mod tests {
         first_outcome.result.expect("first run succeeds");
         let rerun = worker
             .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
-            .await;
+            .await
+            .expect("rerun");
         assert_eq!(
             rerun.request,
             VaultWorkRequest::new(vault, VaultWorkKind::Index)
@@ -392,7 +505,8 @@ mod tests {
                     true,
                 ))
             })
-            .await;
+            .await
+            .expect("failed turn");
         assert_eq!(failed.request.vault_id(), failing);
         assert_eq!(failed.request.kind(), VaultWorkKind::Repair);
         assert_eq!(
@@ -402,9 +516,94 @@ mod tests {
 
         let succeeded = worker
             .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
-            .await;
+            .await
+            .expect("healthy turn");
         assert_eq!(succeeded.request.vault_id(), healthy);
         assert_eq!(succeeded.request.kind(), VaultWorkKind::Index);
         succeeded.result.expect("healthy Vault proceeds");
+    }
+
+    #[tokio::test]
+    async fn draining_one_vault_rejects_new_work_and_preserves_another_vaults_turn() {
+        let draining = vault_id("00000000-0000-4000-8000-000000000001");
+        let healthy = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(draining, VaultWorkKind::Index);
+        coordinator.request(healthy, VaultWorkKind::Index);
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                let outcome = worker
+                    .run_next(move |request| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            assert_eq!(request.vault_id(), draining);
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await;
+                (worker, outcome)
+            }
+        });
+
+        started.notified().await;
+        coordinator.request(draining, VaultWorkKind::Git);
+        coordinator.drain_vault(draining);
+        assert_eq!(
+            coordinator.request(draining, VaultWorkKind::Repair),
+            ScheduleResult::Rejected
+        );
+
+        release.notify_one();
+        let (mut worker, first) = running.await.expect("worker task");
+        first
+            .expect("active work reaches its safe boundary")
+            .result
+            .expect("active work succeeds");
+
+        let healthy_turn = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("healthy Vault remains queued");
+        assert_eq!(healthy_turn.request.vault_id(), healthy);
+        assert!(
+            timeout(
+                Duration::from_millis(25),
+                worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            )
+            .await
+            .is_err(),
+            "draining discards the target Vault's queued rerun"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_discards_pending_turns_without_waiting_for_the_queue_to_drain() {
+        let first = vault_id("00000000-0000-4000-8000-000000000001");
+        let second = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        coordinator.request(first, VaultWorkKind::Index);
+        coordinator.request(second, VaultWorkKind::Git);
+
+        coordinator.shutdown();
+
+        assert_eq!(
+            worker
+                .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+                .await,
+            None,
+            "shutdown drops queued work because durable state reconstructs it at restart"
+        );
+        assert_eq!(
+            coordinator.request(first, VaultWorkKind::Repair),
+            ScheduleResult::Rejected
+        );
     }
 }

@@ -100,6 +100,9 @@ that production inventory are still checked for stale paths and duplicates.
   to place in `.env`.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
+- `VaultCollectionRuntime` reconstructs disposable background turns at startup
+  and, on process shutdown, stops new work and waits only for the active turn's
+  safe boundary.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
@@ -165,15 +168,16 @@ backend checks.
 `VaultWorkWorker` is the unique execution side of one instance-wide in-memory
 FIFO. `VaultWorkKind`, `VaultWorkRequest`, `ScheduleResult`, `VaultWorkOutcome`,
 and `VaultWorkError` expose deterministic one-operation turns, request
-coalescing, and Vault-qualified returned outcomes. Index work includes local
-embedding work; Git and repair remain distinct operation kinds.
+coalescing, lifecycle rejection, and Vault-qualified returned outcomes. Index
+work includes local embedding work; Git and repair remain distinct operation
+kinds. A stopped worker returns `None` rather than waiting for discarded work.
 
 **Consumed dependencies:** durable `VaultId` identity and Tokio notification.
 The queue owns no Markdown, SQLite, Git, or lifecycle state.
 
-**Consumers:** none yet. Collection lifecycle packet #90 owns the first worker
-loop and runtime integration; later cache and Git packets supply concrete
-operations without creating additional execution lanes.
+**Consumers:** collection runtime reconstructs and drains work for lifecycle
+transitions. Later cache and Git packets supply concrete operations without
+creating additional execution lanes.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
@@ -184,8 +188,9 @@ per turn; duplicate pending work coalesces and duplicate active work retains at
 most one rerun; remaining work returns to the tail; a returned failure completes
 its turn and remains attributable to one Vault. The queue stays disposable and
 adds no priorities, throttling, persistence, second lane, generic timeout, or
-forced cancellation. Restart reconstruction, disable/disconnect draining, and
-graceful shutdown belong to #90.
+forced cancellation. Runtime lifecycle stops new work, discards queued work,
+and waits only for an active turn's safe boundary; restart reconstruction uses
+durable definitions and current local-content/Git status.
 
 **Validation:** `cargo test vault_work`, the runtime-composition tests when a
 consumer is integrated, and the full backend checks.

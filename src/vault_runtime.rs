@@ -12,6 +12,7 @@ use crate::vault_registry::{
     VaultSource as RegistryVaultSource,
 };
 use crate::vault_watcher::{VaultWatcherHandle, spawn_vault_change_watcher};
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkKind};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultSource {
@@ -706,6 +707,80 @@ impl VaultCollectionRuntime {
         }
     }
 
+    /// Rebuild disposable background work from the authoritative collection and
+    /// currently usable local Markdown. A future cache or Git lifecycle may
+    /// refine the requested operation, but it must use this one coordinator.
+    pub async fn reconcile_and_reconstruct(
+        &self,
+        registry: &VaultRegistryStore,
+        snapshot: &VaultRegistrySnapshot,
+        coordinator: &VaultWorkCoordinator,
+    ) {
+        let previously_active = self.active_runtimes();
+        self.reconcile(registry, snapshot);
+        let active = self.active_runtimes();
+        let retired = previously_active
+            .iter()
+            .filter_map(|(vault_id, previous_runtime)| {
+                (!active.get(vault_id).is_some_and(|next_runtime| {
+                    Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
+                }))
+                .then_some(*vault_id)
+            })
+            .collect::<Vec<_>>();
+
+        for vault_id in &retired {
+            coordinator.drain_vault(*vault_id);
+        }
+        for vault_id in &retired {
+            coordinator.wait_for_vault_safe_boundary(*vault_id).await;
+        }
+        for (vault_id, runtime) in &active {
+            coordinator.activate_vault(*vault_id);
+            if previously_active
+                .get(vault_id)
+                .is_some_and(|previous_runtime| {
+                    Arc::ptr_eq(&previous_runtime.snapshot, &runtime.snapshot)
+                })
+            {
+                continue;
+            }
+            let snapshot = runtime.snapshot();
+            if snapshot.activation == VaultActivationStatus::Active
+                && matches!(
+                    snapshot.local_content,
+                    LocalContentStatus::ReadWrite | LocalContentStatus::ReadOnly
+                )
+            {
+                coordinator.request(*vault_id, VaultWorkKind::Index);
+            }
+            if snapshot.git == VaultGitStatus::Pending {
+                coordinator.request(*vault_id, VaultWorkKind::Git);
+            }
+        }
+    }
+
+    /// Revoke every Vault runtime, discard queued background work, and wait
+    /// only for the already-active operation to reach its safe boundary.
+    pub async fn shutdown(&self, coordinator: &VaultWorkCoordinator) {
+        let runtimes = self
+            .state
+            .read()
+            .expect("Vault collection runtime poisoned")
+            .vaults
+            .values()
+            .filter_map(|entry| match entry {
+                VaultCollectionEntry::Active(runtime) => Some(runtime.clone()),
+                VaultCollectionEntry::Disabled(_) => None,
+            })
+            .collect::<Vec<_>>();
+        for runtime in runtimes {
+            runtime.revoke();
+        }
+        coordinator.shutdown();
+        coordinator.wait_for_shutdown_boundary().await;
+    }
+
     pub fn runtime(&self, vault_id: VaultId) -> Option<VaultControlBlock> {
         let state = self
             .state
@@ -725,6 +800,19 @@ impl VaultCollectionRuntime {
             .iter()
             .filter_map(|(vault_id, entry)| {
                 matches!(entry, VaultCollectionEntry::Active(_)).then_some(*vault_id)
+            })
+            .collect()
+    }
+
+    fn active_runtimes(&self) -> BTreeMap<VaultId, VaultControlBlock> {
+        self.state
+            .read()
+            .expect("Vault collection runtime poisoned")
+            .vaults
+            .iter()
+            .filter_map(|(vault_id, entry)| match entry {
+                VaultCollectionEntry::Active(runtime) => Some((*vault_id, runtime.clone())),
+                VaultCollectionEntry::Disabled(_) => None,
             })
             .collect()
     }
@@ -950,8 +1038,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::vault_registry::{
-        NewVaultDefinition, VaultGitMode, VaultRegistrySnapshot, VaultRegistryStore,
-        VaultSource as RegistryVaultSource,
+        HttpsCredentialUpdate, NewVaultDefinition, VaultDefinitionEdit, VaultGitMode,
+        VaultRegistrySnapshot, VaultRegistryStore, VaultSource as RegistryVaultSource,
     };
 
     fn managed(mode: ManagedGitMode) -> VaultSource {
@@ -1233,6 +1321,7 @@ mod tests {
         let after = collection.snapshot().collection_revision;
         assert_eq!(after, before + 1);
         assert_eq!(*revisions.borrow_and_update(), after);
+        assert_eq!(collection.snapshot().registry_revision, one.revision());
     }
 
     #[tokio::test]
@@ -1378,5 +1467,333 @@ mod tests {
                 .expect("second runtime survives disconnect")
                 .mutation_lock
         ));
+    }
+
+    #[tokio::test]
+    async fn restart_reconstructs_index_work_for_each_enabled_vault_from_the_collection() {
+        use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
+
+        let directory = tempdir().expect("temporary state directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let first_path = directory.path().join("first");
+        let second_path = directory.path().join("second");
+        std::fs::create_dir_all(&first_path).expect("first Vault directory");
+        std::fs::create_dir_all(&second_path).expect("second Vault directory");
+        let one = add_local_vault(&registry, &empty, "First", first_path);
+        let two = add_local_vault(&registry, &one, "Second", second_path);
+        let mut expected = [
+            vault_id_named(&two, "First"),
+            vault_id_named(&two, "Second"),
+        ];
+        expected.sort();
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+
+        collection
+            .reconcile_and_reconstruct(&registry, &two, &coordinator)
+            .await;
+
+        let mut reconstructed = Vec::new();
+        for _ in expected {
+            let turn = worker
+                .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+                .await
+                .expect("reconstructed turn");
+            assert_eq!(turn.request.kind(), VaultWorkKind::Index);
+            reconstructed.push(turn.request.vault_id());
+        }
+        assert_eq!(reconstructed, expected);
+    }
+
+    #[tokio::test]
+    async fn disabling_a_vault_waits_for_its_active_work_safe_boundary() {
+        use std::sync::Arc;
+
+        use crate::vault_work::{ScheduleResult, VaultWorkCoordinator, VaultWorkError};
+
+        let directory = tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("Vault directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let enabled = add_local_vault(&registry, &empty, "Vault", vault_path);
+        let vault_id = vault_id_named(&enabled, "Vault");
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        collection
+            .reconcile_and_reconstruct(&registry, &enabled, &coordinator)
+            .await;
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                worker
+                    .run_next(move |request| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            assert_eq!(request.vault_id(), vault_id);
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await
+            }
+        });
+        started.notified().await;
+
+        let disabled = registry
+            .disable(enabled.revision(), vault_id)
+            .expect("disable Vault");
+        let reconciliation =
+            collection.reconcile_and_reconstruct(&registry, &disabled, &coordinator);
+        tokio::pin!(reconciliation);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut reconciliation)
+                .await
+                .is_err(),
+            "disable waits only for the Vault's active work"
+        );
+        assert_eq!(
+            coordinator.request(vault_id, VaultWorkKind::Index),
+            ScheduleResult::Rejected
+        );
+
+        release.notify_one();
+        reconciliation.await;
+        running
+            .await
+            .expect("worker task")
+            .expect("active work completes")
+            .result
+            .expect("active work succeeds");
+        assert!(collection.runtime(vault_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn replacing_an_enabled_vault_waits_for_old_work_then_reconstructs_new_work() {
+        use std::sync::Arc;
+
+        use crate::vault_work::{ScheduleResult, VaultWorkCoordinator, VaultWorkError};
+
+        let directory = tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("Vault directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let enabled = add_local_vault(&registry, &empty, "Vault", vault_path.clone());
+        let vault_id = vault_id_named(&enabled, "Vault");
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        collection
+            .reconcile_and_reconstruct(&registry, &enabled, &coordinator)
+            .await;
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                let outcome = worker
+                    .run_next(move |request| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            assert_eq!(request.vault_id(), vault_id);
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await;
+                (worker, outcome)
+            }
+        });
+        started.notified().await;
+
+        let replacement = registry
+            .edit(
+                enabled.revision(),
+                vault_id,
+                VaultDefinitionEdit {
+                    name: "Vault".to_string(),
+                    source: RegistryVaultSource::Local { path: vault_path },
+                    exclude_patterns: vec!["ignored/**".to_string()],
+                    https_credentials: HttpsCredentialUpdate::Keep,
+                    confirm_identity_change: false,
+                },
+            )
+            .expect("replace enabled Vault definition");
+        let reconciliation =
+            collection.reconcile_and_reconstruct(&registry, &replacement, &coordinator);
+        tokio::pin!(reconciliation);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut reconciliation)
+                .await
+                .is_err(),
+            "replacement waits for the old control block's active work"
+        );
+        assert_eq!(
+            coordinator.request(vault_id, VaultWorkKind::Index),
+            ScheduleResult::Rejected
+        );
+
+        release.notify_one();
+        reconciliation.await;
+        let (mut worker, old_outcome) = running.await.expect("worker task");
+        old_outcome
+            .expect("old active work completes")
+            .result
+            .expect("old active work succeeds");
+        let replacement_turn = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("replacement work reconstructed");
+        assert_eq!(replacement_turn.request.vault_id(), vault_id);
+        assert_eq!(replacement_turn.request.kind(), VaultWorkKind::Index);
+    }
+
+    #[tokio::test]
+    async fn disconnecting_a_vault_discards_its_work_without_delaying_another_vault() {
+        use crate::vault_work::{ScheduleResult, VaultWorkCoordinator, VaultWorkError};
+
+        let directory = tempdir().expect("temporary state directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let target_path = directory.path().join("target");
+        let healthy_path = directory.path().join("healthy");
+        std::fs::create_dir_all(&target_path).expect("target Vault directory");
+        std::fs::create_dir_all(&healthy_path).expect("healthy Vault directory");
+        let target = add_local_vault(&registry, &empty, "Target", target_path);
+        let both = add_local_vault(&registry, &target, "Healthy", healthy_path);
+        let target_id = vault_id_named(&both, "Target");
+        let healthy_id = vault_id_named(&both, "Healthy");
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        collection
+            .reconcile_and_reconstruct(&registry, &both, &coordinator)
+            .await;
+
+        let disconnected = registry
+            .disconnect(both.revision(), target_id)
+            .expect("disconnect target Vault");
+        collection
+            .reconcile_and_reconstruct(&registry, &disconnected, &coordinator)
+            .await;
+
+        assert!(collection.runtime(target_id).is_none());
+        assert_eq!(
+            coordinator.request(target_id, VaultWorkKind::Index),
+            ScheduleResult::Rejected
+        );
+        let healthy_turn = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("healthy Vault work remains runnable");
+        assert_eq!(healthy_turn.request.vault_id(), healthy_id);
+        assert_eq!(healthy_turn.request.kind(), VaultWorkKind::Index);
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_revokes_vaults_and_discards_reconstructible_work() {
+        use std::sync::Arc;
+
+        use crate::vault_work::{
+            ScheduleResult, VaultWorkCoordinator, VaultWorkError, VaultWorkKind,
+        };
+
+        let directory = tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("Vault directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let snapshot = add_local_vault(&registry, &empty, "Vault", vault_path);
+        let vault_id = vault_id_named(&snapshot, "Vault");
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        collection
+            .reconcile_and_reconstruct(&registry, &snapshot, &coordinator)
+            .await;
+        let runtime = collection.runtime(vault_id).expect("active runtime");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                let outcome = worker
+                    .run_next(move |request| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            assert_eq!(request.vault_id(), vault_id);
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await;
+                (worker, outcome)
+            }
+        });
+        started.notified().await;
+        assert_eq!(
+            coordinator.request(vault_id, VaultWorkKind::Git),
+            ScheduleResult::Queued
+        );
+
+        let mut shutdown = Box::pin(tokio::spawn({
+            let collection = collection.clone();
+            let coordinator = coordinator.clone();
+            async move { collection.shutdown(&coordinator).await }
+        }));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut shutdown)
+                .await
+                .is_err(),
+            "shutdown waits for active work instead of draining the queued rerun"
+        );
+
+        release.notify_one();
+        shutdown.await.expect("shutdown task");
+        let (mut worker, active_outcome) = running.await.expect("worker task");
+        active_outcome
+            .expect("active work completes")
+            .result
+            .expect("active work succeeds");
+
+        assert!(!runtime.is_accepting_operations());
+        assert_eq!(
+            coordinator.request(vault_id, VaultWorkKind::Index),
+            ScheduleResult::Rejected
+        );
+        assert!(
+            worker
+                .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+                .await
+                .is_none(),
+            "queued work is reconstructed after restart instead of delaying shutdown"
+        );
     }
 }
