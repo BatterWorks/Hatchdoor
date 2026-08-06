@@ -3,12 +3,13 @@ pub mod parse;
 mod populate;
 mod queries;
 mod schema;
+mod vault_snapshots;
 
 pub(crate) use schema::is_recognized_legacy_cache;
 
 pub use populate::BuildOptions;
 pub use queries::SemanticHit;
-
+use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ use std::sync::{Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+
+use crate::vault_registry::VaultId;
 
 /// Where the cache database lives. File-backed caches get a pool of extra
 /// read connections (WAL lets many readers run alongside the single writer);
@@ -36,6 +39,12 @@ pub struct SqliteCache {
     source: CacheSource,
     /// Idle read connections available for checkout (file-backed only).
     read_pool: Mutex<Vec<Connection>>,
+    /// Monotonic per-Vault cache-publication attempts. This is disposable
+    /// process state: it prevents an older failed or successful candidate from
+    /// overwriting a newer attempt's cache status while the durable Markdown
+    /// source remains untouched.
+    #[allow(dead_code)]
+    vault_snapshot_attempts: Mutex<BTreeMap<VaultId, u64>>,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -140,6 +149,7 @@ impl SqliteCache {
             conn: Mutex::new(conn),
             source: CacheSource::File(path.to_path_buf()),
             read_pool: Mutex::new(Vec::new()),
+            vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -154,6 +164,7 @@ impl SqliteCache {
             conn: Mutex::new(conn),
             source: CacheSource::Memory,
             read_pool: Mutex::new(Vec::new()),
+            vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
