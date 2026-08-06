@@ -146,20 +146,29 @@ pub fn validate_repo(config: &GitConfig) -> Result<(), GitError> {
     Ok(())
 }
 
-/// Local mode needs only a non-bare repository rooted at the vault. Branch and
+/// Local mode needs only a non-bare repository containing the vault. Branch and
 /// remote checks are deliberately remote-only: local history follows whatever
 /// branch the operator has checked out.
 pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
-    let repo = Repository::open(&config.vault_path).map_err(|e| {
+    let repo = Repository::discover(&config.vault_path).map_err(|e| {
         GitError::Validation(format!("cannot open vault as git repo: {}", e.message()))
     })?;
     let workdir = repo
         .workdir()
         .ok_or_else(|| GitError::Validation("repository is bare".to_string()))?;
-    if !same_path(workdir, &config.vault_path) {
+    let vault_path = config.vault_path.canonicalize().map_err(|error| {
+        GitError::Validation(format!(
+            "cannot canonicalize Vault path {}: {error}",
+            config.vault_path.display()
+        ))
+    })?;
+    let workdir = workdir.canonicalize().map_err(|error| {
+        GitError::Validation(format!("cannot canonicalize repository root: {error}"))
+    })?;
+    if !vault_path.starts_with(&workdir) {
         return Err(GitError::Validation(format!(
-            "vault path {} is not the repository root {}",
-            config.vault_path.display(),
+            "vault path {} is not contained by repository root {}",
+            vault_path.display(),
             workdir.display()
         )));
     }
@@ -305,11 +314,16 @@ pub fn unpushed_count(config: &GitConfig) -> Result<usize, GitError> {
 /// existing edits commits that drift immediately, in both local and remote
 /// mode, rather than waiting for the next write (issue #56).
 pub fn has_uncommitted_changes(config: &GitConfig) -> Result<bool, GitError> {
-    let repo = Repository::open(&config.vault_path)?;
+    let repo = Repository::discover(&config.vault_path)?;
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true).recurse_untracked_dirs(true);
     let statuses = repo.statuses(Some(&mut opts))?;
-    Ok(!statuses.is_empty())
+    let vault_relative = vault_relative_path(&repo, config)?;
+    Ok(statuses.iter().any(|entry| {
+        entry
+            .path()
+            .is_ok_and(|path| status_path_is_in_vault(path, &vault_relative))
+    }))
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -339,24 +353,26 @@ fn recover_interrupted_state(repo: &Repository) -> Result<Option<git2::Repositor
     Ok(Some(state))
 }
 
-/// Local phase: heal any interrupted merge, stage the whole working tree, and
-/// commit if it differs from HEAD. Touches only the working tree and `.git` — no
-/// network — so callers hold the vault-write lock across this. Returns whether a
-/// commit was made and whether the remote phases are needed.
+/// Local phase: Remote mode may recover an interrupted integration; all modes
+/// stage only the Vault subtree and commit if it differs from HEAD. It never
+/// contacts a remote, so callers hold the vault-write lock across this. Returns
+/// whether a commit was made and whether the remote phases are needed.
 ///
 /// `paths` (the current write batch) is retained for the `SyncOps` contract and
-/// the commit message, but staging is deliberately whole-tree, not batch-scoped
-/// — see `commit_working_tree`.
+/// the commit message, but staging covers all detected Vault-subtree drift, not
+/// merely the batch — see `commit_working_tree`.
 pub fn commit_local(
     config: &GitConfig,
     paths: &[PathBuf],
     message: &str,
 ) -> Result<CommitOutcome, GitError> {
     let _ = paths;
-    let repo = Repository::open(&config.vault_path)?;
-    // Heal a repo left half-merged by an earlier crash before touching the index,
-    // otherwise commit_working_tree's write_tree would fail on the conflicted index.
-    if let Some(state) = recover_interrupted_state(&repo)? {
+    let repo = Repository::discover(&config.vault_path)?;
+    // Interrupted merge recovery hard-resets the checkout. It is restricted to
+    // remote integration; local history must preserve every manual edit.
+    if config.mode == GitMode::Remote
+        && let Some(state) = recover_interrupted_state(&repo)?
+    {
         tracing::warn!("git sync: recovered repository from interrupted {state:?} state");
     }
 
@@ -450,33 +466,29 @@ pub fn sync(config: &GitConfig, paths: &[PathBuf], message: &str) -> Result<Sync
     })
 }
 
-/// Stage the entire working tree — new, modified, and deleted files, honouring
-/// `.gitignore` — and create a commit if the result differs from HEAD. Returns
-/// true when a commit was created.
-///
-/// Staging is deliberately whole-tree rather than scoped to the current write
-/// batch. A batch path stranded by an earlier failed commit, a note edited
-/// directly on the server, or a write that raced into the sync window must all
-/// be captured; otherwise the edit is stranded out of git and, if it touches a
-/// tracked file, later wedges every remote-integrating merge.
+/// Stage all Vault-subtree drift from a fresh in-memory index seeded at HEAD
+/// and commit if it differs. Afterwards, refresh only that subtree in the
+/// on-disk index so it agrees with the new HEAD; an operator's staging outside
+/// the Vault stays untouched and is never swept into Local history.
 fn commit_working_tree(
     repo: &Repository,
     config: &GitConfig,
     message: &str,
 ) -> Result<bool, GitError> {
     let mut index = repo.index()?;
-    // add_all stages new + modified files; update_all (git add -u) additionally
-    // stages deletions of tracked files removed from disk. Together = git add -A.
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
-    index.update_all(["*"].iter(), None)?;
-    index.write()?;
-
-    let tree_oid = index.write_tree()?;
+    let head_commit = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+    let vault_relative = vault_relative_path(repo, config)?;
+    let preserve_vault_index = has_staged_vault_changes(repo, &vault_relative)?;
+    if let Some(parent) = &head_commit {
+        index.read_tree(&parent.tree()?)?;
+    } else {
+        index.clear()?;
+    }
+    stage_vault_drift(repo, &mut index, &vault_relative)?;
+    let tree_oid = index.write_tree_to(repo)?;
     let tree = repo.find_tree(tree_oid)?;
 
-    let head_commit = repo.head().ok().and_then(|h| h.target());
-    if let Some(parent_oid) = head_commit {
-        let parent = repo.find_commit(parent_oid)?;
+    if let Some(parent) = head_commit {
         if parent.tree()?.id() == tree_oid {
             return Ok(false); // nothing staged differs from HEAD
         }
@@ -486,7 +498,92 @@ fn commit_working_tree(
         let sig = signature(config)?;
         repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[])?;
     }
+    // `commit` advances HEAD but does not update the index. Refresh precisely
+    // the Vault subtree when it had no existing staging. If an operator did
+    // stage Vault content, retain that index exactly: it may intentionally
+    // differ from both the working tree and the just-created commit.
+    if !preserve_vault_index {
+        let mut worktree_index = repo.index()?;
+        stage_vault_drift(repo, &mut worktree_index, &vault_relative)?;
+        worktree_index.write()?;
+    }
     Ok(true)
+}
+
+/// Return the Vault location relative to the discovered checkout. This is a
+/// filesystem path, deliberately not a Git pathspec: a Vault name is
+/// operator-controlled and must never be interpreted as a wildcard.
+fn vault_relative_path(repo: &Repository, config: &GitConfig) -> Result<PathBuf, GitError> {
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| GitError::Validation("repository is bare".to_string()))?;
+    let vault_path = config.vault_path.canonicalize().map_err(|error| {
+        GitError::Validation(format!("cannot canonicalize Vault path: {error}"))
+    })?;
+    let workdir = workdir.canonicalize().map_err(|error| {
+        GitError::Validation(format!("cannot canonicalize repository root: {error}"))
+    })?;
+    let relative = vault_path.strip_prefix(&workdir).map_err(|_| {
+        GitError::Validation("Vault path is outside its discovered repository".to_string())
+    })?;
+    Ok(relative.to_path_buf())
+}
+
+fn status_path_is_in_vault(status_path: &str, vault_relative: &Path) -> bool {
+    vault_relative.as_os_str().is_empty() || Path::new(status_path).starts_with(vault_relative)
+}
+
+fn has_staged_vault_changes(repo: &Repository, vault_relative: &Path) -> Result<bool, GitError> {
+    let statuses = repo.statuses(None)?;
+    let staged = git2::Status::INDEX_NEW
+        | git2::Status::INDEX_MODIFIED
+        | git2::Status::INDEX_DELETED
+        | git2::Status::INDEX_RENAMED
+        | git2::Status::INDEX_TYPECHANGE;
+    statuses.iter().try_fold(false, |found, entry| {
+        if found {
+            return Ok(true);
+        }
+        let path = entry.path().map_err(|error| {
+            GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
+        })?;
+        Ok(status_path_is_in_vault(path, vault_relative) && entry.status().intersects(staged))
+    })
+}
+
+/// Add or remove exactly the changed, non-ignored paths reported by Git inside
+/// the configured Vault. Working from status entries rather than a pathspec
+/// keeps special characters in the Vault directory literal.
+fn stage_vault_drift(
+    repo: &Repository,
+    index: &mut git2::Index,
+    vault_relative: &Path,
+) -> Result<(), GitError> {
+    let mut options = git2::StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .renames_head_to_index(false)
+        .renames_index_to_workdir(false);
+    for entry in repo.statuses(Some(&mut options))?.iter() {
+        let path = entry.path().map_err(|error| {
+            GitError::Validation(format!("cannot read changed Git path as UTF-8: {error}"))
+        })?;
+        if !status_path_is_in_vault(path, vault_relative) {
+            continue;
+        }
+        let relative_path = Path::new(path);
+        let worktree_path = repo
+            .workdir()
+            .expect("non-bare repository was validated")
+            .join(relative_path);
+        if worktree_path.exists() {
+            index.add_path(relative_path)?;
+        } else {
+            index.remove_path(relative_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn merge_remote(
@@ -562,6 +659,130 @@ mod tests {
     use git2::Repository;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn local_history_commits_only_the_contained_vault_subtree() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        let vault_name = "notes*";
+        fs::create_dir(root.path().join(vault_name)).expect("notes directory");
+        fs::write(root.path().join(vault_name).join("inside.md"), "inside").expect("inside note");
+        fs::create_dir(root.path().join("notes-sibling")).expect("sibling directory");
+        fs::write(
+            root.path().join("notes-sibling/outside.md"),
+            "outside sibling",
+        )
+        .expect("outside sibling");
+        fs::write(root.path().join("outside.md"), "outside").expect("outside file");
+        let mut operator_index = repo.index().expect("operator index");
+        operator_index
+            .add_path(Path::new("outside.md"))
+            .expect("stage outside file");
+        operator_index.write().expect("preserve operator staging");
+        let config = GitConfig {
+            vault_path: root.path().join(vault_name),
+            mode: GitMode::Local,
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            username: String::new(),
+            token: String::new(),
+            debounce_seconds: 1,
+            author_name: "Test".to_string(),
+            author_email: "test@example.invalid".to_string(),
+        };
+
+        let report = sync(&config, &[], "local Vault history").expect("commit subtree");
+        assert_eq!(
+            report.outcome,
+            SyncOutcome::Committed { committed: true },
+            "Local history must finish without consulting a remote"
+        );
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        let tree = head.tree().expect("tree");
+        assert!(tree.get_path(Path::new("notes*/inside.md")).is_ok());
+        assert!(
+            tree.get_path(Path::new("notes-sibling/outside.md"))
+                .is_err(),
+            "pathspec syntax in a Vault name must not stage a sibling"
+        );
+        assert!(tree.get_path(Path::new("outside.md")).is_err());
+        assert!(
+            repo.index()
+                .expect("operator index after sync")
+                .get_path(Path::new("outside.md"), 0)
+                .is_some(),
+            "outside staged work remains in the operator index"
+        );
+        let mut status_options = git2::StatusOptions::new();
+        status_options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true);
+        assert!(
+            !repo
+                .statuses(Some(&mut status_options))
+                .expect("statuses")
+                .iter()
+                .any(|entry| entry.path().is_ok_and(|path| path == "notes*/inside.md")),
+            "the committed Vault path is clean in the operator index"
+        );
+        assert!(
+            root.path().join("outside.md").exists(),
+            "manual outside work remains"
+        );
+    }
+
+    #[test]
+    fn local_history_preserves_staged_vault_content() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        let note = vault_path.join("inside.md");
+        fs::write(&note, "operator staging").expect("staged content");
+        let mut operator_index = repo.index().expect("operator index");
+        operator_index
+            .add_path(Path::new("notes/inside.md"))
+            .expect("stage Vault content");
+        operator_index.write().expect("preserve operator staging");
+        fs::write(&note, "working tree content").expect("working content");
+        let config = GitConfig {
+            vault_path,
+            mode: GitMode::Local,
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            username: String::new(),
+            token: String::new(),
+            debounce_seconds: 1,
+            author_name: "Test".to_string(),
+            author_email: "test@example.invalid".to_string(),
+        };
+
+        sync(&config, &[], "local Vault history").expect("commit working tree");
+
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        let committed = head
+            .tree()
+            .expect("tree")
+            .get_path(Path::new("notes/inside.md"))
+            .expect("committed note")
+            .to_object(&repo)
+            .expect("note object")
+            .peel_to_blob()
+            .expect("note blob");
+        assert_eq!(committed.content(), b"working tree content");
+        let staged = repo
+            .index()
+            .expect("operator index after sync")
+            .get_path(Path::new("notes/inside.md"), 0)
+            .expect("preserved staged entry");
+        assert_eq!(
+            repo.find_blob(staged.id)
+                .expect("preserved staged blob")
+                .content(),
+            b"operator staging",
+            "Local history must not overwrite the operator's staged Vault content"
+        );
+    }
 
     fn base_config(vault: &Path) -> GitConfig {
         GitConfig {
