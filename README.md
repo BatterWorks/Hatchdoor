@@ -680,9 +680,10 @@ If [`just`](https://github.com/casey/just) is installed, `just dev-start` builds
 on top of the manual steps below to also track PIDs and prevent duplicate
 servers or stale build-cache directories from piling up; `just dev-stop` shuts
 both down cleanly, and `just --list` shows the rest (`dev-status`,
-`dev-clean`, `prod-check`). See the `justfile` for what each recipe does -
-`CARGO_TARGET_DIR`/`CARGO_HOME` there are pinned to this host's layout and may
-need adjusting on a different machine.
+`dev-clean`, `prod-check`). See the `justfile` for what each recipe does. Build
+artifacts are shared through the primary checkout across linked worktrees;
+explicit `CARGO_TARGET_DIR`, `CARGO_HOME`, and `HATCHDOOR_TMPDIR` values can
+override the portable defaults.
 
 Otherwise, build the frontend once:
 
