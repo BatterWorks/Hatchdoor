@@ -247,6 +247,11 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: crate::vault_registry::VaultRegistryStore::new(
+                tmp.path().join("state/vaults.json"),
+            ),
+            vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -303,6 +308,11 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: crate::vault_registry::VaultRegistryStore::new(
+                tmp.path().join("state/vaults.json"),
+            ),
+            vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,

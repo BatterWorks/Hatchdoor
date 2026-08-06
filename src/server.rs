@@ -2,6 +2,7 @@
 //! checks, and the `serve` run loop. Kept in the library (rather than the binary
 //! root) so the HTTP surface is reachable from integration tests.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -39,7 +40,9 @@ use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
-use crate::vault_runtime::{VaultRuntime, VaultSource};
+use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
+use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
+use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
 use crate::vault_watcher::spawn_vault_watcher;
 
 /// Hosts that only accept connections from the local machine. Binding to any
@@ -699,6 +702,84 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
+    // Migration may persist the registry and discard a recognized legacy
+    // cache, so run it only after startup security/configuration refusals and
+    // before opening SQLite.
+    let vault_registry = VaultRegistryStore::at_default_path();
+    let legacy_vault_path = match &config.vault_source {
+        VaultSource::Local { vault_path } => vault_path.clone(),
+        VaultSource::ManagedGit(_) => std::env::var("VAULT_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./vault")),
+    };
+    let migration = migrate_legacy_vault(
+        &vault_registry,
+        &runtime_config,
+        LegacyMigrationInput {
+            vault_path: legacy_vault_path,
+            cache_db_path: config.cache_db_path.clone(),
+            environment: std::env::vars().collect(),
+        },
+    )
+    .unwrap_or_else(|error| {
+        error!("Legacy Vault migration failed: {error}");
+        std::process::exit(1);
+    });
+    let (registry_state, legacy_migration_recovery) = match migration {
+        LegacyMigrationOutcome::NoLegacyDeployment => (
+            vault_registry.load().unwrap_or_else(|error| {
+                error!("Vault registry startup failed: {error}");
+                std::process::exit(1);
+            }),
+            None,
+        ),
+        LegacyMigrationOutcome::ExistingRegistry {
+            state,
+            ignored_environment_keys,
+        } => {
+            if !ignored_environment_keys.is_empty() {
+                warn!(
+                    keys = ?ignored_environment_keys,
+                    "Ignoring legacy environment Vault settings because the registry already exists"
+                );
+            }
+            (state, None)
+        }
+        LegacyMigrationOutcome::Imported {
+            snapshot,
+            vault_id,
+            cleanup_warnings,
+            ignored_environment_keys,
+        } => {
+            info!(%vault_id, "Imported legacy deployment into the Vault registry");
+            for warning in cleanup_warnings {
+                warn!("{warning}");
+            }
+            if !ignored_environment_keys.is_empty() {
+                warn!(keys = ?ignored_environment_keys, "Legacy environment Vault settings were not persisted");
+            }
+            (VaultRegistryState::Ready(snapshot), None)
+        }
+        LegacyMigrationOutcome::Recovery {
+            recovery,
+            ignored_environment_keys,
+        } => {
+            warn!(
+                code = recovery.code(),
+                message = recovery.message(),
+                keys = ?ignored_environment_keys,
+                "Legacy Vault migration requires operator recovery"
+            );
+            (
+                vault_registry.load().unwrap_or_else(|error| {
+                    error!("Vault registry startup failed: {error}");
+                    std::process::exit(1);
+                }),
+                Some(recovery),
+            )
+        }
+    };
+
     let sqlite = Arc::new(
         SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
             error!(
@@ -744,6 +825,14 @@ pub async fn run_server() {
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+    let vaults = VaultCollectionRuntime::with_watching(config.cache_db_path.clone());
+    match &registry_state {
+        VaultRegistryState::Ready(snapshot) => vaults.reconcile(&vault_registry, snapshot),
+        VaultRegistryState::Recovery(recovery) => warn!(
+            message = recovery.message(),
+            "Vault registry requires operator recovery; no Vault runtimes were activated"
+        ),
+    }
     let runtime = VaultRuntime::new(config.vault_source.clone());
     let startup = StartupTracker::new(runtime);
     if matches!(config.vault_source, VaultSource::Local { .. }) {
@@ -755,6 +844,9 @@ pub async fn run_server() {
     }
     let state = AppState {
         cache_db_path: config.cache_db_path.clone(),
+        vault_registry,
+        vaults,
+        legacy_migration_recovery,
         startup_sqlite: sqlite.clone(),
         ready_vault: Arc::new(RwLock::new(None)),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -928,6 +1020,9 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
+            vaults: VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -994,6 +1089,9 @@ mod tests {
         }
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
+            vaults: VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -1852,6 +1950,9 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
+            vaults: VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -2982,6 +3083,9 @@ mod tests {
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
+            vaults: VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,

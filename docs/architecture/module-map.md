@@ -100,6 +100,10 @@ that production inventory are still checked for stale paths and duplicates.
   to place in `.env`.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
+  `AppState::vault_registry`, `AppState::vaults`, and
+  `AppState::legacy_migration_recovery` expose the authoritative definition
+  store, activated per-Vault control blocks, and safe legacy-recovery state to
+  later shared-core adapters.
   `AppState::index_status` separately tracks setting-triggered rebuild drift,
   progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
@@ -109,15 +113,30 @@ that production inventory are still checked for stale paths and duplicates.
 - `StartupTracker` exposes startup/model/indexing readiness.
 - `VaultRuntime` and its serialized snapshot expose the current configured
   source, mode, lifecycle phase, and derived capabilities. This is the rebased
-  single-configured-Vault foundation, not the accepted collection registry or
-  final per-Vault runtime topology.
+  single-configured-Vault adapter retained for the still-unmigrated application
+  surfaces; it is not the collection authority.
+- `VaultCollectionRuntime` reconciles registry snapshots into zero, one, or
+  many Vault-ID-keyed `VaultControlBlock` values. Each enabled block owns its
+  definition and resolved Markdown root, capability-specific activation/local
+  content/search/Git/watcher status and errors, mutation and refresh locks, and
+  independently cancellable watcher. Status changes advance a revisioned
+  collection snapshot and publish revision events. Disabling, replacing, or
+  disconnecting a block first revokes operation acceptance, publishes its
+  cancellation signal, and stops its watcher, including through already-held
+  handles. Unchanged Vaults retain their control blocks when another definition
+  changes; disabled definitions remain visible with no capabilities and no
+  active runtime.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records.
-- `spawn_vault_watcher` connects filesystem events to cache refresh.
+- `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
+  an independently cancellable handle. Queueing/coalescing those intents is
+  deliberately deferred to #89. The existing `spawn_vault_watcher` remains the
+  transitional single-Vault adapter until later application-surface packets.
 
 **Consumed dependencies:** nearly every backend boundary. This is expected for
 a composition boundary and is not a reason to introduce per-domain service
-traits.
+traits. Collection activation consumes redacted registry definitions and their
+store-resolved local Markdown roots; it does not read credentials.
 
 **Coordination rule:** any work packet touching these files must name the
 specific field, route, startup phase, or integration being changed. Adding an
@@ -194,8 +213,9 @@ checks.
 types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
-operations, explicit confirmed-empty initialization for migration recovery,
-and the versioned `/data/state/vaults.json` format. An absent file
+operations, store-owned `vault_path` resolution for runtime consumers,
+explicit confirmed-empty initialization for migration recovery, and the
+versioned `/data/state/vaults.json` format. An absent file
 is a complete revision-0 zero-Vault state and is not created by reads. Commits
 are serialized by normalized registry path across all store handles in the
 process, compare the expected persisted revision, increment it once, and
@@ -204,14 +224,15 @@ future-schema, or structurally invalid definition files expose no Vault records
 and are never overwritten automatically.
 
 **Consumers:** the legacy single-Vault import consumes the registry load, add,
-and confirmed-empty initialization contracts. Later runtime and management
-adapters consume its safe projections and lifecycle operations under their own
-work packets. No runtime, HTTP, MCP, frontend, cache, search, or Git-lifecycle
-consumer is integrated by #87.
+and confirmed-empty initialization contracts. Runtime composition loads the
+registry after migration and `VaultCollectionRuntime` consumes its safe
+projections and resolved paths. HTTP, MCP, frontend, cache, search, and
+Git-lifecycle adapters remain separately owned later packets.
 
-**Coordination paths:** `src/lib.rs` exports the boundary. Future construction
-in runtime composition, `/data/state` deployment persistence, and management
-adapters require their own declared work packets.
+**Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
+`src/app_state.rs` construct and retain it; `/data/state` deployment
+persistence and later management adapters require their own declared work
+packets.
 
 **Invariants:** the registry is the sole Hatchdoor-owned Vault-definition
 authority; immutable IDs are UUID v4 map keys; revision conflicts save nothing;
@@ -243,9 +264,10 @@ outcome. Any existing registry, including an intentionally empty one,
 permanently suppresses legacy import. Confirmed Start with no Vaults writes an
 ordinary revisioned zero-Vault registry.
 
-**Consumers:** startup runtime composition will call this isolated adapter in
-#88 before activating Vault runtimes. There is deliberately no production
-startup caller in #87.
+**Consumers:** startup runtime composition calls this isolated adapter before
+opening the disposable cache and activating Vault runtimes. Safe imports become
+ordinary enabled definitions; recovery activates no Vault and remains in
+`AppState` for later setup/management surfaces.
 
 **Coordination paths:** `src/lib.rs` exports the boundary;
 `docker-compose.yml`, `.env.example`, `README.md`, and

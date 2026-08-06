@@ -904,6 +904,15 @@ impl VaultRegistryStore {
         &self.path
     }
 
+    /// Resolve the local Markdown root owned by a persisted Vault definition.
+    ///
+    /// Managed checkouts are placed relative to this store's instance-state
+    /// directory, so runtime consumers must use this method rather than
+    /// reconstructing that persistent layout independently.
+    pub fn vault_path(&self, definition: &VaultDefinition) -> PathBuf {
+        self.source_vault_path(definition.vault_id(), definition.source())
+    }
+
     fn source_vault_path(&self, vault_id: VaultId, source: &VaultSource) -> PathBuf {
         match source {
             VaultSource::Local { path } => path.clone(),

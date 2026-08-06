@@ -1,17 +1,142 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use notify::{
     Config, Event, RecommendedWatcher, RecursiveMode, Watcher,
     event::{MetadataKind, ModifyKind},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::app_state::{AppState, refresh_now};
 use crate::vault::ExcludeMatcher;
+use crate::vault_registry::VaultId;
 
 pub const WATCH_DEBOUNCE: Duration = Duration::from_millis(500);
+
+#[derive(Clone)]
+pub struct VaultWatcherHandle {
+    inner: Arc<VaultWatcherControl>,
+}
+
+struct VaultWatcherControl {
+    cancelled: AtomicBool,
+    cancel: watch::Sender<bool>,
+    task: tokio::task::AbortHandle,
+}
+
+impl Drop for VaultWatcherControl {
+    fn drop(&mut self) {
+        let _ = self.cancel.send(true);
+        self.task.abort();
+    }
+}
+
+impl VaultWatcherHandle {
+    /// Stop this Vault's watcher without affecting any other Vault runtime.
+    pub fn cancel(&self) {
+        if !self.inner.cancelled.swap(true, Ordering::SeqCst) {
+            let _ = self.inner.cancel.send(true);
+            self.inner.task.abort();
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+/// Start one independently cancellable watcher that reports only the changed
+/// Vault's identity. Queueing and coalescing these intents belongs to #89.
+pub fn spawn_vault_change_watcher(
+    vault_id: VaultId,
+    vault_path: PathBuf,
+    cache_db_path: PathBuf,
+    exclude: ExcludeMatcher,
+    changes: broadcast::Sender<VaultId>,
+) -> Result<VaultWatcherHandle, String> {
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    let mut watcher = RecommendedWatcher::new(
+        move |result| {
+            if event_tx.send(result).is_err() {
+                debug!(%vault_id, "Vault watcher receiver closed");
+            }
+        },
+        Config::default(),
+    )
+    .map_err(|error| format!("failed to create watcher: {error}"))?;
+    watcher
+        .watch(&vault_path, RecursiveMode::Recursive)
+        .map_err(|error| format!("failed to watch {}: {error}", vault_path.display()))?;
+    let (cancel, cancel_rx) = watch::channel(false);
+    let task = tokio::spawn(run_vault_change_watcher(
+        watcher,
+        vault_id,
+        vault_path,
+        cache_db_path,
+        exclude,
+        changes,
+        event_rx,
+        cancel_rx,
+    ));
+    Ok(VaultWatcherHandle {
+        inner: Arc::new(VaultWatcherControl {
+            cancelled: AtomicBool::new(false),
+            cancel,
+            task: task.abort_handle(),
+        }),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_vault_change_watcher(
+    _watcher: RecommendedWatcher,
+    vault_id: VaultId,
+    vault_path: PathBuf,
+    cache_db_path: PathBuf,
+    exclude: ExcludeMatcher,
+    changes: broadcast::Sender<VaultId>,
+    mut event_rx: mpsc::UnboundedReceiver<notify::Result<Event>>,
+    mut cancel: watch::Receiver<bool>,
+) {
+    info!(%vault_id, vault_path = %vault_path.display(), "Vault watcher started");
+    loop {
+        tokio::select! {
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    break;
+                }
+            }
+            result = event_rx.recv() => {
+                let Some(result) = result else {
+                    break;
+                };
+                match result {
+                    Ok(event) if should_refresh_for_event(
+                        &event,
+                        &cache_db_path,
+                        &vault_path,
+                        &exclude,
+                    ) => {
+                        debounce_events(
+                            &mut event_rx,
+                            &cache_db_path,
+                            &vault_path,
+                            &exclude,
+                        )
+                        .await;
+                        let _ = changes.send(vault_id);
+                    }
+                    Ok(_) => {}
+                    Err(error) => warn!(%vault_id, "Vault watcher event error: {error}"),
+                }
+            }
+        }
+    }
+    info!(%vault_id, "Vault watcher stopped");
+}
 
 pub fn spawn_vault_watcher(state: AppState, vault_path: PathBuf, cache_db_path: PathBuf) {
     tokio::spawn(async move {
@@ -219,6 +344,8 @@ fn absolute_clean_path(path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use notify::{
         EventKind,
@@ -445,5 +572,35 @@ mod tests {
             should_refresh_for_event(&content, &cache, dir.path(), &exclude),
             "a real content change must still trigger a reindex"
         );
+    }
+
+    #[tokio::test]
+    async fn per_vault_watcher_reports_identity_and_can_be_cancelled() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("Vault directory");
+        let cache = dir.path().join("cache.sqlite3");
+        let vault_id =
+            crate::vault_registry::VaultId::from_str("12345678-1234-4567-89ab-1234567890ab")
+                .expect("Vault ID");
+        let (changes, mut receiver) = tokio::sync::broadcast::channel(8);
+        let handle = spawn_vault_change_watcher(
+            vault_id,
+            vault_path.clone(),
+            cache,
+            default_exclude(),
+            changes,
+        )
+        .expect("start per-Vault watcher");
+
+        std::fs::write(vault_path.join("Changed.md"), "# Changed\n").expect("write changed note");
+        let changed = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+            .await
+            .expect("watcher change timeout")
+            .expect("watcher change");
+        assert_eq!(changed, vault_id);
+
+        handle.cancel();
+        assert!(handle.is_cancelled());
     }
 }
