@@ -433,6 +433,32 @@ impl VaultControlBlock {
         &self.vault_path
     }
 
+    /// Build an authoritative index for an exact read. Collection projections
+    /// use the shared disposable cache, but exact note, link, and resolve
+    /// operations must always inspect this Vault's own Markdown directory.
+    pub fn authoritative_index(&self) -> Result<crate::vault::VaultIndex, VaultRuntimeError> {
+        self.ensure_accepting_operations()?;
+        let exclude = crate::vault::ExcludeMatcher::new(self.definition.exclude_patterns())
+            .map_err(|message| VaultRuntimeError {
+                code: "vault_scan_config_invalid".to_string(),
+                message,
+                retryable: false,
+            })?;
+        crate::vault::VaultIndex::build_with_config(
+            self.vault_path(),
+            &crate::vault::VaultScanConfig { exclude },
+        )
+        .map_err(|error| VaultRuntimeError {
+            code: "vault_read_unavailable".to_string(),
+            message: format!(
+                "Could not read Vault {} from '{}': {error}",
+                self.definition.vault_id(),
+                self.vault_path().display()
+            ),
+            retryable: true,
+        })
+    }
+
     pub fn snapshot(&self) -> CollectionVaultSnapshot {
         self.snapshot
             .read()

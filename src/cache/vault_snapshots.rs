@@ -1,6 +1,8 @@
 //! Vault-qualified snapshot storage for the shared disposable SQLite cache.
 #![allow(dead_code)] // #92 is the first shared-core consumer of this internal cache seam.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{OptionalExtension, Transaction, params};
 
 use crate::cache::SqliteCache;
@@ -18,6 +20,41 @@ pub(crate) enum VaultSnapshotFreshness {
 pub(crate) struct VaultSnapshotStatus {
     pub(crate) participating: bool,
     pub(crate) freshness: VaultSnapshotFreshness,
+}
+
+/// One Vault's complete published read snapshot. This is intentionally a
+/// cache-local representation: callers must treat it as disposable data and
+/// keep exact note reads on the authoritative Markdown path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VaultSnapshotRead {
+    pub(crate) notes: Vec<VaultSnapshotNote>,
+    pub(crate) links: Vec<VaultSnapshotLink>,
+    pub(crate) tags_by_note: BTreeMap<String, Vec<String>>,
+}
+
+/// A participant state and every row used to project it, read from one pinned
+/// SQLite snapshot. `None` means there is no currently participating snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PublishedVaultSnapshot {
+    pub(crate) status: VaultSnapshotStatus,
+    pub(crate) read: VaultSnapshotRead,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VaultSnapshotNote {
+    pub(crate) title: String,
+    pub(crate) slug: String,
+    pub(crate) relative_path: String,
+    pub(crate) content: String,
+    pub(crate) size_bytes: i64,
+    pub(crate) mtime_ns: i64,
+    pub(crate) layer: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct VaultSnapshotLink {
+    pub(crate) source_slug: String,
+    pub(crate) target_slug: String,
 }
 
 enum SnapshotRelation {
@@ -114,6 +151,44 @@ impl SqliteCache {
         vault_id: VaultId,
     ) -> Result<Option<VaultSnapshotStatus>, String> {
         let conn = self.read()?;
+        Self::read_snapshot_status(&conn, vault_id)
+    }
+
+    /// Read one participating Vault's state and projection rows from one
+    /// SQLite snapshot. This prevents a concurrent publish or disconnect from
+    /// pairing a prior freshness value with empty or newer rows.
+    pub(crate) fn read_vault_snapshot(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Option<PublishedVaultSnapshot>, String> {
+        let conn = self.read()?;
+        conn.execute_batch("BEGIN")
+            .map_err(|error| format!("begin Vault snapshot read: {error}"))?;
+        let result = (|| {
+            let Some(status) = Self::read_snapshot_status(&conn, vault_id)? else {
+                return Ok(None);
+            };
+            if !status.participating {
+                return Ok(None);
+            }
+            let read = Self::read_vault_snapshot_rows(&conn, vault_id)?;
+            Ok(Some(PublishedVaultSnapshot { status, read }))
+        })();
+        let close = if result.is_ok() {
+            conn.execute_batch("COMMIT")
+                .map_err(|error| format!("commit Vault snapshot read: {error}"))
+        } else {
+            conn.execute_batch("ROLLBACK")
+                .map_err(|error| format!("rollback Vault snapshot read: {error}"))
+        };
+        close?;
+        result
+    }
+
+    fn read_snapshot_status(
+        conn: &rusqlite::Connection,
+        vault_id: VaultId,
+    ) -> Result<Option<VaultSnapshotStatus>, String> {
         let row: Option<(i64, String)> = conn
             .query_row(
                 "SELECT participating, freshness FROM vault_snapshots WHERE vault_id = ?1",
@@ -138,6 +213,76 @@ impl SqliteCache {
             })
         })
         .transpose()
+    }
+
+    fn read_vault_snapshot_rows(
+        conn: &rusqlite::Connection,
+        vault_id: VaultId,
+    ) -> Result<VaultSnapshotRead, String> {
+        let vault_id = vault_id.to_string();
+        let mut notes_statement = conn
+            .prepare(
+                "SELECT title, slug, relative_path, content, size_bytes, mtime_ns, layer \
+                 FROM vault_notes WHERE vault_id = ?1 ORDER BY relative_path",
+            )
+            .map_err(|error| format!("prepare Vault snapshot notes: {error}"))?;
+        let notes = notes_statement
+            .query_map(params![&vault_id], |row| {
+                Ok(VaultSnapshotNote {
+                    title: row.get(0)?,
+                    slug: row.get(1)?,
+                    relative_path: row.get(2)?,
+                    content: row.get(3)?,
+                    size_bytes: row.get(4)?,
+                    mtime_ns: row.get(5)?,
+                    layer: row.get(6)?,
+                })
+            })
+            .map_err(|error| format!("query Vault snapshot notes: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("read Vault snapshot notes: {error}"))?;
+        drop(notes_statement);
+
+        let mut links_statement = conn
+            .prepare(
+                "SELECT source_slug, target_slug FROM vault_note_links \
+                 WHERE vault_id = ?1 ORDER BY source_slug, target_slug",
+            )
+            .map_err(|error| format!("prepare Vault snapshot links: {error}"))?;
+        let links = links_statement
+            .query_map(params![&vault_id], |row| {
+                Ok(VaultSnapshotLink {
+                    source_slug: row.get(0)?,
+                    target_slug: row.get(1)?,
+                })
+            })
+            .map_err(|error| format!("query Vault snapshot links: {error}"))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|error| format!("read Vault snapshot links: {error}"))?;
+        drop(links_statement);
+
+        let mut tags_statement = conn
+            .prepare(
+                "SELECT note_slug, tag FROM vault_tags WHERE vault_id = ?1 \
+                 ORDER BY note_slug, tag",
+            )
+            .map_err(|error| format!("prepare Vault snapshot tags: {error}"))?;
+        let mut tags_by_note = BTreeMap::<String, Vec<String>>::new();
+        let tag_rows = tags_statement
+            .query_map(params![&vault_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("query Vault snapshot tags: {error}"))?;
+        for tag in tag_rows {
+            let (slug, tag) = tag.map_err(|error| format!("read Vault snapshot tag: {error}"))?;
+            tags_by_note.entry(slug).or_default().push(tag);
+        }
+
+        Ok(VaultSnapshotRead {
+            notes,
+            links,
+            tags_by_note,
+        })
     }
 
     fn snapshot_count(
@@ -742,6 +887,13 @@ mod tests {
             .disconnect_vault_snapshot(first)
             .expect("disconnect only first Vault");
         assert_eq!(cache.snapshot_status(first).expect("first status"), None);
+        assert!(
+            cache
+                .read_vault_snapshot(first)
+                .expect("read disconnected snapshot")
+                .is_none(),
+            "a disconnected Vault must be unavailable, never an empty projection"
+        );
         assert_eq!(cache.snapshot_note_count(first).expect("first rows"), 0);
         assert_eq!(
             cache

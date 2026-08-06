@@ -461,6 +461,43 @@ configuration for archive or upload limits.
 **Validation:** `cargo test vault::write`, adapter write tests, and the full
 backend checks.
 
+### Vault-qualified read projections
+
+**Kind:** product capability/domain core.
+
+**Owned paths:** `src/vault_read.rs`.
+
+**Public contract:** `VaultReadCore`, explicit `VaultScope`, the common
+`VaultReadProjection` envelope, participant state/error types, and
+Vault-qualified exact-note, tree, statistics, graph, and recent-note
+projections.
+
+**Consumed dependencies:** the Vault runtime's authoritative per-Vault index,
+the shared cache's published Vault snapshot seam, and existing Vault note/link
+types.
+
+**Consumers:** future HTTP and MCP Vault-scoped adapters. The core has no
+adapter or route ownership.
+
+**Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
+Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
+and `src/vault_runtime.rs` for the authoritative exact-read index boundary.
+
+**Invariants:**
+
+- Exact reads inspect the requested Vault's Markdown directory; SQLite remains
+  a disposable projection (ADR-01).
+- Every selected or returned note identity includes an immutable Vault ID; no
+  default or sole-Vault inference exists.
+- One-Vault snapshots are explicit about stale availability, unavailable
+  snapshots never become empty data, and all-Vault reads preserve participant
+  status and Vault grouping.
+- Trees, statistics, and graphs remain grouped by Vault; graph edges never
+  cross a Vault boundary.
+
+**Validation:** `cargo test vault_read`, focused cache snapshot tests, and the
+full backend checks.
+
 ### Cache and query read model
 
 **Kind:** infrastructure/read model.
@@ -489,12 +526,13 @@ fingerprint and opens existing files read-only for the one-time migration.
 **Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec.
 
-**Consumers:** application state/reindexing, Search, handlers, MCP reads,
-evaluation tooling, diagnostics, and the one-time legacy single-Vault
-migration's read-only evidence check.
+**Consumers:** application state/reindexing, Vault-qualified read projections,
+Search, handlers, MCP reads, evaluation tooling, diagnostics, and the one-time
+legacy single-Vault migration's read-only evidence check.
 
-**Coordination paths:** `src/app_state.rs`, `src/search/**`,
-`src/vault/index.rs`, `src/chunk/**`, and embedder identity/dimensions.
+**Coordination paths:** `src/app_state.rs`, `src/vault_read.rs`,
+`src/search/**`, `src/vault/index.rs`, `src/chunk/**`, and embedder
+identity/dimensions.
 
 **Invariants:**
 
