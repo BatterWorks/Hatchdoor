@@ -176,6 +176,44 @@ schemas fail with recovery guidance and are never overwritten.
 **Validation:** `cargo test runtime_config`, followed by the full backend
 checks.
 
+### Vault collection registry
+
+**Kind:** infrastructure/persistent domain state.
+
+**Owned paths:** `src/vault_registry.rs`.
+
+**Public contract:** `DEFAULT_VAULT_REGISTRY_PATH`,
+`REGISTRY_SCHEMA_VERSION`, canonical `VaultId` generation and parsing,
+`VaultRegistryStore`, immutable `VaultRegistrySnapshot` values, explicit
+`VaultRegistryState::Ready` versus `Recovery`, structured recovery/error
+types, and the versioned `/data/state/vaults.json` format. An absent file is a
+complete revision-0 zero-Vault state and is not created by reads. Commits are
+serialized by normalized registry path across all store handles in the process,
+compare the expected persisted revision, increment it once, and atomically
+replace the file with owner-only permissions. Corrupt, unsupported, or
+future-schema files expose no Vault records and are never overwritten
+automatically. `VaultRecord` is deliberately an empty persisted identity slot in
+#85; #86 owns its accepted definition fields, validation, redaction, and
+lifecycle operations without changing the registry identity contract.
+
+**Consumers:** the Vault-definition and legacy-import packets will consume
+this boundary in #86 and #87. No runtime, HTTP, MCP, frontend, cache, search, or
+Git consumer is integrated by #85.
+
+**Coordination paths:** `src/lib.rs` exports the boundary. Future construction
+in runtime composition, `/data/state` deployment persistence, and management
+adapters require their own declared work packets.
+
+**Invariants:** the registry is the sole Hatchdoor-owned Vault-definition
+authority; immutable IDs are UUID v4 map keys; revision conflicts save nothing;
+recovery retains the original bytes; Vault contents remain authoritative
+Markdown and SQLite remains disposable (ADR-01); the store adds no service,
+framework, or speculative trait (ADR-02/13); filesystem behavior assumes no
+runtime shell and remains usable by the rootless image (ADR-12).
+
+**Validation:** `cargo test vault_registry`,
+`node scripts/check-module-map.mjs`, followed by the full backend checks.
+
 ### Web authentication
 
 **Kind:** infrastructure/security.
