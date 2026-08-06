@@ -4,6 +4,8 @@ mod populate;
 mod queries;
 mod schema;
 
+pub(crate) use schema::is_recognized_legacy_cache;
+
 pub use populate::BuildOptions;
 pub use queries::SemanticHit;
 
