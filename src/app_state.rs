@@ -14,11 +14,21 @@ use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::{IndexingProgressSnapshot, StartupTracker};
 use crate::vault::{VaultIndex, VaultScanConfig, seed_empty_vault};
+use crate::vault_migration::LegacyMigrationRecovery;
+use crate::vault_registry::VaultRegistryStore;
+use crate::vault_runtime::VaultCollectionRuntime;
 use crate::vault_runtime::VaultSource;
 
 #[derive(Clone)]
 pub struct AppState {
     pub cache_db_path: PathBuf,
+    /// Authoritative Vault definitions and the independently activated runtime
+    /// collection derived from them.
+    pub vault_registry: VaultRegistryStore,
+    pub vaults: VaultCollectionRuntime,
+    /// Present when safe automatic import could not prove the legacy
+    /// deployment. Collection/setup surfaces remain available for recovery.
+    pub legacy_migration_recovery: Option<LegacyMigrationRecovery>,
     /// Disposable SQLite handle used while a configured local vault is still
     /// being indexed. It is published through `ready_vault` only after a
     /// successful build.
@@ -712,6 +722,9 @@ mod tests {
         let (mcp_tools_changed, _) = broadcast::channel(16);
         AppState {
             cache_db_path: state_root.join("cache.sqlite3"),
+            vault_registry: VaultRegistryStore::new(state_root.join("state/vaults.json")),
+            vaults: VaultCollectionRuntime::new(),
+            legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault { vault_path, cache }))),
             vault_revision: Arc::new(AtomicU64::new(0)),
