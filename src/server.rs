@@ -44,11 +44,34 @@ use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migra
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
 use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
 use crate::vault_watcher::spawn_vault_watcher;
+use crate::vault_work::VaultWorkCoordinator;
 
 /// Hosts that only accept connections from the local machine. Binding to any
 /// other address exposes the port to the network.
 fn is_loopback_host(host: &str) -> bool {
     matches!(host.trim(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl-C shutdown signal handler");
+    };
+
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("install SIGTERM shutdown signal handler");
+        tokio::select! {
+            () = ctrl_c => {}
+            _ = terminate.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
 }
 
 /// Refuse to serve mutating routes unauthenticated on a public interface. A
@@ -826,8 +849,15 @@ pub async fn run_server() {
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let vaults = VaultCollectionRuntime::with_watching(config.cache_db_path.clone());
+    // #90 establishes durable reconstruction and lifecycle admission. Later
+    // cache and Git packets own the concrete worker loop and operation dispatch.
+    let (vault_work, _) = VaultWorkCoordinator::new();
     match &registry_state {
-        VaultRegistryState::Ready(snapshot) => vaults.reconcile(&vault_registry, snapshot),
+        VaultRegistryState::Ready(snapshot) => {
+            vaults
+                .reconcile_and_reconstruct(&vault_registry, snapshot, &vault_work)
+                .await
+        }
         VaultRegistryState::Recovery(recovery) => warn!(
             message = recovery.message(),
             "Vault registry requires operator recovery; no Vault runtimes were activated"
@@ -842,6 +872,7 @@ pub async fn run_server() {
             startup.set_scanning();
         }
     }
+    let shutdown_vaults = vaults.clone();
     let state = AppState {
         cache_db_path: config.cache_db_path.clone(),
         vault_registry,
@@ -873,6 +904,16 @@ pub async fn run_server() {
 
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
     let app = build_router(state.clone(), web_bearer_token);
+    let shutdown_state = state.clone();
+    let (shutdown_started, mut shutdown_received) = tokio::sync::watch::channel(false);
+    let shutdown_task = tokio::spawn({
+        let vault_work = vault_work.clone();
+        async move {
+            shutdown_signal().await;
+            vault_work.shutdown();
+            shutdown_started.send_replace(true);
+        }
+    });
 
     let addr = config.socket_addr().unwrap_or_else(|e| {
         error!("Address error: {e}");
@@ -907,10 +948,25 @@ pub async fn run_server() {
         VaultSource::Local { .. } => {}
     }
 
-    axum::serve(listener, app).await.unwrap_or_else(|e| {
-        error!("Server error: {e}");
-        std::process::exit(1);
-    });
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_received.changed().await;
+        })
+        .await
+        .unwrap_or_else(|e| {
+            error!("Server error: {e}");
+            std::process::exit(1);
+        });
+
+    shutdown_vaults.shutdown(&vault_work).await;
+    if let Some(git_sync) = shutdown_state.git_sync.read().await.clone()
+        && let Err(error) = git_sync.stop(std::time::Duration::from_secs(30)).await
+    {
+        error!(%error, "Git sync did not reach its shutdown boundary");
+    }
+    if let Err(error) = shutdown_task.await {
+        error!(%error, "Server shutdown task exited unexpectedly");
+    }
 }
 
 #[cfg(test)]
