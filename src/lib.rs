@@ -20,3 +20,4 @@ pub mod vault_migration;
 pub mod vault_registry;
 pub mod vault_runtime;
 pub mod vault_watcher;
+pub mod vault_work;

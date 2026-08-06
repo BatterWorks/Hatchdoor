@@ -155,6 +155,41 @@ specific field, route, startup phase, or integration being changed. Adding an
 `cargo test vault_runtime`, `cargo test vault_watcher`, followed by the full
 backend checks.
 
+### Background work coordination
+
+**Kind:** infrastructure/runtime scheduling.
+
+**Owned paths:** `src/vault_work.rs`.
+
+**Public contract:** `VaultWorkCoordinator` is the cloneable request side and
+`VaultWorkWorker` is the unique execution side of one instance-wide in-memory
+FIFO. `VaultWorkKind`, `VaultWorkRequest`, `ScheduleResult`, `VaultWorkOutcome`,
+and `VaultWorkError` expose deterministic one-operation turns, request
+coalescing, and Vault-qualified returned outcomes. Index work includes local
+embedding work; Git and repair remain distinct operation kinds.
+
+**Consumed dependencies:** durable `VaultId` identity and Tokio notification.
+The queue owns no Markdown, SQLite, Git, or lifecycle state.
+
+**Consumers:** none yet. Collection lifecycle packet #90 owns the first worker
+loop and runtime integration; later cache and Git packets supply concrete
+operations without creating additional execution lanes.
+
+**Coordination paths:** `src/lib.rs` for the module export; runtime composition,
+per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
+when their owning packets integrate the coordinator.
+
+**Invariants:** one Vault occupies at most one FIFO position; one operation runs
+per turn; duplicate pending work coalesces and duplicate active work retains at
+most one rerun; remaining work returns to the tail; a returned failure completes
+its turn and remains attributable to one Vault. The queue stays disposable and
+adds no priorities, throttling, persistence, second lane, generic timeout, or
+forced cancellation. Restart reconstruction, disable/disconnect draining, and
+graceful shutdown belong to #90.
+
+**Validation:** `cargo test vault_work`, the runtime-composition tests when a
+consumer is integrated, and the full backend checks.
+
 ### Live configuration foundation
 
 **Kind:** infrastructure/runtime state.
