@@ -691,7 +691,8 @@ runtime setting), `GitConfig`, write-record/message types, sync outcomes and
 errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
 and `spawn_sync_task`. The crate-private `parse_mode` and `non_empty_setting`
 helpers keep startup and one-time migration interpretation identical. Local
-mode commits without network access; remote mode
+mode commits without network access and discovers an enclosing existing
+checkout while staging only the configured Vault subtree; remote mode
 retains the safe fetch/integrate/push phases. The settings HTTP boundary owns
 the preflight → bounded drain → replacement protocol and exposes it through
 `GET /api/git-status`. `GitSyncHandle::stop` timing out withdraws its stop

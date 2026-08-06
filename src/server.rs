@@ -1066,7 +1066,12 @@ mod tests {
         web_bearer_token: Option<Arc<str>>,
         demo_mode: bool,
     ) -> (Router, TempDir, AppState) {
-        let tmp = TempDir::new().expect("temp dir");
+        // These settings tests exercise the explicit fresh-repository consent
+        // flow. Keep the fixture outside Cargo's TMPDIR: the project build
+        // directory may sit inside Hatchdoor's own Git checkout, which would
+        // intentionally count as an enclosing existing repository for Local
+        // history.
+        let tmp = TempDir::new_in("/tmp").expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
         std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");

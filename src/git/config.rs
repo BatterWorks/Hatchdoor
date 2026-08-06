@@ -18,7 +18,8 @@ impl GitMode {
 /// Static configuration for one running versioning task.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GitConfig {
-    /// Absolute path to the vault, which must be the git repository root.
+    /// Absolute path to the Vault. Remote mode requires it to be the Git
+    /// repository root; Local history may use an existing enclosing checkout.
     pub vault_path: std::path::PathBuf,
     /// Local commits only, or local commits plus safe remote synchronization.
     pub mode: GitMode,
