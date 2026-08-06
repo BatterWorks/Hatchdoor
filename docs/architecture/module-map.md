@@ -476,14 +476,17 @@ backend checks.
 - `src/cache/queries/graph.rs`
 - `src/cache/queries/metadata.rs`
 - `src/cache/queries/search.rs`
+- `src/cache/vault_snapshots.rs`
 
 **Public contract:** `SqliteCache`, `ReadConn`, `BuildOptions`, `SemanticHit`,
-and the methods implemented on `SqliteCache`. `parse` is currently public and
+and the methods implemented on `SqliteCache`. The crate-private
+`vault_snapshots` seam owns Vault-ID-qualified candidate publication,
+stale/participation state, attempt ordering, and Vault-local disposal in the shared cache. `parse` is currently public and
 also supplies parsing/hash behavior to vault indexing. The crate-private
 `is_recognized_legacy_cache` inspection seam owns the supported legacy schema
 fingerprint and opens existing files read-only for the one-time migration.
 
-**Consumed dependencies:** vault index/types, chunking, embeddings, SQLite,
+**Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec.
 
 **Consumers:** application state/reindexing, Search, handlers, MCP reads,
@@ -500,6 +503,9 @@ migration's read-only evidence check.
   query-only reads (ADR-06).
 - Schema or embedder identity mismatch rebuilds rather than mixing data.
 - A refresh commits a coherent new read snapshot.
+- Every shared snapshot row and relationship is Vault-ID-qualified; failed
+  replacement retains the prior snapshot as stale, disabling removes only
+  participation, and disconnect deletes only that Vault's disposable rows.
 
 **Validation:** `cargo test cache` and full backend checks. Schema/population
 changes require search and application-state tests too.
