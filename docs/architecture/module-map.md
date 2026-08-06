@@ -186,19 +186,22 @@ checks.
 `REGISTRY_SCHEMA_VERSION`, canonical `VaultId` generation and parsing,
 `VaultRegistryStore`, immutable `VaultRegistrySnapshot` values, explicit
 `VaultRegistryState::Ready` versus `Recovery`, structured recovery/error
-types, and the versioned `/data/state/vaults.json` format. An absent file is a
-complete revision-0 zero-Vault state and is not created by reads. Commits are
-serialized by normalized registry path across all store handles in the process,
-compare the expected persisted revision, increment it once, and atomically
-replace the file with owner-only permissions. Corrupt, unsupported, or
-future-schema files expose no Vault records and are never overwritten
-automatically. `VaultRecord` is deliberately an empty persisted identity slot in
-#85; #86 owns its accepted definition fields, validation, redaction, and
-lifecycle operations without changing the registry identity contract.
+types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
+local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
+inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
+operations, and the versioned `/data/state/vaults.json` format. An absent file
+is a complete revision-0 zero-Vault state and is not created by reads. Commits
+are serialized by normalized registry path across all store handles in the
+process, compare the expected persisted revision, increment it once, and
+atomically replace the file with owner-only permissions. Corrupt, unsupported,
+future-schema, or structurally invalid definition files expose no Vault records
+and are never overwritten automatically.
 
-**Consumers:** the Vault-definition and legacy-import packets will consume
-this boundary in #86 and #87. No runtime, HTTP, MCP, frontend, cache, search, or
-Git consumer is integrated by #85.
+**Consumers:** the legacy-import packet will consume this boundary in #87;
+later runtime and management adapters consume its safe projections and
+lifecycle operations under their own work packets. No runtime, HTTP, MCP,
+frontend, cache, search, migration, or Git-lifecycle consumer is integrated by
+#86.
 
 **Coordination paths:** `src/lib.rs` exports the boundary. Future construction
 in runtime composition, `/data/state` deployment persistence, and management
@@ -206,6 +209,12 @@ adapters require their own declared work packets.
 
 **Invariants:** the registry is the sole Hatchdoor-owned Vault-definition
 authority; immutable IDs are UUID v4 map keys; revision conflicts save nothing;
+names are unique case-insensitively; canonical Vault paths never overlap and
+disabled definitions continue reserving them; identity-bearing changes require
+a disabled definition plus explicit same-Vault confirmation; readable
+non-writable directories remain valid; disconnect deletes no files or Git
+state; HTTPS credentials persist only in the private registry record and never
+appear in projections, debug output, errors, status, or repository URLs;
 recovery retains the original bytes; Vault contents remain authoritative
 Markdown and SQLite remains disposable (ADR-01); the store adds no service,
 framework, or speculative trait (ADR-02/13); filesystem behavior assumes no

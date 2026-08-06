@@ -1,8 +1,9 @@
-//! Authoritative, revisioned persistence for the collection of Vault identities.
+//! Authoritative, revisioned persistence and lifecycle management for Vault definitions.
 //!
-//! Definition fields and lifecycle operations intentionally arrive in issue #86.
-//! This boundary owns only durable identity, revision, atomicity, permissions,
-//! and recovery behavior.
+//! This boundary owns durable identity, tagged source definitions, validation,
+//! credential redaction, optimistic lifecycle operations, atomicity, permissions,
+//! and recovery behavior. Runtime reconciliation, Git lifecycle, migration, and
+//! transport adapters remain outside this module.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -140,16 +141,169 @@ fn decode_hex(value: u8) -> Option<u8> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VaultSource {
+    Local {
+        path: PathBuf,
+    },
+    ExistingGit {
+        repository_path: PathBuf,
+        repository_url: Option<String>,
+        branch: Option<String>,
+        vault_subdirectory: Option<PathBuf>,
+        mode: VaultGitMode,
+    },
+    ManagedGit {
+        repository_url: String,
+        branch: Option<String>,
+        vault_subdirectory: Option<PathBuf>,
+        mode: VaultGitMode,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultGitMode {
+    LocalHistory,
+    PullOnly,
+    TwoWay,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct HttpsCredentials {
+    pub username: String,
+    pub token: String,
+}
+
+impl fmt::Debug for HttpsCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpsCredentials")
+            .field("username", &"[REDACTED]")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-/// The persisted slot for one Vault ID. Issue #86 adds the accepted definition
-/// fields without changing the identity or registry persistence contract.
-pub struct VaultRecord {}
+struct StoredHttpsCredentials {
+    username: String,
+    token: String,
+}
+
+impl fmt::Debug for StoredHttpsCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StoredHttpsCredentials")
+            .field("username", &"[REDACTED]")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl From<HttpsCredentials> for StoredHttpsCredentials {
+    fn from(credentials: HttpsCredentials) -> Self {
+        Self {
+            username: credentials.username,
+            token: credentials.token,
+        }
+    }
+}
+
+pub struct NewVaultDefinition {
+    pub name: String,
+    pub enabled: bool,
+    pub source: VaultSource,
+    pub exclude_patterns: Vec<String>,
+    pub https_credentials: Option<HttpsCredentials>,
+}
+
+#[derive(Debug)]
+pub enum HttpsCredentialUpdate {
+    Keep,
+    Remove,
+    Replace(HttpsCredentials),
+}
+
+pub struct VaultDefinitionEdit {
+    pub name: String,
+    pub source: VaultSource,
+    pub exclude_patterns: Vec<String>,
+    pub https_credentials: HttpsCredentialUpdate,
+    pub confirm_identity_change: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultDefinition {
+    vault_id: VaultId,
+    name: String,
+    enabled: bool,
+    source: VaultSource,
+    exclude_patterns: Vec<String>,
+    credential_configured: bool,
+}
+
+impl VaultDefinition {
+    pub fn vault_id(&self) -> VaultId {
+        self.vault_id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn source(&self) -> &VaultSource {
+        &self.source
+    }
+
+    pub fn exclude_patterns(&self) -> &[String] {
+        &self.exclude_patterns
+    }
+
+    pub fn credential_configured(&self) -> bool {
+        self.credential_configured
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultRecord {
+    name: String,
+    enabled: bool,
+    source: VaultSource,
+    exclude_patterns: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    https_credentials: Option<StoredHttpsCredentials>,
+}
 
 impl VaultRecord {
+    fn redacted(&self, vault_id: VaultId) -> VaultDefinition {
+        VaultDefinition {
+            vault_id,
+            name: self.name.clone(),
+            enabled: self.enabled,
+            source: self.source.clone(),
+            exclude_patterns: self.exclude_patterns.clone(),
+            credential_configured: self.https_credentials.is_some(),
+        }
+    }
+
     #[cfg(test)]
-    fn empty() -> Self {
-        Self {}
+    fn empty(vault_id: VaultId) -> Self {
+        Self {
+            name: format!("Test Vault {vault_id}"),
+            enabled: true,
+            source: VaultSource::Local {
+                path: PathBuf::from("/tmp/test-vault").join(vault_id.to_string()),
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: None,
+        }
     }
 }
 
@@ -180,7 +334,58 @@ impl VaultRegistrySnapshot {
     pub fn vault_ids(&self) -> impl ExactSizeIterator<Item = VaultId> + '_ {
         self.vaults.keys().copied()
     }
+
+    pub fn definitions(&self) -> impl Iterator<Item = VaultDefinition> + '_ {
+        self.vaults
+            .iter()
+            .map(|(vault_id, record)| record.redacted(*vault_id))
+    }
+
+    pub fn definition(&self, vault_id: VaultId) -> Option<VaultDefinition> {
+        self.vaults
+            .get(&vault_id)
+            .map(|record| record.redacted(vault_id))
+    }
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VaultDefinitionError {
+    InvalidName,
+    InvalidExclusionPattern,
+    DuplicateName,
+    PathOverlap,
+    VaultNotFound,
+    IdentityChangeRequiresDisabled,
+    IdentityChangeRequiresConfirmation,
+    InvalidSource(String),
+}
+
+impl fmt::Display for VaultDefinitionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidName => formatter.write_str("Vault name must be non-empty"),
+            Self::InvalidExclusionPattern => {
+                formatter.write_str("Vault exclusion patterns must not contain control characters")
+            }
+            Self::DuplicateName => {
+                formatter.write_str("Vault name is already used by another definition")
+            }
+            Self::PathOverlap => formatter.write_str(
+                "Vault path overlaps another connected Vault, including disabled definitions",
+            ),
+            Self::VaultNotFound => formatter.write_str("Vault definition was not found"),
+            Self::IdentityChangeRequiresDisabled => formatter.write_str(
+                "Vault source, repository, branch, subdirectory, or location may change only while disabled",
+            ),
+            Self::IdentityChangeRequiresConfirmation => formatter.write_str(
+                "Vault identity-bearing changes require explicit confirmation that it is the same logical Vault",
+            ),
+            Self::InvalidSource(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for VaultDefinitionError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VaultRegistryRecoveryKind {
@@ -217,6 +422,7 @@ pub enum VaultRegistryError {
     RecoveryRequired,
     RevisionExhausted,
     LockPoisoned,
+    InvalidDefinition(VaultDefinitionError),
     Storage(String),
 }
 
@@ -232,6 +438,7 @@ impl fmt::Display for VaultRegistryError {
             }
             Self::RevisionExhausted => formatter.write_str("Vault registry revision is exhausted"),
             Self::LockPoisoned => formatter.write_str("Vault registry write lock was poisoned"),
+            Self::InvalidDefinition(error) => error.fmt(formatter),
             Self::Storage(message) => formatter.write_str(message),
         }
     }
@@ -270,6 +477,199 @@ impl VaultRegistryStore {
         self.load_unlocked()
     }
 
+    pub fn add(
+        &self,
+        expected_revision: u64,
+        definition: NewVaultDefinition,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        let VaultRegistryState::Ready(current) = self.load()? else {
+            return Err(VaultRegistryError::RecoveryRequired);
+        };
+        let name = normalize_vault_name(definition.name)?;
+        if current
+            .vaults
+            .values()
+            .any(|record| vault_name_key(&record.name) == vault_name_key(&name))
+        {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::DuplicateName,
+            ));
+        }
+        let source = normalize_source(definition.source)?;
+        let vault_id = loop {
+            let candidate = VaultId::generate().map_err(|error| {
+                VaultRegistryError::Storage(format!("could not generate Vault ID: {error}"))
+            })?;
+            if !current.vaults.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        let vault_path = canonical_or_normalized(&self.source_vault_path(vault_id, &source));
+        if current.vaults.iter().any(|(existing_id, record)| {
+            let existing =
+                canonical_or_normalized(&self.source_vault_path(*existing_id, &record.source));
+            paths_overlap(&vault_path, &existing)
+        }) {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::PathOverlap,
+            ));
+        }
+        let exclude_patterns = normalize_exclude_patterns(definition.exclude_patterns)?;
+        let mut vaults = current.vaults;
+        let https_credentials = normalize_credentials(&source, definition.https_credentials)?;
+        vaults.insert(
+            vault_id,
+            VaultRecord {
+                name,
+                enabled: definition.enabled,
+                source,
+                exclude_patterns,
+                https_credentials,
+            },
+        );
+        self.commit(expected_revision, vaults)
+    }
+
+    pub fn edit(
+        &self,
+        expected_revision: u64,
+        vault_id: VaultId,
+        edit: VaultDefinitionEdit,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        let VaultRegistryState::Ready(current) = self.load()? else {
+            return Err(VaultRegistryError::RecoveryRequired);
+        };
+        ensure_revision(&current, expected_revision)?;
+        let Some(existing) = current.vaults.get(&vault_id).cloned() else {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::VaultNotFound,
+            ));
+        };
+        let name = normalize_vault_name(edit.name)?;
+        if current.vaults.iter().any(|(other_id, record)| {
+            *other_id != vault_id && vault_name_key(&record.name) == vault_name_key(&name)
+        }) {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::DuplicateName,
+            ));
+        }
+        let source = normalize_source(edit.source)?;
+        let identity_changed = !same_source_identity(&existing.source, &source);
+        if identity_changed && existing.enabled {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::IdentityChangeRequiresDisabled,
+            ));
+        }
+        if identity_changed && !edit.confirm_identity_change {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::IdentityChangeRequiresConfirmation,
+            ));
+        }
+        let vault_path = canonical_or_normalized(&self.source_vault_path(vault_id, &source));
+        if current.vaults.iter().any(|(other_id, record)| {
+            if *other_id == vault_id {
+                return false;
+            }
+            let existing_path =
+                canonical_or_normalized(&self.source_vault_path(*other_id, &record.source));
+            paths_overlap(&vault_path, &existing_path)
+        }) {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::PathOverlap,
+            ));
+        }
+        let https_credentials = match edit.https_credentials {
+            HttpsCredentialUpdate::Keep
+                if source_is_remote_backed(&source) && !identity_changed =>
+            {
+                existing.https_credentials
+            }
+            HttpsCredentialUpdate::Keep | HttpsCredentialUpdate::Remove => None,
+            HttpsCredentialUpdate::Replace(credentials) => {
+                normalize_credentials(&source, Some(credentials))?
+            }
+        };
+        let mut vaults = current.vaults;
+        vaults.insert(
+            vault_id,
+            VaultRecord {
+                name,
+                enabled: existing.enabled,
+                source,
+                exclude_patterns: normalize_exclude_patterns(edit.exclude_patterns)?,
+                https_credentials,
+            },
+        );
+        self.commit(expected_revision, vaults)
+    }
+
+    pub fn enable(
+        &self,
+        expected_revision: u64,
+        vault_id: VaultId,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        self.set_enabled(expected_revision, vault_id, true)
+    }
+
+    pub fn disable(
+        &self,
+        expected_revision: u64,
+        vault_id: VaultId,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        self.set_enabled(expected_revision, vault_id, false)
+    }
+
+    pub fn disconnect(
+        &self,
+        expected_revision: u64,
+        vault_id: VaultId,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        let VaultRegistryState::Ready(current) = self.load()? else {
+            return Err(VaultRegistryError::RecoveryRequired);
+        };
+        ensure_revision(&current, expected_revision)?;
+        let mut vaults = current.vaults;
+        if vaults.remove(&vault_id).is_none() {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::VaultNotFound,
+            ));
+        }
+        self.commit(expected_revision, vaults)
+    }
+
+    fn set_enabled(
+        &self,
+        expected_revision: u64,
+        vault_id: VaultId,
+        enabled: bool,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        let VaultRegistryState::Ready(current) = self.load()? else {
+            return Err(VaultRegistryError::RecoveryRequired);
+        };
+        ensure_revision(&current, expected_revision)?;
+        let mut vaults = current.vaults;
+        let Some(existing) = vaults.get(&vault_id) else {
+            return Err(VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::VaultNotFound,
+            ));
+        };
+        if existing.enabled == enabled {
+            return Ok(VaultRegistrySnapshot {
+                schema_version: REGISTRY_SCHEMA_VERSION,
+                revision: expected_revision,
+                vaults,
+            });
+        }
+        if enabled {
+            normalize_source(existing.source.clone())?;
+        }
+        let record = vaults
+            .get_mut(&vault_id)
+            .expect("record checked before enable transition");
+        record.enabled = enabled;
+        self.commit(expected_revision, vaults)
+    }
+
     fn load_unlocked(&self) -> Result<VaultRegistryState, VaultRegistryError> {
         if !self.path.exists() {
             return Ok(VaultRegistryState::Ready(VaultRegistrySnapshot::empty()));
@@ -283,10 +683,8 @@ impl VaultRegistryStore {
         })?;
         let value: serde_json::Value = match serde_json::from_slice(&encoded) {
             Ok(value) => value,
-            Err(error) => {
-                return Ok(VaultRegistryState::Recovery(
-                    self.corrupt(error.to_string()),
-                ));
+            Err(_) => {
+                return Ok(VaultRegistryState::Recovery(self.corrupt("invalid JSON")));
             }
         };
         let Some(schema_version) = value.get("schema_version").and_then(|value| value.as_u64())
@@ -323,12 +721,15 @@ impl VaultRegistryStore {
         }
         let stored: StoredVaultRegistry = match serde_json::from_value(value) {
             Ok(stored) => stored,
-            Err(error) => {
+            Err(_) => {
                 return Ok(VaultRegistryState::Recovery(
-                    self.corrupt(error.to_string()),
+                    self.corrupt("invalid registry shape"),
                 ));
             }
         };
+        if let Err(detail) = self.validate_stored_definitions(&stored.vaults) {
+            return Ok(VaultRegistryState::Recovery(self.corrupt(detail)));
+        }
         Ok(VaultRegistryState::Ready(VaultRegistrySnapshot {
             schema_version: stored.schema_version,
             revision: stored.revision,
@@ -336,7 +737,7 @@ impl VaultRegistryStore {
         }))
     }
 
-    pub fn commit(
+    fn commit(
         &self,
         expected_revision: u64,
         vaults: impl IntoIterator<Item = (VaultId, VaultRecord)>,
@@ -365,6 +766,46 @@ impl VaultRegistryStore {
         };
         self.persist(&next)?;
         Ok(next)
+    }
+
+    fn validate_stored_definitions(
+        &self,
+        vaults: &BTreeMap<VaultId, VaultRecord>,
+    ) -> Result<(), &'static str> {
+        validate_stored_names(vaults)?;
+        for record in vaults.values() {
+            if record.exclude_patterns.iter().any(|pattern| {
+                pattern.is_empty()
+                    || pattern.trim() != pattern
+                    || pattern.chars().any(char::is_control)
+            }) {
+                return Err("Vault definition contains invalid exclusion patterns");
+            }
+            if !stored_source_is_valid(&record.source) {
+                return Err("Vault definition contains an invalid or credential-bearing source");
+            }
+            if let Some(credentials) = &record.https_credentials
+                && (!source_is_remote_backed(&record.source)
+                    || credentials.username.is_empty()
+                    || credentials.token.is_empty()
+                    || credentials.username.trim() != credentials.username
+                    || credentials.token.trim() != credentials.token)
+            {
+                return Err("Vault definition contains invalid HTTPS credentials");
+            }
+        }
+        let definitions = vaults.iter().collect::<Vec<_>>();
+        for (index, (vault_id, record)) in definitions.iter().enumerate() {
+            let path = canonical_or_normalized(&self.source_vault_path(**vault_id, &record.source));
+            for (other_id, other) in definitions.iter().skip(index + 1) {
+                let other_path =
+                    canonical_or_normalized(&self.source_vault_path(**other_id, &other.source));
+                if paths_overlap(&path, &other_path) {
+                    return Err("Vault definitions contain overlapping canonical paths");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn persist(&self, snapshot: &VaultRegistrySnapshot) -> Result<(), VaultRegistryError> {
@@ -413,6 +854,34 @@ impl VaultRegistryStore {
         &self.path
     }
 
+    fn source_vault_path(&self, vault_id: VaultId, source: &VaultSource) -> PathBuf {
+        match source {
+            VaultSource::Local { path } => path.clone(),
+            VaultSource::ExistingGit {
+                repository_path,
+                vault_subdirectory,
+                ..
+            } => vault_subdirectory.as_ref().map_or_else(
+                || repository_path.clone(),
+                |subdirectory| repository_path.join(subdirectory),
+            ),
+            VaultSource::ManagedGit {
+                vault_subdirectory, ..
+            } => {
+                let state_directory = self.path.parent().unwrap_or_else(|| Path::new("."));
+                let repository = state_directory
+                    .join("vaults")
+                    .join(vault_id.to_string())
+                    .join("repository");
+                vault_subdirectory
+                    .as_ref()
+                    .map_or(repository.clone(), |subdirectory| {
+                        repository.join(subdirectory)
+                    })
+            }
+        }
+    }
+
     fn corrupt(&self, detail: impl fmt::Display) -> VaultRegistryRecovery {
         VaultRegistryRecovery {
             kind: VaultRegistryRecoveryKind::Corrupt,
@@ -421,6 +890,467 @@ impl VaultRegistryStore {
                 self.path.display()
             ),
         }
+    }
+}
+
+fn normalize_vault_name(name: String) -> Result<String, VaultRegistryError> {
+    let name = name.trim().to_string();
+    if name.is_empty() || name.chars().any(char::is_control) {
+        return Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::InvalidName,
+        ));
+    }
+    Ok(name)
+}
+
+fn vault_name_key(name: &str) -> String {
+    name.to_lowercase()
+}
+
+fn ensure_revision(
+    snapshot: &VaultRegistrySnapshot,
+    expected_revision: u64,
+) -> Result<(), VaultRegistryError> {
+    if snapshot.revision != expected_revision {
+        return Err(VaultRegistryError::RevisionConflict {
+            expected: expected_revision,
+            actual: snapshot.revision,
+        });
+    }
+    Ok(())
+}
+
+fn normalize_exclude_patterns(patterns: Vec<String>) -> Result<Vec<String>, VaultRegistryError> {
+    let patterns = patterns
+        .into_iter()
+        .map(|pattern| pattern.trim().to_string())
+        .filter(|pattern| !pattern.is_empty())
+        .collect::<Vec<_>>();
+    if patterns
+        .iter()
+        .any(|pattern| pattern.chars().any(char::is_control))
+    {
+        return Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::InvalidExclusionPattern,
+        ));
+    }
+    Ok(patterns)
+}
+
+fn normalize_optional_branch(branch: Option<String>) -> Result<Option<String>, VaultRegistryError> {
+    let branch = branch
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty());
+    if branch
+        .as_ref()
+        .is_some_and(|branch| branch.chars().any(char::is_control))
+    {
+        return Err(invalid_source(
+            "Git branch must not contain control characters",
+        ));
+    }
+    Ok(branch)
+}
+
+fn same_source_identity(first: &VaultSource, second: &VaultSource) -> bool {
+    match (first, second) {
+        (VaultSource::Local { path: first }, VaultSource::Local { path: second }) => {
+            first == second
+        }
+        (
+            VaultSource::ExistingGit {
+                repository_path: first_path,
+                repository_url: first_url,
+                branch: first_branch,
+                vault_subdirectory: first_subdirectory,
+                ..
+            },
+            VaultSource::ExistingGit {
+                repository_path: second_path,
+                repository_url: second_url,
+                branch: second_branch,
+                vault_subdirectory: second_subdirectory,
+                ..
+            },
+        ) => {
+            first_path == second_path
+                && first_url == second_url
+                && first_branch == second_branch
+                && first_subdirectory == second_subdirectory
+        }
+        (
+            VaultSource::ManagedGit {
+                repository_url: first_url,
+                branch: first_branch,
+                vault_subdirectory: first_subdirectory,
+                ..
+            },
+            VaultSource::ManagedGit {
+                repository_url: second_url,
+                branch: second_branch,
+                vault_subdirectory: second_subdirectory,
+                ..
+            },
+        ) => {
+            first_url == second_url
+                && first_branch == second_branch
+                && first_subdirectory == second_subdirectory
+        }
+        _ => false,
+    }
+}
+
+fn normalize_source(source: VaultSource) -> Result<VaultSource, VaultRegistryError> {
+    let source = normalize_structural_source(source)?;
+    match source {
+        VaultSource::Local { path } => {
+            let path = path.canonicalize().map_err(|error| {
+                VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(format!(
+                    "local Vault path '{}' is not readable: {error}",
+                    path.display()
+                )))
+            })?;
+            let metadata = fs::metadata(&path).map_err(|error| {
+                VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(format!(
+                    "local Vault path '{}' is not readable: {error}",
+                    path.display()
+                )))
+            })?;
+            if !metadata.is_dir() {
+                return Err(VaultRegistryError::InvalidDefinition(
+                    VaultDefinitionError::InvalidSource(format!(
+                        "local Vault path '{}' is not a directory",
+                        path.display()
+                    )),
+                ));
+            }
+            fs::read_dir(&path).map_err(|error| {
+                VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(format!(
+                    "local Vault path '{}' is not readable: {error}",
+                    path.display()
+                )))
+            })?;
+            Ok(VaultSource::Local { path })
+        }
+        VaultSource::ManagedGit {
+            repository_url,
+            branch,
+            vault_subdirectory,
+            mode,
+        } => Ok(VaultSource::ManagedGit {
+            repository_url,
+            branch,
+            vault_subdirectory,
+            mode,
+        }),
+        VaultSource::ExistingGit {
+            repository_path,
+            repository_url,
+            branch,
+            vault_subdirectory,
+            mode,
+        } => {
+            let repository_path = repository_path.canonicalize().map_err(|error| {
+                invalid_source(&format!(
+                    "existing Git location '{}' is not readable: {error}",
+                    repository_path.display()
+                ))
+            })?;
+            let repository = git2::Repository::open(&repository_path).map_err(|_| {
+                invalid_source("existing Git location must be a readable working checkout")
+            })?;
+            if repository.is_bare() || repository.workdir().is_none() {
+                return Err(invalid_source(
+                    "existing Git location must be a readable working checkout",
+                ));
+            }
+            let workdir = repository
+                .workdir()
+                .expect("non-bare repository checked above")
+                .canonicalize()
+                .map_err(|_| {
+                    invalid_source("existing Git location must be a readable working checkout")
+                })?;
+            if workdir != repository_path {
+                return Err(invalid_source(
+                    "existing Git location must be the working checkout root",
+                ));
+            }
+            let vault_path = vault_subdirectory.as_ref().map_or_else(
+                || repository_path.clone(),
+                |subdirectory| repository_path.join(subdirectory),
+            );
+            let canonical_vault_path = vault_path.canonicalize().map_err(|error| {
+                invalid_source(&format!(
+                    "existing Git Vault path '{}' is not readable: {error}",
+                    vault_path.display()
+                ))
+            })?;
+            if !canonical_vault_path.starts_with(&repository_path) {
+                return Err(invalid_source(
+                    "existing Git Vault subdirectory must stay inside its repository",
+                ));
+            }
+            fs::read_dir(&canonical_vault_path).map_err(|error| {
+                invalid_source(&format!(
+                    "existing Git Vault path '{}' is not readable: {error}",
+                    canonical_vault_path.display()
+                ))
+            })?;
+            let canonical_subdirectory = canonical_vault_path
+                .strip_prefix(&repository_path)
+                .expect("contained Vault path checked above");
+            let vault_subdirectory = if canonical_subdirectory.as_os_str().is_empty() {
+                None
+            } else {
+                Some(canonical_subdirectory.to_path_buf())
+            };
+            Ok(VaultSource::ExistingGit {
+                repository_path,
+                repository_url,
+                branch,
+                vault_subdirectory,
+                mode,
+            })
+        }
+    }
+}
+
+fn normalize_structural_source(source: VaultSource) -> Result<VaultSource, VaultRegistryError> {
+    match source {
+        VaultSource::Local { path } => Ok(VaultSource::Local { path }),
+        VaultSource::ManagedGit {
+            repository_url,
+            branch,
+            vault_subdirectory,
+            mode,
+        } => {
+            if mode == VaultGitMode::LocalHistory {
+                return Err(invalid_source(
+                    "managed Git requires pull_only or two_way mode",
+                ));
+            }
+            Ok(VaultSource::ManagedGit {
+                repository_url: normalize_https_repository_url(repository_url)?,
+                branch: normalize_optional_branch(branch)?,
+                vault_subdirectory: vault_subdirectory
+                    .map(normalize_relative_subdirectory)
+                    .transpose()?,
+                mode,
+            })
+        }
+        VaultSource::ExistingGit {
+            repository_path,
+            repository_url,
+            branch,
+            vault_subdirectory,
+            mode,
+        } => {
+            let repository_url = match (mode, repository_url) {
+                (VaultGitMode::LocalHistory, None) => None,
+                (VaultGitMode::LocalHistory, Some(_)) => {
+                    return Err(invalid_source(
+                        "local_history mode must not configure a remote repository URL",
+                    ));
+                }
+                (_, Some(repository_url)) => Some(normalize_https_repository_url(repository_url)?),
+                (_, None) => {
+                    return Err(invalid_source(
+                        "pull_only and two_way existing Git modes require a repository URL",
+                    ));
+                }
+            };
+            Ok(VaultSource::ExistingGit {
+                repository_path,
+                repository_url,
+                branch: normalize_optional_branch(branch)?,
+                vault_subdirectory: vault_subdirectory
+                    .map(normalize_relative_subdirectory)
+                    .transpose()?,
+                mode,
+            })
+        }
+    }
+}
+
+fn normalize_credentials(
+    source: &VaultSource,
+    credentials: Option<HttpsCredentials>,
+) -> Result<Option<StoredHttpsCredentials>, VaultRegistryError> {
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
+    if !source_is_remote_backed(source) {
+        return Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::InvalidSource(
+                "HTTPS credentials are valid only for a remote-backed Vault".to_string(),
+            ),
+        ));
+    }
+    let username = credentials.username.trim().to_string();
+    let token = credentials.token.trim().to_string();
+    if username.is_empty() || token.is_empty() {
+        return Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::InvalidSource(
+                "HTTPS credential username and token must both be non-empty".to_string(),
+            ),
+        ));
+    }
+    Ok(Some(StoredHttpsCredentials { username, token }))
+}
+
+fn source_is_remote_backed(source: &VaultSource) -> bool {
+    matches!(
+        source,
+        VaultSource::ManagedGit { .. }
+            | VaultSource::ExistingGit {
+                repository_url: Some(_),
+                ..
+            }
+    )
+}
+
+fn normalize_https_repository_url(repository_url: String) -> Result<String, VaultRegistryError> {
+    let repository_url = repository_url.trim().to_string();
+    if !is_safe_https_repository_url(&repository_url) {
+        return Err(invalid_source(
+            "Git repository URL must be valid credential-free HTTPS with a repository path",
+        ));
+    }
+    Ok(repository_url)
+}
+
+fn is_safe_https_repository_url(repository_url: &str) -> bool {
+    let Some(remainder) = repository_url.strip_prefix("https://") else {
+        return false;
+    };
+    let Some((authority, path)) = remainder.split_once('/') else {
+        return false;
+    };
+    !(authority.is_empty()
+        || authority.contains('@')
+        || path.is_empty()
+        || repository_url.contains(['?', '#', '\\'])
+        || repository_url
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control()))
+        && valid_https_authority(authority)
+        && valid_percent_encoding(repository_url)
+}
+
+fn valid_https_authority(authority: &str) -> bool {
+    if let Some(ipv6) = authority.strip_prefix('[') {
+        let Some((address, suffix)) = ipv6.split_once(']') else {
+            return false;
+        };
+        return address.parse::<std::net::Ipv6Addr>().is_ok() && valid_port_suffix(suffix);
+    }
+
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    !host.is_empty()
+        && !host.contains(':')
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        && port.is_none_or(valid_port)
+}
+
+fn valid_port_suffix(suffix: &str) -> bool {
+    suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+}
+
+fn valid_percent_encoding(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
+fn normalize_relative_subdirectory(path: PathBuf) -> Result<PathBuf, VaultRegistryError> {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            _ => {
+                return Err(invalid_source(
+                    "Vault subdirectory must be a contained relative path",
+                ));
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(invalid_source(
+            "Vault subdirectory must be a contained relative path",
+        ));
+    }
+    Ok(normalized)
+}
+
+fn invalid_source(message: &str) -> VaultRegistryError {
+    VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(message.to_string()))
+}
+
+fn paths_overlap(first: &Path, second: &Path) -> bool {
+    first.starts_with(second) || second.starts_with(first)
+}
+
+fn validate_stored_names(vaults: &BTreeMap<VaultId, VaultRecord>) -> Result<(), &'static str> {
+    let mut names = std::collections::BTreeSet::new();
+    for record in vaults.values() {
+        if record.name.trim().is_empty()
+            || record.name.trim() != record.name
+            || record.name.chars().any(char::is_control)
+        {
+            return Err("Vault definition contains an invalid name");
+        }
+        if !names.insert(vault_name_key(&record.name)) {
+            return Err("Vault definitions contain duplicate case-insensitive names");
+        }
+    }
+    Ok(())
+}
+
+fn stored_source_is_valid(source: &VaultSource) -> bool {
+    if normalize_structural_source(source.clone()).as_ref() != Ok(source) {
+        return false;
+    }
+    match source {
+        VaultSource::Local { path } => {
+            path.is_absolute() && normalized_absolute_path(path) == *path
+        }
+        VaultSource::ExistingGit {
+            repository_path, ..
+        } => {
+            repository_path.is_absolute()
+                && normalized_absolute_path(repository_path) == *repository_path
+        }
+        VaultSource::ManagedGit { .. } => true,
     }
 }
 
@@ -457,6 +1387,11 @@ fn normalized_absolute_path(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+fn canonical_or_normalized(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|_| normalized_absolute_path(path))
 }
 
 fn temporary_path(path: &Path) -> Result<PathBuf, VaultRegistryError> {
@@ -536,6 +1471,7 @@ fn sync_directory(_path: &Path) -> Result<(), VaultRegistryError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Barrier};
@@ -543,8 +1479,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        DEFAULT_VAULT_REGISTRY_PATH, REGISTRY_SCHEMA_VERSION, VaultId, VaultRecord,
-        VaultRegistryError, VaultRegistryRecoveryKind, VaultRegistryState, VaultRegistryStore,
+        DEFAULT_VAULT_REGISTRY_PATH, HttpsCredentialUpdate, HttpsCredentials, NewVaultDefinition,
+        REGISTRY_SCHEMA_VERSION, VaultDefinitionEdit, VaultDefinitionError, VaultGitMode, VaultId,
+        VaultRecord, VaultRegistryError, VaultRegistryRecoveryKind, VaultRegistryState,
+        VaultRegistryStore, VaultSource,
     };
 
     #[test]
@@ -599,6 +1537,863 @@ mod tests {
     }
 
     #[test]
+    fn local_definition_add_round_trips_through_the_public_snapshot() {
+        let directory = tempdir().expect("temporary directory");
+        let vault_path = directory.path().join("notes");
+        std::fs::create_dir(&vault_path).expect("create Vault directory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+        let committed = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Personal".to_string(),
+                    enabled: true,
+                    source: VaultSource::Local {
+                        path: vault_path.clone(),
+                    },
+                    exclude_patterns: vec![" private/** ".to_string(), "".to_string()],
+                    https_credentials: None,
+                },
+            )
+            .expect("add local Vault");
+
+        assert_eq!(committed.revision(), 1);
+        let definition = committed
+            .definitions()
+            .next()
+            .expect("committed definition");
+        assert_eq!(definition.name(), "Personal");
+        assert!(definition.enabled());
+        assert_eq!(
+            definition.source(),
+            &VaultSource::Local {
+                path: vault_path.canonicalize().expect("canonical Vault path")
+            }
+        );
+        assert_eq!(definition.exclude_patterns(), &["private/**"]);
+        assert!(!definition.credential_configured());
+
+        let VaultRegistryState::Ready(restarted) = store.load().expect("reload registry") else {
+            panic!("valid registry entered recovery");
+        };
+        assert_eq!(restarted.definitions().next(), Some(definition));
+    }
+
+    #[test]
+    fn vault_names_are_unique_without_regard_to_case() {
+        let directory = tempdir().expect("temporary directory");
+        let first_path = directory.path().join("first");
+        let second_path = directory.path().join("second");
+        std::fs::create_dir(&first_path).expect("create first Vault");
+        std::fs::create_dir(&second_path).expect("create second Vault");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        store
+            .add(0, local_definition("Personal", first_path, true))
+            .expect("add first Vault");
+
+        let error = store
+            .add(1, local_definition("personal", second_path, true))
+            .expect_err("case-insensitive duplicate name accepted");
+
+        assert_eq!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::DuplicateName)
+        );
+        let VaultRegistryState::Ready(snapshot) = store.load().expect("reload registry") else {
+            panic!("valid registry entered recovery");
+        };
+        assert_eq!(snapshot.revision(), 1);
+        assert_eq!(snapshot.definitions().count(), 1);
+    }
+
+    #[test]
+    fn disabled_definitions_continue_reserving_their_canonical_paths() {
+        let directory = tempdir().expect("temporary directory");
+        let parent = directory.path().join("notes");
+        let nested = parent.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested Vault paths");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        store
+            .add(0, local_definition("Paused", parent, false))
+            .expect("add disabled Vault");
+
+        let error = store
+            .add(1, local_definition("Nested", nested, true))
+            .expect_err("nested path accepted");
+
+        assert_eq!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
+        );
+        let VaultRegistryState::Ready(snapshot) = store.load().expect("reload registry") else {
+            panic!("valid registry entered recovery");
+        };
+        assert_eq!(snapshot.revision(), 1);
+    }
+
+    #[test]
+    fn managed_https_credentials_are_persisted_but_redacted_from_reads_and_debug() {
+        let directory = tempdir().expect("temporary directory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let credentials = HttpsCredentials {
+            username: "git-user".to_string(),
+            token: "super-secret-token".to_string(),
+        };
+        assert!(!format!("{credentials:?}").contains("super-secret-token"));
+
+        let committed = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Remote notes".to_string(),
+                    enabled: true,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://example.test/owner/notes.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: Some(PathBuf::from("knowledge/notes")),
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: Some(credentials),
+                },
+            )
+            .expect("add managed Vault");
+
+        let definition = committed.definitions().next().expect("definition");
+        assert!(definition.credential_configured());
+        assert!(!format!("{definition:?}").contains("super-secret-token"));
+        assert_eq!(
+            definition.source(),
+            &VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: Some("main".to_string()),
+                vault_subdirectory: Some(PathBuf::from("knowledge/notes")),
+                mode: VaultGitMode::PullOnly,
+            }
+        );
+        let encoded = std::fs::read_to_string(store.path()).expect("persisted registry");
+        assert!(encoded.contains("super-secret-token"));
+        assert!(!format!("{committed:?}").contains("super-secret-token"));
+    }
+
+    #[test]
+    fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_location() {
+        let directory = tempdir().expect("temporary directory");
+        let repository_path = directory.path().join("repository");
+        git2::Repository::init(&repository_path).expect("initialize repository");
+        std::fs::create_dir(repository_path.join("notes")).expect("create Vault subdirectory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+        let committed = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Existing checkout".to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path: repository_path.clone(),
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: Some(PathBuf::from("notes")),
+                        mode: VaultGitMode::LocalHistory,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add existing checkout");
+
+        assert_eq!(
+            committed.definitions().next().expect("definition").source(),
+            &VaultSource::ExistingGit {
+                repository_path: repository_path
+                    .canonicalize()
+                    .expect("canonical repository"),
+                repository_url: None,
+                branch: None,
+                vault_subdirectory: Some(PathBuf::from("notes")),
+                mode: VaultGitMode::LocalHistory,
+            }
+        );
+
+        let not_repository = directory.path().join("ordinary-directory");
+        std::fs::create_dir(&not_repository).expect("create ordinary directory");
+        let error = store
+            .add(
+                1,
+                NewVaultDefinition {
+                    name: "Not Git".to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path: not_repository,
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::LocalHistory,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect_err("ordinary directory accepted as existing Git");
+        assert!(matches!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_git_symlink_subdirectory_cannot_bypass_canonical_overlap_validation() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().expect("temporary directory");
+        let repository_path = directory.path().join("repository");
+        git2::Repository::init(&repository_path).expect("initialize repository");
+        let actual = repository_path.join("actual");
+        std::fs::create_dir(&actual).expect("create actual Vault path");
+        symlink("actual", repository_path.join("alias")).expect("create in-repository symlink");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Existing checkout".to_string(),
+                    enabled: false,
+                    source: VaultSource::ExistingGit {
+                        repository_path,
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: Some(PathBuf::from("alias")),
+                        mode: VaultGitMode::LocalHistory,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add existing checkout");
+        assert!(matches!(
+            added.definitions().next().expect("definition").source(),
+            VaultSource::ExistingGit {
+                vault_subdirectory: Some(path),
+                ..
+            } if path == std::path::Path::new("actual")
+        ));
+
+        let error = store
+            .add(1, local_definition("Same files", actual, true))
+            .expect_err("symlink alias bypassed path overlap");
+
+        assert_eq!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
+        );
+    }
+
+    #[test]
+    fn existing_git_source_rejects_the_repository_metadata_directory_as_its_location() {
+        let directory = tempdir().expect("temporary directory");
+        let repository_path = directory.path().join("repository");
+        git2::Repository::init(&repository_path).expect("initialize repository");
+        let path = directory.path().join("vaults.json");
+        let store = VaultRegistryStore::new(&path);
+
+        let error = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Metadata is not a Vault".to_string(),
+                    enabled: true,
+                    source: VaultSource::ExistingGit {
+                        repository_path: repository_path.join(".git"),
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::LocalHistory,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect_err("repository metadata accepted as checkout root");
+
+        assert!(matches!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn malformed_https_repository_urls_save_nothing() {
+        for repository_url in [
+            "https://:bad/notes.git",
+            "https://example.test/%zz/notes.git",
+        ] {
+            let directory = tempdir().expect("temporary directory");
+            let path = directory.path().join("vaults.json");
+            let store = VaultRegistryStore::new(&path);
+
+            let error = store
+                .add(
+                    0,
+                    NewVaultDefinition {
+                        name: "Malformed remote".to_string(),
+                        enabled: true,
+                        source: VaultSource::ManagedGit {
+                            repository_url: repository_url.to_string(),
+                            branch: None,
+                            vault_subdirectory: None,
+                            mode: VaultGitMode::PullOnly,
+                        },
+                        exclude_patterns: Vec::new(),
+                        https_credentials: None,
+                    },
+                )
+                .expect_err("malformed HTTPS URL accepted");
+
+            assert!(matches!(
+                error,
+                VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+            ));
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
+    fn identity_changes_require_a_disabled_definition_and_explicit_confirmation() {
+        let directory = tempdir().expect("temporary directory");
+        let original_path = directory.path().join("original");
+        let replacement_path = directory.path().join("replacement");
+        std::fs::create_dir(&original_path).expect("create original Vault");
+        std::fs::create_dir(&replacement_path).expect("create replacement Vault");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(0, local_definition("Notes", original_path, true))
+            .expect("add Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+
+        let enabled_error = store
+            .edit(
+                1,
+                vault_id,
+                local_edit("Notes", replacement_path.clone(), true),
+            )
+            .expect_err("enabled identity change accepted");
+        assert_eq!(
+            enabled_error,
+            VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::IdentityChangeRequiresDisabled
+            )
+        );
+
+        let disabled = store.disable(1, vault_id).expect("disable Vault");
+        assert_eq!(disabled.revision(), 2);
+        assert!(!disabled.definitions().next().expect("definition").enabled());
+
+        let confirmation_error = store
+            .edit(
+                2,
+                vault_id,
+                local_edit("Notes", replacement_path.clone(), false),
+            )
+            .expect_err("unconfirmed identity change accepted");
+        assert_eq!(
+            confirmation_error,
+            VaultRegistryError::InvalidDefinition(
+                VaultDefinitionError::IdentityChangeRequiresConfirmation
+            )
+        );
+
+        let edited = store
+            .edit(
+                2,
+                vault_id,
+                local_edit("Notes", replacement_path.clone(), true),
+            )
+            .expect("confirmed disabled identity change");
+        let definition = edited.definitions().next().expect("definition");
+        assert_eq!(definition.vault_id(), vault_id);
+        assert!(!definition.enabled());
+        assert_eq!(
+            definition.source(),
+            &VaultSource::Local {
+                path: replacement_path
+                    .canonicalize()
+                    .expect("canonical replacement")
+            }
+        );
+    }
+
+    #[test]
+    fn disconnect_removes_only_the_definition_and_preserves_vault_files() {
+        let directory = tempdir().expect("temporary directory");
+        let vault_path = directory.path().join("notes");
+        std::fs::create_dir(&vault_path).expect("create Vault");
+        let note_path = vault_path.join("kept.md");
+        std::fs::write(&note_path, "# Kept\n").expect("write note");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(0, local_definition("Notes", vault_path.clone(), true))
+            .expect("add Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+
+        let disconnected = store.disconnect(1, vault_id).expect("disconnect Vault");
+
+        assert_eq!(disconnected.revision(), 2);
+        assert_eq!(disconnected.definitions().count(), 0);
+        assert_eq!(
+            std::fs::read_to_string(note_path).expect("preserved note"),
+            "# Kept\n"
+        );
+        assert!(vault_path.exists());
+    }
+
+    #[test]
+    fn structurally_invalid_persisted_definitions_enter_recovery_without_overwrite() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("vaults.json");
+        let original = br#"{
+          "schema_version": 1,
+          "revision": 8,
+          "vaults": {
+            "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {
+              "name": "Personal",
+              "enabled": true,
+              "source": {"type": "local", "path": "/srv/first"},
+              "exclude_patterns": []
+            },
+            "b676d7c4-ca1c-4c92-813f-b47b14a5192d": {
+              "name": "personal",
+              "enabled": false,
+              "source": {"type": "local", "path": "/srv/second"},
+              "exclude_patterns": []
+            }
+          }
+        }"#;
+        std::fs::write(&path, original).expect("write invalid registry");
+        let store = VaultRegistryStore::new(&path);
+
+        let VaultRegistryState::Recovery(recovery) = store.load().expect("load registry") else {
+            panic!("invalid definitions were treated as ready");
+        };
+
+        assert_eq!(recovery.kind(), VaultRegistryRecoveryKind::Corrupt);
+        assert_eq!(std::fs::read(&path).expect("preserved registry"), original);
+        assert_eq!(
+            store
+                .disconnect(
+                    8,
+                    VaultId::from_str("018f47a0-7768-4d0c-8da3-5aa28d1c31c7").expect("known ID")
+                )
+                .expect_err("invalid registry overwritten"),
+            VaultRegistryError::RecoveryRequired
+        );
+    }
+
+    #[test]
+    fn credential_bearing_repository_urls_enter_redacted_recovery() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("vaults.json");
+        let original = br#"{
+          "schema_version": 1,
+          "revision": 4,
+          "vaults": {
+            "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {
+              "name": "Remote",
+              "enabled": true,
+              "source": {
+                "type": "managed_git",
+                "repository_url": "https://git-user:url-secret@example.test/notes.git",
+                "branch": "main",
+                "vault_subdirectory": null,
+                "mode": "pull_only"
+              },
+              "exclude_patterns": []
+            }
+          }
+        }"#;
+        std::fs::write(&path, original).expect("write unsafe registry");
+        let store = VaultRegistryStore::new(&path);
+
+        let VaultRegistryState::Recovery(recovery) = store.load().expect("load registry") else {
+            panic!("credential-bearing URL was treated as ready");
+        };
+
+        assert_eq!(recovery.kind(), VaultRegistryRecoveryKind::Corrupt);
+        assert!(!recovery.message().contains("url-secret"));
+        assert_eq!(std::fs::read(&path).expect("preserved registry"), original);
+    }
+
+    #[test]
+    fn malformed_persisted_secret_fields_do_not_echo_values_in_recovery() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("vaults.json");
+        let original = br#"{
+          "schema_version": 1,
+          "revision": 4,
+          "vaults": {
+            "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {
+              "name": "Remote",
+              "enabled": true,
+              "source": {
+                "type": "managed_git",
+                "repository_url": "https://example.test/notes.git",
+                "branch": "main",
+                "vault_subdirectory": null,
+                "mode": "value-that-must-not-leak"
+              },
+              "exclude_patterns": []
+            }
+          }
+        }"#;
+        std::fs::write(&path, original).expect("write malformed registry");
+        let store = VaultRegistryStore::new(&path);
+
+        let VaultRegistryState::Recovery(recovery) = store.load().expect("load registry") else {
+            panic!("malformed definition was treated as ready");
+        };
+
+        assert_eq!(recovery.kind(), VaultRegistryRecoveryKind::Corrupt);
+        assert!(!recovery.message().contains("value-that-must-not-leak"));
+        assert_eq!(std::fs::read(&path).expect("preserved registry"), original);
+    }
+
+    #[test]
+    fn enabled_definitions_allow_name_mode_and_credential_changes() {
+        let directory = tempdir().expect("temporary directory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let source = VaultSource::ManagedGit {
+            repository_url: "https://example.test/notes.git".to_string(),
+            branch: Some("main".to_string()),
+            vault_subdirectory: None,
+            mode: VaultGitMode::PullOnly,
+        };
+        let added = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Remote".to_string(),
+                    enabled: true,
+                    source: source.clone(),
+                    exclude_patterns: Vec::new(),
+                    https_credentials: Some(HttpsCredentials {
+                        username: "old-user".to_string(),
+                        token: "old-token".to_string(),
+                    }),
+                },
+            )
+            .expect("add remote Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+
+        let edited = store
+            .edit(
+                1,
+                vault_id,
+                VaultDefinitionEdit {
+                    name: "Renamed remote".to_string(),
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://example.test/notes.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::TwoWay,
+                    },
+                    exclude_patterns: vec!["drafts/**".to_string()],
+                    https_credentials: HttpsCredentialUpdate::Replace(HttpsCredentials {
+                        username: "new-user".to_string(),
+                        token: "new-token".to_string(),
+                    }),
+                    confirm_identity_change: false,
+                },
+            )
+            .expect("edit non-identity fields");
+
+        let definition = edited.definitions().next().expect("definition");
+        assert!(definition.enabled());
+        assert_eq!(definition.name(), "Renamed remote");
+        assert!(definition.credential_configured());
+        assert!(matches!(
+            definition.source(),
+            VaultSource::ManagedGit {
+                mode: VaultGitMode::TwoWay,
+                ..
+            }
+        ));
+        let encoded = std::fs::read_to_string(store.path()).expect("registry");
+        assert!(!encoded.contains("old-token"));
+        assert!(encoded.contains("new-token"));
+
+        let removed = store
+            .edit(
+                2,
+                vault_id,
+                VaultDefinitionEdit {
+                    name: "Renamed remote".to_string(),
+                    source: definition.source().clone(),
+                    exclude_patterns: vec!["drafts/**".to_string()],
+                    https_credentials: HttpsCredentialUpdate::Remove,
+                    confirm_identity_change: false,
+                },
+            )
+            .expect("remove credential");
+        assert!(
+            !removed
+                .definitions()
+                .next()
+                .expect("definition")
+                .credential_configured()
+        );
+        assert!(
+            !std::fs::read_to_string(store.path())
+                .expect("registry")
+                .contains("new-token")
+        );
+    }
+
+    #[test]
+    fn invalid_sources_reject_the_transaction_without_leaking_credentials() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("vaults.json");
+        let store = VaultRegistryStore::new(&path);
+        let error = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Unsafe remote".to_string(),
+                    enabled: true,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://git-user:embedded-secret@example.test/notes.git"
+                            .to_string(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect_err("credential-bearing URL accepted");
+        assert!(!error.to_string().contains("embedded-secret"));
+        assert!(!path.exists());
+
+        let error = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Escaping remote".to_string(),
+                    enabled: true,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://example.test/notes.git".to_string(),
+                        branch: None,
+                        vault_subdirectory: Some(PathBuf::from("../outside")),
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect_err("escaping subdirectory accepted");
+        assert!(matches!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn readable_non_writable_local_vaults_remain_valid() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary directory");
+        let vault_path = directory.path().join("read-only-notes");
+        std::fs::create_dir(&vault_path).expect("create Vault");
+        std::fs::set_permissions(&vault_path, std::fs::Permissions::from_mode(0o555))
+            .expect("make Vault non-writable");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+        let committed = store
+            .add(0, local_definition("Read only", vault_path, true))
+            .expect("connect readable non-writable Vault");
+
+        assert!(
+            committed
+                .definitions()
+                .next()
+                .expect("definition")
+                .enabled()
+        );
+    }
+
+    #[test]
+    fn enable_preserves_identity_and_increments_the_registry_revision() {
+        let directory = tempdir().expect("temporary directory");
+        let vault_path = directory.path().join("notes");
+        std::fs::create_dir(&vault_path).expect("create Vault");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(0, local_definition("Paused", vault_path, false))
+            .expect("add disabled Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+
+        let enabled = store.enable(1, vault_id).expect("enable Vault");
+
+        let definition = enabled.definitions().next().expect("definition");
+        assert_eq!(enabled.revision(), 2);
+        assert_eq!(definition.vault_id(), vault_id);
+        assert!(definition.enabled());
+    }
+
+    #[test]
+    fn enable_revalidates_a_local_source_before_saving() {
+        let directory = tempdir().expect("temporary directory");
+        let vault_path = directory.path().join("notes");
+        std::fs::create_dir(&vault_path).expect("create Vault");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(0, local_definition("Paused", vault_path.clone(), false))
+            .expect("add disabled Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+        std::fs::remove_dir(&vault_path).expect("make source unavailable");
+
+        let error = store
+            .enable(1, vault_id)
+            .expect_err("unreadable source was enabled");
+
+        assert!(matches!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+        ));
+        let VaultRegistryState::Ready(snapshot) = store.load().expect("reload registry") else {
+            panic!("valid registry entered recovery");
+        };
+        assert_eq!(snapshot.revision(), 1);
+        assert!(!snapshot.definition(vault_id).expect("definition").enabled());
+    }
+
+    #[test]
+    fn confirmed_repository_change_does_not_carry_an_old_credential() {
+        let directory = tempdir().expect("temporary directory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Paused remote".to_string(),
+                    enabled: false,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://old.example.test/notes.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: Some(HttpsCredentials {
+                        username: "old-user".to_string(),
+                        token: "old-repository-token".to_string(),
+                    }),
+                },
+            )
+            .expect("add managed Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+
+        let edited = store
+            .edit(
+                1,
+                vault_id,
+                VaultDefinitionEdit {
+                    name: "Paused remote".to_string(),
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://new.example.test/notes.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: HttpsCredentialUpdate::Keep,
+                    confirm_identity_change: true,
+                },
+            )
+            .expect("confirm repository change");
+
+        assert!(
+            !edited
+                .definitions()
+                .next()
+                .expect("definition")
+                .credential_configured()
+        );
+        assert!(
+            !std::fs::read_to_string(store.path())
+                .expect("registry")
+                .contains("old-repository-token")
+        );
+    }
+
+    #[test]
+    fn managed_checkout_paths_participate_in_overlap_validation() {
+        let directory = tempdir().expect("temporary directory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let added = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Managed".to_string(),
+                    enabled: false,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://example.test/notes.git".to_string(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add managed Vault");
+        let vault_id = added.definitions().next().expect("definition").vault_id();
+        let managed_checkout = directory
+            .path()
+            .join("vaults")
+            .join(vault_id.to_string())
+            .join("repository");
+        std::fs::create_dir_all(&managed_checkout).expect("create managed checkout location");
+
+        let error = store
+            .add(
+                1,
+                local_definition("Overlapping local", managed_checkout, true),
+            )
+            .expect_err("managed checkout overlap accepted");
+
+        assert_eq!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::PathOverlap)
+        );
+    }
+
+    fn local_definition(name: &str, path: PathBuf, enabled: bool) -> NewVaultDefinition {
+        NewVaultDefinition {
+            name: name.to_string(),
+            enabled,
+            source: VaultSource::Local { path },
+            exclude_patterns: Vec::new(),
+            https_credentials: None,
+        }
+    }
+
+    fn local_edit(name: &str, path: PathBuf, confirm_identity_change: bool) -> VaultDefinitionEdit {
+        VaultDefinitionEdit {
+            name: name.to_string(),
+            source: VaultSource::Local { path },
+            exclude_patterns: Vec::new(),
+            https_credentials: HttpsCredentialUpdate::Keep,
+            confirm_identity_change,
+        }
+    }
+
+    #[test]
     fn committed_registry_round_trips_ids_and_monotonic_revision() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("state").join("vaults.json");
@@ -606,23 +2401,22 @@ mod tests {
         let id = VaultId::from_str("018f47a0-7768-4d0c-8da3-5aa28d1c31c7").expect("known Vault ID");
 
         let committed = store
-            .commit(0, [(id, VaultRecord::empty())])
+            .commit(0, [(id, VaultRecord::empty(id))])
             .expect("commit registry");
 
         assert_eq!(committed.revision(), 1);
         assert_eq!(committed.vault_ids().collect::<Vec<_>>(), vec![id]);
         let encoded = std::fs::read_to_string(&path).expect("read registry");
+        let encoded: serde_json::Value = serde_json::from_str(&encoded).expect("registry JSON");
+        assert_eq!(encoded["schema_version"], 1);
+        assert_eq!(encoded["revision"], 1);
         assert_eq!(
-            encoded,
-            concat!(
-                "{\n",
-                "  \"schema_version\": 1,\n",
-                "  \"revision\": 1,\n",
-                "  \"vaults\": {\n",
-                "    \"018f47a0-7768-4d0c-8da3-5aa28d1c31c7\": {}\n",
-                "  }\n",
-                "}\n"
-            )
+            encoded["vaults"]["018f47a0-7768-4d0c-8da3-5aa28d1c31c7"]["name"],
+            "Test Vault 018f47a0-7768-4d0c-8da3-5aa28d1c31c7"
+        );
+        assert_eq!(
+            encoded["vaults"]["018f47a0-7768-4d0c-8da3-5aa28d1c31c7"]["source"]["type"],
+            "local"
         );
 
         let VaultRegistryState::Ready(restarted) = store.load().expect("reload registry") else {
@@ -760,7 +2554,7 @@ mod tests {
             let id = VaultId::from_str(value).expect("known Vault ID");
             std::thread::spawn(move || {
                 barrier.wait();
-                store.commit(1, [(id, VaultRecord::empty())])
+                store.commit(1, [(id, VaultRecord::empty(id))])
             })
         });
 
@@ -800,10 +2594,8 @@ mod tests {
         first.commit(0, []).expect("initial commit");
         let records = (0..1024)
             .map(|_| {
-                (
-                    VaultId::generate().expect("generate Vault ID"),
-                    VaultRecord::empty(),
-                )
+                let id = VaultId::generate().expect("generate Vault ID");
+                (id, VaultRecord::empty(id))
             })
             .collect::<Vec<_>>();
         let barrier = Arc::new(Barrier::new(3));
@@ -844,10 +2636,8 @@ mod tests {
         let store = Arc::new(VaultRegistryStore::new(&path));
         let vaults = (0..128)
             .map(|_| {
-                (
-                    VaultId::generate().expect("generate Vault ID"),
-                    VaultRecord::empty(),
-                )
+                let id = VaultId::generate().expect("generate Vault ID");
+                (id, VaultRecord::empty(id))
             })
             .collect::<Vec<_>>();
         store.commit(0, vaults.clone()).expect("initial registry");
