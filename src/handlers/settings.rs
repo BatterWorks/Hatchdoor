@@ -662,11 +662,13 @@ fn validate_updates(
 mod tests {
     use super::*;
     use crate::runtime_config::{Environment, RuntimeConfig, live_settings_defaults};
+    use tempfile::tempdir;
 
     #[test]
     fn environment_values_are_reported_as_locked_and_secrets_are_masked() {
+        let directory = tempdir().expect("test settings directory");
         let snapshot = RuntimeConfig::load(
-            std::env::temp_dir().join("hatchdoor-settings-handler-test.json"),
+            directory.path().join("settings.json"),
             Environment::from_values([
                 ("HATCHDOOR_ARCHIVE_PREFIX".into(), "env-archive/".into()),
                 ("HATCHDOOR_MCP_BEARER_TOKEN".into(), "secret".into()),
@@ -694,13 +696,7 @@ mod tests {
 
     #[test]
     fn demo_mode_is_reported_as_locked_for_a_reason_distinct_from_environment_and_branch() {
-        let snapshot = RuntimeConfig::load(
-            std::env::temp_dir().join("hatchdoor-settings-handler-test-demo.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime config")
-        .snapshot();
+        let snapshot = RuntimeConfig::for_tests().snapshot();
         let response = settings_response(&snapshot, true);
         let demo = response
             .settings
@@ -715,12 +711,7 @@ mod tests {
 
     #[test]
     fn attachment_limit_rejects_an_unsafe_in_memory_value() {
-        let config = RuntimeConfig::load(
-            std::env::temp_dir().join("hatchdoor-settings-handler-test-unsafe.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime config");
+        let config = RuntimeConfig::for_tests();
         let errors = validate_updates(
             &config.snapshot(),
             &BTreeMap::from([(
@@ -733,12 +724,7 @@ mod tests {
 
     #[test]
     fn enabled_mcp_without_a_token_is_a_form_level_refusal_with_no_single_field() {
-        let config = RuntimeConfig::load(
-            std::env::temp_dir().join("hatchdoor-settings-handler-test-mcp.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime config");
+        let config = RuntimeConfig::for_tests();
         let errors = validate_updates(
             &config.snapshot(),
             &BTreeMap::from([("HATCHDOOR_MCP_ENABLED".into(), "true".into())]),

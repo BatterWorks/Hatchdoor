@@ -325,6 +325,8 @@ pub struct RuntimeConfig {
     snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     stored_values: Arc<Mutex<BTreeMap<String, String>>>,
     store: Arc<SettingsStore>,
+    #[cfg(test)]
+    _test_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 impl RuntimeConfig {
@@ -351,6 +353,8 @@ impl RuntimeConfig {
             snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
             stored_values: Arc::new(Mutex::new(stored_values)),
             store: Arc::new(store),
+            #[cfg(test)]
+            _test_directory: None,
         })
     }
 
@@ -446,17 +450,15 @@ impl RuntimeConfig {
 
     #[cfg(test)]
     pub fn for_tests() -> Self {
-        static NEXT_TEST_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = NEXT_TEST_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self::load(
-            std::env::temp_dir().join(format!(
-                "hatchdoor-settings-test-{}-{sequence}.json",
-                std::process::id()
-            )),
+        let directory = Arc::new(tempfile::tempdir().expect("test settings directory"));
+        let mut config = Self::load(
+            directory.path().join("settings.json"),
             Environment::empty(),
             live_settings_defaults(),
         )
-        .expect("test runtime configuration")
+        .expect("test runtime configuration");
+        config._test_directory = Some(directory);
+        config
     }
 }
 
@@ -524,6 +526,53 @@ mod tests {
         )]
         .into_iter()
         .collect()
+    }
+
+    #[test]
+    fn test_runtime_configs_own_distinct_storage_that_cleans_up_during_unwind() {
+        let mut directories = Vec::new();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let first = RuntimeConfig::for_tests();
+            let second = RuntimeConfig::for_tests();
+            assert_ne!(first.settings_path(), second.settings_path());
+
+            for (config, archive_prefix) in [(&first, "first/"), (&second, "second/")] {
+                directories.push(
+                    config
+                        .settings_path()
+                        .parent()
+                        .expect("test settings directory")
+                        .to_path_buf(),
+                );
+                config
+                    .save([(
+                        "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                        archive_prefix.to_string(),
+                    )])
+                    .expect("save isolated fixture");
+                assert_eq!(
+                    config
+                        .snapshot()
+                        .required("HATCHDOOR_ARCHIVE_PREFIX")
+                        .expect("archive prefix"),
+                    archive_prefix
+                );
+            }
+
+            panic!("exercise fixture cleanup during unwind");
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(directories.len(), 2);
+        assert_ne!(directories[0], directories[1]);
+        for directory in directories {
+            assert_ne!(directory, std::env::temp_dir());
+            assert!(
+                !directory.exists(),
+                "test settings directory survived fixture drop: {}",
+                directory.display()
+            );
+        }
     }
 
     #[test]
