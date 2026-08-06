@@ -1,19 +1,22 @@
 # Dev server lifecycle. See AGENTS.md for why this exists instead of raw
 # `cargo run` / `npm run dev`.
 
-cargo_target_dir := "/scratch/cargo-target"
-cargo_home := "/scratch/cargo-home"
+# Share build artifacts across linked worktrees through the primary checkout.
+# Explicit environment values still win for hosts with a dedicated build disk.
+git_common_parent := `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`
+cargo_target_dir := env_var_or_default("CARGO_TARGET_DIR", git_common_parent + "/target")
+cargo_home := env_var_or_default("CARGO_HOME", env_var("HOME") + "/.cargo")
+cargo_tmp_dir := env_var_or_default("HATCHDOOR_TMPDIR", cargo_target_dir + "/tmp")
 backend_port := "42824"
 frontend_port := "5173"
 dev_dir := ".dev"
 target_warn_gb := "20"
 
-# Hardcoded (not inherited) so this works the same from any shell, including
-# ones that don't source the profile that normally sets these (code-server's
-# integrated terminal, for one) - that gap is what caused a stray 5.1G
-# in-repo target/ dir alongside the real one.
+# Export the resolved values so recipes behave consistently even when the
+# invoking shell does not set Cargo paths. TMPDIR stays off small tmpfs mounts.
 export CARGO_TARGET_DIR := cargo_target_dir
 export CARGO_HOME := cargo_home
+export TMPDIR := cargo_tmp_dir
 
 default:
     @just --list
@@ -21,7 +24,7 @@ default:
 # Start the backend (cargo run) and frontend (vite, hot reload) in the
 # background. Always safe to re-run: kills any previous instance first, so
 # you never end up with two copies fighting over the same port.
-dev-start: _kill-stale
+dev-start: _prepare-cargo _kill-stale
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p {{dev_dir}}
@@ -54,6 +57,9 @@ dev-start: _kill-stale
 # npm -> sh -> node child chain, not just the top PID).
 dev-stop: _kill-stale
     @echo "stopped"
+
+_prepare-cargo:
+    @mkdir -p "$CARGO_TARGET_DIR" "$TMPDIR"
 
 # Kill whatever dev-start is tracking, plus anything else bound to our dev
 # ports even if it predates this system (e.g. a server started by hand).
@@ -97,12 +103,12 @@ dev-status:
     fi
 
 # Reclaim space in the cargo target dir. Next build will be a full rebuild.
-dev-clean:
+dev-clean: _prepare-cargo
     cargo clean
 
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.
-prod-check:
+prod-check: _prepare-cargo
     #!/usr/bin/env bash
     set -euo pipefail
     echo "building frontend..."
