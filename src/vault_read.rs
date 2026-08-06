@@ -385,12 +385,12 @@ impl<'a> VaultReadCore<'a> {
     }
 }
 
-struct SelectedVault {
-    vault_id: VaultId,
-    vault_name: String,
+pub(crate) struct SelectedVault {
+    pub(crate) vault_id: VaultId,
+    pub(crate) vault_name: String,
 }
 
-fn selected_vaults(
+pub(crate) fn selected_vaults(
     snapshot: &crate::vault_runtime::VaultCollectionSnapshot,
     scope: VaultScope,
 ) -> Result<Vec<SelectedVault>, VaultReadError> {

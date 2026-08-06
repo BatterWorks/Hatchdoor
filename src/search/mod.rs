@@ -11,6 +11,7 @@ use crate::vault::{NoteMetadata, NoteSummary};
 pub mod assemble;
 pub mod layer_selection;
 pub mod retrieve;
+pub mod vault_scoped;
 
 pub use layer_selection::{LayerInfo, LayerSelection};
 pub use retrieve::ChunkHit;
