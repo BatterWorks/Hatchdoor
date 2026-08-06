@@ -84,6 +84,7 @@ that production inventory are still checked for stale paths and duplicates.
 - `src/app_state.rs`
 - `src/config.rs`
 - `src/startup.rs`
+- `src/vault_runtime.rs`
 - `src/model_setup.rs`
 - `src/vault_watcher.rs`
 
@@ -106,6 +107,10 @@ that production inventory are still checked for stale paths and duplicates.
 - `AppConfig` is the environment-derived deployment contract and interprets the
   live values from the startup `RuntimeConfig` snapshot.
 - `StartupTracker` exposes startup/model/indexing readiness.
+- `VaultRuntime` and its serialized snapshot expose the current configured
+  source, mode, lifecycle phase, and derived capabilities. This is the rebased
+  single-configured-Vault foundation, not the accepted collection registry or
+  final per-Vault runtime topology.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records.
 - `spawn_vault_watcher` connects filesystem events to cache refresh.
@@ -128,7 +133,8 @@ specific field, route, startup phase, or integration being changed. Adding an
 
 **Validation:** `cargo test server`, `cargo test app_state`,
 `cargo test config`, `cargo test startup`, `cargo test model_setup`,
-`cargo test vault_watcher`, followed by the full backend checks.
+`cargo test vault_runtime`, `cargo test vault_watcher`, followed by the full
+backend checks.
 
 ### Live configuration foundation
 
