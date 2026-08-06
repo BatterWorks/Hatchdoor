@@ -3,7 +3,7 @@ pub mod parse;
 mod populate;
 mod queries;
 mod schema;
-mod vault_snapshots;
+pub(crate) mod vault_snapshots;
 
 pub(crate) use schema::is_recognized_legacy_cache;
 
