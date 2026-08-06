@@ -148,7 +148,10 @@ backend checks.
 `settings.json` file format. `RuntimeConfig::snapshot` gives one immutable,
 lock-free configuration view to bind at the start of an operation;
 `RuntimeConfig::save` serializes writes, persists first, then publishes the
-new view. `RuntimeConfig::validate_and_save` runs a caller-supplied decision
+new view. `RuntimeConfig::remove_stored` lets the one-time legacy migration
+remove only settings already copied into the Vault registry, persisting before
+publishing and leaving environment pins and unrelated values untouched.
+`RuntimeConfig::validate_and_save` runs a caller-supplied decision
 against the snapshot current at the moment the write lock is taken and only
 persists on success, so validation and persistence serialize behind the same
 lock (no separate read-then-write race). `ConfigSnapshot::required` is the one
@@ -160,7 +163,9 @@ setup respectively.
 
 **Consumers:** runtime composition constructs the startup instance. The
 settings HTTP API and the archive, index, MCP, and git live consumers bind a
-snapshot in their respective capability boundaries.
+snapshot in their respective capability boundaries. The legacy single-Vault
+import reads one startup snapshot and removes migrated stored keys only after
+the Vault registry commit succeeds.
 
 **Coordination paths:** `src/lib.rs` exports the boundary. Runtime composition,
 `src/config.rs`, `src/mcp/config.rs`, `src/git/config.rs`, and `src/app_state.rs`
@@ -189,7 +194,8 @@ checks.
 types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
-operations, and the versioned `/data/state/vaults.json` format. An absent file
+operations, explicit confirmed-empty initialization for migration recovery,
+and the versioned `/data/state/vaults.json` format. An absent file
 is a complete revision-0 zero-Vault state and is not created by reads. Commits
 are serialized by normalized registry path across all store handles in the
 process, compare the expected persisted revision, increment it once, and
@@ -197,11 +203,11 @@ atomically replace the file with owner-only permissions. Corrupt, unsupported,
 future-schema, or structurally invalid definition files expose no Vault records
 and are never overwritten automatically.
 
-**Consumers:** the legacy-import packet will consume this boundary in #87;
-later runtime and management adapters consume its safe projections and
-lifecycle operations under their own work packets. No runtime, HTTP, MCP,
-frontend, cache, search, migration, or Git-lifecycle consumer is integrated by
-#86.
+**Consumers:** the legacy single-Vault import consumes the registry load, add,
+and confirmed-empty initialization contracts. Later runtime and management
+adapters consume its safe projections and lifecycle operations under their own
+work packets. No runtime, HTTP, MCP, frontend, cache, search, or Git-lifecycle
+consumer is integrated by #87.
 
 **Coordination paths:** `src/lib.rs` exports the boundary. Future construction
 in runtime composition, `/data/state` deployment persistence, and management
@@ -221,6 +227,47 @@ framework, or speculative trait (ADR-02/13); filesystem behavior assumes no
 runtime shell and remains usable by the rootless image (ADR-12).
 
 **Validation:** `cargo test vault_registry`,
+`node scripts/check-module-map.mjs`, followed by the full backend checks.
+
+### Legacy single-Vault import
+
+**Kind:** infrastructure/migration boundary.
+
+**Owned paths:** `src/vault_migration.rs`.
+
+**Public contract:** `LegacyMigrationInput`, `LegacyMigrationOutcome`,
+`LegacyMigrationRecovery`, `LegacyMigrationError`, `migrate_legacy_vault`, and
+`start_with_no_vaults`. Inspection returns a deterministic no-deployment,
+existing-registry, imported, or stable `legacy_migration_required` recovery
+outcome. Any existing registry, including an intentionally empty one,
+permanently suppresses legacy import. Confirmed Start with no Vaults writes an
+ordinary revisioned zero-Vault registry.
+
+**Consumers:** startup runtime composition will call this isolated adapter in
+#88 before activating Vault runtimes. There is deliberately no production
+startup caller in #87.
+
+**Coordination paths:** `src/lib.rs` exports the boundary;
+`docker-compose.yml`, `.env.example`, `README.md`, and
+`docs/migrations/legacy-single-vault.md` document and persist the registry
+required by the migration contract.
+
+**Consumed dependencies:** the Vault collection registry owns definitions and
+atomic persistence; live configuration owns precedence and stored-setting
+cleanup; `src/config.rs` owns exclusion parsing; the cache boundary owns
+read-only legacy-schema recognition; `git2` and filesystem metadata provide
+inspection only.
+
+**Invariants:** detection requires positive legacy evidence, so a fresh empty
+default does not migrate. Registry persistence completes before migrated
+settings or a recognized disposable cache are removed. Inspection never seeds,
+moves, edits, clones, pulls, commits, pushes, checks out, or merges legacy
+content or Git state. Unsafe conversion leaves all legacy state unchanged and
+returns recovery. Markdown remains authoritative and downgrade across the
+registry cutover is unsupported.
+
+**Validation:** `cargo test vault_migration`, `cargo test vault_registry`,
+`cargo test runtime_config`, `cargo test cache`,
 `node scripts/check-module-map.mjs`, followed by the full backend checks.
 
 ### Web authentication
@@ -370,13 +417,16 @@ backend checks.
 
 **Public contract:** `SqliteCache`, `ReadConn`, `BuildOptions`, `SemanticHit`,
 and the methods implemented on `SqliteCache`. `parse` is currently public and
-also supplies parsing/hash behavior to vault indexing.
+also supplies parsing/hash behavior to vault indexing. The crate-private
+`is_recognized_legacy_cache` inspection seam owns the supported legacy schema
+fingerprint and opens existing files read-only for the one-time migration.
 
 **Consumed dependencies:** vault index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec.
 
 **Consumers:** application state/reindexing, Search, handlers, MCP reads,
-evaluation tooling, and diagnostics.
+evaluation tooling, diagnostics, and the one-time legacy single-Vault
+migration's read-only evidence check.
 
 **Coordination paths:** `src/app_state.rs`, `src/search/**`,
 `src/vault/index.rs`, `src/chunk/**`, and embedder identity/dimensions.
@@ -523,7 +573,9 @@ superseding ADR-05.
 **Public contract:** `GitMode` (`off`/`local`/`remote` through the existing
 runtime setting), `GitConfig`, write-record/message types, sync outcomes and
 errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
-and `spawn_sync_task`. Local mode commits without network access; remote mode
+and `spawn_sync_task`. The crate-private `parse_mode` and `non_empty_setting`
+helpers keep startup and one-time migration interpretation identical. Local
+mode commits without network access; remote mode
 retains the safe fetch/integrate/push phases. The settings HTTP boundary owns
 the preflight → bounded drain → replacement protocol and exposes it through
 `GET /api/git-status`. `GitSyncHandle::stop` timing out withdraws its stop
@@ -540,8 +592,8 @@ them (only when those paths live inside the vault), appending to an existing
 **Consumed dependencies:** local Git repository through `git2` and the live
 configuration snapshot for startup parsing.
 
-**Consumers:** server startup, write adapters, status handlers/tools, and
-`AppState`.
+**Consumers:** server startup, write adapters, status handlers/tools,
+`AppState`, and the one-time legacy single-Vault migration parser.
 
 **Coordination paths:** `src/app_state.rs`, `src/server.rs`,
 `src/handlers/settings.rs`, HTTP/MCP write adapters, configuration, frontend

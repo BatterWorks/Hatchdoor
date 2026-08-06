@@ -16,6 +16,7 @@ pub mod search;
 pub mod server;
 pub mod startup;
 pub mod vault;
+pub mod vault_migration;
 pub mod vault_registry;
 pub mod vault_runtime;
 pub mod vault_watcher;

@@ -102,7 +102,7 @@ impl GitConfig {
     }
 }
 
-fn non_empty_setting(
+pub(crate) fn non_empty_setting(
     snapshot: &crate::runtime_config::ConfigSnapshot,
     key: &str,
 ) -> Option<String> {
@@ -113,7 +113,7 @@ fn non_empty_setting(
         .filter(|v| !v.is_empty())
 }
 
-fn parse_mode(value: &str) -> Result<Option<GitMode>, String> {
+pub(crate) fn parse_mode(value: &str) -> Result<Option<GitMode>, String> {
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "" | "off" | "false" | "0" | "no" => Ok(None),

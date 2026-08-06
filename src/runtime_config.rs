@@ -378,6 +378,37 @@ impl RuntimeConfig {
             .map(|((), snapshot)| snapshot)
     }
 
+    /// Remove values that a one-time migration has copied into a durable
+    /// domain record. Environment pins and unrelated stored settings remain
+    /// untouched. When none of the requested keys are stored, this is a
+    /// read-only no-op and does not create `settings.json`.
+    pub fn remove_stored<S>(
+        &self,
+        keys: impl IntoIterator<Item = S>,
+    ) -> Result<Arc<ConfigSnapshot>, String>
+    where
+        S: AsRef<str>,
+    {
+        let mut stored_values = self
+            .stored_values
+            .lock()
+            .map_err(|_| "configuration save lock was poisoned".to_string())?;
+        let mut next_values = stored_values.clone();
+        let mut changed = false;
+        for key in keys {
+            changed |= next_values.remove(key.as_ref()).is_some();
+        }
+        if !changed {
+            return Ok(self.snapshot.load_full());
+        }
+
+        self.store.persist(&next_values)?;
+        let next_snapshot = Arc::new(resolve(&self.environment, &next_values, &self.defaults));
+        self.snapshot.store(next_snapshot.clone());
+        *stored_values = next_values;
+        Ok(next_snapshot)
+    }
+
     /// Validate against the *current* snapshot and persist in the same
     /// critical section, so two concurrent saves can never both validate
     /// against a snapshot the other is about to invalidate (issue #54: saves
@@ -516,6 +547,65 @@ mod tests {
             .expect("setting");
         assert_eq!(setting.value, "archive/");
         assert_eq!(setting.source, SettingSource::Stored);
+    }
+
+    #[test]
+    fn migration_cleanup_removes_only_selected_stored_values() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let defaults = BTreeMap::from([
+            ("HATCHDOOR_EXCLUDE".to_string(), "".to_string()),
+            (
+                "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                "90-archive/".to_string(),
+            ),
+        ]);
+        let config =
+            RuntimeConfig::load(&path, Environment::empty(), defaults.clone()).expect("load");
+        config
+            .save([
+                ("HATCHDOOR_EXCLUDE".to_string(), "private/**".to_string()),
+                (
+                    "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                    "archive/".to_string(),
+                ),
+            ])
+            .expect("save fixtures");
+
+        let snapshot = config
+            .remove_stored(["HATCHDOOR_EXCLUDE"])
+            .expect("remove migrated value");
+        assert_eq!(
+            snapshot
+                .setting("HATCHDOOR_EXCLUDE")
+                .expect("exclude")
+                .source,
+            SettingSource::Default
+        );
+        assert_eq!(
+            snapshot
+                .setting("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("archive")
+                .source,
+            SettingSource::Stored
+        );
+
+        let restarted = RuntimeConfig::load(&path, Environment::empty(), defaults)
+            .expect("restart after cleanup");
+        assert_eq!(
+            restarted
+                .snapshot()
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("archive"),
+            "archive/"
+        );
+        assert_eq!(
+            restarted
+                .snapshot()
+                .required("HATCHDOOR_EXCLUDE")
+                .expect("exclude"),
+            ""
+        );
     }
 
     #[test]

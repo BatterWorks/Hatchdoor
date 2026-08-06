@@ -17,6 +17,9 @@ services:
     volumes:
       - ${HOST_VAULT_PATH:-./vault}:/data/vault
       - ${HOST_CACHE_PATH:-./data/cache}:/data/cache
+      # Vault identities and source definitions are authoritative instance
+      # state. Keep this mount across upgrades; it is not a rebuildable cache.
+      - ${HOST_STATE_PATH:-./data/state}:/data/state
       # Model downloads and the local Gemma acceptance record persist across
       # image upgrades. Bind-mount this directory to avoid re-downloading.
       - ${HOST_MODELS_PATH:-./models}:/models

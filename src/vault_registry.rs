@@ -514,6 +514,14 @@ impl VaultRegistryStore {
         self.load_unlocked()
     }
 
+    /// Persist an intentionally empty registry so legacy import stays disabled.
+    pub fn initialize_empty(
+        &self,
+        expected_revision: u64,
+    ) -> Result<VaultRegistrySnapshot, VaultRegistryError> {
+        self.commit(expected_revision, std::iter::empty())
+    }
+
     pub fn add(
         &self,
         expected_revision: u64,
@@ -1555,6 +1563,21 @@ mod tests {
         assert_eq!(snapshot.revision(), 0);
         assert_eq!(snapshot.vault_ids().count(), 0);
         assert!(!path.exists(), "zero-Vault load created the registry");
+    }
+
+    #[test]
+    fn initialize_empty_registry_persists_intentional_zero_vault_state() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("vaults.json");
+        let store = VaultRegistryStore::new(&path);
+
+        let snapshot = store
+            .initialize_empty(0)
+            .expect("persist intentional empty registry");
+
+        assert_eq!(snapshot.revision(), 1);
+        assert_eq!(snapshot.vault_ids().count(), 0);
+        assert!(path.exists());
     }
 
     #[test]

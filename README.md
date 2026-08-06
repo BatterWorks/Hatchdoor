@@ -154,9 +154,22 @@ HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 What these mean:
 
 - `HOST_VAULT_PATH` is your Markdown vault on the host machine.
-- `HOST_CACHE_PATH` and `HOST_MODELS_PATH` are optional host-side locations for
-  the generated cache and downloaded models; Compose defaults both beside the
-  project.
+- `HOST_CACHE_PATH`, `HOST_STATE_PATH`, and `HOST_MODELS_PATH` are optional
+  host-side locations for the generated cache, authoritative Vault registry,
+  and downloaded models; Compose defaults them beside the project.
+
+Before the first managed-Vault start, create the default authoritative state
+directory with access for the image's numeric `nonroot` user. Docker otherwise
+may create a missing bind source as root, leaving the registry unwritable:
+
+```bash
+mkdir -p data/state
+chmod 700 data/state
+sudo chown 65532:65532 data/state
+```
+
+For rootless Podman, use `podman unshare chown 65532:65532 data/state` instead
+of `sudo chown`. Apply the same ownership rule to a custom `HOST_STATE_PATH`.
 
 Do not add ordinary Settings values to `.env`: an unset value can be changed
 live in Settings. See [Configuration](#configuration) for the few deployment
@@ -225,6 +238,7 @@ Docker Compose mounts:
 | --- | --- |
 | `/data/vault` | Markdown vault, source of truth |
 | `/data/cache` | Generated SQLite cache |
+| `/data/state` | Authoritative Vault identities and source definitions |
 | `/models` | Downloaded search model and local Gemma terms receipt |
 
 ## Data And Safety Model
@@ -233,6 +247,7 @@ Hatchdoor is designed around a simple rule: your Markdown vault is the source of
 truth.
 
 - Markdown files live in `VAULT_PATH`.
+- Vault identities and source definitions live in `/data/state/vaults.json`.
 - SQLite is a generated cache and can be rebuilt.
 - The SQLite cache should live outside the vault.
 - Hatchdoor scans `.md` files under the vault while excluding built-in and
@@ -244,6 +259,11 @@ truth.
 - MCP requires its own bearer token whenever it is enabled.
 - Versioning is off by default; it can keep local Git history or safely sync an
   existing remote.
+
+Upgrading an existing single-Vault deployment requires persistent
+`/data/state`; see the [legacy single-Vault upgrade
+guide](docs/migrations/legacy-single-vault.md) for detection, recovery, and
+rollback constraints.
 
 If `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
 vault before the first index build. Existing vaults are not seeded or modified
@@ -333,11 +353,14 @@ For read-only browsing:
 
 - Mount the vault read-only if you want.
 - Keep the cache directory writable.
+- Keep the state directory writable whenever migration or Vault management may
+  create or update the authoritative registry.
 
 For browser writes, MCP writes, attachment uploads, or git sync:
 
 - The vault mount must be writable by the container runtime user.
 - The cache directory must be writable.
+- The state directory must be writable.
 
 If Hatchdoor starts but write features are disabled, check the permissions on
 your vault mount and call `/api/write-capabilities` from an authenticated
@@ -362,6 +385,7 @@ different container layout.
 | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | Compose host mount input; set in `.env` for an existing vault |
 | `HOST_CACHE_PATH` | `./data/cache` | Compose host mount input |
+| `HOST_STATE_PATH` | `./data/state` | Compose host mount for authoritative Vault registry state; preserve across upgrades |
 | `HOST_MODELS_PATH` | `./models` | Compose host mount input |
 | `VAULT_PATH` | `./vault` directly; `/data/vault` in Compose | Environment-only runtime path |
 | `HATCHDOOR_CACHE_DB` | `./data/cache/hatchdoor-cache.sqlite3` directly; `/data/cache/hatchdoor-cache.sqlite3` in Compose | Environment-only runtime path |

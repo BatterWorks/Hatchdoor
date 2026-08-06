@@ -1,4 +1,6 @@
-use rusqlite::OptionalExtension;
+use std::path::Path;
+
+use rusqlite::{OpenFlags, OptionalExtension};
 use tracing::warn;
 
 use super::SqliteCache;
@@ -7,6 +9,59 @@ use crate::embed::Embedder;
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
 const SCHEMA_VERSION: &str = "8";
+
+/// Identify a cache written by a supported single-Vault Hatchdoor release
+/// without creating, migrating, or otherwise mutating the database.
+pub(crate) fn is_recognized_legacy_cache(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(connection) = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    let version = connection.query_row(
+        "SELECT value FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get::<_, String>(0),
+    );
+    let current_version = SCHEMA_VERSION.parse::<u32>().expect("numeric cache schema");
+    if !version
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|version| (1..=current_version).contains(&version))
+    {
+        return false;
+    }
+
+    let hatchdoor_tables = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name IN ('notes', 'note_links', 'headings', 'tags')",
+        [],
+        |row| row.get::<_, u32>(0),
+    );
+    let note_columns = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('notes')
+         WHERE name IN (
+            'slug', 'title', 'relative_path', 'absolute_path',
+            'content', 'content_hash', 'indexed_at'
+         )",
+        [],
+        |row| row.get::<_, u32>(0),
+    );
+    let hatchdoor_fts = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_fts' AND lower(sql) LIKE '%using fts5%'",
+        [],
+        |row| row.get::<_, u32>(0),
+    );
+    matches!(
+        (hatchdoor_tables, note_columns, hatchdoor_fts),
+        (Ok(4), Ok(7), Ok(1))
+    )
+}
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
