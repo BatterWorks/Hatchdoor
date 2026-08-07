@@ -684,6 +684,7 @@ superseding ADR-05.
 - `src/git/mod.rs`
 - `src/git/config.rs`
 - `src/git/managed_checkout.rs`
+- `src/git/managed_sync.rs`
 - `src/git/message.rs`
 - `src/git/status.rs`
 - `src/git/sync.rs`
@@ -720,6 +721,24 @@ damaged, mismatched, credential-bearing, or out-of-containment destinations
 remain untouched and are rejected. This boundary neither fetches nor resets,
 checks out, polls, pushes, or attempts automatic reacquisition/recovery.
 
+`ManagedSyncConfig`, `ManagedSyncMode`, `ManagedSyncOutcome`,
+`ManagedSyncError`, and `synchronize_managed_checkout` form the next shared-core
+managed-checkout graph boundary. A caller that holds the checkout lease and
+serializes Vault writes supplies the already validated repository and contained
+Vault root. Pull-only refuses and preserves any local work or local-only
+history, then only fast-forwards a clean checkout. Two-way commits Vault-subtree
+work before every tree-changing graph operation, refuses unrelated repository
+work, fast-forwards remote-only advancement, creates a merge commit for clean
+divergence, aborts a verified clean conflict back to the pre-merge local commit,
+and never pushes after conflict. It uses safe checkout transitions and rejects
+outside-Vault dirt rather than overwriting it; the narrowly scoped conflict
+abort is the only hard reset. A non-fast-forward push retries only through one
+bounded fetch-integrate-push graph replay before returning a redacted push-race
+error. Every configured remote and push URL must remain credential-free HTTPS.
+Public HTTPS makes no credential callback; supplied credentials are callback
+input only and remain redacted. This boundary does not acquire, delete,
+schedule, poll, persist status, or repair checkouts.
+
 **Consumed dependencies:** local Git repository through `git2`, the live
 configuration snapshot for startup parsing, and the registry's shared
 credential-free HTTPS URL validator plus `VaultId` identity.
@@ -729,6 +748,9 @@ credential-free HTTPS URL validator plus `VaultId` identity.
 The managed-checkout boundary has no runtime consumer in its acquisition packet;
 a later lifecycle packet must retain its lease and persist the resolved branch
 to the authoritative definition before activation.
+Managed synchronization likewise has no lifecycle, work-dispatch, status, or
+network-scheduling consumer in this packet; that later consumer retains the
+lease and routes its bounded returned result through the per-Vault worker.
 
 **Coordination paths:** `src/app_state.rs`, `src/server.rs`,
 `src/handlers/settings.rs`, HTTP/MCP write adapters, configuration, frontend
@@ -742,7 +764,8 @@ configuration, reads, logs, errors, or status; it never deletes, overwrites,
 or silently adopts a checkout destination.
 
 **Validation:** `cargo test git`, `cargo test managed_checkout`, and affected
-adapter/server tests.
+adapter/server tests. Managed graph changes additionally run `cargo test
+managed_sync` against local bare-repository fixtures.
 
 ### HTTP adapters
 

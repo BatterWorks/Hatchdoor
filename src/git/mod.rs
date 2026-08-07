@@ -1,5 +1,6 @@
 pub mod config;
 pub mod managed_checkout;
+pub mod managed_sync;
 pub mod message;
 pub mod status;
 pub mod sync;
@@ -9,6 +10,10 @@ pub use config::{GitConfig, GitMode};
 pub use managed_checkout::{
     ManagedCheckout, ManagedCheckoutError, ManagedCheckoutLease, ManagedCheckoutRequest,
     ManagedHttpsCredentials,
+};
+pub use managed_sync::{
+    ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome,
+    synchronize_managed_checkout,
 };
 pub use message::{WriteRecord, build_commit_message};
 pub use status::GitSyncStatus;
