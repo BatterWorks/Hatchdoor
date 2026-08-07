@@ -254,6 +254,8 @@ types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
 operations, store-owned `vault_path` resolution for runtime consumers,
+the crate-private `is_safe_https_repository_url` validator shared with the
+managed-checkout boundary,
 explicit confirmed-empty initialization for migration recovery, and the
 versioned `/data/state/vaults.json` format. An absent file
 is a complete revision-0 zero-Vault state and is not created by reads. Commits
@@ -681,6 +683,7 @@ superseding ADR-05.
 
 - `src/git/mod.rs`
 - `src/git/config.rs`
+- `src/git/managed_checkout.rs`
 - `src/git/message.rs`
 - `src/git/status.rs`
 - `src/git/sync.rs`
@@ -706,11 +709,26 @@ cache-database and settings-file paths and derives `.gitignore` entries from
 them (only when those paths live inside the vault), appending to an existing
 `.gitignore` rather than skipping it.
 
-**Consumed dependencies:** local Git repository through `git2` and the live
-configuration snapshot for startup parsing.
+`ManagedCheckoutLease`, `ManagedCheckoutRequest`, `ManagedHttpsCredentials`,
+and `acquire_or_reuse` form the shared-core managed-HTTPS acquisition boundary.
+It holds a per-Vault process ownership lease, clones only into an
+application-owned temporary sibling, validates origin, branch, repository
+shape, and canonical Vault containment before atomic installation, and writes
+an application-owned receipt that retains a once-resolved default branch.
+Reuse accepts only a receipt-backed matching checkout; unknown, interrupted,
+damaged, mismatched, credential-bearing, or out-of-containment destinations
+remain untouched and are rejected. This boundary neither fetches nor resets,
+checks out, polls, pushes, or attempts automatic reacquisition/recovery.
+
+**Consumed dependencies:** local Git repository through `git2`, the live
+configuration snapshot for startup parsing, and the registry's shared
+credential-free HTTPS URL validator plus `VaultId` identity.
 
 **Consumers:** server startup, write adapters, status handlers/tools,
 `AppState`, and the one-time legacy single-Vault migration parser.
+The managed-checkout boundary has no runtime consumer in its acquisition packet;
+a later lifecycle packet must retain its lease and persist the resolved branch
+to the authoritative definition before activation.
 
 **Coordination paths:** `src/app_state.rs`, `src/server.rs`,
 `src/handlers/settings.rs`, HTTP/MCP write adapters, configuration, frontend
@@ -719,9 +737,12 @@ settings UI, and vault watcher Git exclusions.
 **Invariants:** optional and debounced; writes do not block on sync; task
 replacement drains before another task can start; local mode never contacts a
 remote; remote mode never force-checks out over uncommitted manual vault edits
-(ADR-10).
+(ADR-10). Managed acquisition never writes credentials to URLs, Git
+configuration, reads, logs, errors, or status; it never deletes, overwrites,
+or silently adopts a checkout destination.
 
-**Validation:** `cargo test git` and affected adapter/server tests.
+**Validation:** `cargo test git`, `cargo test managed_checkout`, and affected
+adapter/server tests.
 
 ### HTTP adapters
 

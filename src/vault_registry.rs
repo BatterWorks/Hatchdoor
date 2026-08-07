@@ -1274,7 +1274,9 @@ fn normalize_https_repository_url(repository_url: String) -> Result<String, Vaul
     Ok(repository_url)
 }
 
-fn is_safe_https_repository_url(repository_url: &str) -> bool {
+/// Shared managed-Git input validation. Callers must never accept a broader
+/// URL syntax than the persisted Vault source contract.
+pub(crate) fn is_safe_https_repository_url(repository_url: &str) -> bool {
     let Some(remainder) = repository_url.strip_prefix("https://") else {
         return false;
     };
