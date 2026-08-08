@@ -1312,6 +1312,20 @@ fn normalize_https_repository_url(repository_url: String) -> Result<String, Vaul
 
 /// Shared managed-Git input validation. Callers must never accept a broader
 /// URL syntax than the persisted Vault source contract.
+///
+/// Deliberately has no `#[cfg(test)]` local-path allowance, unlike
+/// `git::managed_checkout::is_safe_managed_repository_url` and
+/// `git::managed_sync::safe_managed_remote_url`, which each carry one so
+/// their own tests can drive real `git2` clone/fetch/push against a local
+/// bare repository. This validator gates the persisted registry itself — a
+/// non-`https://` `ManagedGit` source is corruption at both write time
+/// (`add`/`edit`) and read time (`load`), with no exception. A test that
+/// needs a `VaultDefinition`/`VaultControlBlock` wired to a real local `git2`
+/// fixture cannot get one through `VaultRegistryStore` and should not try;
+/// either exercise the git2 layer directly (as `managed_checkout.rs`/
+/// `managed_sync.rs`/`managed_task.rs` do), or inject a fake turn executor at
+/// the `vault_runtime::dispatch_managed_git_turn_with` seam to drive a
+/// fabricated result through the full async/status-publishing path instead.
 pub(crate) fn is_safe_https_repository_url(repository_url: &str) -> bool {
     let Some(remainder) = repository_url.strip_prefix("https://") else {
         return false;
