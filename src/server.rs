@@ -17,7 +17,7 @@ use axum::{Json, Router};
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::app_state::{AppState, build_cache_with_sqlite_and_progress};
 use crate::auth::{WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_token, require_web_token};
@@ -42,9 +42,11 @@ use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file
 use crate::startup::StartupTracker;
 use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
-use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
+use crate::vault_runtime::{
+    VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
+};
 use crate::vault_watcher::spawn_vault_watcher;
-use crate::vault_work::VaultWorkCoordinator;
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
 
 /// Hosts that only accept connections from the local machine. Binding to any
 /// other address exposes the port to the network.
@@ -849,13 +851,23 @@ pub async fn run_server() {
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let vaults = VaultCollectionRuntime::with_watching(config.cache_db_path.clone());
-    // #90 establishes durable reconstruction and lifecycle admission. Later
-    // cache and Git packets own the concrete worker loop and operation dispatch.
-    let (vault_work, _) = VaultWorkCoordinator::new();
+    // #90 establishes durable reconstruction and lifecycle admission. #97
+    // owns the concrete worker loop and Git operation dispatch, spawned
+    // below once `vault_work`/`managed_git` and the collection/registry
+    // handles they dispatch against all exist. Index/Repair dispatch remains
+    // for a later cache/repair packet.
+    let (vault_work, vault_worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+    let git_author_name =
+        crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
+            .unwrap_or_else(|| "Hatchdoor".to_string());
+    let git_author_email =
+        crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
+            .unwrap_or_else(|| "hatchdoor@localhost".to_string());
     match &registry_state {
         VaultRegistryState::Ready(snapshot) => {
             vaults
-                .reconcile_and_reconstruct(&vault_registry, snapshot, &vault_work)
+                .reconcile_and_reconstruct(&vault_registry, snapshot, &vault_work, &managed_git)
                 .await
         }
         VaultRegistryState::Recovery(recovery) => warn!(
@@ -915,6 +927,77 @@ pub async fn run_server() {
         }
     });
 
+    // The one global consumer of `vault_work`/`vault_worker`: dispatches
+    // `Git` turns through #97's managed-Git scheduler and marks `Index`/
+    // `Repair` explicitly not-yet-implemented so they release a Vault's
+    // single FIFO position instead of blocking a later Git turn behind a
+    // request nobody drains (a later cache/repair packet supplies those).
+    // Exits on its own once `vault_work.shutdown()` drains to quiescence.
+    let dispatch_task = tokio::spawn({
+        let mut vault_worker = vault_worker;
+        let dispatch_vaults = state.vaults.clone();
+        let dispatch_registry = state.vault_registry.clone();
+        let dispatch_managed_git = managed_git.clone();
+        async move {
+            while let Some(outcome) = vault_worker
+                .run_next(|request| {
+                    let vaults = dispatch_vaults.clone();
+                    let registry = dispatch_registry.clone();
+                    let managed_git = dispatch_managed_git.clone();
+                    let author_name = git_author_name.clone();
+                    let author_email = git_author_email.clone();
+                    async move {
+                        match request.kind() {
+                            VaultWorkKind::Git => {
+                                dispatch_managed_git_turn(
+                                    &vaults,
+                                    &registry,
+                                    &managed_git,
+                                    &author_name,
+                                    &author_email,
+                                    request,
+                                )
+                                .await
+                            }
+                            VaultWorkKind::Index | VaultWorkKind::Repair => {
+                                Err(VaultWorkError::new(
+                                    "vault_work_kind_not_yet_implemented",
+                                    format!("{:?} dispatch is not implemented yet", request.kind()),
+                                    false,
+                                ))
+                            }
+                        }
+                    }
+                })
+                .await
+            {
+                if let Err(error) = outcome.result {
+                    // Expected and permanent until a later cache/repair
+                    // packet lands (see the `Index`/`Repair` arm above); log
+                    // it quietly rather than as a recurring warning on every
+                    // Vault activation.
+                    if error.code() == "vault_work_kind_not_yet_implemented" {
+                        debug!(
+                            vault_id = %outcome.request.vault_id(),
+                            kind = ?outcome.request.kind(),
+                            "Vault background work kind not yet implemented"
+                        );
+                    } else {
+                        warn!(
+                            vault_id = %outcome.request.vault_id(),
+                            kind = ?outcome.request.kind(),
+                            code = error.code(),
+                            message = error.message(),
+                            "Vault background work turn failed"
+                        );
+                    }
+                }
+            }
+        }
+    });
+    let scheduler_tick_task =
+        crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
+
     let addr = config.socket_addr().unwrap_or_else(|e| {
         error!("Address error: {e}");
         std::process::exit(1);
@@ -959,6 +1042,13 @@ pub async fn run_server() {
         });
 
     shutdown_vaults.shutdown(&vault_work).await;
+    // The scheduler's own timer has nothing left to protect once the
+    // coordinator has stopped accepting work; the dispatch loop drains and
+    // exits on its own now that `shutdown()` above reached quiescence.
+    scheduler_tick_task.abort();
+    if let Err(error) = dispatch_task.await {
+        error!(%error, "Vault background work dispatch loop exited unexpectedly");
+    }
     if let Some(git_sync) = shutdown_state.git_sync.read().await.clone()
         && let Err(error) = git_sync.stop(std::time::Duration::from_secs(30)).await
     {

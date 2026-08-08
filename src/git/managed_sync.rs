@@ -58,10 +58,20 @@ pub enum ManagedSyncOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManagedSyncError {
     Validation,
-    DirtyWorkingCopy { files: Vec<String> },
-    LocalCommits { ahead: usize },
-    Conflict { files: Vec<String> },
+    DirtyWorkingCopy {
+        files: Vec<String>,
+    },
+    LocalCommits {
+        ahead: usize,
+    },
+    Conflict {
+        files: Vec<String>,
+    },
     PushRace,
+    /// The remote rejected the supplied (or absent) credentials. Distinct from
+    /// `Remote` so a caller can wait for a credential change or manual retry
+    /// rather than backing off and retrying blindly.
+    Authentication,
     Remote,
 }
 
@@ -89,6 +99,7 @@ impl std::fmt::Display for ManagedSyncError {
             Self::PushRace => {
                 formatter.write_str("managed checkout push raced with a remote update")
             }
+            Self::Authentication => formatter.write_str("managed checkout authentication failed"),
             Self::Remote => formatter.write_str("managed checkout remote operation failed"),
         }
     }
@@ -445,7 +456,16 @@ fn fetch(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Mana
     }
     remote
         .fetch(&[&config.branch], Some(&mut options), None)
-        .map_err(|_| ManagedSyncError::Remote)
+        .map_err(classify_remote_error)
+}
+
+/// Distinguish a credential rejection from any other remote failure.
+fn classify_remote_error(error: git2::Error) -> ManagedSyncError {
+    if error.code() == git2::ErrorCode::Auth {
+        ManagedSyncError::Authentication
+    } else {
+        ManagedSyncError::Remote
+    }
 }
 
 struct BranchRelation {
@@ -631,7 +651,7 @@ fn push(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), Manag
             if error.code() == git2::ErrorCode::NotFastForward {
                 ManagedSyncError::PushRace
             } else {
-                ManagedSyncError::Remote
+                classify_remote_error(error)
             }
         })
 }
@@ -747,6 +767,29 @@ mod tests {
             .expect("entry");
         let blob = repository.find_blob(entry.id()).expect("blob");
         String::from_utf8(blob.content().to_vec()).expect("UTF-8 file")
+    }
+
+    #[test]
+    fn remote_errors_are_classified_as_authentication_or_generic_remote_failure() {
+        let auth_error = git2::Error::new(
+            git2::ErrorCode::Auth,
+            git2::ErrorClass::Http,
+            "authentication required",
+        );
+        assert_eq!(
+            classify_remote_error(auth_error),
+            ManagedSyncError::Authentication
+        );
+
+        let network_error = git2::Error::new(
+            git2::ErrorCode::GenericError,
+            git2::ErrorClass::Net,
+            "could not resolve host",
+        );
+        assert_eq!(
+            classify_remote_error(network_error),
+            ManagedSyncError::Remote
+        );
     }
 
     #[test]

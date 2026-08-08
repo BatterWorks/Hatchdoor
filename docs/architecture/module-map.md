@@ -135,11 +135,26 @@ that production inventory are still checked for stale paths and duplicates.
   an independently cancellable handle. Queueing/coalescing those intents is
   deliberately deferred to #89. The existing `spawn_vault_watcher` remains the
   transitional single-Vault adapter until later application-surface packets.
+- `dispatch_managed_git_turn` is the `VaultWorkKind::Git` execution closure
+  `src/server.rs`'s worker loop calls: it resolves one managed-Git Vault's
+  current definition and credentials, runs `git::run_managed_git_turn` off the
+  async runtime via `spawn_blocking`, and publishes the result through
+  `VaultControlBlock::set_git_status`/`set_local_content_status` and
+  `ManagedGitScheduler::record_outcome`. `reconcile_and_reconstruct` activates
+  or deactivates a managed-Git Vault's scheduler entry alongside its
+  coordinator admission. `set_local_content_status` (mirroring
+  `set_search_status`/`set_git_status`) republishes authoritative
+  local-content availability after a Git turn, since `activation_snapshot`
+  only stats `vault_path` once, at `reconcile()` time, before a managed
+  checkout exists.
 
 **Consumed dependencies:** nearly every backend boundary. This is expected for
 a composition boundary and is not a reason to introduce per-domain service
 traits. Collection activation consumes redacted registry definitions and their
-store-resolved local Markdown roots; it does not read credentials.
+store-resolved local Markdown roots and does not read credentials; managed-Git
+Git-turn dispatch is the one exception, reading plaintext credentials only
+through the registry's crate-private `https_credentials` accessor, for Git
+authentication only.
 
 **Coordination rule:** any work packet touching these files must name the
 specific field, route, startup phase, or integration being changed. Adding an
@@ -255,7 +270,11 @@ local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
 operations, store-owned `vault_path` resolution for runtime consumers,
 the crate-private `is_safe_https_repository_url` validator shared with the
-managed-checkout boundary,
+managed-checkout boundary, the crate-private `https_credentials` accessor
+that returns plaintext credentials for one Vault ID (`None` for both an
+absent Vault and one with none configured, so it cannot be used to probe
+existence) for the managed-Git Git-turn dispatch boundary's internal use only
+— never exposed to HTTP, MCP, or any other external-facing surface,
 explicit confirmed-empty initialization for migration recovery, and the
 versioned `/data/state/vaults.json` format. An absent file
 is a complete revision-0 zero-Vault state and is not created by reads. Commits
@@ -268,8 +287,10 @@ and are never overwritten automatically.
 **Consumers:** the legacy single-Vault import consumes the registry load, add,
 and confirmed-empty initialization contracts. Runtime composition loads the
 registry after migration and `VaultCollectionRuntime` consumes its safe
-projections and resolved paths. HTTP, MCP, frontend, cache, search, and
-Git-lifecycle adapters remain separately owned later packets.
+projections and resolved paths; its managed-Git Git-turn dispatch
+(`dispatch_managed_git_turn`) is the one consumer of the crate-private
+`https_credentials` accessor. HTTP, MCP, frontend, cache, and search adapters
+remain separately owned later packets.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
 `src/app_state.rs` construct and retain it; `/data/state` deployment
@@ -685,6 +706,7 @@ superseding ADR-05.
 - `src/git/config.rs`
 - `src/git/managed_checkout.rs`
 - `src/git/managed_sync.rs`
+- `src/git/managed_task.rs`
 - `src/git/message.rs`
 - `src/git/status.rs`
 - `src/git/sync.rs`
@@ -739,33 +761,62 @@ Public HTTPS makes no credential callback; supplied credentials are callback
 input only and remain redacted. This boundary does not acquire, delete,
 schedule, poll, persist status, or repair checkouts.
 
+`ManagedGitTurnConfig`, `ManagedGitOutcome`, `run_managed_git_turn`,
+`ManagedGitScheduler`, `spawn_scheduler_tick`, `DEFAULT_POLL_INTERVAL`, and
+`DEFAULT_TICK_INTERVAL` form the per-Vault managed-Git scheduling boundary —
+the "later consumer" the two paragraphs above anticipated. `run_managed_git_turn`
+is the concrete `acquire_or_reuse`-then-`synchronize_managed_checkout` operation
+`VaultWorkKind::Git` executes; it classifies every `ManagedCheckoutError`/
+`ManagedSyncError` into a redacted `VaultWorkError{code, message, retryable}`,
+distinguishing authentication failures (`ManagedCheckoutError::AuthenticationFailed`,
+`ManagedSyncError::Authentication`, detected via `git2::ErrorCode::Auth`) from
+other remote failures. `ManagedGitScheduler` is one process-wide instance —
+mirroring the coordinator's single-worker design, it adds no per-Vault
+execution lane — that decides *when* to request a Vault's next Git turn:
+`DEFAULT_POLL_INTERVAL` (24h, not yet user-configurable) after a success or any
+non-retryable failure (including authentication, which never backs off — it
+waits for a configuration change, a manual `sync_now`/`retry_now`, a restart, or
+the normal schedule), or bounded exponential backoff after a retryable
+(transient) failure. `spawn_scheduler_tick` drives it on `DEFAULT_TICK_INTERVAL`.
+
 **Consumed dependencies:** local Git repository through `git2`, the live
 configuration snapshot for startup parsing, and the registry's shared
-credential-free HTTPS URL validator plus `VaultId` identity.
+credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
+`https_credentials` accessor (managed-Git turns only; never exposed further).
 
 **Consumers:** server startup, write adapters, status handlers/tools,
 `AppState`, and the one-time legacy single-Vault migration parser.
-The managed-checkout boundary has no runtime consumer in its acquisition packet;
-a later lifecycle packet must retain its lease and persist the resolved branch
-to the authoritative definition before activation.
-Managed synchronization likewise has no lifecycle, work-dispatch, status, or
-network-scheduling consumer in this packet; that later consumer retains the
-lease and routes its bounded returned result through the per-Vault worker.
+`ManagedGitScheduler`/`run_managed_git_turn` are consumed by runtime
+composition (`src/vault_runtime.rs::dispatch_managed_git_turn` and
+`reconcile_and_reconstruct`, which activates/deactivates a managed-Git Vault's
+schedule alongside its coordinator admission) and by `src/server.rs`, which
+owns the one global consumer loop driving `VaultWorkWorker::run_next` — the
+worker/scheduler-tick construction and dispatch this module map previously
+noted as missing. `VaultWorkKind::Index`/`Repair` dispatch remains for a later
+cache/repair packet; `src/server.rs` returns an explicit non-retryable
+"not yet implemented" `VaultWorkError` for those kinds so a Vault's shared FIFO
+position is not blocked ahead of its Git turn.
 
 **Coordination paths:** `src/app_state.rs`, `src/server.rs`,
-`src/handlers/settings.rs`, HTTP/MCP write adapters, configuration, frontend
-settings UI, and vault watcher Git exclusions.
+`src/vault_runtime.rs`, `src/vault_registry.rs` (crate-private
+`https_credentials` accessor), `src/handlers/settings.rs`, HTTP/MCP write
+adapters, configuration, frontend settings UI, and vault watcher Git
+exclusions.
 
 **Invariants:** optional and debounced; writes do not block on sync; task
 replacement drains before another task can start; local mode never contacts a
 remote; remote mode never force-checks out over uncommitted manual vault edits
 (ADR-10). Managed acquisition never writes credentials to URLs, Git
 configuration, reads, logs, errors, or status; it never deletes, overwrites,
-or silently adopts a checkout destination.
+or silently adopts a checkout destination. The managed-Git scheduler adds no
+persisted queue, priority, or second execution lane (ADR-13); a Git turn's
+returned failure always completes that Vault's turn so the shared worker is
+released for the next Vault.
 
 **Validation:** `cargo test git`, `cargo test managed_checkout`, and affected
 adapter/server tests. Managed graph changes additionally run `cargo test
-managed_sync` against local bare-repository fixtures.
+managed_sync` against local bare-repository fixtures; scheduling changes run
+`cargo test managed_task` and `cargo test vault_runtime`.
 
 ### HTTP adapters
 
