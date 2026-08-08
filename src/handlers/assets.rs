@@ -3,7 +3,7 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 
 use crate::api_types::ErrorResponse;
 use crate::app_state::{AppState, run_blocking, vault_unavailable};
@@ -34,6 +34,13 @@ pub async fn vault_asset_handler(
         Err(err) => return err.into_response(),
     };
 
+    asset_response(content_type, bytes)
+}
+
+/// Shared response shape for a resolved, in-bounds asset/attachment file,
+/// reused by the legacy unscoped route above and the Vault-scoped route in
+/// `handlers/vault_content.rs`.
+pub(crate) fn asset_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     // Cacheable in the browser (assets re-render on every note view) but never
@@ -60,7 +67,10 @@ pub async fn vault_asset_handler(
     (StatusCode::OK, headers, bytes).into_response()
 }
 
-fn resolve_asset_path(vault_root: &FsPath, raw_path: &str) -> Result<PathBuf, AssetPathError> {
+pub(crate) fn resolve_asset_path(
+    vault_root: &FsPath,
+    raw_path: &str,
+) -> Result<PathBuf, AssetPathError> {
     let relative = sanitize_asset_path(raw_path).ok_or(AssetPathError::BadRequest)?;
     if !is_allowed_asset_extension(&relative) {
         return Err(AssetPathError::Forbidden);
@@ -121,7 +131,7 @@ fn is_allowed_asset_extension(path: &FsPath) -> bool {
         .unwrap_or(false)
 }
 
-fn content_type_for_path(path: &FsPath) -> &'static str {
+pub(crate) fn content_type_for_path(path: &FsPath) -> &'static str {
     match path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -141,30 +151,45 @@ fn content_type_for_path(path: &FsPath) -> &'static str {
 }
 
 fn asset_error_response(kind: AssetPathError, requested_path: &str) -> axum::response::Response {
-    let (status, message) = match kind {
+    let (_code, status, message) = asset_error_parts(kind, requested_path);
+    (status, Json(ErrorResponse { error: message })).into_response()
+}
+
+/// One `AssetPathError` -> (structured code, HTTP status, human message)
+/// mapping, shared by this route's `ErrorResponse{error}` shape and
+/// `handlers/vault_content.rs`'s Vault-scoped `VaultApiError{code, ...}`
+/// shape, so the two wire shapes cannot silently diverge on the same
+/// underlying containment outcome.
+pub(crate) fn asset_error_parts(
+    kind: AssetPathError,
+    requested_path: &str,
+) -> (&'static str, StatusCode, String) {
+    match kind {
         AssetPathError::BadRequest => (
+            "invalid_asset_path",
             StatusCode::BAD_REQUEST,
             format!("Invalid asset path: {requested_path}"),
         ),
         AssetPathError::Forbidden => (
+            "asset_access_denied",
             StatusCode::FORBIDDEN,
             format!("Asset access denied: {requested_path}"),
         ),
         AssetPathError::NotFound => (
+            "asset_not_found",
             StatusCode::NOT_FOUND,
             format!("Asset not found: {requested_path}"),
         ),
         AssetPathError::Internal => (
+            "internal_error",
             StatusCode::INTERNAL_SERVER_ERROR,
             "Asset resolution failed".to_string(),
         ),
-    };
-
-    (status, Json(ErrorResponse { error: message })).into_response()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AssetPathError {
+pub(crate) enum AssetPathError {
     BadRequest,
     Forbidden,
     NotFound,

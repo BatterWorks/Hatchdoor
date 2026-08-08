@@ -19,7 +19,7 @@ use crate::api_types::{
 use crate::app_state::{AppState, refresh_coalescing, run_blocking, sqlite_cache};
 
 /// Upper bound on targets accepted by `/api/resolve-batch` (DoS guard).
-const MAX_RESOLVE_BATCH: usize = 200;
+pub(crate) const MAX_RESOLVE_BATCH: usize = 200;
 
 pub async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     let _ = state;

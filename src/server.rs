@@ -36,7 +36,9 @@ use crate::handlers::{
     retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler, search_handler,
     spa_index_handler, stats_handler, sync_vault_handler, tree_handler, update_note_handler,
     upload_attachment_handler, vault_asset_handler, vault_collection_events_handler,
-    vault_events_handler, write_capabilities_handler,
+    vault_events_handler, vault_scoped_asset_handler, vault_scoped_note_download_handler,
+    vault_scoped_note_handler, vault_scoped_note_links_handler, vault_scoped_resolve_batch_handler,
+    vault_scoped_resolve_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -284,12 +286,17 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
-    // Vault-collection discovery, management, and events are deliberately not
-    // gated by `require_vault_ready`: that middleware guards the legacy
-    // single-configured-Vault readiness signal, while connecting the first
-    // Vault and recovering a corrupt registry must stay reachable at zero
-    // enabled Vaults. Demo-mode posture mirrors settings: these are operator
-    // controls, not demo content.
+    // Vault-collection discovery, management, events, and exact content reads
+    // are deliberately not gated by `require_vault_ready`: that middleware
+    // guards the legacy single-configured-Vault readiness signal, while
+    // connecting the first Vault and recovering a corrupt registry must stay
+    // reachable at zero enabled Vaults. Exact reads gate per-request on their
+    // own targeted Vault instead (`vault_not_found`/`vault_disabled`/
+    // `vault_unavailable` from `VaultReadCore`), which is the per-Vault
+    // equivalent this surface needs. Demo-mode posture mirrors settings and
+    // the collection-management routes above: a demo deployment serves its
+    // single legacy vault over the existing unscoped routes, unaffected by
+    // this exclusion.
     let vaults_v1 = if state.demo_mode {
         Router::new()
     } else {
@@ -315,7 +322,31 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 post(disable_vault_handler),
             )
             .route("/api/v1/vaults/{vault_id}/sync", post(sync_vault_handler))
-            .route("/api/v1/vaults/{vault_id}/retry", post(retry_vault_handler));
+            .route("/api/v1/vaults/{vault_id}/retry", post(retry_vault_handler))
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}",
+                get(vault_scoped_note_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/links",
+                get(vault_scoped_note_links_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/download",
+                get(vault_scoped_note_download_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/resolve",
+                get(vault_scoped_resolve_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/resolve-batch",
+                post(vault_scoped_resolve_batch_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/assets/{*path}",
+                get(vault_scoped_asset_handler),
+            );
         match web_bearer_token.clone() {
             Some(token) => vaults_v1.layer(axum::middleware::from_fn_with_state(
                 WebToken(token),
@@ -338,6 +369,11 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(attachment)
         .route("/", get(spa_index_handler))
         .route("/n/{slug}", get(spa_index_handler))
+        // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
+        // when multiple Vaults contain the same slug. Frontend consumption is
+        // #67; the server only needs to serve the SPA shell for it, mirroring
+        // the existing unscoped `/n/{slug}` registration.
+        .route("/v/{vault_id}/n/{slug}", get(spa_index_handler))
         .route("/stats", get(spa_index_handler))
         .route("/graph", get(spa_index_handler))
         .route("/settings", get(spa_index_handler))
@@ -4260,5 +4296,465 @@ mod tests {
         assert!(event.contains("event: vault-collection-revision"));
         assert!(event.contains(r#""category":"definition""#));
         assert!(event.contains(&vault_id));
+    }
+
+    // -----------------------------------------------------------------
+    // #99: /api/v1/vaults/{vault_id} exact reads and contained resources
+    // -----------------------------------------------------------------
+
+    /// Creates a Vault (with `files` already written to disk) via the same
+    /// HTTP surface #98 exercises, and returns its `vault_id`. Local-source
+    /// activation completes synchronously within the request (proven by
+    /// `vaults_v1_create_lists_the_new_vault_with_optimistic_concurrency`
+    /// asserting `capabilities.browse == true` immediately after creation),
+    /// so exact reads against the returned ID are immediately valid.
+    async fn create_vault_with_files(
+        app: &Router,
+        name: &str,
+        root: &std::path::Path,
+        files: &[(&str, &str)],
+        revision: u64,
+    ) -> String {
+        std::fs::create_dir_all(root).expect("create vault directory");
+        for (relative_path, contents) in files {
+            let path = root.join(relative_path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent dir");
+            std::fs::write(path, contents).expect("write note");
+        }
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body(name, root, revision))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_note_and_links_stay_within_the_requested_vault_for_duplicate_slugs() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let first = create_vault_with_files(
+            &app,
+            "First",
+            &tmp.path().join("first"),
+            &[
+                ("Home.md", "# Home\n\nfirst\n\n[[Shared]]"),
+                ("Shared.md", "# Shared"),
+            ],
+            0,
+        )
+        .await;
+        let second = create_vault_with_files(
+            &app,
+            "Second",
+            &tmp.path().join("second"),
+            &[
+                ("Home.md", "# Home\n\nsecond\n\n[[Shared]]"),
+                ("Shared.md", "# Shared"),
+            ],
+            1,
+        )
+        .await;
+
+        let first_note = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/notes/home"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(first_note.status(), StatusCode::OK);
+        let first_body = json_body(first_note).await;
+        assert_eq!(first_body["vault_id"], first);
+        assert!(
+            first_body["note"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("first")
+        );
+
+        let second_note = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{second}/notes/home"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(second_note.status(), StatusCode::OK);
+        let second_body = json_body(second_note).await;
+        assert_eq!(second_body["vault_id"], second);
+        assert!(
+            second_body["note"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("second")
+        );
+
+        let first_links = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/notes/home/links"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(first_links.status(), StatusCode::OK);
+        let first_links_body = json_body(first_links).await;
+        assert_eq!(first_links_body["vault_id"], first);
+        assert_eq!(first_links_body["outgoing"][0]["vault_id"], first);
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_note_reports_structured_errors_for_unknown_disabled_and_malformed_vaults()
+    {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Lifecycle",
+            &tmp.path().join("lifecycle"),
+            &[("Home.md", "# Home")],
+            0,
+        )
+        .await;
+
+        let malformed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/not-a-uuid/notes/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(malformed).await["code"], "invalid_vault_id");
+
+        let unknown_id = "00000000-0000-4000-8000-000000000000";
+        let unknown = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{unknown_id}/notes/home"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(unknown).await["code"], "vault_not_found");
+
+        let missing_note = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/does-not-exist"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_note.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(missing_note).await["code"], "note_not_found");
+
+        let disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/disable?expected_registry_revision=1"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disabled.status(), StatusCode::OK);
+
+        let disabled_read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disabled_read.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(disabled_read).await["code"], "vault_disabled");
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_resolve_and_resolve_batch_scope_to_one_vault() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let first = create_vault_with_files(
+            &app,
+            "First",
+            &tmp.path().join("first"),
+            &[
+                ("Home.md", "# Home\n\n[[Shared]]"),
+                ("Shared.md", "# Shared"),
+            ],
+            0,
+        )
+        .await;
+
+        let resolved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/resolve?target=Shared"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved_body = json_body(resolved).await;
+        assert_eq!(resolved_body["vault_id"], first);
+        assert_eq!(resolved_body["slug"], "shared");
+
+        let unresolved = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/resolve?target=Missing"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unresolved.status(), StatusCode::OK);
+        assert!(json_body(unresolved).await["slug"].is_null());
+
+        let missing_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/resolve"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_query.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(missing_query).await["code"],
+            "invalid_request_query"
+        );
+
+        let batch = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/resolve-batch"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"targets": ["Shared", "Missing"]}).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(batch.status(), StatusCode::OK);
+        let batch_body = json_body(batch).await;
+        assert_eq!(batch_body["vault_id"], first);
+        assert_eq!(batch_body["results"][0]["slug"], "shared");
+        assert!(batch_body["results"][1]["slug"].is_null());
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_asset_retains_containment_and_vault_scoped_download_serves_export() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let first = create_vault_with_files(
+            &app,
+            "First",
+            &tmp.path().join("first"),
+            &[
+                ("Home.md", "# Home\n\n![[diagram.png]]"),
+                ("diagram.png", "png-bytes"),
+                ("secret.txt", "not embeddable"),
+            ],
+            0,
+        )
+        .await;
+
+        let asset = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/assets/diagram.png"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(asset.status(), StatusCode::OK);
+        assert_eq!(asset.headers()["content-type"], "image/png");
+        assert_eq!(asset.headers()["cache-control"], "private, max-age=3600");
+
+        let traversal = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/assets/../../etc/passwd"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(traversal).await["code"], "invalid_asset_path");
+
+        let disallowed_extension = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/assets/secret.txt"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disallowed_extension.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(disallowed_extension).await["code"],
+            "asset_access_denied"
+        );
+
+        let download = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/notes/home/download"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(download.headers()["content-type"], "application/zip");
+        assert_eq!(download.headers()["cache-control"], "no-store");
+        assert!(
+            download.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .contains("Home.zip")
+        );
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_asset_reports_a_retryable_unavailable_status_for_a_missing_directory() {
+        // A managed-Git Vault can be enabled and accepting operations before
+        // its checkout has materialized; simulate that by removing the
+        // (local-source) Vault directory after creation. The asset route must
+        // report the same retryable `vault_read_unavailable` code an exact
+        // note read would for the identical underlying condition, not a
+        // non-retryable 500 surfaced by an unchecked filesystem error.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("materializing");
+        let first = create_vault_with_files(&app, "Materializing", &vault_root, &[], 0).await;
+        std::fs::remove_dir_all(&vault_root).expect("remove vault directory");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/assets/diagram.png"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "vault_read_unavailable");
+        assert_eq!(body["retryable"], true);
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_routes_require_web_token_and_are_absent_in_demo_mode() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret")));
+        let vault_path = tmp.path().join("token-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/notes/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/notes/home")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        // Authorized but the Vault does not exist: proves the token gate was
+        // satisfied rather than short-circuiting before the handler ran.
+        assert_eq!(authorized.status(), StatusCode::NOT_FOUND);
+
+        let (demo_app, _demo_tmp, _demo_state) =
+            app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let demo_response = demo_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/notes/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demo_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn vault_canonical_browser_note_url_reaches_the_spa_shell() {
+        let (app, _tmp) = app_for_tests();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v/00000000-0000-4000-8000-000000000000/n/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        // The frontend is not built in this test environment, so
+        // `spa_index_handler` reports 503 rather than 200 — the discriminator
+        // here is that it is *not* a router 404, proving the canonical Note
+        // URL dispatches to the SPA shell rather than falling through.
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(String::from_utf8_lossy(&bytes).contains("Frontend not built"));
     }
 }

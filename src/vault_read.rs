@@ -197,6 +197,30 @@ impl<'a> VaultReadCore<'a> {
             }))
     }
 
+    /// Resolve every target against one authoritative index build, for
+    /// batch-resolve adapters. `resolve_wikilink` builds a fresh index per
+    /// call, which is correct for one target but would otherwise cost a full
+    /// Vault scan per batch entry.
+    pub fn resolve_wikilinks(
+        &self,
+        vault_id: VaultId,
+        raw_targets: &[String],
+    ) -> Result<Vec<Option<ResolvedVaultNote>>, VaultReadError> {
+        let index = self.authoritative_index(vault_id)?;
+        Ok(raw_targets
+            .iter()
+            .map(|raw_target| {
+                index
+                    .resolve_wikilink(raw_target)
+                    .map(|note| ResolvedVaultNote {
+                        vault_id,
+                        slug: note.slug.clone(),
+                        relative_path: note.relative_path.clone(),
+                    })
+            })
+            .collect())
+    }
+
     pub fn trees(
         &self,
         scope: VaultScope,
@@ -283,10 +307,75 @@ impl<'a> VaultReadCore<'a> {
         })
     }
 
-    fn authoritative_index(
+    /// The requested Vault's resolved local Markdown directory, gated by the
+    /// same not-found/disabled/unavailable checks as `authoritative_index`,
+    /// without paying the cost of parsing every note. For adapters (contained
+    /// asset/attachment/download serving) that only need the directory.
+    ///
+    /// Explicitly confirms the directory currently exists on disk (a managed
+    /// Git Vault can be enabled and accepting operations before its checkout
+    /// has materialized) so a transient-unavailable Vault reports the same
+    /// retryable `vault_read_unavailable` code an exact-note read would,
+    /// rather than callers discovering a raw filesystem error later and
+    /// reporting an unrelated, non-retryable status.
+    pub fn vault_directory(&self, vault_id: VaultId) -> Result<std::path::PathBuf, VaultReadError> {
+        let control = self.control_block(vault_id)?;
+        control
+            .ensure_accepting_operations()
+            .map_err(|error| runtime_error(vault_id, error))?;
+        let path = control.vault_path();
+        if std::fs::metadata(path).is_err() {
+            return Err(unavailable(
+                vault_id,
+                "vault_read_unavailable",
+                format!(
+                    "Vault {vault_id}'s local Markdown directory is not currently available at \
+                     '{}'",
+                    path.display()
+                ),
+                true,
+            ));
+        }
+        Ok(path.to_path_buf())
+    }
+
+    /// The exact Note together with the local Markdown directory it was read
+    /// from, both drawn from one Vault control-block fetch. A caller that
+    /// needs both (e.g. to zip a note with its referenced assets) must not
+    /// call `exact_note` and `vault_directory` separately: a concurrent Vault
+    /// edit reconciles a *replacement* control block rather than mutating the
+    /// current one in place, so two independent lookups could observe the
+    /// note from one Vault path and resolve assets against another.
+    pub fn exact_note_for_download(
         &self,
         vault_id: VaultId,
-    ) -> Result<crate::vault::VaultIndex, VaultReadError> {
+        slug: &str,
+    ) -> Result<Option<(VaultQualifiedNote, std::path::PathBuf)>, VaultReadError> {
+        let (control, index) = self.control_and_index(vault_id)?;
+        index
+            .read_note_by_slug(slug)
+            .map(|note| {
+                note.map(|note| {
+                    (
+                        VaultQualifiedNote { vault_id, note },
+                        control.vault_path().to_path_buf(),
+                    )
+                })
+            })
+            .map_err(|error| {
+                unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
+            })
+    }
+
+    /// The gated Vault control block: not-found, disabled, and no-runtime all
+    /// resolve here, and callers that go on to build an index or read the
+    /// filesystem must also apply an accepting-operations/existence check of
+    /// their own kind, since only `control_and_index` bundles the exact-read
+    /// gate and `vault_directory` bundles the directory-existence gate.
+    fn control_block(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<crate::vault_runtime::VaultControlBlock, VaultReadError> {
         let snapshot = self.vaults.snapshot();
         let Some(vault) = snapshot.vaults.get(&vault_id) else {
             return Err(unavailable(
@@ -304,22 +393,42 @@ impl<'a> VaultReadCore<'a> {
                 false,
             ));
         }
-        let Some(runtime) = self.vaults.runtime(vault_id) else {
-            return Err(unavailable(
+        self.vaults.runtime(vault_id).ok_or_else(|| {
+            unavailable(
                 vault_id,
                 "vault_unavailable",
                 "Vault has no active runtime".to_string(),
                 true,
-            ));
-        };
-        runtime
+            )
+        })
+    }
+
+    /// The gated control block together with its freshly built authoritative
+    /// index, shared by every exact-read method that needs a parsed index
+    /// (`authoritative_index` discards the control block;
+    /// `exact_note_for_download` keeps it for `vault_path()`).
+    fn control_and_index(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<
+        (
+            crate::vault_runtime::VaultControlBlock,
+            crate::vault::VaultIndex,
+        ),
+        VaultReadError,
+    > {
+        let control = self.control_block(vault_id)?;
+        let index = control
             .authoritative_index()
-            .map_err(|error| VaultReadError {
-                code: error.code,
-                message: error.message,
-                vault_id: Some(vault_id),
-                retryable: error.retryable,
-            })
+            .map_err(|error| runtime_error(vault_id, error))?;
+        Ok((control, index))
+    }
+
+    fn authoritative_index(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<crate::vault::VaultIndex, VaultReadError> {
+        self.control_and_index(vault_id).map(|(_, index)| index)
     }
 
     fn collection<T>(
@@ -449,6 +558,18 @@ fn unavailable(vault_id: VaultId, code: &str, message: String, retryable: bool) 
         message,
         vault_id: Some(vault_id),
         retryable,
+    }
+}
+
+fn runtime_error(
+    vault_id: VaultId,
+    error: crate::vault_runtime::VaultRuntimeError,
+) -> VaultReadError {
+    VaultReadError {
+        code: error.code,
+        message: error.message,
+        vault_id: Some(vault_id),
+        retryable: error.retryable,
     }
 }
 
@@ -809,5 +930,96 @@ mod tests {
             .expect("resolve")
             .expect("shared");
         assert_eq!(resolved.vault_id, second);
+    }
+
+    #[test]
+    fn resolve_wikilinks_batch_resolves_every_target_and_matches_the_single_call() {
+        let workspace = workspace(&[(
+            "First",
+            &[
+                ("Home.md", "# Home\n\n[[Shared]]"),
+                ("Shared.md", "# Shared"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+
+        let targets = vec!["Shared".to_string(), "Missing".to_string()];
+        let batch = reads
+            .resolve_wikilinks(first, &targets)
+            .expect("batch resolve");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0].as_ref().expect("shared resolved").slug, "shared");
+        assert!(batch[1].is_none());
+
+        let single = reads
+            .resolve_wikilink(first, "Shared")
+            .expect("single resolve")
+            .expect("shared");
+        assert_eq!(batch[0].as_ref().unwrap().slug, single.slug);
+    }
+
+    #[test]
+    fn vault_directory_resolves_the_enabled_vaults_own_path_and_gates_like_exact_reads() {
+        let workspace = workspace(&[
+            ("First", &[("Home.md", "# Home")]),
+            ("Second", &[("Home.md", "# Home")]),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+
+        let directory = reads.vault_directory(first).expect("first Vault directory");
+        assert_eq!(
+            std::fs::canonicalize(&directory).expect("canonical directory"),
+            std::fs::canonicalize(&workspace.vault_paths[0]).expect("canonical vault root")
+        );
+
+        let missing_id = crate::vault_registry::VaultId::generate().expect("generate Vault id");
+        let missing = reads
+            .vault_directory(missing_id)
+            .expect_err("unknown Vault id");
+        assert_eq!(missing.code, "vault_not_found");
+    }
+
+    #[test]
+    fn vault_directory_reports_a_retryable_error_when_the_local_directory_is_missing() {
+        // A managed-Git Vault can be enabled and accepting operations before
+        // its checkout has materialized on disk; the directory check must
+        // report the same retryable code an exact-note read's index build
+        // would, not an unrelated non-retryable filesystem error surfaced
+        // later by a caller that only checked existence indirectly.
+        let workspace = workspace(&[("First", &[("Home.md", "# Home")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+        std::fs::remove_dir_all(&workspace.vault_paths[0]).expect("remove vault directory");
+
+        let error = reads
+            .vault_directory(first)
+            .expect_err("missing local directory");
+        assert_eq!(error.code, "vault_read_unavailable");
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn exact_note_for_download_returns_the_note_and_directory_from_one_control_block_fetch() {
+        let workspace = workspace(&[("First", &[("Home.md", "# Home\n\nfirst")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+
+        let (note, directory) = reads
+            .exact_note_for_download(first, "home")
+            .expect("lookup")
+            .expect("home found");
+        assert_eq!(note.vault_id, first);
+        assert!(note.note.content.contains("first"));
+        assert_eq!(
+            std::fs::canonicalize(&directory).expect("canonical directory"),
+            std::fs::canonicalize(&workspace.vault_paths[0]).expect("canonical vault root")
+        );
+
+        let missing = reads
+            .exact_note_for_download(first, "does-not-exist")
+            .expect("lookup succeeds");
+        assert!(missing.is_none());
     }
 }

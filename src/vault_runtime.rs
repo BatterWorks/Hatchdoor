@@ -528,7 +528,7 @@ impl VaultControlBlock {
         self.accepting_operations.load(Ordering::SeqCst)
     }
 
-    fn ensure_accepting_operations(&self) -> Result<(), VaultRuntimeError> {
+    pub(crate) fn ensure_accepting_operations(&self) -> Result<(), VaultRuntimeError> {
         if self.is_accepting_operations() {
             return Ok(());
         }
