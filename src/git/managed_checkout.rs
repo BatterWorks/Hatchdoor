@@ -75,6 +75,10 @@ pub enum ManagedCheckoutError {
     UnsafeRepositoryUrl,
     DestinationInvalid,
     CloneFailed,
+    /// The remote rejected the supplied (or absent) credentials. Distinct from
+    /// `CloneFailed` so a caller can wait for a credential change or manual
+    /// retry instead of retrying blindly on a schedule.
+    AuthenticationFailed,
     ValidationFailed,
     AtomicInstallFailed,
 }
@@ -95,6 +99,7 @@ impl std::fmt::Display for ManagedCheckoutError {
             Self::UnsafeRepositoryUrl => "managed checkout repository URL is unsafe",
             Self::DestinationInvalid => "managed checkout destination is invalid",
             Self::CloneFailed => "managed checkout clone failed",
+            Self::AuthenticationFailed => "managed checkout authentication failed",
             Self::ValidationFailed => "managed checkout validation failed",
             Self::AtomicInstallFailed => "managed checkout could not be installed atomically",
         };
@@ -225,8 +230,19 @@ fn clone_repository(
     clone.fetch_options(fetch_options);
     clone
         .clone(&request.repository_url, temporary)
-        .map_err(|_| ManagedCheckoutError::CloneFailed)?;
+        .map_err(classify_remote_error)?;
     Ok(())
+}
+
+/// Distinguish a credential rejection from any other remote failure, so a
+/// caller can wait for a credential change or manual retry rather than
+/// backing off and retrying blindly.
+fn classify_remote_error(error: git2::Error) -> ManagedCheckoutError {
+    if error.code() == git2::ErrorCode::Auth {
+        ManagedCheckoutError::AuthenticationFailed
+    } else {
+        ManagedCheckoutError::CloneFailed
+    }
 }
 
 fn validate_checkout(
@@ -764,6 +780,29 @@ mod tests {
         assert_eq!(error, ManagedCheckoutError::DestinationInvalid);
         assert!(checkout.repository_path.is_symlink());
         assert!(moved.join("note.md").is_file());
+    }
+
+    #[test]
+    fn remote_errors_are_classified_as_authentication_or_generic_clone_failure() {
+        let auth_error = git2::Error::new(
+            git2::ErrorCode::Auth,
+            git2::ErrorClass::Http,
+            "authentication required",
+        );
+        assert_eq!(
+            classify_remote_error(auth_error),
+            ManagedCheckoutError::AuthenticationFailed
+        );
+
+        let network_error = git2::Error::new(
+            git2::ErrorCode::GenericError,
+            git2::ErrorClass::Net,
+            "could not resolve host",
+        );
+        assert_eq!(
+            classify_remote_error(network_error),
+            ManagedCheckoutError::CloneFailed
+        );
     }
 
     #[test]

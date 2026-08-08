@@ -248,6 +248,15 @@ impl From<HttpsCredentials> for StoredHttpsCredentials {
     }
 }
 
+impl From<StoredHttpsCredentials> for HttpsCredentials {
+    fn from(credentials: StoredHttpsCredentials) -> Self {
+        Self {
+            username: credentials.username,
+            token: credentials.token,
+        }
+    }
+}
+
 pub struct NewVaultDefinition {
     pub name: String,
     pub enabled: bool,
@@ -376,6 +385,19 @@ impl VaultRegistrySnapshot {
         self.vaults
             .iter()
             .map(|(vault_id, record)| record.redacted(*vault_id))
+    }
+
+    /// Plaintext credentials for one Vault, for internal Git authentication
+    /// only. An absent Vault is indistinguishable from one with no configured
+    /// credentials. Never expose this beyond a trusted internal caller: the
+    /// redacted `VaultDefinition` projection is the only credential-adjacent
+    /// view external surfaces may see.
+    pub(crate) fn https_credentials(&self, vault_id: VaultId) -> Option<HttpsCredentials> {
+        self.vaults
+            .get(&vault_id)?
+            .https_credentials
+            .clone()
+            .map(HttpsCredentials::from)
     }
 
     pub fn definition(&self, vault_id: VaultId) -> Option<VaultDefinition> {
@@ -902,6 +924,20 @@ impl VaultRegistryStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Plaintext credentials for one Vault, for internal Git authentication
+    /// only. Returns `Ok(None)` both when the Vault has no configured
+    /// credentials and when it does not exist, so a caller cannot use this to
+    /// probe Vault existence. A registry in recovery has no readable Vaults.
+    pub(crate) fn https_credentials(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<Option<HttpsCredentials>, VaultRegistryError> {
+        Ok(match self.load()? {
+            VaultRegistryState::Ready(snapshot) => snapshot.https_credentials(vault_id),
+            VaultRegistryState::Recovery(_) => None,
+        })
     }
 
     /// Resolve the local Markdown root owned by a persisted Vault definition.
@@ -1786,6 +1822,77 @@ mod tests {
         let encoded = std::fs::read_to_string(store.path()).expect("persisted registry");
         assert!(encoded.contains("super-secret-token"));
         assert!(!format!("{committed:?}").contains("super-secret-token"));
+    }
+
+    #[test]
+    fn crate_private_https_credentials_accessor_returns_plaintext_only_for_configured_vaults() {
+        let directory = tempdir().expect("temporary directory");
+        let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let credentials = HttpsCredentials {
+            username: "git-user".to_string(),
+            token: "super-secret-token".to_string(),
+        };
+        let committed = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Remote notes".to_string(),
+                    enabled: true,
+                    source: VaultSource::ManagedGit {
+                        repository_url: "https://example.test/owner/notes.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: Some(credentials.clone()),
+                },
+            )
+            .expect("add managed Vault");
+        let configured_id = committed
+            .definitions()
+            .next()
+            .expect("definition")
+            .vault_id();
+
+        let local_path = directory.path().join("local");
+        std::fs::create_dir(&local_path).expect("local Vault directory");
+        let committed = store
+            .add(
+                committed.revision(),
+                NewVaultDefinition {
+                    name: "No credentials".to_string(),
+                    enabled: true,
+                    source: VaultSource::Local { path: local_path },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add local Vault");
+        let unconfigured_id = committed
+            .definitions()
+            .find(|definition| definition.name() == "No credentials")
+            .expect("local definition")
+            .vault_id();
+
+        assert_eq!(
+            store
+                .https_credentials(configured_id)
+                .expect("credentials lookup"),
+            Some(credentials)
+        );
+        assert_eq!(
+            store
+                .https_credentials(unconfigured_id)
+                .expect("credentials lookup"),
+            None
+        );
+        assert_eq!(
+            store
+                .https_credentials(VaultId::generate().expect("random Vault ID"))
+                .expect("credentials lookup for absent Vault"),
+            None
+        );
     }
 
     #[test]

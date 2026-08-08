@@ -6,13 +6,14 @@ use std::sync::{Arc, RwLock, Weak};
 
 use serde::Serialize;
 
+use crate::git::{ManagedGitScheduler, ManagedGitTurnConfig, run_managed_git_turn};
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault_registry::{
     VaultDefinition, VaultGitMode, VaultId, VaultRegistrySnapshot, VaultRegistryStore,
     VaultSource as RegistryVaultSource,
 };
 use crate::vault_watcher::{VaultWatcherHandle, spawn_vault_change_watcher};
-use crate::vault_work::{VaultWorkCoordinator, VaultWorkKind};
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultSource {
@@ -553,6 +554,40 @@ impl VaultControlBlock {
         Ok(())
     }
 
+    /// Publish authoritative local-Markdown availability, without changing
+    /// Git status. `activation_snapshot` stats `vault_path` only once, at
+    /// `reconcile()` time; for a managed Git Vault that path does not exist
+    /// until the per-Vault Git lifecycle packet completes first acquisition,
+    /// so that packet owns the transitions that call this seam to make the
+    /// Vault browsable once its checkout exists (or to report the source
+    /// unavailable again, e.g. after the checkout is lost).
+    pub fn set_local_content_status(
+        &self,
+        status: LocalContentStatus,
+        error: Option<VaultRuntimeError>,
+    ) -> Result<(), VaultRuntimeError> {
+        self.ensure_accepting_operations()?;
+        let mut snapshot = self
+            .snapshot
+            .write()
+            .expect("Vault control snapshot poisoned");
+        let previous = snapshot.clone();
+        snapshot.local_content = status;
+        snapshot.activation = if status == LocalContentStatus::Unavailable {
+            VaultActivationStatus::Unavailable
+        } else {
+            VaultActivationStatus::Active
+        };
+        snapshot.activation_error = error;
+        snapshot.capabilities = collection_capabilities(&self.definition, &snapshot);
+        let changed = *snapshot != previous;
+        drop(snapshot);
+        if changed {
+            self.revisions.bump();
+        }
+        Ok(())
+    }
+
     /// Publish Git availability without changing authoritative local-content
     /// capability. The per-Vault Git lifecycle packet owns the operations that
     /// call this seam.
@@ -736,11 +771,17 @@ impl VaultCollectionRuntime {
     /// Rebuild disposable background work from the authoritative collection and
     /// currently usable local Markdown. A future cache or Git lifecycle may
     /// refine the requested operation, but it must use this one coordinator.
+    ///
+    /// `managed_git` tracks scheduling (daily polling, backoff) only for
+    /// managed-Git Vaults; it is activated/deactivated alongside the
+    /// coordinator so a retired or disabled Vault's schedule cannot outlive
+    /// its runtime.
     pub async fn reconcile_and_reconstruct(
         &self,
         registry: &VaultRegistryStore,
         snapshot: &VaultRegistrySnapshot,
         coordinator: &VaultWorkCoordinator,
+        managed_git: &ManagedGitScheduler,
     ) {
         let previously_active = self.active_runtimes();
         self.reconcile(registry, snapshot);
@@ -757,6 +798,7 @@ impl VaultCollectionRuntime {
 
         for vault_id in &retired {
             coordinator.drain_vault(*vault_id);
+            managed_git.deactivate(*vault_id);
         }
         for vault_id in &retired {
             coordinator.wait_for_vault_safe_boundary(*vault_id).await;
@@ -781,6 +823,9 @@ impl VaultCollectionRuntime {
                 coordinator.request(*vault_id, VaultWorkKind::Index);
             }
             if snapshot.git == VaultGitStatus::Pending {
+                if is_managed_git(runtime.definition().source()) {
+                    managed_git.activate(*vault_id);
+                }
                 coordinator.request(*vault_id, VaultWorkKind::Git);
             }
         }
@@ -882,38 +927,11 @@ fn collection_snapshots(
 }
 
 fn activation_snapshot(definition: &VaultDefinition, vault_path: &Path) -> CollectionVaultSnapshot {
-    let (activation, local_content, activation_error) = match std::fs::metadata(vault_path) {
-        Ok(metadata) if metadata.is_dir() => {
-            match directory_content_status(vault_path, &metadata) {
-                Ok(local_content) => (VaultActivationStatus::Active, local_content, None),
-                Err(error) => (
-                    VaultActivationStatus::Unavailable,
-                    LocalContentStatus::Unavailable,
-                    Some(error),
-                ),
-            }
-        }
-        Ok(_) => (
-            VaultActivationStatus::Unavailable,
-            LocalContentStatus::Unavailable,
-            Some(VaultRuntimeError {
-                code: "vault_path_not_directory".to_string(),
-                message: format!("Vault path '{}' is not a directory", vault_path.display()),
-                retryable: false,
-            }),
-        ),
-        Err(error) => (
-            VaultActivationStatus::Unavailable,
-            LocalContentStatus::Unavailable,
-            Some(VaultRuntimeError {
-                code: "vault_path_unavailable".to_string(),
-                message: format!(
-                    "Vault path '{}' is unavailable: {error}",
-                    vault_path.display()
-                ),
-                retryable: true,
-            }),
-        ),
+    let (local_content, activation_error) = stat_local_content(vault_path);
+    let activation = if local_content == LocalContentStatus::Unavailable {
+        VaultActivationStatus::Unavailable
+    } else {
+        VaultActivationStatus::Active
     };
     let git = if matches!(definition.source(), RegistryVaultSource::Local { .. }) {
         VaultGitStatus::Disabled
@@ -937,6 +955,41 @@ fn activation_snapshot(definition: &VaultDefinition, vault_path: &Path) -> Colle
     };
     snapshot.capabilities = collection_capabilities(definition, &snapshot);
     snapshot
+}
+
+/// Stat `vault_path` and derive its current local-content availability. The
+/// single source of truth for that derivation: `activation_snapshot` uses it
+/// at `reconcile()` time, and `publish_local_content_after_git_success` uses
+/// it again after a managed-Git checkout materializes, so the two call sites
+/// can never drift on what "unavailable" means for a Vault path.
+fn stat_local_content(vault_path: &Path) -> (LocalContentStatus, Option<VaultRuntimeError>) {
+    match std::fs::metadata(vault_path) {
+        Ok(metadata) if metadata.is_dir() => {
+            match directory_content_status(vault_path, &metadata) {
+                Ok(local_content) => (local_content, None),
+                Err(error) => (LocalContentStatus::Unavailable, Some(error)),
+            }
+        }
+        Ok(_) => (
+            LocalContentStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: "vault_path_not_directory".to_string(),
+                message: format!("Vault path '{}' is not a directory", vault_path.display()),
+                retryable: false,
+            }),
+        ),
+        Err(error) => (
+            LocalContentStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: "vault_path_unavailable".to_string(),
+                message: format!(
+                    "Vault path '{}' is unavailable: {error}",
+                    vault_path.display()
+                ),
+                retryable: true,
+            }),
+        ),
+    }
 }
 
 fn directory_content_status(
@@ -1056,6 +1109,171 @@ fn collection_capabilities(
         .flatten()
         .any(|error| error.retryable),
     }
+}
+
+fn is_managed_git(source: &RegistryVaultSource) -> bool {
+    matches!(source, RegistryVaultSource::ManagedGit { .. })
+}
+
+/// Execute one `VaultWorkKind::Git` turn for `request` and publish its
+/// result: Git status always, and — since `activation_snapshot` only stats
+/// `vault_path` once, at `reconcile()` time, before any managed checkout
+/// exists — authoritative local-content availability whenever a turn
+/// completes successfully. A Git failure never touches local-content status,
+/// so a Vault that already has a usable checkout stays browsable through a
+/// later sync failure.
+///
+/// A no-op returning `Ok(())` if the Vault has since been retired (its
+/// runtime is gone) or is not managed-Git (defensive: the coordinator only
+/// receives `Git` requests for managed-Git Vaults, but this seam does not
+/// assume that holds forever).
+pub async fn dispatch_managed_git_turn(
+    collection: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    managed_git: &ManagedGitScheduler,
+    author_name: &str,
+    author_email: &str,
+    request: VaultWorkRequest,
+) -> Result<(), VaultWorkError> {
+    dispatch_managed_git_turn_with(
+        collection,
+        registry,
+        managed_git,
+        author_name,
+        author_email,
+        request,
+        run_managed_git_turn,
+    )
+    .await
+}
+
+/// [`dispatch_managed_git_turn`] with the actual `git2` turn injectable,
+/// mirroring `git/task.rs`'s `SyncOps` dependency-injection pattern: `execute`
+/// is production's `run_managed_git_turn` in the real dispatch loop, and a
+/// deterministic fake in tests that need to drive a real failure through the
+/// full async path (credential resolution, `spawn_blocking`, status
+/// publishing, scheduler recording) without a reachable remote.
+async fn dispatch_managed_git_turn_with<F>(
+    collection: &VaultCollectionRuntime,
+    registry: &VaultRegistryStore,
+    managed_git: &ManagedGitScheduler,
+    author_name: &str,
+    author_email: &str,
+    request: VaultWorkRequest,
+    execute: F,
+) -> Result<(), VaultWorkError>
+where
+    F: FnOnce(&ManagedGitTurnConfig) -> Result<crate::git::ManagedGitOutcome, VaultWorkError>
+        + Send
+        + 'static,
+{
+    let vault_id = request.vault_id();
+    let Some(control_block) = collection.runtime(vault_id) else {
+        managed_git.deactivate(vault_id);
+        return Ok(());
+    };
+    let (repository_url, branch, vault_subdirectory, mode) =
+        match control_block.definition().source() {
+            RegistryVaultSource::ManagedGit {
+                repository_url,
+                branch,
+                vault_subdirectory,
+                mode,
+            } => (
+                repository_url.clone(),
+                branch.clone(),
+                vault_subdirectory.clone(),
+                *mode,
+            ),
+            RegistryVaultSource::Local { .. } | RegistryVaultSource::ExistingGit { .. } => {
+                return Ok(());
+            }
+        };
+    let credentials = match registry.https_credentials(vault_id) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            let result = Err(VaultWorkError::new(
+                "managed_git_registry_unavailable",
+                error.to_string(),
+                true,
+            ));
+            publish_managed_git_turn_outcome(&control_block, managed_git, vault_id, &result);
+            return result.map(|_: crate::git::ManagedGitOutcome| ());
+        }
+    };
+    let state_directory = registry
+        .path()
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+    let config = ManagedGitTurnConfig {
+        vault_id,
+        state_directory,
+        repository_url,
+        branch,
+        vault_subdirectory,
+        mode,
+        credentials,
+        author_name: author_name.to_string(),
+        author_email: author_email.to_string(),
+    };
+    let result = tokio::task::spawn_blocking(move || execute(&config))
+        .await
+        .unwrap_or_else(|join_error| {
+            Err(VaultWorkError::new(
+                "managed_git_task_panicked",
+                join_error.to_string(),
+                false,
+            ))
+        });
+
+    publish_managed_git_turn_outcome(&control_block, managed_git, vault_id, &result);
+    result.map(|_| ())
+}
+
+/// Publish one Git turn's result: Git status always, and — since
+/// `activation_snapshot` only stats `vault_path` once, at `reconcile()`
+/// time, before any managed checkout exists — authoritative local-content
+/// availability whenever a turn completes successfully. A Git failure never
+/// touches local-content status, so a Vault that already has a usable
+/// checkout stays browsable through a later sync failure. Also feeds the
+/// outcome back to the scheduler so it can arm the next attempt.
+///
+/// Separated from [`dispatch_managed_git_turn`] so this — the interesting
+/// behavior — is testable against a fabricated result, without needing a
+/// real `git2` clone/fetch against a reachable remote.
+fn publish_managed_git_turn_outcome(
+    control_block: &VaultControlBlock,
+    managed_git: &ManagedGitScheduler,
+    vault_id: VaultId,
+    result: &Result<crate::git::ManagedGitOutcome, VaultWorkError>,
+) {
+    match result {
+        Ok(_) => {
+            let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
+            publish_local_content_after_git_success(control_block);
+        }
+        Err(error) => {
+            let _ = control_block.set_git_status(
+                VaultGitStatus::Unavailable,
+                Some(VaultRuntimeError {
+                    code: error.code().to_string(),
+                    message: error.message().to_string(),
+                    retryable: error.retryable(),
+                }),
+            );
+        }
+    }
+    managed_git.record_outcome(vault_id, result);
+}
+
+/// Re-derive and publish local-content availability after a successful Git
+/// turn, using the same directory check `activation_snapshot` uses at
+/// `reconcile()` time (via [`stat_local_content`]). A managed Vault's
+/// checkout may not have existed the last time that ran.
+fn publish_local_content_after_git_success(control_block: &VaultControlBlock) {
+    let (status, error) = stat_local_content(control_block.vault_path());
+    let _ = control_block.set_local_content_status(status, error);
 }
 
 #[cfg(test)]
@@ -1320,6 +1538,371 @@ mod tests {
             .expect("restore Vault permissions");
     }
 
+    #[test]
+    fn set_local_content_status_makes_a_managed_vault_browsable_after_first_acquisition() {
+        let directory = tempdir().expect("temporary state directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let committed = registry
+            .add(
+                empty.revision(),
+                NewVaultDefinition {
+                    name: "Unacquired managed".to_string(),
+                    enabled: true,
+                    source: RegistryVaultSource::ManagedGit {
+                        repository_url: "https://example.test/vault.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::TwoWay,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add managed Vault before acquisition");
+        let vault_id = vault_id_named(&committed, "Unacquired managed");
+        let collection = VaultCollectionRuntime::new();
+        collection.reconcile(&registry, &committed);
+        let runtime = collection.runtime(vault_id).expect("active runtime");
+
+        let before_acquisition = runtime.snapshot();
+        assert_eq!(
+            before_acquisition.activation,
+            VaultActivationStatus::Unavailable
+        );
+        assert_eq!(
+            before_acquisition.local_content,
+            LocalContentStatus::Unavailable
+        );
+        assert!(!before_acquisition.capabilities.browse);
+
+        // The Git lifecycle packet materializes the checkout at the path the
+        // registry already resolved, then publishes it — no `reconcile()`
+        // needed, since the definition itself never changed.
+        let vault_path = registry.vault_path(runtime.definition());
+        std::fs::create_dir_all(&vault_path).expect("acquired checkout Vault root");
+        runtime
+            .set_local_content_status(LocalContentStatus::ReadWrite, None)
+            .expect("publish acquired local content");
+
+        let acquired = runtime.snapshot();
+        assert_eq!(acquired.activation, VaultActivationStatus::Active);
+        assert_eq!(acquired.local_content, LocalContentStatus::ReadWrite);
+        assert!(acquired.activation_error.is_none());
+        assert!(acquired.capabilities.browse);
+        // Git status is untouched by this seam — it remains whatever the Git
+        // lifecycle packet last published (still `Pending` here).
+        assert_eq!(acquired.git, VaultGitStatus::Pending);
+
+        // A later lost checkout degrades local content independently again.
+        runtime
+            .set_local_content_status(
+                LocalContentStatus::Unavailable,
+                Some(VaultRuntimeError {
+                    code: "vault_path_unavailable".to_string(),
+                    message: "checkout directory disappeared".to_string(),
+                    retryable: true,
+                }),
+            )
+            .expect("publish lost local content");
+        let lost = runtime.snapshot();
+        assert_eq!(lost.activation, VaultActivationStatus::Unavailable);
+        assert!(!lost.capabilities.browse);
+        assert_eq!(
+            lost.activation_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("vault_path_unavailable")
+        );
+    }
+
+    /// A managed-Git Vault's control block, activated through the real
+    /// registry and collection runtime exactly like production. Uses a
+    /// syntactically valid but unreachable `https://` URL — like
+    /// `activation_failure_is_isolated_from_healthy_local_markdown` above,
+    /// the registry only ever accepts credential-free HTTPS, with no test
+    /// escape (unlike the Git-owned `acquire_or_reuse`/
+    /// `synchronize_managed_checkout`, which each carry their own
+    /// `#[cfg(test)]` local-path allowance). `run_managed_git_turn`'s own
+    /// tests in `git/managed_task.rs` already prove the real `git2`
+    /// mechanics against a local bare repository; this fixture exists to
+    /// test `publish_managed_git_turn_outcome`'s status-publishing behavior
+    /// against a *fabricated* result instead, without a reachable remote.
+    fn managed_git_control_block(
+        directory: &Path,
+    ) -> (
+        VaultCollectionRuntime,
+        VaultRegistryStore,
+        VaultControlBlock,
+        VaultId,
+    ) {
+        let registry = VaultRegistryStore::new(directory.join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let committed = registry
+            .add(
+                empty.revision(),
+                NewVaultDefinition {
+                    name: "Remote notes".to_string(),
+                    enabled: true,
+                    source: RegistryVaultSource::ManagedGit {
+                        repository_url: "https://example.test/vault.git".to_string(),
+                        branch: Some("main".to_string()),
+                        vault_subdirectory: None,
+                        mode: VaultGitMode::PullOnly,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add managed Vault");
+        let vault_id = vault_id_named(&committed, "Remote notes");
+        let collection = VaultCollectionRuntime::new();
+        collection.reconcile(&registry, &committed);
+        let control_block = collection.runtime(vault_id).expect("active runtime");
+        (collection, registry, control_block, vault_id)
+    }
+
+    #[test]
+    fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_browsable() {
+        let directory = tempdir().expect("temporary state directory");
+        let (_collection, _registry, control_block, vault_id) =
+            managed_git_control_block(directory.path());
+        // The checkout materializes at exactly the path the registry already
+        // resolved for this Vault ID — `run_managed_git_turn` installs there
+        // in production; this test fabricates that outcome directly.
+        std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
+        let (coordinator, _worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator);
+        managed_git.activate(vault_id);
+        assert_eq!(
+            control_block.snapshot().local_content,
+            LocalContentStatus::Unavailable
+        );
+
+        publish_managed_git_turn_outcome(
+            &control_block,
+            &managed_git,
+            vault_id,
+            &Ok(crate::git::ManagedGitOutcome::Synchronized),
+        );
+
+        let after = control_block.snapshot();
+        assert_eq!(after.git, VaultGitStatus::Ready);
+        assert!(after.git_error.is_none());
+        assert_eq!(after.local_content, LocalContentStatus::ReadWrite);
+        assert!(after.activation_error.is_none());
+        assert!(after.capabilities.browse);
+    }
+
+    #[test]
+    fn publish_managed_git_turn_outcome_isolates_a_failure_from_already_acquired_local_markdown() {
+        let directory = tempdir().expect("temporary state directory");
+        let (_collection, _registry, control_block, vault_id) =
+            managed_git_control_block(directory.path());
+        std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
+        let (coordinator, _worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator);
+        managed_git.activate(vault_id);
+        publish_managed_git_turn_outcome(
+            &control_block,
+            &managed_git,
+            vault_id,
+            &Ok(crate::git::ManagedGitOutcome::UpToDate),
+        );
+        assert_eq!(
+            control_block.snapshot().local_content,
+            LocalContentStatus::ReadWrite
+        );
+
+        // A later turn fails (e.g. the remote went unreachable). Local
+        // Markdown access must not regress just because Git did.
+        publish_managed_git_turn_outcome(
+            &control_block,
+            &managed_git,
+            vault_id,
+            &Err(VaultWorkError::new(
+                "managed_git_remote_unreachable",
+                "could not resolve host",
+                true,
+            )),
+        );
+
+        let after = control_block.snapshot();
+        assert_eq!(after.git, VaultGitStatus::Unavailable);
+        assert_eq!(
+            after.git_error.as_ref().map(|error| error.code.as_str()),
+            Some("managed_git_remote_unreachable")
+        );
+        assert!(
+            after
+                .git_error
+                .as_ref()
+                .is_some_and(|error| error.retryable)
+        );
+        assert_eq!(
+            after.local_content,
+            LocalContentStatus::ReadWrite,
+            "a Git failure must not revoke already-acquired local Markdown access"
+        );
+        assert!(after.capabilities.browse);
+    }
+
+    /// Drives a real Git-turn *failure* through the full async dispatch path
+    /// — credential resolution, `spawn_blocking`, status publishing, and
+    /// scheduler recording — via `dispatch_managed_git_turn_with`'s injected
+    /// executor, rather than calling `publish_managed_git_turn_outcome`
+    /// directly. This is the "not just the generic coordinator mechanism"
+    /// coverage a real remote failure would exercise, without a reachable
+    /// remote or a network call in the test suite.
+    #[tokio::test]
+    async fn dispatch_managed_git_turn_with_publishes_a_real_failure_through_the_full_async_path() {
+        let directory = tempdir().expect("temporary state directory");
+        let (collection, registry, control_block, vault_id) =
+            managed_git_control_block(directory.path());
+        std::fs::create_dir_all(control_block.vault_path()).expect("already-acquired checkout");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
+        managed_git.activate(vault_id);
+
+        // First turn succeeds (fabricated), establishing already-acquired
+        // local content exactly like a real prior sync would.
+        coordinator.request(vault_id, VaultWorkKind::Git);
+        worker
+            .run_next(|request| {
+                dispatch_managed_git_turn_with(
+                    &collection,
+                    &registry,
+                    &managed_git,
+                    "Hatchdoor",
+                    "hatchdoor@example.test",
+                    request,
+                    |_config| Ok(crate::git::ManagedGitOutcome::UpToDate),
+                )
+            })
+            .await
+            .expect("first turn dequeued")
+            .result
+            .expect("first turn succeeds");
+        assert_eq!(
+            control_block.snapshot().local_content,
+            LocalContentStatus::ReadWrite
+        );
+
+        // A later turn fails for real, through the same dispatch path.
+        coordinator.request(vault_id, VaultWorkKind::Git);
+        let outcome = worker
+            .run_next(|request| {
+                dispatch_managed_git_turn_with(
+                    &collection,
+                    &registry,
+                    &managed_git,
+                    "Hatchdoor",
+                    "hatchdoor@example.test",
+                    request,
+                    |_config| {
+                        Err(VaultWorkError::new(
+                            "managed_git_remote_unreachable",
+                            "simulated remote outage",
+                            true,
+                        ))
+                    },
+                )
+            })
+            .await
+            .expect("Git turn dequeued");
+
+        assert_eq!(outcome.request.vault_id(), vault_id);
+        assert_eq!(outcome.request.kind(), VaultWorkKind::Git);
+        let error = outcome.result.expect_err("injected failure propagates");
+        assert_eq!(error.code(), "managed_git_remote_unreachable");
+        assert!(error.retryable());
+
+        let after = control_block.snapshot();
+        assert_eq!(after.git, VaultGitStatus::Unavailable);
+        assert_eq!(
+            after.git_error.as_ref().map(|error| error.code.as_str()),
+            Some("managed_git_remote_unreachable")
+        );
+        assert_eq!(
+            after.local_content,
+            LocalContentStatus::ReadWrite,
+            "already-acquired local Markdown must survive a real dispatched failure"
+        );
+        assert!(after.capabilities.browse);
+
+        // The failure also released the worker: a healthy Vault's turn can
+        // still proceed right after, through the very same worker.
+        let current = match registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => {
+                panic!("registry recovery")
+            }
+        };
+        let healthy_path = directory.path().join("healthy");
+        std::fs::create_dir_all(&healthy_path).expect("healthy Vault directory");
+        let updated = add_local_vault(&registry, &current, "Healthy local", healthy_path);
+        let healthy = vault_id_named(&updated, "Healthy local");
+        coordinator.request(healthy, VaultWorkKind::Repair);
+        let healthy_turn = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("worker still runs turns after the failure");
+        assert_eq!(healthy_turn.request.vault_id(), healthy);
+    }
+
+    #[tokio::test]
+    async fn dispatch_managed_git_turn_is_a_no_op_for_a_non_managed_git_vault() {
+        let directory = tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("Vault directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let one = add_local_vault(&registry, &empty, "Local Vault", vault_path);
+        let vault_id = vault_id_named(&one, "Local Vault");
+        let collection = VaultCollectionRuntime::new();
+        collection.reconcile(&registry, &one);
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
+        // A Local Vault's Git status is `Disabled`, never `Pending`, so
+        // nothing would request Git work for it in production; requesting it
+        // directly here exercises `dispatch_managed_git_turn`'s defensive
+        // non-managed-Git branch without any real Git I/O.
+        coordinator.request(vault_id, VaultWorkKind::Git);
+
+        let outcome = worker
+            .run_next(|request| {
+                dispatch_managed_git_turn(
+                    &collection,
+                    &registry,
+                    &managed_git,
+                    "Hatchdoor",
+                    "hatchdoor@example.test",
+                    request,
+                )
+            })
+            .await
+            .expect("turn dequeued");
+
+        outcome
+            .result
+            .expect("non-managed-Git dispatch is a harmless no-op");
+        let snapshot = collection
+            .runtime(vault_id)
+            .expect("active runtime")
+            .snapshot();
+        assert_eq!(snapshot.git, VaultGitStatus::Disabled);
+        assert!(snapshot.git_error.is_none());
+    }
+
     #[tokio::test]
     async fn status_changes_advance_and_publish_collection_revisions() {
         let directory = tempdir().expect("temporary state directory");
@@ -1518,9 +2101,10 @@ mod tests {
         expected.sort();
         let collection = VaultCollectionRuntime::new();
         let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
 
         collection
-            .reconcile_and_reconstruct(&registry, &two, &coordinator)
+            .reconcile_and_reconstruct(&registry, &two, &coordinator, &managed_git)
             .await;
 
         let mut reconstructed = Vec::new();
@@ -1553,8 +2137,9 @@ mod tests {
         let vault_id = vault_id_named(&enabled, "Vault");
         let collection = VaultCollectionRuntime::new();
         let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
         collection
-            .reconcile_and_reconstruct(&registry, &enabled, &coordinator)
+            .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
             .await;
 
         let started = Arc::new(tokio::sync::Notify::new());
@@ -1583,7 +2168,7 @@ mod tests {
             .disable(enabled.revision(), vault_id)
             .expect("disable Vault");
         let reconciliation =
-            collection.reconcile_and_reconstruct(&registry, &disabled, &coordinator);
+            collection.reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git);
         tokio::pin!(reconciliation);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut reconciliation)
@@ -1625,8 +2210,9 @@ mod tests {
         let vault_id = vault_id_named(&enabled, "Vault");
         let collection = VaultCollectionRuntime::new();
         let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
         collection
-            .reconcile_and_reconstruct(&registry, &enabled, &coordinator)
+            .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
             .await;
 
         let started = Arc::new(tokio::sync::Notify::new());
@@ -1665,8 +2251,12 @@ mod tests {
                 },
             )
             .expect("replace enabled Vault definition");
-        let reconciliation =
-            collection.reconcile_and_reconstruct(&registry, &replacement, &coordinator);
+        let reconciliation = collection.reconcile_and_reconstruct(
+            &registry,
+            &replacement,
+            &coordinator,
+            &managed_git,
+        );
         tokio::pin!(reconciliation);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut reconciliation)
@@ -1714,15 +2304,16 @@ mod tests {
         let healthy_id = vault_id_named(&both, "Healthy");
         let collection = VaultCollectionRuntime::new();
         let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
         collection
-            .reconcile_and_reconstruct(&registry, &both, &coordinator)
+            .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
             .await;
 
         let disconnected = registry
             .disconnect(both.revision(), target_id)
             .expect("disconnect target Vault");
         collection
-            .reconcile_and_reconstruct(&registry, &disconnected, &coordinator)
+            .reconcile_and_reconstruct(&registry, &disconnected, &coordinator, &managed_git)
             .await;
 
         assert!(collection.runtime(target_id).is_none());
@@ -1758,8 +2349,9 @@ mod tests {
         let vault_id = vault_id_named(&snapshot, "Vault");
         let collection = VaultCollectionRuntime::new();
         let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
         collection
-            .reconcile_and_reconstruct(&registry, &snapshot, &coordinator)
+            .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
             .await;
         let runtime = collection.runtime(vault_id).expect("active runtime");
         let started = Arc::new(tokio::sync::Notify::new());
