@@ -453,20 +453,6 @@ where
     }
 }
 
-/// Coalescing refresh for the public `/api/refresh` endpoint: if a reindex is
-/// already running, skip rather than queue another full pass behind it. This
-/// defuses a request loop that would otherwise pin a CPU core (F-02).
-pub async fn refresh_coalescing(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let _refresh_guard = match state.refresh_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            debug!("Refresh already in progress; coalescing request");
-            return Ok(());
-        }
-    };
-    run_reindex(state, None).await.map_err(internal_error)
-}
-
 /// Guaranteed refresh for paths that must see their own change reflected (MCP
 /// writes, the vault watcher): waits for any in-flight reindex, then reindexes.
 pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
@@ -760,21 +746,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_coalescing_surfaces_errors() {
-        let dir = tempdir().expect("temp dir");
-        let vault_path = dir.path().join("vault");
-        std::fs::create_dir_all(&vault_path).expect("create vault");
-        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-
-        let state = state_with_vault(vault_path);
-        state.ready_vault.write().await.as_mut().unwrap().vault_path =
-            dir.path().join("missing-vault");
-
-        let result = refresh_coalescing(&state).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn sqlite_cache_returns_current_cache_without_reindexing() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
@@ -889,7 +860,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_coalescing_broadcasts_revision_after_successful_refresh() {
+    async fn refresh_broadcasts_revision_after_successful_reindex() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -898,7 +869,7 @@ mod tests {
         let mut events = state.vault_events.subscribe();
 
         std::fs::write(vault_path.join("Second.md"), "second").expect("write note");
-        refresh_coalescing(&state).await.expect("refresh");
+        refresh_now(&state).await.expect("refresh");
 
         assert_eq!(events.recv().await.expect("revision"), 1);
     }

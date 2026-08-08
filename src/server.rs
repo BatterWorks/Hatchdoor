@@ -26,21 +26,20 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, archive_note_handler, create_note_handler, create_vault_handler,
-    delete_note_handler, diagnostics_handler, disable_vault_handler, disconnect_vault_handler,
-    edit_vault_handler, enable_vault_handler, generate_mcp_token_handler, get_git_status_handler,
-    get_index_status_handler, get_settings_handler, graph_handler, health_handler,
-    list_vaults_handler, move_note_handler, move_rename_note_handler, note_download_handler,
-    note_handler, note_links_handler, patch_settings_handler, recently_modified_handler,
-    refresh_handler, rename_note_handler, resolve_batch_handler, resolve_handler,
-    retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler, search_handler,
-    spa_index_handler, stats_handler, sync_vault_handler, tree_handler, update_note_handler,
-    upload_attachment_handler, vault_asset_handler, vault_collection_events_handler,
-    vault_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, disable_vault_handler,
+    disconnect_vault_handler, edit_vault_handler, enable_vault_handler, generate_mcp_token_handler,
+    get_git_status_handler, get_index_status_handler, get_settings_handler, health_handler,
+    list_vaults_handler, patch_settings_handler, retry_vault_handler, reveal_mcp_token_handler,
+    reveal_web_token_handler, spa_index_handler, sync_vault_handler,
+    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
     vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
-    vault_scoped_asset_handler, vault_scoped_note_download_handler, vault_scoped_note_handler,
-    vault_scoped_note_links_handler, vault_scoped_resolve_batch_handler,
-    vault_scoped_resolve_handler, write_capabilities_handler,
+    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
+    vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
+    vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
+    vault_scoped_rename_note_handler, vault_scoped_resolve_batch_handler,
+    vault_scoped_resolve_handler, vault_scoped_update_note_handler,
+    vault_scoped_upload_attachment_handler, vault_scoped_write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -163,75 +162,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
         .min(usize::MAX as u64) as usize;
 
-    // Routes that expose vault data sit behind startup readiness and, when
-    // configured, web authentication. The SPA shell and status routes stay open.
-    let protected = Router::new()
-        .route("/api/tree", get(tree_handler))
-        .route("/api/vault-events", get(vault_events_handler))
-        .route("/api/recently-modified", get(recently_modified_handler))
-        .route("/api/note", post(create_note_handler))
-        .route(
-            "/api/note/{slug}",
-            get(note_handler)
-                .put(update_note_handler)
-                .delete(delete_note_handler),
-        )
-        .route("/api/note/{slug}/rename", patch(rename_note_handler))
-        .route("/api/note/{slug}/move", patch(move_note_handler))
-        .route("/api/note/{slug}/archive", patch(archive_note_handler))
-        .route(
-            "/api/note/{slug}/move-rename",
-            patch(move_rename_note_handler),
-        )
-        .route("/api/note/{slug}/download", get(note_download_handler))
-        .route("/api/note/{slug}/links", get(note_links_handler))
-        .route("/api/resolve", get(resolve_handler))
-        .route("/api/resolve-batch", post(resolve_batch_handler))
-        .route("/api/search", get(search_handler))
-        .route("/api/stats", get(stats_handler))
-        .route("/api/diagnostics", get(diagnostics_handler))
-        .route("/api/graph", get(graph_handler))
-        .route("/api/refresh", post(refresh_handler))
-        .route("/api/write-capabilities", get(write_capabilities_handler))
-        .route("/vault-assets/{*path}", get(vault_asset_handler));
-
-    let protected = match web_bearer_token.clone() {
-        Some(token) => protected.layer(axum::middleware::from_fn_with_state(
-            WebToken(token),
-            require_web_token,
-        )),
-        None => protected,
-    };
-    let protected = protected.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        require_vault_ready,
-    ));
-    let protected = protected.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        reject_demo_layer_query,
-    ));
-
-    // The attachment endpoint sits outside the shared `protected` group: an MCP
-    // agent that already holds the MCP bearer token can use it directly,
-    // without provisioning the separate web token just for this one route. It
-    // still accepts the web token too, since the web UI's paste-to-upload flow
-    // hits the same endpoint.
-    let attachment = Router::new().route(
-        "/api/attachment",
-        post(upload_attachment_handler).layer(DefaultBodyLimit::max(attachment_body_limit)),
-    );
-    let attachment = attachment.layer(axum::middleware::from_fn_with_state(
-        WebOrLiveMcpToken {
-            web: web_bearer_token.clone(),
-            runtime_config: state.runtime_config.clone(),
-        },
-        require_web_or_live_mcp_token,
-    ));
-    let attachment = attachment.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        require_vault_ready,
-    ));
-
     let model_setup = Router::new()
         .route("/api/model/accept-gemma", post(accept_gemma_handler))
         .route("/api/model/decline-gemma", post(decline_gemma_handler))
@@ -288,17 +218,19 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
-    // Vault-collection discovery, management, events, and exact content reads
-    // are deliberately not gated by `require_vault_ready`: that middleware
-    // guards the legacy single-configured-Vault readiness signal, while
-    // connecting the first Vault and recovering a corrupt registry must stay
-    // reachable at zero enabled Vaults. Exact reads gate per-request on their
-    // own targeted Vault instead (`vault_not_found`/`vault_disabled`/
-    // `vault_unavailable` from `VaultReadCore`), which is the per-Vault
-    // equivalent this surface needs. Demo-mode posture mirrors settings and
-    // the collection-management routes above: a demo deployment serves its
-    // single legacy vault over the existing unscoped routes, unaffected by
-    // this exclusion.
+    // Vault-collection discovery, management, events, exact content reads, and
+    // #101's Vault-scoped mutations are deliberately not gated by any
+    // `require_vault_ready`-style middleware: connecting the first Vault and
+    // recovering a corrupt registry must stay reachable at zero enabled
+    // Vaults. Every operation gates per-request on its own targeted Vault
+    // instead (`vault_not_found`/`vault_disabled`/`vault_unavailable`/
+    // `capability_unavailable` from `VaultReadCore`/`VaultControlBlock`),
+    // which is the per-Vault equivalent this surface needs. Demo-mode posture
+    // (this whole group absent) is unchanged by #101: a demo deployment now
+    // has no working content-serving surface at all, since the legacy
+    // unscoped routes it depended on are retired in the same change — a
+    // documented, deliberate gap (`docs/migrations/vault-scoped-clients.md`),
+    // not something this packet fixes.
     let vaults_v1 = if state.demo_mode {
         Router::new()
     } else {
@@ -326,8 +258,30 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route("/api/v1/vaults/{vault_id}/sync", post(sync_vault_handler))
             .route("/api/v1/vaults/{vault_id}/retry", post(retry_vault_handler))
             .route(
+                "/api/v1/vaults/{vault_id}/notes",
+                post(vault_scoped_create_note_handler),
+            )
+            .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}",
-                get(vault_scoped_note_handler),
+                get(vault_scoped_note_handler)
+                    .put(vault_scoped_update_note_handler)
+                    .delete(vault_scoped_delete_note_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/rename",
+                patch(vault_scoped_rename_note_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/move",
+                patch(vault_scoped_move_note_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/move-rename",
+                patch(vault_scoped_move_rename_note_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/notes/{slug}/archive",
+                patch(vault_scoped_archive_note_handler),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/links",
@@ -348,6 +302,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/assets/{*path}",
                 get(vault_scoped_asset_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/write-capabilities",
+                get(vault_scoped_write_capabilities_handler),
             )
             // #100: one-or-all collection reads and search. `{vault_id}` here
             // is a Vault-or-`all` scope (parsed by `parse_vault_scope`); the
@@ -385,6 +343,31 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         }
     };
 
+    // Vault-scoped attachment upload sits outside `vaults_v1`'s web-token-only
+    // auth, mirroring the legacy `/api/attachment` route it replaces: an MCP
+    // agent that already holds the MCP bearer token can use it directly,
+    // without provisioning the separate web token just for this one route. It
+    // still accepts the web token too, since the web UI's paste-to-upload flow
+    // hits the same endpoint. Absent in demo mode like the rest of #101's
+    // Vault-scoped mutations.
+    let vault_attachment = if state.demo_mode {
+        Router::new()
+    } else {
+        Router::new()
+            .route(
+                "/api/v1/vaults/{vault_id}/attachments",
+                post(vault_scoped_upload_attachment_handler)
+                    .layer(DefaultBodyLimit::max(attachment_body_limit)),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                WebOrLiveMcpToken {
+                    web: web_bearer_token.clone(),
+                    runtime_config: state.runtime_config.clone(),
+                },
+                require_web_or_live_mcp_token,
+            ))
+    };
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
@@ -393,15 +376,13 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(model_setup)
         .merge(settings)
         .merge(vaults_v1)
+        .merge(vault_attachment)
         .merge(mcp)
-        .merge(protected)
-        .merge(attachment)
         .route("/", get(spa_index_handler))
-        .route("/n/{slug}", get(spa_index_handler))
         // Canonical Vault-qualified browser Note URL (issue #62): unambiguous
-        // when multiple Vaults contain the same slug. Frontend consumption is
-        // #67; the server only needs to serve the SPA shell for it, mirroring
-        // the existing unscoped `/n/{slug}` registration.
+        // when multiple Vaults contain the same slug. The legacy slug-only
+        // `/n/{slug}` route is retired in #101 along with the rest of the
+        // unscoped API — frontend consumption of this route is #67.
         .route("/v/{vault_id}/n/{slug}", get(spa_index_handler))
         .route("/stats", get(spa_index_handler))
         .route("/graph", get(spa_index_handler))
@@ -678,36 +659,6 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
     });
 }
 
-async fn require_vault_ready(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    if state.startup.is_ready() {
-        return next.run(request).await;
-    }
-    let snapshot = state.startup.snapshot();
-    let (error, code) = match snapshot.phase {
-        crate::vault_runtime::VaultPhase::Unavailable => (
-            "The configured vault is unavailable",
-            snapshot
-                .error
-                .as_ref()
-                .map(|error| error.code.as_str())
-                .unwrap_or("vault_unavailable"),
-        ),
-        _ => ("Vault is still being indexed", "vault_indexing"),
-    };
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(serde_json::json!({
-            "error": error,
-            "code": code
-        })),
-    )
-        .into_response()
-}
-
 async fn reject_demo_model_setup(
     State(state): State<AppState>,
     request: Request,
@@ -715,32 +666,6 @@ async fn reject_demo_model_setup(
 ) -> Response {
     if state.demo_mode {
         return StatusCode::NOT_FOUND.into_response();
-    }
-    next.run(request).await
-}
-
-/// The HTTP surface is intentionally default-only. In demo mode reject an
-/// attempted layer selector explicitly rather than silently ignoring it, which
-/// could make a caller believe demoted data was being queried safely.
-async fn reject_demo_layer_query(
-    State(state): State<AppState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let requests_layers = request.uri().query().is_some_and(|query| {
-        query
-            .split('&')
-            .filter_map(|part| part.split_once('=').map(|(key, _)| key).or(Some(part)))
-            .any(|key| key == "layers")
-    });
-    if state.demo_mode && requests_layers {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "layers is unavailable in demo mode"
-            })),
-        )
-            .into_response();
     }
     next.run(request).await
 }
@@ -1242,7 +1167,6 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
@@ -1391,7 +1315,11 @@ mod tests {
         (build_router(state, web_bearer_token), tmp)
     }
 
-    fn attachment_upload_request(target_relative_path: &str, token: Option<&str>) -> Request<Body> {
+    fn attachment_upload_request(
+        vault_id: &str,
+        target_relative_path: &str,
+        token: Option<&str>,
+    ) -> Request<Body> {
         let boundary = "hatchdoor-test-boundary";
         let body = format!(
             "--{boundary}\r\n\
@@ -1408,7 +1336,7 @@ mod tests {
         .collect::<Vec<_>>();
 
         let mut builder = Request::builder()
-            .uri("/api/attachment")
+            .uri(format!("/api/v1/vaults/{vault_id}/attachments"))
             .method("POST")
             .header(
                 "content-type",
@@ -1422,14 +1350,27 @@ mod tests {
 
     #[tokio::test]
     async fn attachment_route_accepts_either_web_or_mcp_token() {
-        let (app, _tmp) = app_for_tests_with_web_and_mcp_auth(
+        let (app, tmp) = app_for_tests_with_web_and_mcp_auth(
             Some(Arc::from("web-secret")),
             Some("mcp-secret".to_string()),
         );
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Attachments",
+            &tmp.path().join("attachments"),
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
 
         let no_token = app
             .clone()
-            .oneshot(attachment_upload_request("Attachments/no-token.png", None))
+            .oneshot(attachment_upload_request(
+                &vault_id,
+                "Attachments/no-token.png",
+                None,
+            ))
             .await
             .expect("response");
         assert_eq!(no_token.status(), StatusCode::UNAUTHORIZED);
@@ -1437,6 +1378,7 @@ mod tests {
         let wrong_token = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/wrong-token.png",
                 Some("not-a-real-token"),
             ))
@@ -1447,6 +1389,7 @@ mod tests {
         let with_web_token = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/via-web-token.png",
                 Some("web-secret"),
             ))
@@ -1456,6 +1399,7 @@ mod tests {
 
         let with_mcp_token = app
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/via-mcp-token.png",
                 Some("mcp-secret"),
             ))
@@ -1469,16 +1413,26 @@ mod tests {
         // S9 regression: the attachment route's token check must not gate on
         // `mcp.enabled && mcp.write_enabled` — issue #60 only asked to read the
         // token per-request and mount the check unconditionally. A token that
-        // worked for `/api/attachment` while MCP write mode is off must keep
-        // working.
-        let (app, _tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+        // worked for the attachment route while MCP write mode is off must
+        // keep working.
+        let (app, tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
             Some(Arc::from("web-secret")),
             Some("mcp-secret".to_string()),
             false,
         );
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Attachments",
+            &tmp.path().join("attachments"),
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
 
         let response = app
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/via-mcp-token.png",
                 Some("mcp-secret"),
             ))
@@ -1489,10 +1443,17 @@ mod tests {
 
     #[tokio::test]
     async fn attachment_route_open_when_no_token_configured() {
-        let (app, _tmp) = app_for_tests_with_web_and_mcp_auth(None, None);
+        let (app, tmp) = app_for_tests_with_web_and_mcp_auth(None, None);
+        let vault_id =
+            create_vault_with_files(&app, "Attachments", &tmp.path().join("attachments"), &[], 0)
+                .await;
 
         let response = app
-            .oneshot(attachment_upload_request("Attachments/open.png", None))
+            .oneshot(attachment_upload_request(
+                &vault_id,
+                "Attachments/open.png",
+                None,
+            ))
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1500,7 +1461,9 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_settings_apply_atomically_and_rotate_attachment_authorization() {
-        let (app, _tmp, state) = app_for_tests_with_state();
+        let (app, tmp, state) = app_for_tests_with_state();
+        let vault_id =
+            create_vault_with_files(&app, "Mcp", &tmp.path().join("mcp-attachments"), &[], 0).await;
 
         let invalid = app
             .clone()
@@ -1579,7 +1542,11 @@ mod tests {
 
         let rejected = app
             .clone()
-            .oneshot(attachment_upload_request("Attachments/rejected.png", None))
+            .oneshot(attachment_upload_request(
+                &vault_id,
+                "Attachments/rejected.png",
+                None,
+            ))
             .await
             .expect("response");
         assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
@@ -1587,6 +1554,7 @@ mod tests {
         let first_token = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/first-token.png",
                 Some("first-token"),
             ))
@@ -1616,6 +1584,7 @@ mod tests {
         let read_only_attachment = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/read-only.png",
                 Some("first-token"),
             ))
@@ -1642,6 +1611,7 @@ mod tests {
         let limited_attachment = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/limited.png",
                 Some("first-token"),
             ))
@@ -1693,6 +1663,7 @@ mod tests {
         let disabled_attachment = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/disabled.png",
                 Some("first-token"),
             ))
@@ -1719,6 +1690,7 @@ mod tests {
         let old_token = app
             .clone()
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/old-token.png",
                 Some("first-token"),
             ))
@@ -1728,6 +1700,7 @@ mod tests {
 
         let new_token = app
             .oneshot(attachment_upload_request(
+                &vault_id,
                 "Attachments/new-token.png",
                 Some("second-token"),
             ))
@@ -1932,7 +1905,6 @@ mod tests {
         );
 
         let status = app
-            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/vault-status")
@@ -1952,62 +1924,82 @@ mod tests {
         assert_eq!(payload["mode"], "pull-only");
         assert_eq!(payload["capabilities"]["mutate"], false);
         assert!(!payload.to_string().contains("/data/repositories/vault"));
+    }
 
-        let vault_response = app
+    #[tokio::test]
+    async fn vault_scoped_pull_only_vault_disables_mutation() {
+        // A Pull-only Vault's `capabilities.mutate` is false regardless of local
+        // content (issue #62): no real Git remote traffic is needed to prove
+        // the adapter's `ensure_mutable` gate, but the registry still requires
+        // `repository_path` to be a real Git working checkout to accept an
+        // `existing_git` source at all.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let repository_path = tmp.path().join("pull-only-repo");
+        std::fs::create_dir_all(&repository_path).expect("create repo directory");
+        git2::Repository::init(&repository_path).expect("init git repo");
+        std::fs::write(repository_path.join("Home.md"), "# Home\n").expect("write note");
+        let created = app
+            .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/tree")
-                    .body(Body::empty())
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expected_registry_revision": 0,
+                            "name": "PullOnly",
+                            "enabled": true,
+                            "source": {
+                                "type": "existing_git",
+                                "repository_path": repository_path.to_string_lossy(),
+                                "repository_url": "https://example.test/vault.git",
+                                "branch": null,
+                                "vault_subdirectory": null,
+                                "mode": "pull_only",
+                            },
+                            "exclude_patterns": [],
+                        })
+                        .to_string(),
+                    ))
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(vault_response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let payload: serde_json::Value = serde_json::from_slice(
-            &to_bytes(vault_response.into_body(), usize::MAX)
-                .await
-                .expect("vault response body"),
-        )
-        .expect("vault response json");
-        assert_eq!(payload["code"], "managed_vault_not_acquired");
-    }
-
-    #[tokio::test]
-    async fn pull_only_lifecycle_disables_browser_mutation() {
-        let (_app, _tmp, mut state) = app_for_tests_with_state();
-        state.startup = StartupTracker::new(VaultRuntime::ready(VaultSource::ManagedGit(
-            crate::vault_runtime::ManagedGitSource {
-                repository_url: "https://example.test/vault.git".to_string(),
-                checkout_path: "/data/repositories/vault".into(),
-                branch: None,
-                vault_subdirectory: None,
-                mode: crate::vault_runtime::ManagedGitMode::PullOnly,
-            },
-        )));
-        let app = build_router(state, None);
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
 
         let capabilities = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/write-capabilities")
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        let payload: serde_json::Value = serde_json::from_slice(
-            &to_bytes(capabilities.into_body(), usize::MAX)
-                .await
-                .expect("capabilities body"),
-        )
-        .expect("capabilities json");
+        assert_eq!(capabilities.status(), StatusCode::OK);
+        let payload = json_body(capabilities).await;
         assert_eq!(payload["enabled"], false);
+        assert!(
+            payload["warnings"]
+                .as_array()
+                .expect("warnings")
+                .iter()
+                .any(|warning| warning
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("do not allow mutation"))
+        );
 
         let mutation = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -2017,7 +2009,9 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(mutation.status(), StatusCode::FORBIDDEN);
+        assert_eq!(mutation.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(mutation).await["code"], "capability_unavailable");
+        assert!(!repository_path.join("Blocked.md").exists());
     }
 
     #[tokio::test]
@@ -2051,7 +2045,6 @@ mod tests {
         }
 
         let readiness = app
-            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/ready")
@@ -2061,25 +2054,6 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
-
-        for path in ["/api/tree"] {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .uri(path)
-                        .body(Body::empty())
-                        .expect("request"),
-                )
-                .await
-                .expect("response");
-            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
-            let body = to_bytes(response.into_body(), usize::MAX)
-                .await
-                .expect("body");
-            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
-            assert_eq!(payload["code"], "vault_indexing");
-        }
     }
 
     #[tokio::test]
@@ -2150,115 +2124,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_enforces_http_methods_for_api_routes() {
-        let (app, _tmp) = app_for_tests();
-        let tree_post = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/tree")
-                    .method("POST")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(tree_post.status(), StatusCode::METHOD_NOT_ALLOWED);
-
-        let refresh_get = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/refresh")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(refresh_get.status(), StatusCode::METHOD_NOT_ALLOWED);
-    }
-
-    #[tokio::test]
-    async fn router_serves_vault_events_stream() {
-        let (app, _tmp, state) = app_for_tests_with_state();
-        state.vault_revision.store(7, Ordering::SeqCst);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/vault-events")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()["content-type"], "text/event-stream");
-        let mut stream = response.into_body().into_data_stream();
-        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
-            .await
-            .expect("first SSE event")
-            .expect("stream item")
-            .expect("body chunk");
-        let event = std::str::from_utf8(&chunk).expect("utf8 event");
-        assert!(event.contains("event: vault-revision"));
-        assert!(event.contains("id: 7"));
-        assert!(event.contains(r#"data: {"revision":7}"#));
-    }
-
-    #[tokio::test]
-    async fn resolve_batch_marks_archived_notes() {
-        let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        let archive_dir = vault_root.join("90-archive");
-        std::fs::create_dir_all(&archive_dir).expect("create archive dir");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write home");
-        std::fs::write(archive_dir.join("Old Setup.md"), "# Old Setup\n")
-            .expect("write archived note");
-        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
-        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
-        let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
-            vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
-            vaults: VaultCollectionRuntime::new(),
-            vault_work,
-            managed_git,
-            legacy_migration_recovery: None,
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
-                vault_path: vault_root,
-                cache,
-            }))),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
-            mcp_tools_changed,
-            embedder,
-            runtime_embedder: Arc::new(RuntimeEmbedder::new()),
-            model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
-            model_setup_started: Arc::new(AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
-            web_auth_enabled: false,
-            demo_mode: false,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
-            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
-            startup: StartupTracker::ready(),
-        };
-        let app = build_router(state, None);
+    async fn vault_scoped_resolve_batch_marks_archived_notes() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("archiving");
+        let vault_id = create_vault_with_files(
+            &app,
+            "Archiving",
+            &vault_root,
+            &[
+                ("Home.md", "# Home\n"),
+                ("90-archive/Old Setup.md", "# Old Setup\n"),
+            ],
+            0,
+        )
+        .await;
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/resolve-batch")
+                    .uri(format!("/api/v1/vaults/{vault_id}/resolve-batch"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"targets":["Home","90-archive/Old Setup"]}"#))
@@ -2268,10 +2152,7 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let payload = json_body(response).await;
         let results = payload["results"].as_array().expect("results array");
 
         let home = results
@@ -2293,12 +2174,13 @@ mod tests {
     #[tokio::test]
     async fn web_token_guards_api_routes_but_not_health_or_spa() {
         let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
+        let guarded_route = "/api/v1/vaults/00000000-0000-4000-8000-000000000000/notes/home";
 
         let no_token = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/tree")
+                    .uri(guarded_route)
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
@@ -2320,11 +2202,13 @@ mod tests {
             .expect("response");
         assert_eq!(model_setup_without_token.status(), StatusCode::UNAUTHORIZED);
 
+        // Authorized but the Vault does not exist: proves the token gate was
+        // satisfied rather than short-circuiting before the handler ran.
         let with_header = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/tree")
+                    .uri(guarded_route)
                     .method("GET")
                     .header("authorization", "Bearer secret-token")
                     .body(Body::empty())
@@ -2332,20 +2216,20 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(with_header.status(), StatusCode::OK);
+        assert_eq!(with_header.status(), StatusCode::NOT_FOUND);
 
         let with_query = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/tree?access_token=secret-token")
+                    .uri(format!("{guarded_route}?access_token=secret-token"))
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(with_query.status(), StatusCode::OK);
+        assert_eq!(with_query.status(), StatusCode::NOT_FOUND);
 
         let health = app
             .clone()
@@ -2714,61 +2598,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_wires_core_api_routes() {
-        let (app, _tmp) = app_for_tests();
-
-        let note = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note/home")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(note.status(), StatusCode::OK);
-
-        let resolve_batch = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/resolve-batch")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"targets":["Home"]}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(resolve_batch.status(), StatusCode::OK);
-
-        let modified = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/recently-modified?limit=5")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(modified.status(), StatusCode::OK);
-        let body = to_bytes(modified.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(payload["notes"][0]["slug"], "home");
-    }
-
-    #[tokio::test]
-    async fn router_wires_write_capabilities_route() {
-        let (app, _tmp) = app_for_tests();
+    async fn vault_scoped_write_capabilities_route_reports_enabled() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Writable", &tmp.path().join("writable"), &[], 0).await;
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/write-capabilities")
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
@@ -2777,10 +2614,8 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let payload = json_body(response).await;
+        assert_eq!(payload["vault_id"], vault_id);
         assert_eq!(payload["enabled"], true);
         assert!(
             payload["warnings"]
@@ -2792,15 +2627,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_wires_write_capabilities_with_web_token() {
-        let (_app, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
-        let app = build_router(state, Some(Arc::from("secret-token")));
+    async fn vault_scoped_write_capabilities_requires_web_token() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Writable",
+            &tmp.path().join("writable"),
+            &[],
+            0,
+            Some("secret-token"),
+        )
+        .await;
 
         let unauthorized = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/write-capabilities")
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
@@ -2812,7 +2655,7 @@ mod tests {
         let authorized = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/write-capabilities")
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
                     .method("GET")
                     .header("authorization", "Bearer secret-token")
                     .body(Body::empty())
@@ -2821,42 +2664,9 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(authorized.status(), StatusCode::OK);
-        let body = to_bytes(authorized.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let payload = json_body(authorized).await;
         assert_eq!(payload["enabled"], true);
         assert!(payload["warnings"].as_array().expect("warnings").is_empty());
-    }
-
-    #[tokio::test]
-    async fn demo_mode_reports_write_capabilities_disabled() {
-        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/write-capabilities")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(payload["enabled"], false);
-        assert!(
-            payload["warnings"]
-                .as_array()
-                .expect("warnings")
-                .iter()
-                .any(|warning| warning.as_str().unwrap_or("").contains("demo mode"))
-        );
     }
 
     #[tokio::test]
@@ -2876,20 +2686,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_reports_write_capabilities_disabled_for_read_only_vault() {
-        let (app, tmp, state) = app_for_tests_with_state();
-        let vault_path = state.vault_path().await.expect("ready vault path");
-        let original_permissions = std::fs::metadata(&vault_path)
+    async fn vault_scoped_write_capabilities_reports_disabled_for_read_only_vault() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("read-only");
+        let vault_id = create_vault_with_files(&app, "ReadOnly", &vault_root, &[], 0).await;
+        let original_permissions = std::fs::metadata(&vault_root)
             .expect("vault metadata")
             .permissions();
         let mut read_only_permissions = original_permissions.clone();
         read_only_permissions.set_readonly(true);
-        std::fs::set_permissions(&vault_path, read_only_permissions).expect("make vault read-only");
+        std::fs::set_permissions(&vault_root, read_only_permissions).expect("make vault read-only");
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/write-capabilities")
+                    .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
@@ -2897,15 +2708,11 @@ mod tests {
             .await
             .expect("response");
 
-        std::fs::set_permissions(&vault_path, original_permissions)
+        std::fs::set_permissions(&vault_root, original_permissions)
             .expect("restore vault permissions");
-        drop(tmp);
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let payload = json_body(response).await;
         assert_eq!(payload["enabled"], false);
         assert!(
             payload["warnings"]
@@ -2927,31 +2734,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_returns_bad_request_for_empty_search_query() {
-        let (app, _tmp) = app_for_tests();
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/search?q=%20%20%20")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(payload["error"], "query cannot be empty");
-    }
-
-    #[tokio::test]
-    async fn router_uploads_attachment_into_vault() {
-        let (app, tmp) = app_for_tests();
+    async fn vault_scoped_uploads_attachment_into_vault() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("attachments");
+        let vault_id = create_vault_with_files(&app, "Attachments", &vault_root, &[], 0).await;
         let boundary = "hatchdoor-test-boundary";
         let body = format!(
             "--{boundary}\r\n\
@@ -2970,7 +2756,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/attachment")
+                    .uri(format!("/api/v1/vaults/{vault_id}/attachments"))
                     .method("POST")
                     .header(
                         "content-type",
@@ -2983,28 +2769,28 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let json = json_body(response).await;
+        assert_eq!(json["vault_id"], vault_id);
         assert_eq!(
             json["attachment"]["relative_path"],
             "Attachments/pasted.png"
         );
         assert_eq!(json["attachment"]["size_bytes"], 9);
         assert_eq!(
-            std::fs::read(tmp.path().join("vault/Attachments/pasted.png")).expect("file"),
+            std::fs::read(vault_root.join("Attachments/pasted.png")).expect("file"),
             b"png-bytes"
         );
     }
 
     #[tokio::test]
-    async fn router_accepts_attachment_between_2mb_and_configured_max() {
+    async fn vault_scoped_attachment_accepts_upload_between_2mb_and_configured_max() {
         // The default McpConfig caps attachments at 10 MB. A 3 MB upload is well
         // within that, but exceeds axum's built-in 2 MB body limit — without an
         // explicit DefaultBodyLimit the framework rejects it before the handler
         // (and its real size check) ever runs.
-        let (app, tmp) = app_for_tests();
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("big-attachments");
+        let vault_id = create_vault_with_files(&app, "BigAttachments", &vault_root, &[], 0).await;
         let boundary = "hatchdoor-test-boundary";
         let file_bytes = vec![b'x'; 3 * 1024 * 1024];
         let body = format!(
@@ -3024,7 +2810,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/attachment")
+                    .uri(format!("/api/v1/vaults/{vault_id}/attachments"))
                     .method("POST")
                     .header(
                         "content-type",
@@ -3038,7 +2824,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            std::fs::read(tmp.path().join("vault/Attachments/big.png"))
+            std::fs::read(vault_root.join("Attachments/big.png"))
                 .expect("file")
                 .len(),
             3 * 1024 * 1024
@@ -3046,31 +2832,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_api_updates_note_and_rejects_stale_hash() {
-        let (app, _tmp) = app_for_tests();
+    async fn vault_scoped_update_note_rejects_stale_hash() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &tmp.path().join("notes"),
+            &[("Home.md", "# Home\n")],
+            0,
+        )
+        .await;
 
         let note_response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        let note_body = to_bytes(note_response.into_body(), usize::MAX)
-            .await
-            .expect("note body");
-        let note_payload: serde_json::Value = serde_json::from_slice(&note_body).expect("json");
-        let hash = note_payload["note"]["content_hash"].as_str().expect("hash");
+        let hash = json_body(note_response).await["note"]["content_hash"]
+            .as_str()
+            .expect("hash")
+            .to_string();
 
         let update = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("PUT")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3081,11 +2874,12 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(update.status(), StatusCode::OK);
+        assert_eq!(json_body(update).await["vault_id"], vault_id);
 
         let stale = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("PUT")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3096,16 +2890,25 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(stale).await["code"], "write_conflict");
     }
 
     #[tokio::test]
-    async fn write_api_rejects_update_payload_missing_expected_hash() {
-        let (app, _tmp) = app_for_tests();
+    async fn vault_scoped_update_note_rejects_payload_missing_expected_hash() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &tmp.path().join("notes"),
+            &[("Home.md", "# Home\n")],
+            0,
+        )
+        .await;
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("PUT")
                     .header("content-type", "application/json")
                     .body(Body::from(r##"{"content":"# Home\nupdated\n"}"##))
@@ -3116,22 +2919,24 @@ mod tests {
 
         // Well-formed JSON missing a required field is a 422 (Unprocessable
         // Entity) — the real status axum's Json extractor reports. write_payload
-        // now preserves it instead of masking every rejection as 400.
+        // preserves it instead of masking every rejection as 400.
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
-    async fn write_api_oversized_json_body_reports_413_not_400() {
+    async fn vault_scoped_create_note_oversized_json_body_reports_413_not_400() {
         // A JSON write body over axum's 2 MB limit is a length-limit rejection
         // (413), not a malformed-body one (400). write_payload must preserve the
         // rejection's real status for clients/proxies that key off status codes.
-        let (app, _tmp) = app_for_tests();
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
         let big = "x".repeat(3 * 1024 * 1024);
         let body = format!(r#"{{"relative_path":"Big.md","content":"{big}"}}"#);
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(body))
@@ -3143,15 +2948,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_api_rejects_create_to_a_noise_path() {
-        // A note written to a built-in noise path (*.tmp) would be indexed away;
-        // the HTTP create route must refuse it, matching the MCP write path.
-        let (app, tmp) = app_for_tests();
+    async fn vault_scoped_create_note_rejects_a_noise_path() {
+        // A note written to this Vault's own noise-exclusion pattern would be
+        // indexed away; the create route must refuse it, matching the MCP write
+        // path and the legacy single-Vault write API.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("noise");
+        let vault_id = create_vault_with_files(&app, "Noise", &vault_root, &[], 0).await;
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -3163,21 +2971,51 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(!tmp.path().join("vault/Notes/scratch.tmp").exists());
+        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
+        assert!(!vault_root.join("Notes/scratch.tmp").exists());
     }
 
     #[tokio::test]
-    async fn write_api_rejects_move_to_a_noise_path() {
-        // Moving an already-indexed note into `.trash/` would make it disappear
-        // on the next refresh. Every write target, not just creates, must be
-        // checked against the scan config.
-        let (app, tmp, _state) = app_for_tests_with_state();
+    async fn vault_scoped_move_note_rejects_a_vault_owned_noise_path() {
+        // Moving an already-indexed note into a Vault-configured exclude pattern
+        // would make it disappear on the next read. Every write target, not just
+        // creates, must be checked against that Vault's own exclude patterns —
+        // not the legacy instance-wide HATCHDOOR_EXCLUDE setting.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("noise-move");
+        std::fs::create_dir_all(&vault_root).expect("create vault directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expected_registry_revision": 0,
+                            "name": "NoiseMove",
+                            "enabled": true,
+                            "source": {"type": "local", "path": vault_root.to_string_lossy()},
+                            "exclude_patterns": [".trash/"],
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
         let hash = crate::cache::parse::content_hash("# Home\n");
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home/move")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home/move"))
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3189,29 +3027,26 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(tmp.path().join("vault/Home.md").exists());
-        assert!(!tmp.path().join("vault/.trash/Home.md").exists());
+        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
+        assert!(vault_root.join("Home.md").exists());
+        assert!(!vault_root.join(".trash/Home.md").exists());
     }
 
     #[tokio::test]
-    async fn write_api_current_index_honours_user_excludes() {
-        // Write routes rebuild a short-lived index for slug/path work. That
-        // rebuild must use HATCHDOOR_EXCLUDE too, or an excluded note becomes
-        // writable even though it is absent from every read surface.
-        let (_unused_app, _tmp, state) = app_for_tests_with_state();
-        let vault_path = state.vault_path().await.expect("ready vault");
-        std::fs::write(vault_path.join("Ignored.md"), "# Ignored\n").expect("write note");
-        state
-            .runtime_config
-            .save([("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string())])
-            .expect("save exclude setting");
-        let app = build_router(state, None);
+    async fn vault_scoped_move_note_rebuilds_the_index_from_this_vaults_own_content() {
+        // Write routes rebuild a short-lived index for slug/path work, scoped to
+        // this Vault's own directory — unrelated Vaults or the legacy instance
+        // config must not affect it. A note absent from this Vault's directory
+        // is simply not found.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
         let hash = crate::cache::parse::content_hash("# Ignored\n");
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/ignored")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/ignored"))
                     .method("PUT")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3226,19 +3061,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_api_rejects_archive_to_a_noise_path() {
-        let (_unused_app, tmp, state) = app_for_tests_with_state();
-        state
-            .runtime_config
-            .save([("HATCHDOOR_EXCLUDE".to_string(), "90-archive/".to_string())])
-            .expect("save exclude setting");
-        let app = build_router(state, None);
+    async fn vault_scoped_archive_note_rejects_a_vault_owned_noise_path() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("noise-archive");
+        std::fs::create_dir_all(&vault_root).expect("create vault directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expected_registry_revision": 0,
+                            "name": "NoiseArchive",
+                            "enabled": true,
+                            "source": {"type": "local", "path": vault_root.to_string_lossy()},
+                            "exclude_patterns": ["90-archive/"],
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
         let hash = crate::cache::parse::content_hash("# Home\n");
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home/archive")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home/archive"))
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3250,18 +3108,21 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(tmp.path().join("vault/Home.md").exists());
-        assert!(!tmp.path().join("vault/90-archive/Home.md").exists());
+        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
+        assert!(vault_root.join("Home.md").exists());
+        assert!(!vault_root.join("90-archive/Home.md").exists());
     }
 
     #[tokio::test]
-    async fn write_api_rejects_create_path_traversal() {
-        let (app, _tmp) = app_for_tests();
+    async fn vault_scoped_create_note_rejects_path_traversal() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
 
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -3276,299 +3137,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demo_mode_rejects_write_api_before_touching_vault() {
-        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        let blocked_path = state
-            .vault_path()
-            .await
-            .expect("ready vault path")
-            .join("Demo Write.md");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r##"{"relative_path":"Demo Write.md","content":"# Should not exist\n"}"##,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(!blocked_path.exists());
-        drop(tmp);
-    }
-
-    #[tokio::test]
-    async fn diagnostics_route_serves_ruleset_and_is_disabled_in_demo_mode() {
-        // Non-demo: the route returns the active noise ruleset.
-        let (app, _tmp) = app_for_tests();
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/diagnostics")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert!(
-            payload["noise_patterns"]
-                .as_array()
-                .expect("noise_patterns")
-                .iter()
-                .any(|p| p["source"] == "built-in"),
-            "the ruleset dump must list the built-in noise patterns"
-        );
-
-        // Demo mode: the surface is disabled entirely (it would reveal demoted paths).
-        let (demo_app, _demo_tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        let demo = demo_app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/diagnostics")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(demo.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn demo_mode_404s_demoted_notes_on_fetch_and_download() {
-        // In demo mode demotion becomes exclusion: a demoted note is a 404 on the
-        // note and download routes, while a default-surface note stays reachable.
-        let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        std::fs::create_dir_all(vault_root.join("sources")).expect("sources dir");
-        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources").expect("marker");
-        std::fs::write(vault_root.join("sources/Clip.md"), "# Clip\n").expect("clip");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("home");
-        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
-        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
-        let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
-            vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
-            vaults: VaultCollectionRuntime::new(),
-            vault_work,
-            managed_git,
-            legacy_migration_recovery: None,
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
-                vault_path: vault_root,
-                cache,
-            }))),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
-            mcp_tools_changed,
-            embedder,
-            runtime_embedder: Arc::new(RuntimeEmbedder::new()),
-            model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
-            model_setup_started: Arc::new(AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
-            web_auth_enabled: false,
-            demo_mode: true,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
-            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
-            startup: StartupTracker::ready(),
-        };
-        let app = build_router(state, None);
-
-        let demoted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note/clip")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(demoted.status(), StatusCode::NOT_FOUND);
-
-        let demoted_download = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note/clip/download")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(demoted_download.status(), StatusCode::NOT_FOUND);
-
-        let demoted_links = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note/clip/links")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(demoted_links.status(), StatusCode::NOT_FOUND);
-
-        let resolved_demoted = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/resolve?target=sources%2FClip")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(resolved_demoted.status(), StatusCode::OK);
-        let resolve_body = to_bytes(resolved_demoted.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let resolved: serde_json::Value = serde_json::from_slice(&resolve_body).expect("json");
-        assert_eq!(resolved["slug"], serde_json::Value::Null);
-
-        let rejected_layer_query = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/tree?layers=sources")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(rejected_layer_query.status(), StatusCode::BAD_REQUEST);
-
-        let default = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note/home")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(
-            default.status(),
-            StatusCode::OK,
-            "a default-surface note stays reachable in demo mode"
-        );
-        drop(tmp);
-    }
-
-    #[tokio::test]
-    async fn vault_assets_are_served_with_private_cache_control() {
-        // Assets must be browser-cacheable (they re-render on every note view)
-        // but never shared-cacheable: authenticated deployments put
-        // ?access_token= in asset URLs.
-        let (app, tmp, state) = app_for_tests_with_web_auth(None);
-        std::fs::write(
-            state
-                .vault_path()
-                .await
-                .expect("ready vault path")
-                .join("diagram.png"),
-            b"png-bytes",
+    async fn vault_scoped_delete_note_rejects_stale_hash() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Notes",
+            &tmp.path().join("notes"),
+            &[("Home.md", "# Home\n")],
+            0,
         )
-        .expect("write asset");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/vault-assets/diagram.png")
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response
-                .headers()
-                .get(axum::http::header::CACHE_CONTROL)
-                .and_then(|value| value.to_str().ok()),
-            Some("private, max-age=3600")
-        );
-        drop(tmp);
-    }
-
-    #[tokio::test]
-    async fn demo_mode_rejects_refresh_endpoint() {
-        // A full reindex re-embeds the whole vault; on an unauthenticated public
-        // demo that is a request-loop CPU DoS, so demo mode must refuse it.
-        let (app, _tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        let revision_before = state
-            .vault_revision
-            .load(std::sync::atomic::Ordering::SeqCst);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/refresh")
-                    .method("POST")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert_eq!(
-            state
-                .vault_revision
-                .load(std::sync::atomic::Ordering::SeqCst),
-            revision_before,
-            "demo refresh must not run a reindex"
-        );
-    }
-
-    #[tokio::test]
-    async fn write_api_delete_rejects_stale_hash() {
-        let (app, _tmp) = app_for_tests();
+        .await;
 
         let note_response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("GET")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        let note_body = to_bytes(note_response.into_body(), usize::MAX)
-            .await
-            .expect("note body");
-        let note_payload: serde_json::Value = serde_json::from_slice(&note_body).expect("json");
-        let original_hash = note_payload["note"]["content_hash"].as_str().expect("hash");
+        let original_hash = json_body(note_response).await["note"]["content_hash"]
+            .as_str()
+            .expect("hash")
+            .to_string();
 
         let update = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("PUT")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3583,7 +3183,7 @@ mod tests {
         let stale_delete = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/note/home")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
                     .method("DELETE")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3595,44 +3195,20 @@ mod tests {
             .expect("response");
 
         assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(stale_delete).await["code"], "write_conflict");
     }
 
     #[tokio::test]
-    async fn write_api_successful_write_updates_vault_revision() {
-        let (app, _tmp, state) = app_for_tests_with_state();
-        let before = state.vault_revision.load(Ordering::SeqCst);
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/note")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r##"{"relative_path":"Projects/Revision Note.md","content":"# Revision Note\n"}"##,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let after = state.vault_revision.load(Ordering::SeqCst);
-        assert!(
-            after > before,
-            "vault revision should advance after refresh"
-        );
-    }
-
-    #[tokio::test]
-    async fn write_api_creates_renames_moves_and_deletes_note() {
-        let (app, _tmp) = app_for_tests();
+    async fn vault_scoped_creates_renames_moves_archives_and_deletes_note() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Lifecycle", &tmp.path().join("lifecycle"), &[], 0).await;
 
         let create = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/note")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -3643,12 +3219,10 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(create.status(), StatusCode::OK);
-        let create_body = to_bytes(create.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let created: serde_json::Value = serde_json::from_slice(&create_body).expect("json");
+        let created = json_body(create).await;
         let created_object = created.as_object().expect("object");
         for field in [
+            "vault_id",
             "ok",
             "slug",
             "relative_path",
@@ -3658,19 +3232,19 @@ mod tests {
             "moved_assets",
             "trashed_path",
             "layer",
-            "git_sync_warning",
         ] {
             assert!(created_object.contains_key(field), "missing field {field}");
         }
         assert_eq!(created["ok"], true);
-        let slug = created["slug"].as_str().expect("slug");
-        let hash = created["content_hash"].as_str().expect("hash");
+        assert_eq!(created["vault_id"], vault_id);
+        let slug = created["slug"].as_str().expect("slug").to_string();
+        let hash = created["content_hash"].as_str().expect("hash").to_string();
 
         let duplicate_create = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/note")
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(
@@ -3686,7 +3260,7 @@ mod tests {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/note/{slug}/rename"))
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/{slug}/rename"))
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3697,18 +3271,20 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(rename.status(), StatusCode::OK);
-        let rename_body = to_bytes(rename.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let renamed: serde_json::Value = serde_json::from_slice(&rename_body).expect("json");
-        let renamed_slug = renamed["slug"].as_str().expect("renamed slug");
-        let renamed_hash = renamed["content_hash"].as_str().expect("renamed hash");
+        let renamed = json_body(rename).await;
+        let renamed_slug = renamed["slug"].as_str().expect("renamed slug").to_string();
+        let renamed_hash = renamed["content_hash"]
+            .as_str()
+            .expect("renamed hash")
+            .to_string();
 
         let move_response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/note/{renamed_slug}/move"))
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/notes/{renamed_slug}/move"
+                    ))
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3719,18 +3295,20 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(move_response.status(), StatusCode::OK);
-        let move_body = to_bytes(move_response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let moved: serde_json::Value = serde_json::from_slice(&move_body).expect("json");
-        let moved_slug = moved["slug"].as_str().expect("moved slug");
-        let moved_hash = moved["content_hash"].as_str().expect("moved hash");
+        let moved = json_body(move_response).await;
+        let moved_slug = moved["slug"].as_str().expect("moved slug").to_string();
+        let moved_hash = moved["content_hash"]
+            .as_str()
+            .expect("moved hash")
+            .to_string();
 
         let archive = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/note/{moved_slug}/archive"))
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/notes/{moved_slug}/archive"
+                    ))
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3741,19 +3319,22 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(archive.status(), StatusCode::OK);
-        let archive_body = to_bytes(archive.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let archived: serde_json::Value = serde_json::from_slice(&archive_body).expect("json");
-        let archived_slug = archived["slug"].as_str().expect("archived slug");
-        let archived_hash = archived["content_hash"].as_str().expect("archived hash");
+        let archived = json_body(archive).await;
+        let archived_slug = archived["slug"]
+            .as_str()
+            .expect("archived slug")
+            .to_string();
+        let archived_hash = archived["content_hash"]
+            .as_str()
+            .expect("archived hash")
+            .to_string();
         assert_eq!(archived["relative_path"], "90-archive/Renamed Note");
         assert_eq!(archived["layer"], serde_json::Value::Null);
 
         let delete = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/api/note/{archived_slug}"))
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/{archived_slug}"))
                     .method("DELETE")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -3764,6 +3345,123 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(delete.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------
+    // Legacy unscoped application API: every route is retired in #101 with
+    // no compatibility shim (issue #62). `refresh`/`diagnostics` are retired
+    // with no Vault-scoped replacement (see module docs on
+    // `handlers/diagnostics.rs` and this file's `vaults_v1` construction);
+    // every other legacy route has a Vault-scoped equivalent proven above or
+    // in #98/#99/#100's own tests.
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn legacy_unscoped_api_routes_are_absent() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        let get_routes = [
+            "/api/tree",
+            "/api/vault-events",
+            "/api/recently-modified",
+            "/api/note/home",
+            "/api/note/home/download",
+            "/api/note/home/links",
+            "/api/resolve?target=Home",
+            "/api/search?q=home",
+            "/api/stats",
+            "/api/diagnostics",
+            "/api/graph",
+            "/api/write-capabilities",
+            "/vault-assets/diagram.png",
+            "/n/home",
+        ];
+        for path in get_routes {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "GET {path}");
+        }
+
+        // A non-GET/HEAD request to any unmatched path falls through to the
+        // SPA fallback `ServeDir`, which itself answers `405` (it only serves
+        // static files over GET/HEAD) rather than the router's own `404` —
+        // still proof no route intercepts these methods to run the retired
+        // handler.
+        let post_routes = [
+            "/api/note",
+            "/api/resolve-batch",
+            "/api/refresh",
+            "/api/attachment",
+        ];
+        for path in post_routes {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .method("POST")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "POST {path}"
+            );
+        }
+
+        for method in ["PUT", "PATCH", "DELETE"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/note/home")
+                        .method(method)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "{method} /api/note/home"
+            );
+        }
+
+        let patch_routes = [
+            "/api/note/home/rename",
+            "/api/note/home/move",
+            "/api/note/home/archive",
+            "/api/note/home/move-rename",
+        ];
+        for path in patch_routes {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .method("PATCH")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::METHOD_NOT_ALLOWED,
+                "PATCH {path}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------
@@ -4357,6 +4055,45 @@ mod tests {
                     .uri("/api/v1/vaults")
                     .method("POST")
                     .header("content-type", "application/json")
+                    .body(create_vault_request_body(name, root, revision))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string()
+    }
+
+    /// Like `create_vault_with_files`, for fixtures where `/api/v1/vaults`
+    /// itself requires a web bearer token.
+    async fn create_vault_with_files_using_token(
+        app: &Router,
+        name: &str,
+        root: &std::path::Path,
+        files: &[(&str, &str)],
+        revision: u64,
+        token: Option<&str>,
+    ) -> String {
+        std::fs::create_dir_all(root).expect("create vault directory");
+        for (relative_path, contents) in files {
+            let path = root.join(relative_path);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent dir");
+            std::fs::write(path, contents).expect("write note");
+        }
+        let mut builder = Request::builder()
+            .uri("/api/v1/vaults")
+            .method("POST")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("authorization", format!("Bearer {token}"));
+        }
+        let created = app
+            .clone()
+            .oneshot(
+                builder
                     .body(create_vault_request_body(name, root, revision))
                     .expect("request"),
             )

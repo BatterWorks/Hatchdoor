@@ -9,8 +9,10 @@
 //! Exact Vault-scoped content reads and their contained resources are a
 //! sibling adapter, `handlers/vault_content.rs`, mounted in the same router
 //! group and reusing `VaultApiError` and the rejection-mapping helpers below.
-//! One-or-all collection reads and mutations beyond #98 remain later packets
-//! (#100/#101); MCP discovery is #103.
+//! One-or-all collection reads and search are `handlers/vault_collection_reads.rs`
+//! (#100); Markdown mutations, attachment upload, and write-capabilities are
+//! `handlers/vault_write.rs` (#101), which retired the entire legacy unscoped
+//! API in the same change. MCP discovery is #103.
 
 use std::convert::Infallible;
 use std::str::FromStr;

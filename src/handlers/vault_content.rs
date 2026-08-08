@@ -321,8 +321,8 @@ pub async fn vault_scoped_resolve_batch_handler(
 
 /// `GET /api/v1/vaults/{vault_id}/assets/{*path}` — the same containment
 /// (extension allowlist, traversal rejection, canonicalize + `starts_with`
-/// containment) `vault_asset_handler` applies to the legacy single-configured
-/// Vault, scoped to the requested Vault ID's own directory. Serves both
+/// containment) the legacy `/vault-assets/{*path}` route applied (retired in
+/// #101), scoped to the requested Vault ID's own directory. Serves both
 /// embedded assets and imported attachments, which share one containment rule
 /// and are not otherwise distinguished on disk.
 pub async fn vault_scoped_asset_handler(

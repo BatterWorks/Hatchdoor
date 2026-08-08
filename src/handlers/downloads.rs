@@ -2,60 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Write};
 use std::path::{Component, Path as FsPath, PathBuf};
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use tracing::warn;
+use axum::response::Response;
 use zip::write::SimpleFileOptions;
 
-use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, sqlite_cache, vault_unavailable};
 use crate::vault::Note;
 
-pub async fn note_download_handler(
-    Path(slug): Path<String>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    let cache = match sqlite_cache(&state).await {
-        Ok(cache) => cache,
-        Err(err) => return err.into_response(),
-    };
-
-    // Reading the note and bundling its assets is filesystem + zip work; keep it
-    // off the async runtime.
-    let lookup_slug = slug.clone();
-    let Some(vault_path) = state.vault_path().await else {
-        return vault_unavailable().into_response();
-    };
-    let demo_mode = state.demo_mode;
-    let export = match crate::app_state::run_blocking(move || {
-        let Some(note) = cache.read_note_by_slug(&lookup_slug)? else {
-            return Ok(None);
-        };
-        // In demo mode a demoted note is excluded outright — downloading it must
-        // 404 like a missing note, not stream demoted content to the public.
-        if demo_mode && note.layer.is_some() {
-            return Ok(None);
-        }
-        build_note_export(&vault_path, &note).map(Some)
-    })
-    .await
-    {
-        Ok(Some(export)) => export,
-        Ok(None) => {
-            warn!(slug = %slug, "Note not found for download");
-            return note_not_found_response(&slug);
-        }
-        Err(err) => return err.into_response(),
-    };
-
-    download_response(export)
-}
-
-/// Shared response shape for a built [`NoteExport`], reused by the legacy
-/// unscoped route above and the Vault-scoped route in
-/// `handlers/vault_content.rs`.
+/// Shared response shape for a built [`NoteExport`], used by the Vault-scoped
+/// route in `handlers/vault_content.rs`.
 pub(crate) fn download_response(export: NoteExport) -> Response {
     let content_disposition = build_download_content_disposition(&export.filename);
 
@@ -81,16 +35,6 @@ pub(crate) struct NoteExport {
     pub(crate) filename: String,
     pub(crate) content_type: &'static str,
     pub(crate) bytes: Vec<u8>,
-}
-
-fn note_not_found_response(slug: &str) -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ErrorResponse {
-            error: format!("Note not found: {slug}"),
-        }),
-    )
-        .into_response()
 }
 
 fn download_filename_for_note(note: &Note) -> String {

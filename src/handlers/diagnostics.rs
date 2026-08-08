@@ -1,19 +1,19 @@
-//! Layer/noise diagnostics: one surface (HTTP route + MCP tool) that explains
-//! *why* the classifier does what it does, without touching the index. It
-//! re-runs the noise and layer matchers on demand, dumps the active ruleset with
-//! provenance, and tallies notes per layer alongside any conflicts. Disabled
-//! under `demo_mode` because it would reveal demoted paths.
+//! Layer/noise diagnostics: pure logic behind the MCP diagnostics tool
+//! (`mcp/tools/read.rs`) that explains *why* the classifier does what it
+//! does, without touching the index. It re-runs the noise and layer matchers
+//! on demand, dumps the active ruleset with provenance, and tallies notes per
+//! layer alongside any conflicts.
+//!
+//! The HTTP route this once also served (`/api/diagnostics`) was removed in
+//! #101 along with the rest of the legacy unscoped API: a Vault-scoped
+//! equivalent would need new per-Vault cache-query domain methods that don't
+//! exist yet, which is out of scope for that adapter-only packet (a
+//! deliberate, documented gap — see `docs/migrations/vault-scoped-clients.md`).
 
 use std::path::Path;
 
-use axum::Json;
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, internal_error, run_blocking, sqlite_cache};
 use crate::cache::SqliteCache;
 use crate::vault::{LayerMap, MARKER_FILE_NAME, VaultScanConfig};
 
@@ -196,52 +196,6 @@ pub fn build_layer_diagnostics(
         conflicts,
         embed_layers,
     })
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DiagnosticsQuery {
-    /// Optional path string to classify against the live matchers.
-    pub path: Option<String>,
-}
-
-pub async fn diagnostics_handler(
-    State(state): State<AppState>,
-    Query(query): Query<DiagnosticsQuery>,
-) -> impl IntoResponse {
-    // Disabled entirely under demo mode: the ruleset and marker dump would
-    // reveal demoted paths that demo mode is meant to exclude.
-    if state.demo_mode {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: "Diagnostics are disabled in demo mode".to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    let cache = match sqlite_cache(&state).await {
-        Ok(cache) => cache,
-        Err(err) => return err.into_response(),
-    };
-    let Some(vault_path) = state.vault_path().await else {
-        return crate::app_state::vault_unavailable().into_response();
-    };
-    let scan_config = match state.live_scan_config() {
-        Ok(scan_config) => scan_config,
-        Err(error) => return internal_error(error).into_response(),
-    };
-    let path = query.path;
-
-    match run_blocking(move || {
-        build_layer_diagnostics(&vault_path, &scan_config, &cache, path.as_deref())
-    })
-    .await
-    {
-        Ok(diagnostics) => (StatusCode::OK, Json(diagnostics)).into_response(),
-        Err(err) => err.into_response(),
-    }
 }
 
 #[cfg(test)]

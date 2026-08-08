@@ -407,10 +407,13 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Owned paths:** `src/api_types.rs`.
 
 **Public contract:** the shared serialized request and response structures
-defined here, including note, links, resolve, refresh, recent, stats, graph,
-and search query shapes. Endpoint-local wire types remain owned by their
-handlers, notably write types in `handlers/write_api.rs` and diagnostics types
-in `handlers/diagnostics.rs`.
+defined here, including resolve, refresh, recent, stats, and graph shapes.
+Endpoint-local wire types remain owned by their handlers, notably write types
+in `handlers/vault_write.rs` and diagnostics types in
+`handlers/diagnostics.rs`. `RefreshResponse` is retained only for
+`src/mcp/tools/read.rs`'s still-unscoped refresh tool (#103); the HTTP
+`/api/refresh` route it once also served was retired in #101 with no
+Vault-scoped replacement.
 
 **Consumers:** `src/handlers/**` and the manually corresponding frontend types
 in `frontend/src/types.ts` or feature-local client types.
@@ -486,7 +489,7 @@ operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
 
 **Consumers:** HTTP write handlers and MCP write tools.
 
-**Coordination paths:** `src/handlers/write_api.rs`,
+**Coordination paths:** `src/handlers/vault_write.rs`,
 `src/mcp/tools/write.rs`, Git write records, frontend write API/types, and
 configuration for archive or upload limits.
 
@@ -498,6 +501,16 @@ configuration for archive or upload limits.
 - Paths remain within the canonical vault root.
 - Layer marker and excluded/noise writes remain protected at adapter and domain
   boundaries as applicable.
+- **Known gap (#101, tracked for MCP's #103 migration):** `vault_write.rs`
+  serializes concurrent writes to one Vault through
+  `VaultControlBlock::acquire_mutation` (a genuine per-Vault lock). MCP write
+  tools and the legacy single-Vault Git-sync task still serialize only through
+  the older, separate `AppState::vault_write_lock`. For a Vault that is both
+  the still-active legacy single-configured Vault (MCP/Git-sync's only target
+  today) and a Vault reachable through the registry (the common
+  already-migrated-deployment case), the two lanes do not exclude each other.
+  Unifying them needs MCP's own migration onto the Vault collection runtime
+  and is explicitly out of this ticket's scope (`src/mcp/**` is untouched).
 
 **Validation:** `cargo test vault::write`, adapter write tests, and the full
 backend checks.
@@ -882,8 +895,8 @@ managed_sync` against local bare-repository fixtures; scheduling changes run
 - `src/handlers/spa.rs`
 - `src/handlers/vault_collection_reads.rs`
 - `src/handlers/vault_content.rs`
+- `src/handlers/vault_write.rs`
 - `src/handlers/vaults.rs`
-- `src/handlers/write_api.rs`
 
 **Public contract:** handler functions intentionally re-exported by
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
@@ -917,8 +930,7 @@ reports an explicit `recovery` object rather than erroring when the persisted
 registry itself needs operator recovery. Every response uses the shared
 `VaultApiError{code, message, vault_id?, retryable}` shape and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
-duplicating them. Vault-control mutations beyond #98 and old unscoped route
-removal remain separately owned later packets (#101); MCP discovery is #103.
+duplicating them. MCP discovery is #103.
 
 `vault_content.rs` owns exact Vault-scoped content reads and their contained
 resources, mounted in the same `/api/v1/vaults/{vault_id}/...` router group as
@@ -935,8 +947,8 @@ through `VaultReadCore`, never the disposable cache, run all blocking
 filesystem/index work off the async runtime via `run_blocking` (one trip per
 request, not one per batch entry or per path-resolution step), and are gated
 per-request by that Vault's own
-`vault_not_found`/`vault_disabled`/`vault_unavailable` status rather than the
-legacy `require_vault_ready` gate. Asset/download path resolution and response
+`vault_not_found`/`vault_disabled`/`vault_unavailable` status rather than any
+single-configured-Vault readiness gate. Asset/download path resolution and response
 shaping reuse `assets.rs`'s and `downloads.rs`'s existing containment, export,
 and response-building logic (`resolve_asset_path`, `content_type_for_path`,
 `asset_error_parts`, `asset_response`, `build_note_export`,
@@ -970,6 +982,38 @@ Vault and absent from another is expected, not an error; only a name absent
 from *every* usable participant is (`VaultSearchCore::search`'s own
 `invalid_layer_selection` check).
 
+`vault_write.rs` owns exactly-one-Vault Markdown mutations, attachment
+upload, and write-capabilities discovery, retiring the entire legacy unscoped
+application API in the same change (#101): `POST .../notes`, `PATCH
+.../notes/{slug}`, `PATCH .../notes/{slug}/rename|move|move-rename|archive`,
+`DELETE .../notes/{slug}`, `POST .../attachments` (mounted separately from the
+rest of this group so it can also accept a live MCP bearer token, mirroring
+the retired `/api/attachment` route), and `GET .../write-capabilities`. It
+calls unchanged `vault/write/**` functions exactly as the legacy write API
+did, gates every mutation on the requested Vault's own control block —
+`VaultControlBlock::acquire_mutation` (a genuine per-Vault lock, distinct from
+the legacy single instance-wide `AppState::vault_write_lock` MCP write tools
+and the legacy Git-sync task still use — see the "Vault mutation" boundary's
+known-gap invariant) and `capabilities.mutate` (a `capability_unavailable`/
+`409` for a Pull-only or otherwise non-mutable Vault, new in #101 since the
+legacy single-Vault write
+API had no per-Vault mode to check) — and checks noise-exclusion against that
+Vault's own `exclude_patterns` rather than the legacy instance-wide
+`HATCHDOOR_EXCLUDE` setting. `VaultReadCore::control_block` and the free
+function `runtime_error` (`vault_read.rs`) are widened to `pub(crate)` so this
+file reuses the exact same not-found/disabled/no-runtime gate and error
+mapping exact reads already use, instead of a duplicate copy. Archive prefix
+and attachment size limit stay instance-wide settings (issue #62), read via
+the same `AppState::runtime_snapshot`/`runtime_archive_prefix`/
+`runtime_mcp_config` calls the legacy write API used. A mutation response
+omits `git_sync_warning`: the managed-Git scheduler has no debounced-on-write
+hook, unlike the legacy single `git_sync` task, so there is nothing per-write
+to report that Vault discovery does not already expose. `refresh` and
+`diagnostics` are retired with no Vault-scoped replacement — the former needs
+`VaultWorkKind::Index` dispatch, the latter needs new per-Vault cache-query
+domain methods, and neither exists yet (a documented gap, not an oversight;
+see `docs/migrations/vault-scoped-clients.md`).
+
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,
@@ -980,7 +1024,10 @@ managed_git}`. `vault_content.rs` is the first HTTP consumer of
 Vault-qualified read projections (`vault_read.rs`'s `VaultReadCore`, including
 its `vault_directory` accessor); `vault_collection_reads.rs` is the first HTTP
 consumer of that core's collection-read projections and of
-`search::vault_scoped::VaultSearchCore`.
+`search::vault_scoped::VaultSearchCore`. `vault_write.rs` is the first
+consumer of `VaultControlBlock::acquire_mutation` and of
+`VaultReadCore::control_block`/`vault_read::runtime_error` outside
+`vault_read.rs` itself.
 
 **Consumers:** route construction in `src/server.rs`.
 
@@ -1317,7 +1364,7 @@ insertion.
 note candidates, and backend HTTP write endpoints.
 
 **Coordination paths:** `App.tsx`, `NotePage.tsx`, `types.ts`,
-`noteEnhancements.css`, backend `handlers/write_api.rs`, and
+`noteEnhancements.css`, backend `handlers/vault_write.rs`, and
 `vault/write/**`.
 
 **Invariants:** expected content hashes remain part of update concurrency;

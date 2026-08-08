@@ -58,9 +58,16 @@ After:  POST /api/v1/vaults/550e8400-e29b-41d4-a716-446655440000/notes
 ```
 
 The same Vault prefix applies to links, wikilink resolution, attachments,
-assets, downloads, tree, recent Notes, statistics, graph, refresh, diagnostics,
-and write-capability routes. Existing authentication, query-token fallback,
-optimistic content hashes, and safe-write semantics remain in force.
+assets, downloads, tree, recent Notes, statistics, graph, and write-capability
+routes. Existing authentication, query-token fallback, optimistic content
+hashes, and safe-write semantics remain in force.
+
+`refresh` and `diagnostics` are retired with the rest of the unscoped API and
+have no Vault-scoped replacement: a working per-Vault refresh needs
+`VaultWorkKind::Index` dispatch, which does not exist yet, and a Vault-scoped
+diagnostics route needs new per-Vault cache-query domain methods that do not
+exist either. Both are adapter-only gaps for a later ticket, not something a
+client can work around today.
 
 ## MCP before and after
 
