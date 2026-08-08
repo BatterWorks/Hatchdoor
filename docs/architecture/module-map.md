@@ -511,14 +511,36 @@ backend checks.
 **Public contract:** `VaultReadCore`, explicit `VaultScope`, the common
 `VaultReadProjection` envelope, participant state/error types, and
 Vault-qualified exact-note, tree, statistics, graph, and recent-note
-projections.
+projections. `resolve_wikilinks` resolves every target in a batch against one
+authoritative-index build, rather than one build per target. `vault_directory`
+resolves one Vault's local Markdown directory under the same
+not-found/disabled/unavailable gating as exact reads (reusing
+`VaultControlBlock::ensure_accepting_operations`, widened to `pub(crate)`,
+rather than re-deriving that check), without building a full index, for
+adapters that only need the path (contained asset/attachment/download
+serving); it additionally confirms the directory exists on disk, since a
+managed-Git Vault can be enabled and accepting operations before its checkout
+has materialized, and reports that as the same retryable
+`vault_read_unavailable` code an exact-note read's index build would rather
+than a caller discovering an unrelated raw filesystem error later.
+`exact_note_for_download` returns a Note together with its containing
+directory from one Vault control-block fetch — required whenever a caller
+needs both, since a concurrent Vault edit reconciles a *replacement* control
+block rather than mutating the current one in place, so two independent
+`exact_note`/`vault_directory` calls could otherwise observe different Vault
+generations. The private `control_and_index` seam shares the
+control-block-then-index-build sequence between `authoritative_index` and
+`exact_note_for_download` so the two cannot diverge on identical failure
+conditions.
 
 **Consumed dependencies:** the Vault runtime's authoritative per-Vault index,
 the shared cache's published Vault snapshot seam, and existing Vault note/link
 types.
 
-**Consumers:** future HTTP and MCP Vault-scoped adapters. The core has no
-adapter or route ownership.
+**Consumers:** `handlers/vault_content.rs` is the first HTTP consumer (exact
+note/link/resolve reads and `vault_directory`). Future MCP Vault-scoped
+adapters and one-or-all collection-read adapters (#100) remain later
+consumers. The core has no adapter or route ownership.
 
 **Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
 Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
@@ -849,6 +871,7 @@ managed_sync` against local bare-repository fixtures; scheduling changes run
 - `src/handlers/downloads.rs`
 - `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
+- `src/handlers/vault_content.rs`
 - `src/handlers/vaults.rs`
 - `src/handlers/write_api.rs`
 
@@ -884,9 +907,33 @@ reports an explicit `recovery` object rather than erroring when the persisted
 registry itself needs operator recovery. Every response uses the shared
 `VaultApiError{code, message, vault_id?, retryable}` shape and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
-duplicating them. Vault-scoped content reads/mutations and one-or-all
-collection reads remain separately owned later packets (#99–#101); MCP
-discovery is #103.
+duplicating them. Vault-control mutations beyond #98, one-or-all collection
+reads, and old unscoped route removal remain separately owned later packets
+(#100–#101); MCP discovery is #103.
+
+`vault_content.rs` owns exact Vault-scoped content reads and their contained
+resources, mounted in the same `/api/v1/vaults/{vault_id}/...` router group as
+`vaults.rs` and sharing its demo-mode/auth posture, `VaultApiError` (including
+its `new`/`respond` constructors, widened to `pub(crate)`), and
+rejection-mapping helpers (`parse_vault_id`, `json_rejection_response`,
+`query_rejection_response`, `internal_error_response`, widened to
+`pub(crate)` for this reuse): `GET .../notes/{slug}`, `GET
+.../notes/{slug}/links`, `GET .../notes/{slug}/download`, `GET .../resolve`,
+`POST .../resolve-batch`, and `GET .../assets/{*path}` (serving both embedded
+assets and imported attachments, which share one containment rule). Exact
+reads always inspect the requested Vault's authoritative Markdown directory
+through `VaultReadCore`, never the disposable cache, run all blocking
+filesystem/index work off the async runtime via `run_blocking` (one trip per
+request, not one per batch entry or per path-resolution step), and are gated
+per-request by that Vault's own
+`vault_not_found`/`vault_disabled`/`vault_unavailable` status rather than the
+legacy `require_vault_ready` gate. Asset/download path resolution and response
+shaping reuse `assets.rs`'s and `downloads.rs`'s existing containment, export,
+and response-building logic (`resolve_asset_path`, `content_type_for_path`,
+`asset_error_parts`, `asset_response`, `build_note_export`,
+`download_response`, widened to `pub(crate)`, with `asset_response`/
+`download_response` factored out of the legacy handlers' inline header-building
+so both routes share one response shape), unchanged.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
@@ -894,7 +941,9 @@ only — the Vault collection registry's mutation/load operations,
 `VaultCollectionRuntime::{snapshot, reconcile_and_reconstruct,
 subscribe_revisions}`, `VaultWorkCoordinator`, and
 `ManagedGitScheduler::{sync_now, retry_now}` via `AppState::{vault_work,
-managed_git}`.
+managed_git}`. `vault_content.rs` is the first HTTP consumer of
+Vault-qualified read projections (`vault_read.rs`'s `VaultReadCore`, including
+its `vault_directory` accessor).
 
 **Consumers:** route construction in `src/server.rs`.
 

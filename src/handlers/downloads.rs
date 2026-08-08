@@ -49,8 +49,15 @@ pub async fn note_download_handler(
         }
         Err(err) => return err.into_response(),
     };
-    let filename = export.filename;
-    let content_disposition = build_download_content_disposition(&filename);
+
+    download_response(export)
+}
+
+/// Shared response shape for a built [`NoteExport`], reused by the legacy
+/// unscoped route above and the Vault-scoped route in
+/// `handlers/vault_content.rs`.
+pub(crate) fn download_response(export: NoteExport) -> Response {
+    let content_disposition = build_download_content_disposition(&export.filename);
 
     let mut response = Response::new(export.bytes.into());
     *response.status_mut() = StatusCode::OK;
@@ -70,10 +77,10 @@ pub async fn note_download_handler(
     response
 }
 
-struct NoteExport {
-    filename: String,
-    content_type: &'static str,
-    bytes: Vec<u8>,
+pub(crate) struct NoteExport {
+    pub(crate) filename: String,
+    pub(crate) content_type: &'static str,
+    pub(crate) bytes: Vec<u8>,
 }
 
 fn note_not_found_response(slug: &str) -> Response {
@@ -100,7 +107,7 @@ fn download_filename_for_note(note: &Note) -> String {
     }
 }
 
-fn build_note_export(vault_root: &FsPath, note: &Note) -> Result<NoteExport, String> {
+pub(crate) fn build_note_export(vault_root: &FsPath, note: &Note) -> Result<NoteExport, String> {
     let markdown_filename = download_filename_for_note(note);
     let markdown = clean_markdown_export(&note.content);
     let assets = export_assets(vault_root, note, &markdown, &markdown_filename);
@@ -146,7 +153,7 @@ fn sanitize_download_filename(input: &str) -> String {
     }
 }
 
-fn build_download_content_disposition(filename: &str) -> String {
+pub(crate) fn build_download_content_disposition(filename: &str) -> String {
     let ascii_fallback = filename
         .chars()
         .map(|ch| if ch.is_ascii() { ch } else { '-' })

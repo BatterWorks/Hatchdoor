@@ -6,8 +6,11 @@
 //! legacy single-configured-Vault gate) so collection management, including
 //! connecting the very first Vault, stays reachable at zero enabled Vaults
 //! and while the persisted registry itself is in an explicit recovery state.
-//! Vault-scoped content reads, one-or-all collection reads, and mutations are
-//! later packets (#99/#100/#101); MCP discovery is #103.
+//! Exact Vault-scoped content reads and their contained resources are a
+//! sibling adapter, `handlers/vault_content.rs`, mounted in the same router
+//! group and reusing `VaultApiError` and the rejection-mapping helpers below.
+//! One-or-all collection reads and mutations beyond #98 remain later packets
+//! (#100/#101); MCP discovery is #103.
 
 use std::convert::Infallible;
 use std::str::FromStr;
@@ -120,7 +123,7 @@ pub struct VaultApiError {
 }
 
 impl VaultApiError {
-    fn new(
+    pub(crate) fn new(
         code: &'static str,
         message: impl Into<String>,
         vault_id: Option<VaultId>,
@@ -134,7 +137,7 @@ impl VaultApiError {
         }
     }
 
-    fn respond(self, status: StatusCode) -> Response {
+    pub(crate) fn respond(self, status: StatusCode) -> Response {
         (status, Json(self)).into_response()
     }
 }
@@ -223,7 +226,7 @@ pub struct RevisionQuery {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-fn parse_vault_id(raw: &str) -> Result<VaultId, VaultApiError> {
+pub(crate) fn parse_vault_id(raw: &str) -> Result<VaultId, VaultApiError> {
     VaultId::from_str(raw).map_err(|_| {
         VaultApiError::new(
             "invalid_vault_id",
@@ -234,17 +237,20 @@ fn parse_vault_id(raw: &str) -> Result<VaultId, VaultApiError> {
     })
 }
 
-fn json_rejection_response(error: JsonRejection) -> Response {
+pub(crate) fn json_rejection_response(error: JsonRejection) -> Response {
     VaultApiError::new("invalid_request_body", error.body_text(), None, false)
         .respond(StatusCode::BAD_REQUEST)
 }
 
-fn query_rejection_response(error: QueryRejection) -> Response {
+pub(crate) fn query_rejection_response(error: QueryRejection) -> Response {
     VaultApiError::new("invalid_request_query", error.body_text(), None, false)
         .respond(StatusCode::BAD_REQUEST)
 }
 
-fn internal_error_response(detail: impl AsRef<str>, vault_id: Option<VaultId>) -> Response {
+pub(crate) fn internal_error_response(
+    detail: impl AsRef<str>,
+    vault_id: Option<VaultId>,
+) -> Response {
     error!(detail = %detail.as_ref(), "Vault collection API internal error");
     VaultApiError::new("internal_error", "Internal server error", vault_id, false)
         .respond(StatusCode::INTERNAL_SERVER_ERROR)
