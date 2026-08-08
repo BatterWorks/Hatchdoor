@@ -103,6 +103,16 @@ are the binding constraints your PR is expected to respect — each index row no
 what not to break. If your change needs to break one, don't work around it
 quietly: propose a new ADR amending it (the file explains how).
 
+## Visual changes
+
+The frontend is built to a documented design system:
+[`docs/design/design-system.html`](docs/design/design-system.html) holds the
+tokens, component patterns, layouts, and interaction states. Read it before
+changing anything visual, and build from the existing tokens rather than new
+values. If you ship a component the system does not cover, add its section in
+the same pull request — the document is updated by the change that ships the
+component, not afterwards.
+
 ## Reporting security issues
 
 Do not open a public issue for a vulnerability. Follow the process in
