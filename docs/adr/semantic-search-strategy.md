@@ -3,6 +3,12 @@
 > Part of the [architecture decision records](./README.md).
 >
 > Status: accepted decision record. Hatchdoor ships pure semantic retrieval by default. Cross-encoder reranking and hybrid keyword/vector fusion remain offline evaluation tools only.
+>
+> This decision was re-validated against the 2026-07 embedding sweep and stands.
+> The measurements below are from the original 26-query evaluation and describe
+> the model and representation of the time — see [ADR-16](./README.md#adr-16--embeddinggemma-by-default-behind-a-licence-gate-representation-locked-at-80050-with-context)
+> for the current embedder and document representation, and [ADR-15](./README.md#adr-15--search-quality-is-a-product-feature-not-a-tunable)
+> for the standing rule on changing the retrieval path.
 
 ## TL;DR
 
