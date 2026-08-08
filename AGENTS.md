@@ -75,6 +75,11 @@ integration points and have no default feature owner.
 - Keep Markdown authoritative and SQLite disposable.
 - Keep runtime search behavior consistent with ADR-05 unless a superseding ADR
   is part of the task.
+- Follow [`docs/design/design-system.html`](docs/design/design-system.html) for
+  any visual change. Build from the existing tokens in
+  `frontend/src/styles/base.css`; do not introduce raw hexes, new radii, or a
+  CSS framework. When a component has no section to build from, add one rather
+  than inventing values locally.
 - Prefer Rust privacy, narrow re-exports, existing ESLint rules, and focused
   tests over new frameworks or speculative abstractions.
 - Do not add traits, packages, state libraries, or code generation solely to
@@ -97,3 +102,14 @@ Also update the map when supported contracts, invariants, cross-module
 dependencies/consumers, coordination paths, or focused validation change. The
 checker verifies structural coverage only; semantic accuracy still requires
 review.
+
+When changing a callout accent or any token in `frontend/src/styles/base.css`,
+run:
+
+```bash
+python3 docs/design/palette.py
+```
+
+It checks uniform lightness per theme, the chroma ceilings, and 4.5:1 contrast
+on the tinted and badge surfaces, and exits non-zero on a violation. No
+dependencies.
