@@ -592,7 +592,7 @@
   }
   .side-rail-item:hover { background: var(--paper-2); color: var(--ink); }
   .side-rail-item.on { color: var(--hot); }
-  .side-rail-item.off { margin-left: auto; opacity: 0.35; cursor: not-allowed; }
+  .side-rail-item.end { margin-left: auto; }
   .side-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 1.25rem 1rem 1.5rem; }
   .side-foot { flex: 0 0 auto; padding: 0.75rem; border-top: 1px solid var(--rule); }
   .side-foot .ui-btn { width: 100%; justify-content: center; }
@@ -1489,6 +1489,66 @@
   .kv-table th { color: var(--muted); font-weight: 500; }
   .kv-table td.name { color: var(--hot); }
   .kv-table td.val { color: var(--ink); }
+
+  /* ── §27 settings page ─────────────────────────────── */
+  .set-layout { display: grid; grid-template-columns: 13rem 1fr; gap: 2rem; align-items: start; }
+  .set-index { border-right: 1px solid var(--rule); padding-right: 1rem; }
+  .set-index-item {
+    display: grid; grid-template-columns: auto 1fr auto; gap: 0.5rem;
+    align-items: baseline; padding: 0.4rem 0; color: var(--ink-soft);
+    border-bottom: 1px solid var(--rule); font-size: 0.82rem;
+  }
+  .set-index-item[data-active="true"] { color: var(--hot); }
+  .set-index-num { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+  .set-index-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
+  .set-eyebrow {
+    font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--hot); margin: 0 0 0.35rem;
+  }
+  .set-row { border-bottom: 1px solid var(--rule); padding: 0.9rem 0; display: grid; grid-template-columns: 1fr auto; gap: 1.5rem; align-items: start; }
+  .set-row-label { font-size: 0.9rem; }
+  .set-row-help { font-size: 0.78rem; color: var(--muted); margin: 0.25rem 0 0; max-width: 46ch; line-height: 1.6; }
+  .set-row-class { font-size: 0.74rem; color: var(--warn-fg); margin: 0.35rem 0 0; }
+  .set-toggle-track {
+    width: 2.4rem; height: 1.1rem; border: 1px solid var(--rule-strong);
+    background: var(--paper-2); display: inline-block; position: relative;
+  }
+  .set-toggle-knob {
+    position: absolute; top: 1px; left: 1px; width: 1rem; height: calc(100% - 2px);
+    background: var(--tertiary); transition: transform 0.15s ease;
+  }
+  .set-toggle-track[data-on="true"] .set-toggle-knob {
+    transform: translateX(calc(2.4rem - 1rem - 4px)); background: var(--hot);
+  }
+  .set-segmented { display: inline-flex; border: 1px solid var(--rule-strong); }
+  .set-segmented span {
+    font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em;
+    text-transform: uppercase; padding: 0.3rem 0.7rem; color: var(--ink-soft);
+    border-right: 1px solid var(--rule-strong);
+  }
+  .set-segmented span:last-child { border-right: none; }
+  .set-segmented span[data-on="true"] { background: var(--hot); color: #fff; }
+  .set-plaque { margin-top: 1.6rem; border: 1px dashed var(--rule-strong); background: var(--paper-2); padding: 0.9rem 1rem; }
+  .set-plaque-head {
+    font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 0.6rem;
+  }
+  .set-plaque-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: baseline;
+    border-bottom: 1px solid var(--rule); padding-bottom: 0.35rem; margin-bottom: 0.4rem;
+    font-size: 0.84rem;
+  }
+  .set-plaque-row:last-child { border-bottom: none; margin-bottom: 0; }
+  .set-plaque-why { font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); }
+  .set-console { display: flex; border: 1px solid var(--rule); background: var(--paper-2); margin-bottom: 1.2rem; }
+  .set-console-cell { padding: 0.6rem 0.9rem; border-right: 1px solid var(--rule); flex: 1; }
+  .set-console-cell:last-child { border-right: none; }
+  .set-console-lbl {
+    font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 0.2rem;
+  }
+  .set-console-val { font-size: 0.9rem; }
+  .set-notice { border-left: 2px solid var(--warn-fg); background: var(--warn-bg); padding: 0.6rem 0.9rem; font-size: 0.82rem; margin-top: 1rem; }
 </style>
 </head>
 <body>
@@ -1498,7 +1558,7 @@
   <!-- ════ DOC NAV ════════════════════════════════════ -->
   <aside class="doc-nav">
     <h2 class="doc-nav-brand"><span class="dot"></span>HATCHDOOR</h2>
-    <div style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-bottom: 1rem;">Design system · v2026.7</div>
+    <div style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-bottom: 1rem;">Design system · v2026.8</div>
 
     <h3>System</h3>
     <a href="#tokens">Tokens</a>
@@ -1542,15 +1602,13 @@
     <a href="#buttons">Buttons</a>
     <a href="#icons">Icons</a>
 
+    <h3>Pages</h3>
+    <a href="#settings">Settings</a>
+
     <div class="doc-theme">
       <button data-set="light">Light</button>
       <button data-set="auto" class="on">Auto</button>
       <button data-set="dark">Dark</button>
-    </div>
-
-    <div style="margin-top: 1.4rem;">
-      <a href="forge.html" style="font-family: var(--font-sans); font-size: 0.78rem; color: var(--hot);">→ View Forge in context</a><br>
-      <a href="index.html" style="font-family: var(--font-sans); font-size: 0.78rem;">← directions</a>
     </div>
   </aside>
 
@@ -1636,6 +1694,7 @@
           <tr><td class="name">--space-8</td><td class="val">2rem · 32px</td></tr>
           <tr><td class="name">--space-10</td><td class="val">2.5rem · 40px</td></tr>
           <tr><td class="name">--space-12</td><td class="val">3rem · 48px</td></tr>
+          <tr><td class="name">--space-16</td><td class="val">4rem · 64px</td></tr>
         </table>
         <div>
           <table class="kv-table">
@@ -1768,7 +1827,7 @@
             <span class="side-rail-item on" title="Changed on disk (open)">
               <svg viewBox="0 -960 960 960" width="1em" height="1em" fill="currentColor"><path d="M120-120v-720h720v720H120Zm80-80h560v-120H640q-30 38-71.5 59T480-240q-47 0-88.5-21T320-320H200v120Zm280-120q38 0 69-22t43-58h168v-360H200v360h168q12 36 43 58t69 22ZM200-200h560-560Z"/></svg>
             </span>
-            <span class="side-rail-item off" title="Settings — reserved, not yet available">
+            <span class="side-rail-item end" title="Settings">
               <svg viewBox="0 -960 960 960" width="1em" height="1em" fill="currentColor"><path d="m370-80-16-128q-13-5-24.5-12T307-235l-119 50L78-375l103-78q-1-7-1-13.5v-27q0-6.5 1-13.5L78-585l110-190 119 50q11-8 23-15t24-12l16-128h220l16 128q13 5 24.5 12t22.5 15l119-50 110 190-103 78q1 7 1 13.5v27q0 6.5-2 13.5l103 78-110 190-118-50q-11 8-23 15t-24 12L590-80H370Zm70-80h79l14-106q31-8 57.5-23.5T639-327l99 41 39-68-86-65q5-14 7-29.5t2-31.5q0-16-2-31.5t-7-29.5l86-65-39-68-99 42q-22-23-48.5-38.5T533-694l-13-106h-79l-14 106q-31 8-57.5 23.5T321-633l-99-41-39 68 86 64q-5 15-7 30t-2 32q0 16 2 31t7 30l-86 65 39 68 99-42q22 23 48.5 38.5T427-266l13 106Zm42-180q58 0 99-41t41-99q0-58-41-99t-99-41q-59 0-99.5 41T342-480q0 58 40.5 99t99.5 41Zm-2-140Z"/></svg>
             </span>
           </div>
@@ -1826,7 +1885,7 @@
       </div>
 
       <p class="blurb"><b>The footer holds one action.</b> Three things in it and it becomes the grab-bag the header used to be. Contextual creation stays on the folder rows as a <code>+</code>.</p>
-      <p class="blurb">The rail&rsquo;s Settings slot is reserved and dimmed until it has a destination. It stays focusable with <code>aria-disabled</code> rather than <code>disabled</code>, so a keyboard user can reach it and hear why it does nothing; a dimmed control with no explanation reads as a bug.</p>
+      <p class="blurb">Settings now has a destination (<a href="#settings">§27</a>) and is a live link. It keeps its own slot at the far edge of the rail &mdash; <span class="key">margin-left: auto</span> &mdash; because it is the one rail item that leaves the vault rather than reframing it. <b>When the page is unavailable the item is not rendered at all</b>, rather than shown dimmed: the earlier reserved-and-disabled treatment was replaced once there was something to link to, since a permanently dead control reads as a bug no matter how well it is labelled.</p>
 
       <div class="tag-row">
         <span class="key">.explorer-pane</span><span class="key">.explorer-rail</span><span class="key">.explorer-rail-item</span><span class="key">.explorer-rail-item.active</span><span class="key">.explorer-rail-item.is-disabled</span><span class="key">.explorer-nav</span><span class="key">.explorer-footer</span>
@@ -2477,10 +2536,79 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           <tr><td class="name">bar_chart</td><td class="val">rail: stats</td></tr>
           <tr><td class="name">graph_3</td><td class="val">rail: graph</td></tr>
           <tr><td class="name">inbox</td><td class="val">rail: changed on disk</td></tr>
-          <tr><td class="name">settings</td><td class="val">rail: settings (reserved)</td></tr>
+          <tr><td class="name">settings</td><td class="val">rail: settings</td></tr>
         </tbody>
       </table>
       <div class="tag-row"><span class="key">components/icons.tsx</span><span class="key">.icon-button</span><span class="key">.explorer-rail-item</span></div>
+    </section>
+
+    <!-- ───────── SETTINGS ───────── -->
+    <section class="doc-section" id="settings">
+      <div class="doc-section-num">§27</div>
+      <h2>Settings</h2>
+      <p class="blurb">The first page-level surface in the system, settled by the Variant B prototype (issue&nbsp;#58). <b>An index of sections on the left, one section at a time on the right.</b> It sits inside <span class="key">.note-pane</span>, which already owns the gutter, so the page adds no outer padding of its own &mdash; only a deep bottom margin so the last row clears the fold.</p>
+      <p class="blurb">Two devices are new here and are what make the page work. <b>The plaque</b> pulls settings that cannot be edited out of the form entirely, instead of showing them as disabled inputs. <b>The console</b> is a fixed strip of live state at the top of a section, so the reader is never editing blind.</p>
+
+      <div class="stage">
+        <div class="set-layout">
+          <nav class="set-index">
+            <div class="set-index-item"><span class="set-index-num">01</span><span>Vault</span><span class="set-index-count">04</span></div>
+            <div class="set-index-item" data-active="true"><span class="set-index-num">02</span><span>Indexing</span><span class="set-index-count">03</span></div>
+            <div class="set-index-item"><span class="set-index-num">03</span><span>Agents</span><span class="set-index-count">05</span></div>
+            <div class="set-index-item"><span class="set-index-num">04</span><span>Versioning</span><span class="set-index-count">07</span></div>
+          </nav>
+
+          <div>
+            <p class="set-eyebrow">§02 — Indexing</p>
+            <h3 style="margin: 0 0 0.9rem; font-family: var(--font-serif); font-weight: 500;">Indexing</h3>
+
+            <div class="set-console">
+              <div class="set-console-cell"><span class="set-console-lbl">Notes</span><span class="set-console-val">1,284</span></div>
+              <div class="set-console-cell"><span class="set-console-lbl">Chunks</span><span class="set-console-val">9,610</span></div>
+              <div class="set-console-cell"><span class="set-console-lbl">Model</span><span class="set-console-val">EmbeddingGemma</span></div>
+            </div>
+
+            <div class="set-row">
+              <div>
+                <div class="set-row-label">Embed demoted layers</div>
+                <p class="set-row-help">Include notes on named layers in the vector index. Turning this off makes them findable by keyword only.</p>
+                <p class="set-row-class">Changing this rebuilds the index.</p>
+              </div>
+              <span class="set-toggle-track" data-on="true"><span class="set-toggle-knob"></span></span>
+            </div>
+
+            <div class="set-row">
+              <div>
+                <div class="set-row-label">Archive prefix</div>
+                <p class="set-row-help">Notes under this folder are treated as archived.</p>
+              </div>
+              <input class="field-input" style="width: 10rem;" value="90-archive/">
+            </div>
+
+            <div class="set-row">
+              <div>
+                <div class="set-row-label">Write access</div>
+                <p class="set-row-help">Whether agents may modify the vault through MCP.</p>
+              </div>
+              <span class="set-segmented"><span>Off</span><span>Read</span><span data-on="true">Write</span></span>
+            </div>
+
+            <div class="set-plaque">
+              <p class="set-plaque-head">Set by the environment — restart to change</p>
+              <div class="set-plaque-row"><span>VAULT_PATH</span><span class="set-plaque-why">/vault</span></div>
+              <div class="set-plaque-row"><span>HATCHDOOR_MCP_BEARER_TOKEN</span><span class="set-plaque-why">set</span></div>
+            </div>
+
+            <div class="set-notice">Saving this section rebuilds the search index. Notes stay readable while it runs.</div>
+          </div>
+        </div>
+      </div>
+
+      <p class="blurb"><b>Why a plaque and not a disabled field.</b> A value pinned by an environment variable is authoritative for the process (<a href="../adr/README.md">ADR-14</a>), so no amount of clicking will change it. Rendering it as a greyed-out input invites the attempt and reads as a fault; lifting it into a dashed plaque, with its source stated once in the heading, says <i>this is configuration, not a control</i>. The plaque collapses its top margin when a section has no editable rows at all, so a fully pinned section does not open with a gap.</p>
+      <p class="blurb"><b>Consequences are declared before they are accepted, not after.</b> A row whose change forces a rebuild carries <span class="key">.settings-row-class</span> in <span class="key">--warn-fg</span> &mdash; the same ink a warning callout uses, so the weight of the word matches the weight elsewhere in the system. The save itself is refused with a machine-readable consequence and re-offered through a confirmation modal, and consents accumulate rather than being asked one at a time.</p>
+      <p class="blurb"><b>The toggle&rsquo;s travel is derived, not typed.</b> The track is 2.4rem with a 1px border each side and the knob is 1rem inset by 1px, so the on-position is <span class="key">calc(2.4rem - 1rem - 4px)</span>. Writing a rounded literal there leaves the knob fractionally past its resting inset, which on a 1px-bordered control reads as a wobble.</p>
+
+      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
     </section>
 
   </main>
