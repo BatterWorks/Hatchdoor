@@ -41,7 +41,7 @@ Copy this for a new record:
 | 01 | [Markdown is the source of truth; SQLite is a disposable read model](#adr-01--markdown-is-the-source-of-truth-sqlite-is-a-disposable-read-model) | Accepted | Never make the DB authoritative; it must rebuild from `.md` |
 | 02 | [One binary serving three surfaces over one shared core](#adr-02--one-binary-serving-three-surfaces-over-one-shared-core) | Accepted | Don't split into services or fork the domain core per surface |
 | 03 | [Web and MCP writes share one `vault/write/` layer](#adr-03--web-and-mcp-writes-share-one-vaultwrite-layer) | Accepted | Don't implement writes in a handler or MCP tool directly |
-| 04 | [Local, CPU-only embeddings; no external inference API](#adr-04--local-cpu-only-embeddings-no-external-inference-api) | Accepted | Don't add a paid/remote embedding dependency to the runtime |
+| 04 | [Local, CPU-only embeddings; no external inference API](#adr-04--local-cpu-only-embeddings-no-external-inference-api) | Superseded by ADR-16 | — (see ADR-16) |
 | 05 | [Pure semantic retrieval by default; rerank and hybrid stay offline](./semantic-search-strategy.md) | Accepted | Don't add reranking or FTS/vector fusion to the runtime search path |
 | 06 | [Embedded SQLite: FTS5 + sqlite-vec, WAL, pooled reads](#adr-06--embedded-sqlite-fts5--sqlite-vec-wal-pooled-reads) | Accepted | Don't add an external DB or an ORM; keep reads non-blocking during reindex |
 | 07 | [Fail-fast security posture at startup](#adr-07--fail-fast-security-posture-at-startup) | Accepted | Don't downgrade unsafe configs from refuse-to-start to a warning |
@@ -51,9 +51,13 @@ Copy this for a new record:
 | 11 | [Soft delete (trash) and archive-by-move](#adr-11--soft-delete-trash-and-archive-by-move) | Accepted | Don't hard-delete note or asset files |
 | 12 | [Distroless, rootless, multi-stage container](#adr-12--distroless-rootless-multi-stage-container) | Accepted | Don't assume a shell at runtime; keep the image rootless |
 | 13 | [Deliberate minimalism: trait seams only where they pay](#adr-13--deliberate-minimalism-trait-seams-only-where-they-pay) | Accepted | Don't add speculative abstractions, state libraries, or frameworks |
+| 14 | [No deployment step requires a browser](#adr-14--no-deployment-step-requires-a-browser) | Accepted | Don't add a setting the UI can set but the environment can't, or a startup gate only a browser can clear |
+| 15 | [Search quality is a product feature, not a tunable](#adr-15--search-quality-is-a-product-feature-not-a-tunable) | Accepted | Don't change the retrieval path without eval numbers; don't trade recall or MRR for speed |
+| 16 | [EmbeddingGemma by default behind a licence gate; representation locked at 800/50 with context](#adr-16--embeddinggemma-by-default-behind-a-licence-gate-representation-locked-at-80050-with-context) | Accepted | Don't change the embedder, chunk size, or contextual headers without re-running the eval |
 
-> Records here were reconstructed and adopted on 2026-07-19 from the codebase,
+> Records 01–13 were reconstructed and adopted on 2026-07-19 from the codebase,
 > the CHANGELOG audit fixes (`F-01`…`F-17`), and the semantic-search evaluation.
+> Records 14–16 were added on 2026-08-08.
 
 ---
 
@@ -83,7 +87,7 @@ Copy this for a new record:
 
 ## ADR-04 — Local, CPU-only embeddings; no external inference API
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-16
 - **Context:** Hatchdoor targets private, self-hosted deployment on modest hardware. A dependency on a paid or remote inference API would break privacy and offline operation.
 - **Decision:** Embeddings run locally via fastembed (Nomic Embed Text v1.5, 384-dim). Model weights are prefetched at image-build time so first run is offline.
 - **Consequences:** Fully private and offline; embedding is CPU-bound, which directly constrains the search-strategy decision (ADR-05).
@@ -152,3 +156,27 @@ Copy this for a new record:
 - **Decision:** Introduce abstraction only where it earns its keep. The only trait seams over external ML dependencies are `Embedder` and `Reranker`, exactly where test doubles (`StubEmbedder`) and the `embedder-tests` feature gate need them. No Cargo workspace, no ORM, no frontend state library, no CSS framework.
 - **Consequences:** A lean, navigable dependency set; new code should follow suit rather than introduce speculative layers.
 - **Evidence:** `embed/embedder.rs`, `rerank/reranker.rs`; `Cargo.toml` / `frontend/package.json` dependency sets.
+
+## ADR-14 — No deployment step requires a browser
+
+- **Status:** Accepted
+- **Context:** A Hatchdoor deployment must be completable end to end by a script, a compose file, or an agent, with no human at a browser to finish the boot. That pulls against the settings page: once a knob is editable in the UI, the pull is to make the UI its home and drop the environment variable behind it.
+- **Decision:** No step required to bring Hatchdoor to a working state may be reachable only through the browser. For operator settings the mechanism is an environment variable, and that variable is authoritative for the process — the durable `settings.json` overlay resolves beneath the environment pins and above the defaults, and the UI renders a pinned value as locked with its source rather than silently discarding the edit. A setting may be added to the UI, but never *only* to the UI. For anything that is not a setting, the mechanism is an API or MCP path instead. Accepting the Gemma licence is the standing example: it is a deliberate act by a person or their delegated agent, not a config default to be copy-pasted out of someone else's compose file, so it deliberately has no environment variable — but `accept_gemma_terms` / `decline_gemma_terms` over MCP let an agent complete it unattended, and the versioned on-disk receipt persists it across restarts.
+- **Consequences:** A first boot from `.env` alone — plus, where a licence is involved, one agent call — is always a complete deployment, and a vault can be redeployed from scratch with no manual step. The cost is that every new setting is three things (a key in `live_settings_defaults`, a UI row, and the locked/source display), every new startup gate must ship a machine path alongside its UI, and a setting that cannot be expressed as a string in an env var does not get added.
+- **Evidence:** `runtime_config.rs` (`live_settings_defaults`, `SettingSource`, `ResolvedSetting::pinned`); `handlers/settings.rs` (`SETTINGS`, `locked`, `source`); `model_setup.rs` (`accept_gemma`, `acceptance_is_current`); `mcp/tools/`; `.env.example`; README operator configuration contract.
+
+## ADR-15 — Search quality is a product feature, not a tunable
+
+- **Status:** Accepted
+- **Context:** Retrieval quality is the reason to run Hatchdoor at all. It is also the easiest thing to erode by accident — a cheaper embedding model, a chunking tweak, a filter added for speed, a smaller candidate count. Each looks locally reasonable, and none of them announce themselves as a regression.
+- **Decision:** No change may knowingly degrade retrieval quality. Any change touching the retrieval path — embedding model, chunk size or overlap, contextual document headers, task prefixes, layer selection, candidate counts, pre- or post-filters — is validated against the eval set in `eval/` before merge, on the same metrics the harness already reports (Recall@5/10, MRR, FP-rate@5, correct-heading), with the per-category and per-tier breakdown read, not just the aggregate. Where quality and another axis conflict, quality wins: prefer paying latency, memory, disk, or index time over recall or ranking. A regression ships only with an explicit recorded justification and its measured cost.
+- **Consequences:** Retrieval changes cost an eval run and usually a full reindex, so they move slower than other work. Optimisations on the search path must prove neutrality rather than assume it. Swapping the embedder is a deliberate, evaluated decision (ADR-16), never a convenience.
+- **Evidence:** `eval/` harness, `eval/queries.jsonl`, `eval/results.md`; `docs/research/embeddings/`; `cache/schema.rs` (embedder-identity stamp forcing a rebuild on model change).
+
+## ADR-16 — EmbeddingGemma by default behind a licence gate; representation locked at 800/50 with context
+
+- **Status:** Accepted (supersedes ADR-04)
+- **Context:** ADR-04 fixed the principle — local, CPU-only embeddings, no external inference API — but named Nomic Embed Text v1.5 at 384 dimensions with weights baked into the image. The 2026-07 embedding sweep replaced both halves of that. It ran a 24-cell grid over models, chunk settings, and contextual documents against an eval set grown from 26 queries to ~125, tiered and categorised. Separately, shipping Gemma weights in a public image is not something the licence permits us to do on the user's behalf.
+- **Decision:** The principle of ADR-04 stands unchanged: embeddings run locally on CPU via fastembed, with no remote inference. What it resolves to now is EmbeddingGemma 300M Q4 at 768 dimensions — multilingual, with its own retrieval query/document prefixes — as the default, and Nomic Embed Text v1.5 as the fallback for a user who declines the Gemma terms, explicitly labelled English-only and lower quality for multilingual vaults. Public images ship neither model; weights are fetched on first run behind the licence gate (ADR-14). The document representation is locked at 800-token chunks, 50-token overlap, and contextual headers on: context off wins raw recall, but context on wins MRR in 11 of 12 like-for-like comparisons and correct-heading accuracy in all 12, and Hatchdoor routes people into a specific note section, so first-result quality and heading accuracy are worth more than the broader recall. ADR-05 was re-validated against this newer evidence and is unchanged — retrieval stays pure semantic, with reranking and hybrid fusion offline evaluation tools only.
+- **Consequences:** First run is no longer offline: it needs a network fetch and a licence decision, which is why that decision has a machine path. The cache carries the embedder identity, so switching models wipes and rebuilds. 450/50 with context on remains the specialist setting for heading navigation and is not the default. Any future move off these values is an ADR-15 change and needs eval numbers.
+- **Evidence:** `embed/fastembed_embedder.rs` (`embedding_gemma_300m_q4`, `DocumentFormat::GemmaRetrievalV1`); `model_setup.rs`; `chunk/chunker.rs` (`max_tokens: 800`, `overlap_tokens: 50`); `docs/research/embeddings/embedding-sweep-decisions-2026-07-26.md`; `eval/results.md`; CHANGELOG v2.4.0.
