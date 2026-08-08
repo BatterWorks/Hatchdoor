@@ -36,8 +36,10 @@ use crate::handlers::{
     retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler, search_handler,
     spa_index_handler, stats_handler, sync_vault_handler, tree_handler, update_note_handler,
     upload_attachment_handler, vault_asset_handler, vault_collection_events_handler,
-    vault_events_handler, vault_scoped_asset_handler, vault_scoped_note_download_handler,
-    vault_scoped_note_handler, vault_scoped_note_links_handler, vault_scoped_resolve_batch_handler,
+    vault_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
+    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
+    vault_scoped_asset_handler, vault_scoped_note_download_handler, vault_scoped_note_handler,
+    vault_scoped_note_links_handler, vault_scoped_resolve_batch_handler,
     vault_scoped_resolve_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
@@ -346,6 +348,33 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/assets/{*path}",
                 get(vault_scoped_asset_handler),
+            )
+            // #100: one-or-all collection reads and search. `{vault_id}` here
+            // is a Vault-or-`all` scope (parsed by `parse_vault_scope`); the
+            // path parameter keeps the name `vault_id` for every route in
+            // this group because axum's router requires one consistent
+            // parameter name per path position — the segment is a Vault ID in
+            // every sibling route above, and `all` is simply the one
+            // additional value this group's handlers accept for it.
+            .route(
+                "/api/v1/vaults/{vault_id}/tree",
+                get(vault_scope_tree_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/recent",
+                get(vault_scope_recent_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/stats",
+                get(vault_scope_stats_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/graph",
+                get(vault_scope_graph_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/search",
+                get(vault_scope_search_handler),
             );
         match web_bearer_token.clone() {
             Some(token) => vaults_v1.layer(axum::middleware::from_fn_with_state(
@@ -4727,6 +4756,491 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/notes/home")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(demo_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // #100: /api/v1/vaults/{scope}/{tree,recent,stats,graph,search} —
+    // one-or-all collection reads and search
+    // -----------------------------------------------------------------
+
+    /// Collection reads (unlike exact reads) serve only the shared disposable
+    /// cache's already-published Vault snapshot. `VaultWorkKind::Index`
+    /// dispatch — the background turn that would build and publish that
+    /// snapshot after a real Vault creation — is explicitly not yet
+    /// implemented (`src/server.rs`'s dispatch loop returns
+    /// `vault_work_kind_not_yet_implemented` for it, and the test harness's
+    /// `_vault_worker` is never driven regardless), so a Vault created only
+    /// through the HTTP surface never becomes a fresh collection-read
+    /// participant in this test process. Publish its snapshot directly
+    /// through the same shared cache `VaultReadCore`/`VaultSearchCore` read
+    /// from, mirroring what `vault_read.rs`'s and `search/vault_scoped.rs`'s
+    /// own unit tests already do, and what the eventual indexing dispatch
+    /// will do in production.
+    fn publish_vault_snapshot(state: &AppState, vault_id: &str, vault_root: &std::path::Path) {
+        use std::str::FromStr;
+        let vault_id = crate::vault_registry::VaultId::from_str(vault_id).expect("parse vault id");
+        let index = crate::vault::VaultIndex::build(vault_root).expect("build index");
+        state
+            .startup_sqlite
+            .replace_vault_snapshot(vault_id, &index, state.embedder.as_ref())
+            .expect("publish snapshot");
+    }
+
+    #[tokio::test]
+    async fn vault_scope_tree_stats_graph_group_data_per_vault_for_all_scope() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let first_root = tmp.path().join("first");
+        let first = create_vault_with_files(
+            &app,
+            "First",
+            &first_root,
+            &[
+                ("Home.md", "# Home\n\nfirst\n\n[[Shared]]"),
+                ("Shared.md", "# Shared"),
+            ],
+            0,
+        )
+        .await;
+        let second_root = tmp.path().join("second");
+        let second = create_vault_with_files(
+            &app,
+            "Second",
+            &second_root,
+            &[
+                ("Home.md", "# Home\n\nsecond\n\n[[Shared]]"),
+                ("Shared.md", "# Shared"),
+            ],
+            1,
+        )
+        .await;
+        publish_vault_snapshot(&_state, &first, &first_root);
+        publish_vault_snapshot(&_state, &second, &second_root);
+
+        let tree = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/tree")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(tree.status(), StatusCode::OK);
+        let tree_body = json_body(tree).await;
+        assert_eq!(tree_body["scope"], "all");
+        assert_eq!(tree_body["partial"], false);
+        assert_eq!(tree_body["data"].as_array().expect("tree data").len(), 2);
+        assert_eq!(
+            tree_body["participants"]
+                .as_array()
+                .expect("participants")
+                .len(),
+            2
+        );
+        for vault_tree in tree_body["data"].as_array().unwrap() {
+            let vault_id = vault_tree["vault_id"].as_str().expect("vault_id");
+            for note in vault_tree["tree"]["notes"].as_array().unwrap() {
+                assert_eq!(note["vault_id"], vault_id);
+            }
+        }
+
+        let stats = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/stats")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stats.status(), StatusCode::OK);
+        let stats_body = json_body(stats).await;
+        assert_eq!(stats_body["data"].as_array().expect("stats data").len(), 2);
+        assert!(
+            stats_body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry["note_count"] == 2)
+        );
+
+        let graph = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/graph")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(graph.status(), StatusCode::OK);
+        let graph_body = json_body(graph).await;
+        let graph_data = graph_body["data"].as_array().expect("graph data");
+        assert_eq!(graph_data.len(), 2);
+        for vault_graph in graph_data {
+            let vault_id = vault_graph["vault_id"].as_str().expect("vault_id");
+            for edge in vault_graph["edges"].as_array().unwrap() {
+                // No cross-Vault graph edges.
+                assert_eq!(edge["vault_id"], vault_id);
+            }
+        }
+        let vault_ids: std::collections::BTreeSet<_> = graph_data
+            .iter()
+            .map(|entry| entry["vault_id"].as_str().unwrap().to_string())
+            .collect();
+        assert!(vault_ids.contains(&first));
+        assert!(vault_ids.contains(&second));
+    }
+
+    #[tokio::test]
+    async fn vault_scope_recent_and_search_flatten_across_vaults_and_honour_one_scope() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let first_root = tmp.path().join("first");
+        let first = create_vault_with_files(
+            &app,
+            "First",
+            &first_root,
+            &[("Home.md", "# Home\n\nshared term")],
+            0,
+        )
+        .await;
+        let second_root = tmp.path().join("second");
+        let second = create_vault_with_files(
+            &app,
+            "Second",
+            &second_root,
+            &[("Home.md", "# Home\n\nshared term")],
+            1,
+        )
+        .await;
+        publish_vault_snapshot(&_state, &first, &first_root);
+        publish_vault_snapshot(&_state, &second, &second_root);
+
+        let recent_all = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/recent")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(recent_all.status(), StatusCode::OK);
+        let recent_all_body = json_body(recent_all).await;
+        assert_eq!(
+            recent_all_body["data"]
+                .as_array()
+                .expect("recent data")
+                .len(),
+            2
+        );
+
+        let recent_one = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{first}/recent"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(recent_one.status(), StatusCode::OK);
+        let recent_one_body = json_body(recent_one).await;
+        let recent_one_data = recent_one_body["data"].as_array().expect("recent one data");
+        assert_eq!(recent_one_data.len(), 1);
+        assert_eq!(recent_one_data[0]["vault_id"], first);
+
+        let search_all = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search?q=shared&mode=keyword")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(search_all.status(), StatusCode::OK);
+        let search_all_body = json_body(search_all).await;
+        assert_eq!(search_all_body["scope"], "all");
+        let results = search_all_body["data"]["results"]
+            .as_array()
+            .expect("search results");
+        assert_eq!(results.len(), 2);
+        let mut result_vault_ids: Vec<String> = results
+            .iter()
+            .map(|result| result["vault_id"].as_str().unwrap().to_string())
+            .collect();
+        result_vault_ids.sort();
+        let mut expected = vec![first.clone(), second.clone()];
+        expected.sort();
+        assert_eq!(result_vault_ids, expected);
+
+        let search_one = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{second}/search?q=shared&mode=keyword"
+                    ))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(search_one.status(), StatusCode::OK);
+        let search_one_body = json_body(search_one).await;
+        let one_results = search_one_body["data"]["results"]
+            .as_array()
+            .expect("search one results");
+        assert_eq!(one_results.len(), 1);
+        assert_eq!(one_results[0]["vault_id"], second);
+    }
+
+    #[tokio::test]
+    async fn vault_scope_zero_enabled_vaults_returns_a_complete_empty_envelope() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+
+        for uri in [
+            "/api/v1/vaults/all/tree",
+            "/api/v1/vaults/all/recent",
+            "/api/v1/vaults/all/stats",
+            "/api/v1/vaults/all/graph",
+            "/api/v1/vaults/all/search?q=anything",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "uri: {uri}");
+            let body = json_body(response).await;
+            assert_eq!(body["scope"], "all", "uri: {uri}");
+            assert_eq!(body["partial"], false, "uri: {uri}");
+            assert_eq!(
+                body["participants"].as_array().expect("participants").len(),
+                0,
+                "uri: {uri}"
+            );
+            let data = &body["data"];
+            let is_empty = data
+                .as_array()
+                .map(|array| array.is_empty())
+                .unwrap_or_else(|| {
+                    data["results"]
+                        .as_array()
+                        .expect("search results array")
+                        .is_empty()
+                });
+            assert!(is_empty, "uri: {uri} data: {data}");
+        }
+    }
+
+    #[tokio::test]
+    async fn vault_scope_reports_structured_errors_for_invalid_scope_unknown_and_disabled_vault() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Lifecycle",
+            &tmp.path().join("lifecycle"),
+            &[("Home.md", "# Home")],
+            0,
+        )
+        .await;
+
+        let invalid_scope = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/not-a-scope/tree")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(invalid_scope.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(invalid_scope).await["code"], "invalid_scope");
+
+        let unknown_id = "00000000-0000-4000-8000-000000000000";
+        let unknown = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{unknown_id}/stats"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(unknown).await["code"], "vault_not_found");
+
+        let disable = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/disable?expected_registry_revision=1"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disable.status(), StatusCode::OK);
+
+        let disabled_read = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/graph"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disabled_read.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(disabled_read).await["code"], "vault_disabled");
+    }
+
+    #[tokio::test]
+    async fn vault_scope_search_validates_query_and_applies_layer_selection_independently() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let layered_root = tmp.path().join("layered");
+        let layered = create_vault_with_files(
+            &app,
+            "Layered",
+            &layered_root,
+            &[
+                ("sources/.hatchdoor-layer", "sources"),
+                ("sources/Clipping.md", "# Clipping\n\nneedle"),
+            ],
+            0,
+        )
+        .await;
+        let plain_root = tmp.path().join("plain");
+        let plain = create_vault_with_files(
+            &app,
+            "Plain",
+            &plain_root,
+            &[("Home.md", "# Home\n\nneedle")],
+            1,
+        )
+        .await;
+        publish_vault_snapshot(&_state, &layered, &layered_root);
+        publish_vault_snapshot(&_state, &plain, &plain_root);
+
+        let missing_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing_query.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(missing_query).await["code"],
+            "invalid_request_query"
+        );
+
+        let empty_query = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search?q=")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(empty_query.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(empty_query).await["code"], "invalid_search_query");
+
+        let absent_layer = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search?q=needle&mode=keyword&layers=ghost")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(absent_layer.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(absent_layer).await["code"],
+            "invalid_layer_selection"
+        );
+
+        let selected_layer = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/search?q=needle&mode=keyword&layers=sources")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(selected_layer.status(), StatusCode::OK);
+        let selected_layer_body = json_body(selected_layer).await;
+        let results = selected_layer_body["data"]["results"]
+            .as_array()
+            .expect("results");
+        assert_eq!(results.len(), 1);
+        assert_ne!(results[0]["vault_id"], plain);
+    }
+
+    #[tokio::test]
+    async fn vault_scope_routes_require_web_token_and_are_absent_in_demo_mode() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret")));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/tree")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/tree")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(authorized.status(), StatusCode::OK);
+
+        let (demo_app, _demo_tmp, _demo_state) =
+            app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let demo_response = demo_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/tree")
                     .body(Body::empty())
                     .expect("request"),
             )

@@ -67,13 +67,16 @@ fn note_not_found_response(vault_id: VaultId, slug: &str) -> Response {
     .respond(StatusCode::NOT_FOUND)
 }
 
-/// Maps a [`VaultReadError`] (from exact-read/asset-directory gating) onto the
-/// shared `VaultApiError` shape and issue #62's HTTP-meaning buckets: absence
-/// is `404`, a current-state conflict (disabled) is `409`, and every
+/// Maps a [`VaultReadError`] (from exact-read/asset-directory gating, and
+/// from the one-or-all collection-read and search shared core in
+/// `handlers/vault_collection_reads.rs`, which reuses this rather than
+/// duplicating the same bucket logic) onto the shared `VaultApiError` shape
+/// and issue #62's HTTP-meaning buckets: absence is `404`, a current-state
+/// conflict (disabled) is `409`, malformed input is `400`, and every
 /// transient-unavailability code is `503`. A malformed per-Vault scan
 /// configuration is a `500` — it depends on saved exclusion patterns, not on
 /// this request, so retrying the same request cannot help.
-fn vault_read_error_response(error: VaultReadError) -> Response {
+pub(crate) fn vault_read_error_response(error: VaultReadError) -> Response {
     let (code, status): (&'static str, StatusCode) = match error.code.as_str() {
         "vault_not_found" => ("vault_not_found", StatusCode::NOT_FOUND),
         "vault_disabled" => ("vault_disabled", StatusCode::CONFLICT),
@@ -83,6 +86,9 @@ fn vault_read_error_response(error: VaultReadError) -> Response {
         ),
         "vault_read_unavailable" => ("vault_read_unavailable", StatusCode::SERVICE_UNAVAILABLE),
         "vault_runtime_not_active" => ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+        "invalid_search_query" => ("invalid_search_query", StatusCode::BAD_REQUEST),
+        "invalid_layer_selection" => ("invalid_layer_selection", StatusCode::BAD_REQUEST),
+        "search_unavailable" => ("search_unavailable", StatusCode::SERVICE_UNAVAILABLE),
         _ => ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
     };
     VaultApiError::new(code, error.message, error.vault_id, error.retryable).respond(status)
@@ -402,6 +408,30 @@ mod tests {
             retryable: true,
         });
         assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let invalid_query = vault_read_error_response(VaultReadError {
+            code: "invalid_search_query".to_string(),
+            message: "empty".to_string(),
+            vault_id: None,
+            retryable: false,
+        });
+        assert_eq!(invalid_query.status(), StatusCode::BAD_REQUEST);
+
+        let invalid_layer = vault_read_error_response(VaultReadError {
+            code: "invalid_layer_selection".to_string(),
+            message: "absent everywhere".to_string(),
+            vault_id: None,
+            retryable: false,
+        });
+        assert_eq!(invalid_layer.status(), StatusCode::BAD_REQUEST);
+
+        let search_unavailable = vault_read_error_response(VaultReadError {
+            code: "search_unavailable".to_string(),
+            message: "embedder failed".to_string(),
+            vault_id: None,
+            retryable: true,
+        });
+        assert_eq!(search_unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]

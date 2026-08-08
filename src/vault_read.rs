@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
 use crate::vault::{Note, NoteLink, NoteLinks};
@@ -12,11 +12,27 @@ use crate::vault_runtime::VaultCollectionRuntime;
 
 /// An explicit collection read target. There is deliberately no selected,
 /// default, or sole-Vault variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VaultScope {
     One(VaultId),
     All,
+}
+
+/// Serializes as the flat scalar `docs/migrations/vault-scoped-clients.md`'s
+/// envelope documents (the Vault ID's canonical text, or the literal
+/// `"all"`), mirroring exactly what a caller passes as the `scope` path
+/// segment — not serde's derived externally-tagged shape (`{"one": "<uuid>"}`
+/// for the data-carrying variant), which no wire consumer expects.
+impl Serialize for VaultScope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            VaultScope::One(vault_id) => vault_id.serialize(serializer),
+            VaultScope::All => serializer.serialize_str("all"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -753,6 +769,19 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             std::fs::write(path, contents).expect("write note");
         }
+    }
+
+    #[test]
+    fn vault_scope_serializes_as_the_flat_scalar_the_wire_contract_documents() {
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        assert_eq!(
+            serde_json::to_string(&VaultScope::One(vault_id)).expect("serialize one"),
+            format!("\"{vault_id}\"")
+        );
+        assert_eq!(
+            serde_json::to_string(&VaultScope::All).expect("serialize all"),
+            "\"all\""
+        );
     }
 
     #[test]

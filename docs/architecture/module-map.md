@@ -511,7 +511,12 @@ backend checks.
 **Public contract:** `VaultReadCore`, explicit `VaultScope`, the common
 `VaultReadProjection` envelope, participant state/error types, and
 Vault-qualified exact-note, tree, statistics, graph, and recent-note
-projections. `resolve_wikilinks` resolves every target in a batch against one
+projections. `VaultScope` serializes as the flat scalar
+`docs/migrations/vault-scoped-clients.md`'s envelope documents — the Vault
+ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
+a caller passes as the `scope` path segment, rather than serde's derived
+externally-tagged shape. `resolve_wikilinks` resolves every target in a batch
+against one
 authoritative-index build, rather than one build per target. `vault_directory`
 resolves one Vault's local Markdown directory under the same
 not-found/disabled/unavailable gating as exact reads (reusing
@@ -538,9 +543,11 @@ the shared cache's published Vault snapshot seam, and existing Vault note/link
 types.
 
 **Consumers:** `handlers/vault_content.rs` is the first HTTP consumer (exact
-note/link/resolve reads and `vault_directory`). Future MCP Vault-scoped
-adapters and one-or-all collection-read adapters (#100) remain later
-consumers. The core has no adapter or route ownership.
+note/link/resolve reads and `vault_directory`). `handlers/vault_collection_reads.rs`
+is the first HTTP consumer of the collection-read projections (`trees`,
+`statistics`, `graphs`, `recently_modified`) — a thin adapter with no
+collection-read domain logic of its own. Future MCP Vault-scoped adapters
+remain a later consumer. The core has no adapter or route ownership.
 
 **Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
 Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
@@ -660,11 +667,13 @@ Vault-read core without owning any HTTP, MCP, or frontend adapter.
 query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
 scope/envelope, and vault metadata/types.
 
-**Consumers:** HTTP search handler, MCP search/query tools, offline evaluation
-runners, and future Vault-scoped adapters.
+**Consumers:** the legacy HTTP search handler, `handlers/vault_collection_reads.rs`
+(the first HTTP consumer of `VaultSearchCore::search`), MCP search/query
+tools, offline evaluation runners, and future Vault-scoped MCP adapters.
 
 **Coordination paths:** `src/api_types.rs`, `src/handlers/api.rs`,
-`src/mcp/tools/read.rs`, cache query methods, and frontend Search contracts.
+`src/handlers/vault_collection_reads.rs`, `src/mcp/tools/read.rs`, cache query
+methods, and frontend Search contracts.
 
 **Invariants:**
 
@@ -871,6 +880,7 @@ managed_sync` against local bare-repository fixtures; scheduling changes run
 - `src/handlers/downloads.rs`
 - `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
+- `src/handlers/vault_collection_reads.rs`
 - `src/handlers/vault_content.rs`
 - `src/handlers/vaults.rs`
 - `src/handlers/write_api.rs`
@@ -907,9 +917,8 @@ reports an explicit `recovery` object rather than erroring when the persisted
 registry itself needs operator recovery. Every response uses the shared
 `VaultApiError{code, message, vault_id?, retryable}` shape and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
-duplicating them. Vault-control mutations beyond #98, one-or-all collection
-reads, and old unscoped route removal remain separately owned later packets
-(#100–#101); MCP discovery is #103.
+duplicating them. Vault-control mutations beyond #98 and old unscoped route
+removal remain separately owned later packets (#101); MCP discovery is #103.
 
 `vault_content.rs` owns exact Vault-scoped content reads and their contained
 resources, mounted in the same `/api/v1/vaults/{vault_id}/...` router group as
@@ -935,6 +944,32 @@ and response-building logic (`resolve_asset_path`, `content_type_for_path`,
 `download_response` factored out of the legacy handlers' inline header-building
 so both routes share one response shape), unchanged.
 
+`vault_collection_reads.rs` owns one-or-all collection reads and search:
+`GET /api/v1/vaults/{scope}/tree`, `.../recent`, `.../stats`, `.../graph`, and
+`.../search`, mounted in the same router group and sharing the same
+demo-mode/auth posture, `VaultApiError` shape, and `query_rejection_response`/
+`vault_read_error_response` (the latter widened to `pub(crate)` in
+`vault_content.rs` and extended with `invalid_search_query`/
+`invalid_layer_selection` (`400`) and `search_unavailable` (`503`) arms for
+reuse here) rather than duplicating them. `{scope}` reuses the path segment
+name `vault_id` for router-tree consistency with every sibling route in this
+group, parsed by this file's own `parse_vault_scope` into either a Vault ID or
+`VaultScope::All`; anything else is the structured `invalid_scope` error
+(`400`). This file is a thin adapter with no collection-read domain logic of
+its own: `tree`/`stats`/`graph` return `vault_read.rs`'s existing
+`VaultReadCore::{trees, statistics, graphs}` projections unchanged (grouped
+per Vault); `recent` returns `recently_modified` (flattened across Vaults);
+`search` returns `search::vault_scoped::VaultSearchCore::search`'s projection
+(flattened, one global ranking). `search`'s `layers` query parameter is a
+comma-separated token list parsed by this file's own `parse_layer_selection`
+into a `LayerSelection` applied identically to every participant — unlike
+`search::LayerSelection::parse` (built for the single-Vault MCP surface, where
+an unrecognized token degrades to the default surface), it does not consult
+any one Vault's known-layer catalog while parsing, since a name valid in one
+Vault and absent from another is expected, not an error; only a name absent
+from *every* usable participant is (`VaultSearchCore::search`'s own
+`invalid_layer_selection` check).
+
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,
@@ -943,7 +978,9 @@ subscribe_revisions}`, `VaultWorkCoordinator`, and
 `ManagedGitScheduler::{sync_now, retry_now}` via `AppState::{vault_work,
 managed_git}`. `vault_content.rs` is the first HTTP consumer of
 Vault-qualified read projections (`vault_read.rs`'s `VaultReadCore`, including
-its `vault_directory` accessor).
+its `vault_directory` accessor); `vault_collection_reads.rs` is the first HTTP
+consumer of that core's collection-read projections and of
+`search::vault_scoped::VaultSearchCore`.
 
 **Consumers:** route construction in `src/server.rs`.
 
