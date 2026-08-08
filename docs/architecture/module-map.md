@@ -809,6 +809,11 @@ route tests, and full frontend checks.
 
 **Contract and responsibility:** shared primitives, global tokens/base rules,
 style aggregation, topbar/shell styles, and cross-feature responsive overrides.
+The tokens in `base.css` are governed by
+[`docs/design/design-system.html`](../design/design-system.html), which is
+authoritative for visual decisions across every feature stylesheet; a component
+the system does not yet cover gets its section added by the change that ships
+it.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected
