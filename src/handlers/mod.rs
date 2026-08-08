@@ -4,6 +4,7 @@ pub mod diagnostics;
 mod downloads;
 mod settings;
 mod spa;
+mod vaults;
 mod write_api;
 
 pub use api::{
@@ -20,6 +21,11 @@ pub use settings::{
     reveal_mcp_token_handler, reveal_web_token_handler,
 };
 pub use spa::spa_index_handler;
+pub use vaults::{
+    create_vault_handler, disable_vault_handler, disconnect_vault_handler, edit_vault_handler,
+    enable_vault_handler, list_vaults_handler, retry_vault_handler, sync_vault_handler,
+    vault_collection_events_handler,
+};
 pub use write_api::{
     archive_note_handler, create_note_handler, delete_note_handler, move_note_handler,
     move_rename_note_handler, rename_note_handler, update_note_handler, upload_attachment_handler,

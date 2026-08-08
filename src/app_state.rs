@@ -26,6 +26,12 @@ pub struct AppState {
     /// collection derived from them.
     pub vault_registry: VaultRegistryStore,
     pub vaults: VaultCollectionRuntime,
+    /// The instance-wide background-work admission queue and its per-Vault
+    /// managed-Git scheduler. HTTP Vault-collection management (add/edit/
+    /// enable/disable/disconnect) reconciles through these after a registry
+    /// commit; manual sync/retry request a Git turn directly.
+    pub vault_work: crate::vault_work::VaultWorkCoordinator,
+    pub managed_git: Arc<crate::git::ManagedGitScheduler>,
     /// Present when safe automatic import could not prove the legacy
     /// deployment. Collection/setup surfaces remain available for recovery.
     pub legacy_migration_recovery: Option<LegacyMigrationRecovery>,
@@ -720,10 +726,14 @@ mod tests {
         let cache = build_cache(&vault_path, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = broadcast::channel(64);
         let (mcp_tools_changed, _) = broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         AppState {
             cache_db_path: state_root.join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(state_root.join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault { vault_path, cache }))),

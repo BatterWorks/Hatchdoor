@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -350,6 +350,41 @@ pub struct VaultCollectionSnapshot {
     pub vaults: BTreeMap<VaultId, CollectionVaultSnapshot>,
 }
 
+/// Broad category of a published collection-revision change, so a subscriber
+/// can decide how widely to refetch without inspecting every field that
+/// changed. `Definition` covers registry-level changes reconciled into the
+/// live collection (added/edited/enabled/disabled/disconnected); `Status`
+/// covers one Vault's runtime capability/search/Git/watcher status moving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaultChangeCategory {
+    Definition,
+    Status,
+}
+
+/// One collection-revision advance, published to every subscriber. Since the
+/// underlying channel keeps only the latest value, a subscriber that misses
+/// intermediate advances still learns the current `collection_revision` and
+/// should treat a gap as "refetch broadly" rather than trust `vault_ids` to be
+/// a complete history — the same lightweight-invalidation tradeoff the
+/// existing single-Vault `/api/vault-events` stream already makes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultCollectionRevisionEvent {
+    pub collection_revision: u64,
+    pub vault_ids: Vec<VaultId>,
+    pub category: VaultChangeCategory,
+}
+
+impl VaultCollectionRevisionEvent {
+    fn initial() -> Self {
+        Self {
+            collection_revision: 0,
+            vault_ids: Vec::new(),
+            category: VaultChangeCategory::Definition,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct VaultControlBlock {
     definition: Arc<VaultDefinition>,
@@ -549,7 +584,8 @@ impl VaultControlBlock {
         let changed = *snapshot != previous;
         drop(snapshot);
         if changed {
-            self.revisions.bump();
+            self.revisions
+                .bump(self.definition.vault_id(), VaultChangeCategory::Status);
         }
         Ok(())
     }
@@ -583,7 +619,8 @@ impl VaultControlBlock {
         let changed = *snapshot != previous;
         drop(snapshot);
         if changed {
-            self.revisions.bump();
+            self.revisions
+                .bump(self.definition.vault_id(), VaultChangeCategory::Status);
         }
         Ok(())
     }
@@ -608,7 +645,8 @@ impl VaultControlBlock {
         let changed = *snapshot != previous;
         drop(snapshot);
         if changed {
-            self.revisions.bump();
+            self.revisions
+                .bump(self.definition.vault_id(), VaultChangeCategory::Status);
         }
         Ok(())
     }
@@ -632,27 +670,31 @@ impl VaultCollectionEntry {
 #[derive(Clone)]
 pub struct VaultCollectionRuntime {
     state: Arc<RwLock<VaultCollectionState>>,
-    revisions: tokio::sync::watch::Sender<u64>,
+    revisions: tokio::sync::watch::Sender<VaultCollectionRevisionEvent>,
     watching: Option<WatcherContext>,
 }
 
 #[derive(Clone)]
 struct CollectionRevisionPublisher {
     state: Weak<RwLock<VaultCollectionState>>,
-    revisions: tokio::sync::watch::Sender<u64>,
+    revisions: tokio::sync::watch::Sender<VaultCollectionRevisionEvent>,
 }
 
 impl CollectionRevisionPublisher {
-    fn bump(&self) {
+    fn bump(&self, vault_id: VaultId, category: VaultChangeCategory) {
         let Some(state) = self.state.upgrade() else {
             return;
         };
-        let revision = {
+        let event = {
             let mut state = state.write().expect("Vault collection runtime poisoned");
             state.collection_revision = state.collection_revision.saturating_add(1);
-            state.collection_revision
+            VaultCollectionRevisionEvent {
+                collection_revision: state.collection_revision,
+                vault_ids: vec![vault_id],
+                category,
+            }
         };
-        self.revisions.send_replace(revision);
+        self.revisions.send_replace(event);
     }
 }
 
@@ -670,7 +712,7 @@ struct VaultCollectionState {
 
 impl VaultCollectionRuntime {
     pub fn new() -> Self {
-        let (revisions, _) = tokio::sync::watch::channel(0);
+        let (revisions, _) = tokio::sync::watch::channel(VaultCollectionRevisionEvent::initial());
         Self {
             state: Arc::new(RwLock::new(VaultCollectionState {
                 registry_revision: 0,
@@ -684,7 +726,7 @@ impl VaultCollectionRuntime {
 
     pub fn with_watching(cache_db_path: PathBuf) -> Self {
         let (changes, _) = tokio::sync::broadcast::channel(64);
-        let (revisions, _) = tokio::sync::watch::channel(0);
+        let (revisions, _) = tokio::sync::watch::channel(VaultCollectionRevisionEvent::initial());
         Self {
             state: Arc::new(RwLock::new(VaultCollectionState {
                 registry_revision: 0,
@@ -753,18 +795,37 @@ impl VaultCollectionRuntime {
             }
         }
 
-        let changed = collection_snapshots(&previous) != collection_snapshots(&next);
+        let previous_snapshots = collection_snapshots(&previous);
+        let next_snapshots = collection_snapshots(&next);
+        let changed_vault_ids: Vec<VaultId> = {
+            let mut ids = BTreeSet::new();
+            for (vault_id, snapshot) in &next_snapshots {
+                if previous_snapshots.get(vault_id) != Some(snapshot) {
+                    ids.insert(*vault_id);
+                }
+            }
+            for vault_id in previous_snapshots.keys() {
+                if !next_snapshots.contains_key(vault_id) {
+                    ids.insert(*vault_id);
+                }
+            }
+            ids.into_iter().collect()
+        };
         state.registry_revision = snapshot.revision();
-        let collection_revision = if changed {
-            state.collection_revision = state.collection_revision.saturating_add(1);
-            Some(state.collection_revision)
-        } else {
+        let event = if changed_vault_ids.is_empty() {
             None
+        } else {
+            state.collection_revision = state.collection_revision.saturating_add(1);
+            Some(VaultCollectionRevisionEvent {
+                collection_revision: state.collection_revision,
+                vault_ids: changed_vault_ids,
+                category: VaultChangeCategory::Definition,
+            })
         };
         state.vaults = next;
         drop(state);
-        if let Some(collection_revision) = collection_revision {
-            self.revisions.send_replace(collection_revision);
+        if let Some(event) = event {
+            self.revisions.send_replace(event);
         }
     }
 
@@ -894,7 +955,9 @@ impl VaultCollectionRuntime {
             .map(|watching| watching.changes.subscribe())
     }
 
-    pub fn subscribe_revisions(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn subscribe_revisions(
+        &self,
+    ) -> tokio::sync::watch::Receiver<VaultCollectionRevisionEvent> {
         self.revisions.subscribe()
     }
 
@@ -1929,8 +1992,41 @@ mod tests {
         revisions.changed().await.expect("revision event");
         let after = collection.snapshot().collection_revision;
         assert_eq!(after, before + 1);
-        assert_eq!(*revisions.borrow_and_update(), after);
+        let event = revisions.borrow_and_update().clone();
+        assert_eq!(event.collection_revision, after);
+        assert_eq!(event.vault_ids, vec![vault_id]);
+        assert_eq!(event.category, VaultChangeCategory::Status);
         assert_eq!(collection.snapshot().registry_revision, one.revision());
+    }
+
+    #[tokio::test]
+    async fn reconcile_event_reports_only_the_vault_ids_that_actually_changed() {
+        let directory = tempdir().expect("temporary state directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let first_path = directory.path().join("first");
+        std::fs::create_dir_all(&first_path).expect("first Vault directory");
+        let one = add_local_vault(&registry, &empty, "First", first_path);
+        let first_id = vault_id_named(&one, "First");
+        let collection = VaultCollectionRuntime::new();
+        collection.reconcile(&registry, &one);
+        let mut revisions = collection.subscribe_revisions();
+        revisions.borrow_and_update();
+
+        let second_path = directory.path().join("second");
+        std::fs::create_dir_all(&second_path).expect("second Vault directory");
+        let two = add_local_vault(&registry, &one, "Second", second_path);
+        let second_id = vault_id_named(&two, "Second");
+        collection.reconcile(&registry, &two);
+
+        revisions.changed().await.expect("definition event");
+        let event = revisions.borrow_and_update().clone();
+        assert_eq!(event.category, VaultChangeCategory::Definition);
+        assert_eq!(event.vault_ids, vec![second_id]);
+        assert!(!event.vault_ids.contains(&first_id));
     }
 
     #[tokio::test]

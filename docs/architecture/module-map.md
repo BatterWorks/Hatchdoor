@@ -106,7 +106,12 @@ that production inventory are still checked for stale paths and duplicates.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
-  later shared-core adapters.
+  later shared-core adapters. `AppState::vault_work` and
+  `AppState::managed_git` expose the same background-work coordinator and
+  managed-Git scheduler `run_server()` wires into the one dispatch loop, so an
+  HTTP adapter (`handlers/vaults.rs`) can reconcile a registry mutation into
+  live runtime effects and request an immediate Git turn without a second
+  execution lane.
   `AppState::index_status` separately tracks setting-triggered rebuild drift,
   progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
@@ -122,9 +127,15 @@ that production inventory are still checked for stale paths and duplicates.
   many Vault-ID-keyed `VaultControlBlock` values. Each enabled block owns its
   definition and resolved Markdown root, capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
-  independently cancellable watcher. Status changes advance a revisioned
-  collection snapshot and publish revision events. Disabling, replacing, or
-  disconnecting a block first revokes operation acceptance, publishes its
+  independently cancellable watcher. Status changes and `reconcile()` advance a
+  revisioned collection snapshot and publish a `VaultCollectionRevisionEvent`
+  (`collection_revision`, the affected Vault IDs, and a broad
+  `VaultChangeCategory` of `definition` or `status`) over
+  `subscribe_revisions()`; a subscriber that misses an intermediate advance
+  still learns the current revision from the watch channel's latest value and
+  should refetch broadly rather than trust `vault_ids` as a complete history.
+  Disabling, replacing, or disconnecting a block first revokes operation
+  acceptance, publishes its
   cancellation signal, and stops its watcher, including through already-held
   handles. Unchanged Vaults retain their control blocks when another definition
   changes; disabled definitions remain visible with no capabilities and no
@@ -191,8 +202,12 @@ kinds. A stopped worker returns `None` rather than waiting for discarded work.
 The queue owns no Markdown, SQLite, Git, or lifecycle state.
 
 **Consumers:** collection runtime reconstructs and drains work for lifecycle
-transitions. Later cache and Git packets supply concrete operations without
-creating additional execution lanes.
+transitions. `handlers/vaults.rs` reaches the coordinator only indirectly,
+through `VaultCollectionRuntime::reconcile_and_reconstruct` after a registry
+mutation, and directly through `ManagedGitScheduler::sync_now`/`retry_now` for
+manual Git control — it never calls `request`/`drain_vault` itself. Later
+cache and Git packets supply concrete operations without creating additional
+execution lanes.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
@@ -289,8 +304,11 @@ and confirmed-empty initialization contracts. Runtime composition loads the
 registry after migration and `VaultCollectionRuntime` consumes its safe
 projections and resolved paths; its managed-Git Git-turn dispatch
 (`dispatch_managed_git_turn`) is the one consumer of the crate-private
-`https_credentials` accessor. HTTP, MCP, frontend, cache, and search adapters
-remain separately owned later packets.
+`https_credentials` accessor. `handlers/vaults.rs` is the first HTTP consumer
+of the `add`/`edit`/`enable`/`disable`/`disconnect` mutation contracts and of
+`load` for authenticated discovery, including its explicit `Recovery` state.
+MCP, frontend, cache, and search adapters remain separately owned later
+packets.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
 `src/app_state.rs` construct and retain it; `/data/state` deployment
@@ -831,6 +849,7 @@ managed_sync` against local bare-repository fixtures; scheduling changes run
 - `src/handlers/downloads.rs`
 - `src/handlers/settings.rs`
 - `src/handlers/spa.rs`
+- `src/handlers/vaults.rs`
 - `src/handlers/write_api.rs`
 
 **Public contract:** handler functions intentionally re-exported by
@@ -851,8 +870,31 @@ asynchronously rebuilding; `/api/index-status` reports that dedicated
 rebuild's staleness, progress, ETA, and last failure without reusing startup
 readiness.
 
+`vaults.rs` owns `/api/v1/vaults` discovery, collection management (create/
+edit/enable/disable/disconnect), manual Git sync/retry, and the collection-wide
+SSE event stream — the first `/api/v1` surface. It is the first HTTP consumer
+of the Vault collection registry's write operations and of
+`VaultCollectionRuntime::reconcile_and_reconstruct`, which every mutation calls
+in the same request so background Index/Git work is requested for a newly
+enabled Vault without a separate reconciliation pass. Deliberately not gated by
+`require_vault_ready` (a legacy single-configured-Vault signal) or reachable in
+demo mode (mirrors `settings.rs`'s operator-controls posture): discovery and
+creating the first Vault stay reachable at zero enabled Vaults, and discovery
+reports an explicit `recovery` object rather than erroring when the persisted
+registry itself needs operator recovery. Every response uses the shared
+`VaultApiError{code, message, vault_id?, retryable}` shape and reuses
+`vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
+duplicating them. Vault-scoped content reads/mutations and one-or-all
+collection reads remain separately owned later packets (#99–#101); MCP
+discovery is #103.
+
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
-`vault/write`, Search, cache queries, Git status, and auth.
+`vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
+only — the Vault collection registry's mutation/load operations,
+`VaultCollectionRuntime::{snapshot, reconcile_and_reconstruct,
+subscribe_revisions}`, `VaultWorkCoordinator`, and
+`ManagedGitScheduler::{sync_now, retry_now}` via `AppState::{vault_work,
+managed_git}`.
 
 **Consumers:** route construction in `src/server.rs`.
 
@@ -861,7 +903,9 @@ and whichever domain a handler adapts.
 
 **Invariants:** handlers stay thin. Write handlers never touch the vault
 filesystem directly (ADR-03). Static and vault asset behavior must retain auth
-and path containment.
+and path containment. `vaults.rs` never returns HTTPS credentials, only
+`credential_configured` (ADR-01/registry invariant); disconnect deletes no
+files, checkouts, Git history, or credentials outside the registry record.
 
 **Validation:** `cargo test handlers`, router tests, and affected domain tests.
 
