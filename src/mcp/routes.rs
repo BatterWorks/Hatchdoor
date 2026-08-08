@@ -245,12 +245,17 @@ mod tests {
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 tmp.path().join("state/vaults.json"),
             ),
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
@@ -306,12 +311,17 @@ mod tests {
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 tmp.path().join("state/vaults.json"),
             ),
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {

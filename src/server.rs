@@ -26,15 +26,17 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, archive_note_handler, create_note_handler, delete_note_handler,
-    diagnostics_handler, generate_mcp_token_handler, get_git_status_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, archive_note_handler, create_note_handler, create_vault_handler,
+    delete_note_handler, diagnostics_handler, disable_vault_handler, disconnect_vault_handler,
+    edit_vault_handler, enable_vault_handler, generate_mcp_token_handler, get_git_status_handler,
     get_index_status_handler, get_settings_handler, graph_handler, health_handler,
-    move_note_handler, move_rename_note_handler, note_download_handler, note_handler,
-    note_links_handler, patch_settings_handler, recently_modified_handler, refresh_handler,
-    rename_note_handler, resolve_batch_handler, resolve_handler, reveal_mcp_token_handler,
-    reveal_web_token_handler, search_handler, spa_index_handler, stats_handler, tree_handler,
-    update_note_handler, upload_attachment_handler, vault_asset_handler, vault_events_handler,
-    write_capabilities_handler,
+    list_vaults_handler, move_note_handler, move_rename_note_handler, note_download_handler,
+    note_handler, note_links_handler, patch_settings_handler, recently_modified_handler,
+    refresh_handler, rename_note_handler, resolve_batch_handler, resolve_handler,
+    retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler, search_handler,
+    spa_index_handler, stats_handler, sync_vault_handler, tree_handler, update_note_handler,
+    upload_attachment_handler, vault_asset_handler, vault_collection_events_handler,
+    vault_events_handler, write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -282,6 +284,47 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
+    // Vault-collection discovery, management, and events are deliberately not
+    // gated by `require_vault_ready`: that middleware guards the legacy
+    // single-configured-Vault readiness signal, while connecting the first
+    // Vault and recovering a corrupt registry must stay reachable at zero
+    // enabled Vaults. Demo-mode posture mirrors settings: these are operator
+    // controls, not demo content.
+    let vaults_v1 = if state.demo_mode {
+        Router::new()
+    } else {
+        let vaults_v1 = Router::new()
+            .route(
+                "/api/v1/vaults",
+                get(list_vaults_handler).post(create_vault_handler),
+            )
+            .route(
+                "/api/v1/vaults/events",
+                get(vault_collection_events_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}",
+                patch(edit_vault_handler).delete(disconnect_vault_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/enable",
+                post(enable_vault_handler),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/disable",
+                post(disable_vault_handler),
+            )
+            .route("/api/v1/vaults/{vault_id}/sync", post(sync_vault_handler))
+            .route("/api/v1/vaults/{vault_id}/retry", post(retry_vault_handler));
+        match web_bearer_token.clone() {
+            Some(token) => vaults_v1.layer(axum::middleware::from_fn_with_state(
+                WebToken(token),
+                require_web_token,
+            )),
+            None => vaults_v1,
+        }
+    };
+
     Router::new()
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
@@ -289,6 +332,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/api/vault-status", get(vault_status_handler))
         .merge(model_setup)
         .merge(settings)
+        .merge(vaults_v1)
         .merge(mcp)
         .merge(protected)
         .merge(attachment)
@@ -889,6 +933,8 @@ pub async fn run_server() {
         cache_db_path: config.cache_db_path.clone(),
         vault_registry,
         vaults,
+        vault_work: vault_work.clone(),
+        managed_git: managed_git.clone(),
         legacy_migration_recovery,
         startup_sqlite: sqlite.clone(),
         ready_vault: Arc::new(RwLock::new(None)),
@@ -1169,10 +1215,15 @@ mod tests {
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
@@ -1238,10 +1289,15 @@ mod tests {
                 ])
                 .expect("save MCP token");
         }
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
@@ -2099,10 +2155,15 @@ mod tests {
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
@@ -3232,10 +3293,15 @@ mod tests {
         let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
         let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
             cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
             legacy_migration_recovery: None,
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
@@ -3633,5 +3699,566 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(delete.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------
+    // #98: /api/v1/vaults discovery, management, and events
+    // -----------------------------------------------------------------
+
+    fn create_vault_request_body(name: &str, path: &std::path::Path, revision: u64) -> Body {
+        Body::from(
+            serde_json::json!({
+                "expected_registry_revision": revision,
+                "name": name,
+                "enabled": true,
+                "source": {"type": "local", "path": path.to_string_lossy()},
+                "exclude_patterns": [],
+            })
+            .to_string(),
+        )
+    }
+
+    async fn json_body(response: Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_discovery_is_reachable_at_zero_vaults() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["registry_revision"], 0);
+        assert_eq!(body["collection_revision"], 0);
+        assert_eq!(body["vaults"], serde_json::json!([]));
+        assert!(body.get("recovery").is_none());
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_requires_web_token_when_configured() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret")));
+
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .header("authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(authorized.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_absent_in_demo_mode() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_create_lists_the_new_vault_with_optimistic_concurrency() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("second-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+
+        // A stale expected revision is rejected with a structured, retryable
+        // conflict rather than silently succeeding.
+        let stale = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Second", &vault_path, 41))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let stale_body = json_body(stale).await;
+        assert_eq!(stale_body["code"], "registry_revision_conflict");
+        assert_eq!(stale_body["retryable"], true);
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Second", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created_body = json_body(created).await;
+        assert_eq!(created_body["registry_revision"], 1);
+        let vault = &created_body["vault"];
+        assert_eq!(vault["name"], "Second");
+        assert_eq!(vault["credential_configured"], false);
+        assert_eq!(vault["capabilities"]["browse"], true);
+        let vault_id = vault["vault_id"].as_str().expect("vault id").to_string();
+
+        let duplicate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Second", &vault_path, 1))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(duplicate).await["code"], "duplicate_vault_name");
+
+        let discovery = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let discovery_body = json_body(discovery).await;
+        assert_eq!(discovery_body["registry_revision"], 1);
+        let vaults = discovery_body["vaults"].as_array().expect("vaults array");
+        assert_eq!(vaults.len(), 1);
+        assert_eq!(vaults[0]["vault_id"], vault_id);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_enable_disable_disconnect_lifecycle() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("lifecycle-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Lifecycle", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let created_body = json_body(created).await;
+        let vault_id = created_body["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+
+        let disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/disable?expected_registry_revision=1"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disabled.status(), StatusCode::OK);
+        let disabled_body = json_body(disabled).await;
+        assert_eq!(disabled_body["vault"]["enabled"], false);
+        assert_eq!(disabled_body["vault"]["capabilities"]["browse"], false);
+
+        let enabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/enable?expected_registry_revision=2"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(enabled.status(), StatusCode::OK);
+        assert_eq!(json_body(enabled).await["vault"]["enabled"], true);
+
+        let disconnected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}?expected_registry_revision=3"
+                    ))
+                    .method("DELETE")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disconnected.status(), StatusCode::OK);
+        let disconnected_body = json_body(disconnected).await;
+        assert!(disconnected_body.get("vault").is_none() || disconnected_body["vault"].is_null());
+        assert_eq!(disconnected_body["registry_revision"], 4);
+        assert!(
+            vault_path.exists(),
+            "disconnect must not delete Vault files"
+        );
+
+        let discovery = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(json_body(discovery).await["vaults"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_edit_identity_change_requires_disabled_then_confirmation() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let first_path = tmp.path().join("identity-first");
+        let second_path = tmp.path().join("identity-second");
+        std::fs::create_dir_all(&first_path).expect("first vault directory");
+        std::fs::create_dir_all(&second_path).expect("second vault directory");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Identity", &first_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+
+        let edit_body = |revision: u64, confirm: bool| {
+            Body::from(
+                serde_json::json!({
+                    "expected_registry_revision": revision,
+                    "name": "Identity",
+                    "source": {"type": "local", "path": second_path.to_string_lossy()},
+                    "exclude_patterns": [],
+                    "confirm_identity_change": confirm,
+                })
+                .to_string(),
+            )
+        };
+
+        // Still enabled: an identity-bearing change is refused outright, even
+        // with confirmation, until the Vault is disabled first.
+        let while_enabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(edit_body(1, true))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(while_enabled.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(while_enabled).await["code"],
+            "identity_change_requires_disabled"
+        );
+
+        let disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/vaults/{vault_id}/disable?expected_registry_revision=1"
+                    ))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disabled.status(), StatusCode::OK);
+
+        let unconfirmed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(edit_body(2, false))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unconfirmed.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(unconfirmed).await["code"],
+            "identity_change_requires_confirmation"
+        );
+
+        let confirmed = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}"))
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(edit_body(2, true))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        let confirmed_body = json_body(confirmed).await;
+        assert_eq!(
+            confirmed_body["vault"]["source"]["path"],
+            second_path.to_string_lossy().as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_sync_and_retry_require_a_managed_git_source() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("local-only");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("LocalOnly", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+
+        let sync = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/sync"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(sync.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(sync).await["code"], "capability_unavailable");
+
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/retry")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(json_body(missing).await["code"], "vault_not_found");
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_malformed_vault_id_is_a_structured_bad_request() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/not-a-uuid/sync")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(response).await["code"], "invalid_vault_id");
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_enable_without_a_revision_query_is_a_structured_bad_request() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("no-query-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("NoQuery", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+
+        // No `?expected_registry_revision=...` query string at all: the
+        // structured error shape must survive extractor rejection, not just
+        // handler-body validation.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/disable"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "invalid_request_query");
+        assert_eq!(body["retryable"], false);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_discovery_reports_registry_recovery_without_crashing() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        std::fs::create_dir_all(state.vault_registry.path().parent().unwrap())
+            .expect("registry directory");
+        std::fs::write(state.vault_registry.path(), b"not valid json").expect("corrupt registry");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert!(body["registry_revision"].is_null());
+        assert_eq!(body["vaults"], serde_json::json!([]));
+        assert_eq!(body["recovery"]["code"], "vault_registry_recovery_required");
+        assert_eq!(body["recovery"]["kind"], "corrupt");
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_events_route_is_not_shadowed_by_the_vault_id_wildcard() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/events")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "text/event-stream");
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_events_stream_reports_the_affected_vault_and_category() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("event-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+
+        let events_request = Request::builder()
+            .uri("/api/v1/vaults/events")
+            .body(Body::empty())
+            .expect("request");
+        let events_response = app.clone().oneshot(events_request).await.expect("response");
+        let mut stream = events_response.into_body().into_data_stream();
+        // The stream immediately yields the current (empty-collection) value.
+        let _initial = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("initial SSE event")
+            .expect("stream item")
+            .expect("body chunk");
+
+        let create_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("EventVault", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(create_response).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+
+        let chunk = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("definition-change SSE event")
+            .expect("stream item")
+            .expect("body chunk");
+        let event = std::str::from_utf8(&chunk).expect("utf8 event");
+        assert!(event.contains("event: vault-collection-revision"));
+        assert!(event.contains(r#""category":"definition""#));
+        assert!(event.contains(&vault_id));
     }
 }
