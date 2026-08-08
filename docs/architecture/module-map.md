@@ -984,9 +984,13 @@ typecheck, then full frontend checks.
 
 **Contract and responsibility:** shared primitives, global tokens/base rules,
 style aggregation, topbar/shell styles, and cross-feature responsive overrides.
-`icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
-and paint with `currentColor`, so callers control them through font-size and
-color. Attribution lives in `THIRD_PARTY_NOTICES.md`.
+The tokens in `base.css` are governed by
+[`docs/design/design-system.html`](../design/design-system.html), which is
+authoritative for visual decisions across every feature stylesheet; a component
+the system does not yet cover gets its section added by the change that ships
+it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to
+`1em` and paint with `currentColor`, so callers control them through font-size
+and color. Attribution lives in `THIRD_PARTY_NOTICES.md`.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected
@@ -994,7 +998,8 @@ features. `App.css` remains an aggregation/composition stylesheet; feature
 styles should migrate only as part of a declared boundary pilot.
 
 **Validation:** affected component/App tests, responsive manual or screenshot
-review when layout changes, and full frontend checks.
+review when layout changes, `python3 docs/design/palette.py` when a `base.css`
+accent or token changes, and full frontend checks.
 
 ### Small shared browser utilities
 

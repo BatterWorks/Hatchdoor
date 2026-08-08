@@ -34,6 +34,16 @@ npm test
 npm run build
 ```
 
+When changing a callout accent or any token in `frontend/src/styles/base.css`:
+
+```bash
+python3 docs/design/palette.py
+```
+
+It checks uniform lightness per theme, the chroma ceilings, and 4.5:1 contrast
+on the tinted and badge surfaces, and exits non-zero on a violation. No
+dependencies.
+
 Changes should come with tests: a bug fix with a regression test that fails
 before the fix, and new behavior with tests that cover it.
 
@@ -102,6 +112,16 @@ Before a structural change, read [`docs/adr/`](docs/adr/README.md). Those record
 are the binding constraints your PR is expected to respect — each index row notes
 what not to break. If your change needs to break one, don't work around it
 quietly: propose a new ADR amending it (the file explains how).
+
+## Visual changes
+
+The frontend is built to a documented design system:
+[`docs/design/design-system.html`](docs/design/design-system.html) holds the
+tokens, component patterns, layouts, and interaction states. Read it before
+changing anything visual, and build from the existing tokens rather than new
+values. If you ship a component the system does not cover, add its section in
+the same pull request — the document is updated by the change that ships the
+component, not afterwards.
 
 ## Reporting security issues
 
