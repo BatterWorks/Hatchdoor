@@ -4,6 +4,7 @@ pub mod diagnostics;
 mod downloads;
 mod settings;
 mod spa;
+mod vault_collection_reads;
 mod vault_content;
 mod vaults;
 mod write_api;
@@ -22,6 +23,10 @@ pub use settings::{
     reveal_mcp_token_handler, reveal_web_token_handler,
 };
 pub use spa::spa_index_handler;
+pub use vault_collection_reads::{
+    vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,
+    vault_scope_stats_handler, vault_scope_tree_handler,
+};
 pub use vault_content::{
     vault_scoped_asset_handler, vault_scoped_note_download_handler, vault_scoped_note_handler,
     vault_scoped_note_links_handler, vault_scoped_resolve_batch_handler,
