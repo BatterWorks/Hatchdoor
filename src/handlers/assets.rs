@@ -1,45 +1,10 @@
 use std::path::{Component, Path as FsPath, PathBuf};
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, run_blocking, vault_unavailable};
-
-pub async fn vault_asset_handler(
-    Path(path): Path<String>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    let Some(vault_path) = state.vault_path().await else {
-        return vault_unavailable().into_response();
-    };
-    let asset_path = match resolve_asset_path(&vault_path, &path) {
-        Ok(path) => path,
-        Err(kind) => {
-            return asset_error_response(kind, &path);
-        }
-    };
-
-    let content_type = content_type_for_path(&asset_path);
-    let read_path = asset_path.clone();
-    let bytes = match run_blocking(move || {
-        std::fs::read(&read_path)
-            .map_err(|error| format!("failed reading asset '{}': {error}", read_path.display()))
-    })
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(err) => return err.into_response(),
-    };
-
-    asset_response(content_type, bytes)
-}
-
 /// Shared response shape for a resolved, in-bounds asset/attachment file,
-/// reused by the legacy unscoped route above and the Vault-scoped route in
-/// `handlers/vault_content.rs`.
+/// used by the Vault-scoped route in `handlers/vault_content.rs`.
 pub(crate) fn asset_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -148,11 +113,6 @@ pub(crate) fn content_type_for_path(path: &FsPath) -> &'static str {
         Some("pdf") => "application/pdf",
         _ => "application/octet-stream",
     }
-}
-
-fn asset_error_response(kind: AssetPathError, requested_path: &str) -> axum::response::Response {
-    let (_code, status, message) = asset_error_parts(kind, requested_path);
-    (status, Json(ErrorResponse { error: message })).into_response()
 }
 
 /// One `AssetPathError` -> (structured code, HTTP status, human message)

@@ -388,7 +388,12 @@ impl<'a> VaultReadCore<'a> {
     /// filesystem must also apply an accepting-operations/existence check of
     /// their own kind, since only `control_and_index` bundles the exact-read
     /// gate and `vault_directory` bundles the directory-existence gate.
-    fn control_block(
+    ///
+    /// Widened to `pub(crate)` for `handlers/vault_write.rs` (#101), the first
+    /// mutation adapter: mutations need the identical not-found/disabled/
+    /// no-runtime gate exact reads already apply, rather than a duplicated
+    /// copy of this match.
+    pub(crate) fn control_block(
         &self,
         vault_id: VaultId,
     ) -> Result<crate::vault_runtime::VaultControlBlock, VaultReadError> {
@@ -577,7 +582,11 @@ fn unavailable(vault_id: VaultId, code: &str, message: String, retryable: bool) 
     }
 }
 
-fn runtime_error(
+/// Widened to `pub(crate)` for `handlers/vault_write.rs` (#101): mutations
+/// surface the same `VaultControlBlock` runtime errors (e.g. from
+/// `acquire_mutation`) that exact reads do, through the same `VaultReadError`
+/// shape and `vault_read_error_response` mapping.
+pub(crate) fn runtime_error(
     vault_id: VaultId,
     error: crate::vault_runtime::VaultRuntimeError,
 ) -> VaultReadError {
