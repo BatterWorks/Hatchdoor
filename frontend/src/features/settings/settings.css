@@ -456,7 +456,10 @@
 }
 
 .settings-toggle[aria-pressed="true"] .settings-toggle-knob {
-  transform: translateX(1.2rem);
+  /* Track is 2.4rem with a 1px border on each side; the knob is 1rem with a
+     1px inset on each side. Travel distance must subtract both border pairs
+     or the knob overshoots the right edge and sits off-center. */
+  transform: translateX(calc(2.4rem - 1rem - 4px));
   background: var(--hot);
 }
 
