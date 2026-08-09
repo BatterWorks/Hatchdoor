@@ -3,6 +3,9 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+use std::sync::Arc;
+
 use serde::Serialize;
 
 use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
@@ -16,6 +19,9 @@ use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultCollectionRuntime;
 
 use super::{LayerSelection, NoteFilters, OutboundLink, SearchMode, tag_prefix_query};
+
+#[cfg(test)]
+type SnapshotReadHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct VaultSearchRequest {
@@ -56,6 +62,8 @@ pub struct VaultSearchCore<'a> {
     cache: &'a SqliteCache,
     vaults: &'a VaultCollectionRuntime,
     embedder: &'a dyn Embedder,
+    #[cfg(test)]
+    after_snapshot_read_hook: Option<SnapshotReadHook>,
 }
 
 impl<'a> VaultSearchCore<'a> {
@@ -68,7 +76,15 @@ impl<'a> VaultSearchCore<'a> {
             cache,
             vaults,
             embedder,
+            #[cfg(test)]
+            after_snapshot_read_hook: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_after_snapshot_read_hook(mut self, hook: SnapshotReadHook) -> Self {
+        self.after_snapshot_read_hook = Some(hook);
+        self
     }
 
     pub fn search(
@@ -86,10 +102,14 @@ impl<'a> VaultSearchCore<'a> {
         }
         let collection = self.vaults.snapshot();
         let selected = selected_vaults(&collection, request.scope)?;
+        let mut cache_snapshot = self
+            .cache
+            .read_snapshot()
+            .map_err(|message| error(None, "search_unavailable", &message, true))?;
         let mut snapshots = BTreeMap::new();
         let mut participants = Vec::with_capacity(selected.len());
         for vault in selected {
-            match self.cache.read_vault_snapshot(vault.vault_id) {
+            match SqliteCache::read_vault_snapshot_on(&cache_snapshot, vault.vault_id) {
                 Ok(Some(snapshot)) => {
                     let state = match snapshot.status.freshness {
                         crate::cache::vault_snapshots::VaultSnapshotFreshness::Fresh => {
@@ -124,19 +144,30 @@ impl<'a> VaultSearchCore<'a> {
             }
         }
 
+        #[cfg(test)]
+        if let Some(hook) = &self.after_snapshot_read_hook {
+            hook();
+        }
+
         validate_named_layers(&request.layers, snapshots.values())?;
         let results = if let Some(tag) = tag_prefix_query(&request.query) {
             tag_results(&request, &snapshots, &tag)
         } else {
             let raw = match request.mode {
-                SearchMode::Semantic => {
-                    semantic_hits(&request, self.cache, self.embedder, &snapshots)?
+                SearchMode::Semantic => semantic_hits(
+                    &request,
+                    self.cache,
+                    &cache_snapshot,
+                    self.embedder,
+                    &snapshots,
+                )?,
+                SearchMode::Keyword => {
+                    keyword_hits(&request, self.cache, &cache_snapshot, &snapshots)?
                 }
-                SearchMode::Keyword => keyword_hits(&request, self.cache, &snapshots)?,
             };
             apply_per_note_cap(raw, request.per_note_cap, request.limit)
         };
-        Ok(VaultReadProjection {
+        let response = VaultReadProjection {
             scope: request.scope,
             collection_revision: collection.collection_revision,
             partial: participants
@@ -147,7 +178,11 @@ impl<'a> VaultSearchCore<'a> {
                 mode: request.mode,
                 results,
             },
-        })
+        };
+        cache_snapshot
+            .commit()
+            .map_err(|message| error(None, "search_unavailable", &message, true))?;
+        Ok(response)
     }
 
     fn push_unavailable(
@@ -175,6 +210,7 @@ impl<'a> VaultSearchCore<'a> {
 fn semantic_hits(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
+    conn: &rusqlite::Connection,
     embedder: &dyn Embedder,
     snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
@@ -185,7 +221,14 @@ fn semantic_hits(
     if request.filters.is_empty() {
         let ids = snapshots.keys().copied().collect::<Vec<_>>();
         let hits = cache
-            .vault_semantic_search_layered(&ids, embedder, &request.query, raw_k, &request.layers)
+            .vault_semantic_search_layered(
+                conn,
+                &ids,
+                embedder,
+                &request.query,
+                raw_k,
+                &request.layers,
+            )
             .map_err(|message| error(None, "search_unavailable", &message, true))?;
         let results = hits
             .into_iter()
@@ -256,11 +299,12 @@ fn semantic_hits(
 fn keyword_hits(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
+    conn: &rusqlite::Connection,
     snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
     let ids = snapshots.keys().copied().collect::<Vec<_>>();
     let raw = cache
-        .vault_fts_search_chunks(&ids, &request.query, &request.layers)
+        .vault_fts_search_chunks(conn, &ids, &request.query, &request.layers)
         .map_err(|message| error(None, "search_unavailable", &message, true))?;
     let max = raw
         .iter()
@@ -503,6 +547,7 @@ fn error(vault_id: Option<VaultId>, code: &str, message: &str, retryable: bool) 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::{Arc, Barrier};
 
     use tempfile::TempDir;
 
@@ -635,6 +680,58 @@ mod tests {
             .expect("one search");
         assert_eq!(one.data.results.len(), 1);
         assert_eq!(one.data.results[0].vault_id, workspace.vault_ids[1]);
+    }
+
+    #[test]
+    fn keyword_search_keeps_metadata_and_hits_in_one_published_generation() {
+        let workspace = workspace(&[("Only", &[("Home.md", "# Old title\n\nneedle old")])]);
+        let vault_id = workspace.vault_ids[0];
+        let cache = SqliteCache::open(workspace._directory.path().join("concurrent.sqlite3"), 384)
+            .expect("file-backed cache");
+        cache
+            .replace_vault_snapshot(
+                vault_id,
+                &VaultIndex::build(&workspace.vault_paths[0]).expect("old index"),
+                &StubEmbedder::new(384),
+            )
+            .expect("publish old generation");
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let hook = Arc::new({
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                entered.wait();
+                release.wait();
+            }
+        });
+
+        std::thread::scope(|scope| {
+            let search = scope.spawn(|| {
+                let embedder = StubEmbedder::new(384);
+                VaultSearchCore::new(&cache, &workspace.vaults, &embedder)
+                    .with_after_snapshot_read_hook(hook)
+                    .search(request(VaultScope::One(vault_id), "needle"))
+                    .expect("search")
+            });
+            entered.wait();
+            write_files(
+                &workspace.vault_paths[0],
+                &[("Home.md", "# New title\n\nneedle new")],
+            );
+            cache
+                .replace_vault_snapshot(
+                    vault_id,
+                    &VaultIndex::build(&workspace.vault_paths[0]).expect("new index"),
+                    &StubEmbedder::new(384),
+                )
+                .expect("publish new generation");
+            release.wait();
+            let response = search.join().expect("search thread");
+            assert_eq!(response.data.results.len(), 1);
+            assert_eq!(response.data.results[0].note_title, "Home");
+            assert!(response.data.results[0].content.contains("needle old"));
+        });
     }
 
     #[test]

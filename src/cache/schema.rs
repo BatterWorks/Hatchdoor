@@ -109,7 +109,20 @@ impl SqliteCache {
     /// build stamps the current identity and there is no old model to conflict.
     pub fn reset_if_embedder_changed(&self, embedder: &dyn Embedder) -> Result<(), String> {
         let current = embedder.identity();
-        if let Some(stored) = self.get_metadata("embedder_id")?
+        let stored = match self.get_metadata("embedder_id")? {
+            Some(identity) => Some(identity),
+            None => {
+                let conn = self.connection()?;
+                conn.query_row(
+                    "SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| format!("read Vault snapshot embedder identity: {error}"))?
+            }
+        };
+        if let Some(stored) = stored
             && stored != current
         {
             warn!(

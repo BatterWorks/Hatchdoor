@@ -95,11 +95,21 @@ impl SqliteCache {
         index: &VaultIndex,
         embedder: &dyn Embedder,
     ) -> Result<(), String> {
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Vault snapshots share one sqlite-vec table, so their vectors must
+        // have one embedding identity and dimension. A model change wipes the
+        // disposable cache before even a single Vault is rebuilt; otherwise a
+        // partial rebuild could make global semantic search compare unrelated
+        // vector spaces.
+        self.reset_if_embedder_changed(embedder)?;
         let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
         let result = (|| {
             let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
             candidate.replace_from_index_with_embedder(index, embedder)?;
-            self.publish_vault_candidate(vault_id, attempt, &candidate)
+            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity())
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -173,6 +183,24 @@ impl SqliteCache {
         Self::read_snapshot_status(&conn, vault_id)
     }
 
+    /// Enumerate every Vault with disposable snapshot state so current
+    /// registry reconciliation can remove disconnected orphans.
+    pub(crate) fn snapshot_vault_ids(&self) -> Result<Vec<VaultId>, String> {
+        let conn = self.read()?;
+        let mut statement = conn
+            .prepare("SELECT vault_id FROM vault_snapshots ORDER BY vault_id")
+            .map_err(|error| format!("prepare snapshot Vault IDs: {error}"))?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("query snapshot Vault IDs: {error}"))?;
+        rows.map(|row| {
+            row.map_err(|error| format!("read snapshot Vault ID: {error}"))?
+                .parse()
+                .map_err(|error| format!("parse snapshot Vault ID: {error}"))
+        })
+        .collect()
+    }
+
     /// Read one participating Vault's state and projection rows from one
     /// SQLite snapshot. This prevents a concurrent publish or disconnect from
     /// pairing a prior freshness value with empty or newer rows.
@@ -202,6 +230,25 @@ impl SqliteCache {
         };
         close?;
         result
+    }
+
+    /// Read one participating snapshot using the caller's already-pinned
+    /// SQLite read transaction. Search uses this with its KNN/FTS query so
+    /// projection metadata and hits always describe one generation.
+    pub(crate) fn read_vault_snapshot_on(
+        conn: &rusqlite::Connection,
+        vault_id: VaultId,
+    ) -> Result<Option<PublishedVaultSnapshot>, String> {
+        let Some(status) = Self::read_snapshot_status(conn, vault_id)? else {
+            return Ok(None);
+        };
+        if !status.participating {
+            return Ok(None);
+        }
+        Ok(Some(PublishedVaultSnapshot {
+            status,
+            read: Self::read_vault_snapshot_rows(conn, vault_id)?,
+        }))
     }
 
     fn read_snapshot_status(
@@ -418,6 +465,7 @@ impl SqliteCache {
         vault_id: VaultId,
         attempt: u64,
         candidate: &SqliteCache,
+        embedder_identity: &str,
     ) -> Result<(), String> {
         let source = candidate.read()?;
         let attempts = self
@@ -446,6 +494,12 @@ impl SqliteCache {
         copy_headings(&tx, &source, &vault_id)?;
         copy_tags(&tx, &source, &vault_id)?;
         copy_chunks_and_vectors(&tx, &source, &vault_id)?;
+        tx.execute(
+            "INSERT INTO metadata(key, value) VALUES ('embedder_id', ?1) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![embedder_identity],
+        )
+        .map_err(|error| format!("stamp shared embedder identity: {error}"))?;
 
         let result = tx
             .commit()
@@ -766,14 +820,34 @@ fn copy_chunks_and_vectors(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
+    use std::sync::{Arc, Barrier};
 
     use tempfile::tempdir;
 
     use super::{VaultSnapshotFreshness, VaultSnapshotStatus};
     use crate::cache::SqliteCache;
-    use crate::embed::StubEmbedder;
+    use crate::embed::{Embedder, StubEmbedder};
     use crate::vault::VaultIndex;
     use crate::vault_registry::VaultId;
+
+    struct NamedEmbedder {
+        inner: StubEmbedder,
+        identity: &'static str,
+    }
+    impl Embedder for NamedEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+        fn identity(&self) -> String {
+            self.identity.to_string()
+        }
+        fn token_count(&self, text: &str, add: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add)
+        }
+    }
 
     fn vault_id(value: &str) -> VaultId {
         VaultId::from_str(value).expect("known Vault ID")
@@ -1003,6 +1077,213 @@ mod tests {
                 participating: true,
                 freshness: VaultSnapshotFreshness::Fresh,
             })
+        );
+    }
+
+    #[test]
+    fn model_change_wipes_other_vault_snapshots_before_partial_rebuild() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let first = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let second = vault_id("22345678-1234-4567-89ab-1234567890ab");
+        let (_first_directory, first_index) = index(&[("Home.md", "# Home\n\nfirst")]);
+        let (_second_directory, second_index) = index(&[("Home.md", "# Home\n\nsecond")]);
+        let old_model = StubEmbedder::new(384);
+        let new_model = StubEmbedder::new(512);
+
+        cache
+            .replace_vault_snapshot(first, &first_index, &old_model)
+            .expect("publish first old-model snapshot");
+        cache
+            .replace_vault_snapshot(second, &second_index, &old_model)
+            .expect("publish second old-model snapshot");
+        cache
+            .replace_vault_snapshot(first, &first_index, &new_model)
+            .expect("publish first rebuilt snapshot");
+
+        assert!(
+            cache
+                .snapshot_status(first)
+                .expect("first status")
+                .expect("first rebuilt snapshot")
+                .participating
+        );
+        assert_eq!(
+            cache.snapshot_status(second).expect("second status"),
+            None,
+            "a partial rebuild must not leave old-model vectors participating"
+        );
+        assert_eq!(
+            cache
+                .get_metadata("embedder_id")
+                .expect("embedder identity"),
+            Some("stub-512".to_string())
+        );
+    }
+
+    #[test]
+    fn concurrent_same_dimension_model_changes_leave_one_shared_identity() {
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+        let first = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let second = vault_id("22345678-1234-4567-89ab-1234567890ab");
+        let (_a, first_index) = index(&[("Home.md", "# First")]);
+        let (_b, second_index) = index(&[("Home.md", "# Second")]);
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            for (id, index, name) in [
+                (first, &first_index, "model-a-384"),
+                (second, &second_index, "model-b-384"),
+            ] {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    cache
+                        .replace_vault_snapshot(
+                            id,
+                            index,
+                            &NamedEmbedder {
+                                inner: StubEmbedder::new(384),
+                                identity: name,
+                            },
+                        )
+                        .expect("publish");
+                });
+            }
+        });
+        let global = cache
+            .get_metadata("embedder_id")
+            .expect("global")
+            .expect("identity");
+        let conn = cache.connection().expect("conn");
+        let mut stmt = conn
+            .prepare("SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id'")
+            .expect("metadata");
+        let identities = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows");
+        assert!(!identities.is_empty());
+        assert!(identities.iter().all(|identity| identity == &global));
+    }
+
+    #[test]
+    fn snapshot_and_production_populate_share_one_model_epoch() {
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+        let vault = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_a, snapshot_index) = index(&[("Snapshot.md", "# Snapshot")]);
+        let (_b, legacy_index) = index(&[("Legacy.md", "# Legacy")]);
+        let barrier = Arc::new(Barrier::new(2));
+        std::thread::scope(|scope| {
+            let cache_a = cache.clone();
+            let barrier_a = barrier.clone();
+            scope.spawn(move || {
+                barrier_a.wait();
+                cache_a
+                    .replace_vault_snapshot(
+                        vault,
+                        &snapshot_index,
+                        &NamedEmbedder {
+                            inner: StubEmbedder::new(384),
+                            identity: "model-a-384",
+                        },
+                    )
+                    .expect("snapshot");
+            });
+            let cache_b = cache.clone();
+            let barrier_b = barrier.clone();
+            scope.spawn(move || {
+                barrier_b.wait();
+                cache_b
+                    .replace_from_index_with_progress(
+                        &legacy_index,
+                        &NamedEmbedder {
+                            inner: StubEmbedder::new(384),
+                            identity: "model-b-384",
+                        },
+                        None,
+                        true,
+                    )
+                    .expect("legacy");
+            });
+        });
+        let global = cache
+            .get_metadata("embedder_id")
+            .expect("global")
+            .expect("identity");
+        let conn = cache.connection().expect("conn");
+        let mut statement = conn
+            .prepare("SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id'")
+            .expect("metadata");
+        let identities = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows");
+        assert!(identities.iter().all(|identity| identity == &global));
+    }
+
+    #[test]
+    fn missing_global_identity_uses_vault_metadata_before_model_change() {
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let first = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let second = vault_id("22345678-1234-4567-89ab-1234567890ab");
+        let (_a, first_index) = index(&[("Home.md", "# First")]);
+        let (_b, second_index) = index(&[("Home.md", "# Second")]);
+        let old = NamedEmbedder {
+            inner: StubEmbedder::new(384),
+            identity: "model-old-384",
+        };
+        let new = NamedEmbedder {
+            inner: StubEmbedder::new(384),
+            identity: "model-new-384",
+        };
+        cache
+            .replace_vault_snapshot(first, &first_index, &old)
+            .expect("old");
+        cache
+            .connection()
+            .expect("conn")
+            .execute("DELETE FROM metadata WHERE key = 'embedder_id'", [])
+            .expect("drop global stamp");
+        cache
+            .replace_vault_snapshot(second, &second_index, &new)
+            .expect("new");
+        assert_eq!(cache.snapshot_status(first).expect("first"), None);
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("global"),
+            Some("model-new-384".to_string())
+        );
+    }
+
+    #[test]
+    fn failing_global_identity_stamp_rolls_back_target_publication() {
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let first = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let second = vault_id("22345678-1234-4567-89ab-1234567890ab");
+        let (_a, first_index) = index(&[("Home.md", "# First")]);
+        let (_b, second_index) = index(&[("Home.md", "# Second")]);
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_vault_snapshot(first, &first_index, &embedder)
+            .expect("first");
+        cache.connection().expect("conn").execute_batch("CREATE TRIGGER fail_embedder_stamp BEFORE INSERT ON metadata WHEN NEW.key = 'embedder_id' BEGIN SELECT RAISE(ABORT, 'stamp failed'); END;").expect("trigger");
+        assert!(
+            cache
+                .replace_vault_snapshot(second, &second_index, &embedder)
+                .is_err()
+        );
+        assert_eq!(cache.snapshot_status(second).expect("second"), None);
+        assert!(
+            cache
+                .snapshot_status(first)
+                .expect("first")
+                .expect("snapshot")
+                .participating
+        );
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("global"),
+            Some("stub-384".to_string())
         );
     }
 }

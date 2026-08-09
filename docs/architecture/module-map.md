@@ -177,6 +177,18 @@ that production inventory are still checked for stale paths and duplicates.
   runtime, atomically publishes only that Vault's shared snapshot, and
   publishes Ready, Stale, or Unavailable search state without changing another
   Vault's snapshot or status.
+  Disabled runtime state becomes externally nonparticipating immediately;
+  reconciliation retires the corresponding disposable snapshot after admitted
+  work reaches its safe boundary and before its mutation response completes:
+  disable removes participation and disconnect deletes only that Vault's rows.
+  A short reconciliation phase lock makes state application and immediate
+  coordinator drain/activation decisions atomic across competing revisions,
+  but is released before any safe-boundary wait. A retirement failure is
+  returned through the mutation boundary rather than reported as ordinary
+  lifecycle success.
+  A current-revision retry or restart converges disabled participation and
+  removes cached Vault IDs absent from the registry; an older revision fences
+  itself before those cache side effects.
 
 **Consumed dependencies:** nearly every backend boundary. This is expected for
 a composition boundary and is not a reason to introduce per-domain service
@@ -625,6 +637,8 @@ stale/participation state, attempt ordering, and Vault-local disposal in the sha
 also supplies parsing/hash behavior to vault indexing. The crate-private
 `is_recognized_legacy_cache` inspection seam owns the supported legacy schema
 fingerprint and opens existing files read-only for the one-time migration.
+`ReadSnapshot` is the crate-private pinned-read seam used where participant
+metadata and cache queries must observe one published generation.
 
 **Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec.
@@ -645,6 +659,10 @@ and embedder identity/dimensions.
   query-only reads (ADR-06).
 - Schema or embedder identity mismatch rebuilds rather than mixing data.
 - A refresh commits a coherent new read snapshot.
+- Shared semantic vectors have one embedder identity and dimension; a mismatch
+  wipes the disposable cache before any partial rebuild can participate.
+  The cache-wide model epoch covers snapshot and legacy builders, and stamps
+  the shared identity atomically with snapshot participation.
 - Every shared snapshot row and relationship is Vault-ID-qualified; failed
   replacement retains the prior snapshot as stale, disabling removes only
   participation, and disconnect deletes only that Vault's disposable rows.
@@ -719,6 +737,8 @@ methods, and frontend Search contracts.
   Vault snapshot, caps by `(Vault ID, slug)`, and never deduplicates equal
   content or note names across Vaults. Staleness is participant status, not a
   relevance penalty.
+- Participant metadata, note projections, and KNN/FTS hits for one search
+  response come from one pinned SQLite generation.
 - A structure-only frontend Search pilot must not modify these paths.
 
 **Validation:** `cargo test search`, focused Vault-scoped and cache query tests,
