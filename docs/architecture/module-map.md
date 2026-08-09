@@ -102,8 +102,8 @@ that production inventory are still checked for stale paths and duplicates.
 - `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
   `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
 - `VaultCollectionRuntime` reconstructs disposable background turns at startup
-  and, on process shutdown, stops new work and waits only for the active turn's
-  safe boundary.
+  and, on process shutdown, stops new work and waits only for active
+  background-turn and foreground-mutation safe boundaries.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
@@ -127,8 +127,10 @@ that production inventory are still checked for stale paths and duplicates.
   source, mode, lifecycle phase, and derived capabilities. This is the rebased
   single-configured-Vault adapter retained for the still-unmigrated application
   surfaces; it is not the collection authority.
-- `VaultCollectionRuntime` reconciles registry snapshots into zero, one, or
-  many Vault-ID-keyed `VaultControlBlock` values. Each enabled block owns its
+- `VaultCollectionRuntime` reconciles only newer registry snapshots into zero,
+  one, or many Vault-ID-keyed `VaultControlBlock` values; an older asynchronous
+  reconciliation cannot replace or re-admit work after a newer collection is
+  live. Each enabled block owns its
   definition and resolved Markdown root, capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
   independently cancellable watcher. Status changes and `reconcile()` advance a
@@ -139,11 +141,12 @@ that production inventory are still checked for stale paths and duplicates.
   still learns the current revision from the watch channel's latest value and
   should refetch broadly rather than trust `vault_ids` as a complete history.
   Disabling, replacing, or disconnecting a block first revokes operation
-  acceptance, publishes its
-  cancellation signal, and stops its watcher, including through already-held
-  handles. Unchanged Vaults retain their control blocks when another definition
-  changes; disabled definitions remain visible with no capabilities and no
-  active runtime.
+  acceptance, publishes its cancellation signal, and stops its watcher,
+  including through already-held handles; retirement waits for both its active
+  coordinator turn and any already-admitted foreground mutation to reach their
+  safe boundaries. Unchanged Vaults retain their control blocks when another
+  definition changes; disabled definitions remain visible with no capabilities
+  and no active runtime.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records.
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
@@ -938,8 +941,9 @@ and the collection-wide
 SSE event stream — the first `/api/v1` surface. It is the first HTTP consumer
 of the Vault collection registry's write operations and of
 `VaultCollectionRuntime::reconcile_and_reconstruct`, which every mutation calls
-in the same request so background Index/Git work is requested for a newly
-enabled Vault without a separate reconciliation pass. Deliberately not gated by
+in the same request through its foreground-mutation safe boundary; background
+Index/Git draining may continue asynchronously, while a newly enabled Vault's
+work is still requested without a separate reconciliation pass. Deliberately not gated by
 `require_vault_ready` (a legacy single-configured-Vault signal): discovery and
 creating the first Vault stay reachable at zero enabled Vaults, and discovery
 reports an explicit `recovery` object rather than erroring when the persisted

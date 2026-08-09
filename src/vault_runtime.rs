@@ -513,6 +513,13 @@ impl VaultControlBlock {
         Ok(guard)
     }
 
+    /// Wait until a mutation that was admitted before this control block was
+    /// retired has completed. Callers must revoke operation admission first,
+    /// so a queued mutation re-checks that state and cannot begin afterwards.
+    async fn wait_for_mutation_safe_boundary(&self) {
+        let _guard = self.mutation_lock.clone().lock_owned().await;
+    }
+
     pub async fn acquire_refresh(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
@@ -747,11 +754,18 @@ impl VaultCollectionRuntime {
     /// Existing enabled runtimes are retained when their definition and path
     /// are unchanged, so an unrelated Vault update cannot replace their locks
     /// or in-memory status.
-    pub fn reconcile(&self, registry: &VaultRegistryStore, snapshot: &VaultRegistrySnapshot) {
+    pub fn reconcile(
+        &self,
+        registry: &VaultRegistryStore,
+        snapshot: &VaultRegistrySnapshot,
+    ) -> bool {
         let mut state = self
             .state
             .write()
             .expect("Vault collection runtime poisoned");
+        if snapshot.revision() <= state.registry_revision {
+            return false;
+        }
         let previous = std::mem::take(&mut state.vaults);
         let mut next = BTreeMap::new();
         let revision_publisher = CollectionRevisionPublisher {
@@ -829,6 +843,7 @@ impl VaultCollectionRuntime {
         if let Some(event) = event {
             self.revisions.send_replace(event);
         }
+        true
     }
 
     /// Rebuild disposable background work from the authoritative collection and
@@ -846,8 +861,49 @@ impl VaultCollectionRuntime {
         coordinator: &VaultWorkCoordinator,
         managed_git: &ManagedGitScheduler,
     ) {
+        self.reconcile_and_reconstruct_with_mutation_boundary(
+            registry,
+            snapshot,
+            coordinator,
+            managed_git,
+            None,
+        )
+        .await;
+    }
+
+    pub(crate) async fn reconcile_and_reconstruct_and_wait_for_mutation_boundary(
+        &self,
+        registry: &VaultRegistryStore,
+        snapshot: &VaultRegistrySnapshot,
+        coordinator: &VaultWorkCoordinator,
+        managed_git: &ManagedGitScheduler,
+        mutation_boundary: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.reconcile_and_reconstruct_with_mutation_boundary(
+            registry,
+            snapshot,
+            coordinator,
+            managed_git,
+            Some(mutation_boundary),
+        )
+        .await;
+    }
+
+    async fn reconcile_and_reconstruct_with_mutation_boundary(
+        &self,
+        registry: &VaultRegistryStore,
+        snapshot: &VaultRegistrySnapshot,
+        coordinator: &VaultWorkCoordinator,
+        managed_git: &ManagedGitScheduler,
+        mutation_boundary: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
         let previously_active = self.active_runtimes();
-        self.reconcile(registry, snapshot);
+        if !self.reconcile(registry, snapshot) {
+            if let Some(mutation_boundary) = mutation_boundary {
+                let _ = mutation_boundary.send(());
+            }
+            return;
+        }
         let active = self.active_runtimes();
         let retired = previously_active
             .iter()
@@ -855,16 +911,25 @@ impl VaultCollectionRuntime {
                 (!active.get(vault_id).is_some_and(|next_runtime| {
                     Arc::ptr_eq(&previous_runtime.snapshot, &next_runtime.snapshot)
                 }))
-                .then_some(*vault_id)
+                .then_some((*vault_id, previous_runtime.clone()))
             })
             .collect::<Vec<_>>();
 
-        for vault_id in &retired {
+        for (vault_id, _) in &retired {
             coordinator.drain_vault(*vault_id);
             managed_git.deactivate(*vault_id);
         }
-        for vault_id in &retired {
+        for (_, runtime) in &retired {
+            runtime.wait_for_mutation_safe_boundary().await;
+        }
+        if let Some(mutation_boundary) = mutation_boundary {
+            let _ = mutation_boundary.send(());
+        }
+        for (vault_id, _) in &retired {
             coordinator.wait_for_vault_safe_boundary(*vault_id).await;
+        }
+        if !self.has_registry_revision(snapshot.revision()) {
+            return;
         }
         for (vault_id, runtime) in &active {
             coordinator.activate_vault(*vault_id);
@@ -895,7 +960,8 @@ impl VaultCollectionRuntime {
     }
 
     /// Revoke every Vault runtime, discard queued background work, and wait
-    /// only for the already-active operation to reach its safe boundary.
+    /// only for already-active background turns and foreground mutations to
+    /// reach their safe boundaries.
     pub async fn shutdown(&self, coordinator: &VaultWorkCoordinator) {
         let runtimes = self
             .state
@@ -908,10 +974,13 @@ impl VaultCollectionRuntime {
                 VaultCollectionEntry::Disabled(_) => None,
             })
             .collect::<Vec<_>>();
-        for runtime in runtimes {
+        for runtime in &runtimes {
             runtime.revoke();
         }
         coordinator.shutdown();
+        for runtime in &runtimes {
+            runtime.wait_for_mutation_safe_boundary().await;
+        }
         coordinator.wait_for_shutdown_boundary().await;
     }
 
@@ -949,6 +1018,14 @@ impl VaultCollectionRuntime {
                 VaultCollectionEntry::Disabled(_) => None,
             })
             .collect()
+    }
+
+    fn has_registry_revision(&self, registry_revision: u64) -> bool {
+        self.state
+            .read()
+            .expect("Vault collection runtime poisoned")
+            .registry_revision
+            == registry_revision
     }
 
     pub fn subscribe_changes(&self) -> Option<tokio::sync::broadcast::Receiver<VaultId>> {

@@ -34,7 +34,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::WatchStream;
-use tracing::{error, warn};
+use tracing::error;
 
 use crate::app_state::AppState;
 use crate::vault_registry::{
@@ -414,42 +414,27 @@ fn vault_summary_for(
     Some(vault_summary(&definition, &runtime_snapshot))
 }
 
-/// Bound on how long a mutation response waits for the live runtime to catch
-/// up with the registry commit it just made. Retiring a Vault (disable,
-/// disconnect, or an identity-bearing edit) waits for that Vault's already
-/// in-flight background Git/Index turn to reach its safe boundary rather than
-/// force-cancelling it — for a large managed-Git clone that can take minutes.
-/// The registry commit this reconciles is already durable by the time this
-/// runs, and the affected Vault's control-block swap happens synchronously
-/// inside `reconcile_and_reconstruct` before its first await, so a timeout
-/// here only means this one response is built slightly ahead of full
-/// background-work bookkeeping — not that the response is wrong. Spawning
-/// (rather than racing the call directly) keeps reconciliation running to
-/// completion in the background even after a timeout: `/api/v1/vaults` and
-/// the event stream reflect it once it finishes.
-const RECONCILE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
 async fn reconcile_after_commit(state: &AppState, snapshot: &VaultRegistrySnapshot) {
     let vaults = state.vaults.clone();
     let registry = state.vault_registry.clone();
     let vault_work = state.vault_work.clone();
     let managed_git = state.managed_git.clone();
     let snapshot = snapshot.clone();
-    let reconciled = tokio::spawn(async move {
+    let (mutation_boundary, mutation_safe) = tokio::sync::oneshot::channel();
+    let _reconciled = tokio::spawn(async move {
         vaults
-            .reconcile_and_reconstruct(&registry, &snapshot, &vault_work, &managed_git)
+            .reconcile_and_reconstruct_and_wait_for_mutation_boundary(
+                &registry,
+                &snapshot,
+                &vault_work,
+                &managed_git,
+                mutation_boundary,
+            )
             .await;
     });
-    if tokio::time::timeout(RECONCILE_TIMEOUT, reconciled)
+    mutation_safe
         .await
-        .is_err()
-    {
-        warn!(
-            "Vault collection reconciliation is still catching up on an in-flight background \
-             turn after a registry mutation; it continues in the background and this response \
-             reflects the registry commit, not yet the fully reconciled runtime status"
-        );
-    }
+        .expect("Vault reconciliation task must report its mutation safe boundary");
 }
 
 fn mutation_response(
