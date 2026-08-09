@@ -159,13 +159,17 @@ that production inventory are still checked for stale paths and duplicates.
   later application-surface packets.
 - `dispatch_managed_git_turn` is the `VaultWorkKind::Git` execution closure
   `src/server.rs`'s worker loop calls: it resolves one managed-Git Vault's
-  current definition and credentials, runs `git::run_managed_git_turn` off the
-  async runtime via `spawn_blocking`, and publishes the result through
+  current definition and credentials, obtains that Vault's checkout lease
+  from `ManagedGitScheduler` (reused across turns for as long as the Vault
+  stays active in this process — issue #95), runs `git::run_managed_git_turn`
+  off the async runtime via `spawn_blocking`, hands the lease back to the
+  scheduler afterward, and publishes the result through
   `VaultControlBlock::set_git_status`/`set_local_content_status` and
   `ManagedGitScheduler::record_outcome`; a successful acquisition with usable
   local Markdown also requests that Vault's Index turn through the same
   coordinator. `reconcile_and_reconstruct` activates or deactivates a
-  managed-Git Vault's scheduler entry alongside its coordinator admission.
+  managed-Git Vault's scheduler entry (and, on deactivation, releases any
+  held checkout lease) alongside its coordinator admission.
   `set_local_content_status` (mirroring
   `set_search_status`/`set_git_status`) republishes authoritative
   local-content availability after a Git turn, since `activation_snapshot`
@@ -873,14 +877,26 @@ is the concrete `acquire_or_reuse`-then-`synchronize_managed_checkout` operation
 `ManagedSyncError` into a redacted `VaultWorkError{code, message, retryable}`,
 distinguishing authentication failures (`ManagedCheckoutError::AuthenticationFailed`,
 `ManagedSyncError::Authentication`, detected via `git2::ErrorCode::Auth`) from
-other remote failures. `ManagedGitScheduler` is one process-wide instance —
-mirroring the coordinator's single-worker design, it adds no per-Vault
-execution lane — that decides *when* to request a Vault's next Git turn:
-`DEFAULT_POLL_INTERVAL` (24h, not yet user-configurable) after a success or any
-non-retryable failure (including authentication, which never backs off — it
-waits for a configuration change, a manual `sync_now`/`retry_now`, a restart, or
-the normal schedule), or bounded exponential backoff after a retryable
-(transient) failure. `spawn_scheduler_tick` drives it on `DEFAULT_TICK_INTERVAL`.
+other remote failures. It takes a `&ManagedCheckoutLease` rather than acquiring
+its own (issue #95): the process-lifetime ownership boundary the checkout
+lease documents is held by the caller across every turn for a Vault, not
+reacquired and dropped within each one. `ManagedGitScheduler` is one
+process-wide instance — mirroring the coordinator's single-worker design, it
+adds no per-Vault execution lane — that decides *when* to request a Vault's
+next Git turn: `DEFAULT_POLL_INTERVAL` (24h, not yet user-configurable) after a
+success or any non-retryable failure (including authentication, which never
+backs off — it waits for a configuration change, a manual `sync_now`/
+`retry_now`, a restart, or the normal schedule), or bounded exponential backoff
+after a retryable (transient) failure. `spawn_scheduler_tick` drives it on
+`DEFAULT_TICK_INTERVAL`. `ManagedGitScheduler` also holds each active Vault's
+`ManagedCheckoutLease` for that Vault's entire activation lifetime in this
+process, through its crate-private `take_or_acquire_checkout_lease`/
+`keep_checkout_lease` pair: the former returns an already-held lease or
+acquires a fresh one, the latter hands a lease back after a turn so it stays
+held (and its OS-level lock stays exclusive to this process) across turns
+instead of being released at the end of each one. `deactivate` drops any held
+lease, releasing the lock immediately for retirement, disable, disconnect, or
+restart-reuse by a later process.
 
 `run_local_history_git_turn` is an `ExistingGit` + `VaultGitMode::LocalHistory`
 Vault's counterpart to `run_managed_git_turn`: given the Vault's already-resolved
@@ -905,7 +921,14 @@ credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
 `ManagedGitScheduler`/`run_managed_git_turn` are consumed by runtime
 composition (`src/vault_runtime.rs::dispatch_managed_git_turn` and
 `reconcile_and_reconstruct`, which activates/deactivates a managed-Git Vault's
-schedule alongside its coordinator admission) and by `src/server.rs`, which
+schedule alongside its coordinator admission). `dispatch_managed_git_turn_with`
+obtains the Vault's checkout lease via
+`ManagedGitScheduler::take_or_acquire_checkout_lease` before `spawn_blocking`,
+passes it into the injected turn (`run_managed_git_turn` in production), and
+hands it back with `keep_checkout_lease` once the turn completes, so the
+lease survives across turns without being borrowed across the
+`spawn_blocking` boundary — and by
+`src/server.rs`, which
 owns the one global consumer loop driving `VaultWorkWorker::run_next` — the
 worker/scheduler-tick construction and dispatch this module map previously
 noted as missing. `run_local_history_git_turn` is likewise consumed by

@@ -12,7 +12,9 @@ use tracing::error;
 use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::VaultSnapshotFreshness;
 use crate::embed::Embedder;
-use crate::git::{ManagedGitScheduler, ManagedGitTurnConfig, run_managed_git_turn};
+use crate::git::{
+    ManagedCheckoutLease, ManagedGitScheduler, ManagedGitTurnConfig, run_managed_git_turn,
+};
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault_registry::{
     VaultDefinition, VaultGitMode, VaultId, VaultRegistrySnapshot, VaultRegistryStore,
@@ -1640,7 +1642,10 @@ async fn dispatch_managed_git_turn_with<F>(
     execute: F,
 ) -> Result<(), VaultWorkError>
 where
-    F: FnOnce(&ManagedGitTurnConfig) -> Result<crate::git::ManagedGitOutcome, VaultWorkError>
+    F: FnOnce(
+            &ManagedGitTurnConfig,
+            &ManagedCheckoutLease,
+        ) -> Result<crate::git::ManagedGitOutcome, VaultWorkError>
         + Send
         + 'static,
 {
@@ -1737,15 +1742,59 @@ where
         author_name: author_name.to_string(),
         author_email: author_email.to_string(),
     };
-    let result = tokio::task::spawn_blocking(move || execute(&config))
-        .await
-        .unwrap_or_else(|join_error| {
+
+    // Obtain this Vault's checkout lease — reused from a previous turn if
+    // `ManagedGitScheduler` is already holding one, or freshly acquired
+    // otherwise (only the first turn since activation pays that one-time,
+    // local-filesystem-only cost; see
+    // `ManagedGitScheduler::take_or_acquire_checkout_lease`). Extracted
+    // *before* `spawn_blocking` — an owned `ManagedCheckoutLease` has no
+    // lifetime tied to `managed_git`, so it (and `config`) can move into
+    // the blocking closure below without borrowing `managed_git` there,
+    // which `spawn_blocking`'s `'static` bound would otherwise forbid.
+    let lease = match managed_git
+        .take_or_acquire_checkout_lease(config.state_directory.clone(), vault_id)
+    {
+        Ok(lease) => lease,
+        Err(error) => {
+            let result = Err(crate::git::managed_task::classify_checkout_error(error));
+            publish_managed_git_turn_outcome(
+                &control_block,
+                coordinator,
+                managed_git,
+                vault_id,
+                &result,
+            );
+            return result.map(|_: crate::git::ManagedGitOutcome| ());
+        }
+    };
+
+    // The lease travels into the blocking task and back out again — it is
+    // never dropped here, only borrowed by `execute` — so the scheduler can
+    // hand it back to `keep_checkout_lease` afterward and keep holding it
+    // across turns instead of releasing its OS-level lock at the end of
+    // this one (issue #95).
+    let outcome = tokio::task::spawn_blocking(move || {
+        let result = execute(&config, &lease);
+        (result, lease)
+    })
+    .await;
+    let (result, lease) = match outcome {
+        Ok((result, lease)) => (result, Some(lease)),
+        Err(join_error) => (
             Err(VaultWorkError::new(
                 "managed_git_task_panicked",
                 join_error.to_string(),
                 false,
-            ))
-        });
+            )),
+            // The panicking task owned `lease`; it was dropped (releasing
+            // the OS lock) during unwinding, so there is nothing to keep.
+            None,
+        ),
+    };
+    if let Some(lease) = lease {
+        managed_git.keep_checkout_lease(vault_id, lease);
+    }
 
     publish_managed_git_turn_outcome(&control_block, coordinator, managed_git, vault_id, &result);
     result.map(|_| ())

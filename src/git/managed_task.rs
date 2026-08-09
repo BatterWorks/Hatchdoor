@@ -92,8 +92,16 @@ pub enum ManagedGitOutcome {
 /// This is the concrete operation `VaultWorkKind::Git` executes through the
 /// coordinator. It performs blocking `git2`/filesystem I/O and must be run
 /// from `spawn_blocking` by its async caller.
+///
+/// Takes `lease` rather than acquiring its own: the process-lifetime
+/// ownership boundary this documents (see [`classify_checkout_error`]'s
+/// `OwnershipUnavailable` arm) is held by the caller — in production,
+/// [`super::managed_task::ManagedGitScheduler`] — across every turn for a
+/// Vault for as long as it stays active in this process, not just for the
+/// duration of one turn. This function only borrows it.
 pub fn run_managed_git_turn(
     config: &ManagedGitTurnConfig,
+    lease: &ManagedCheckoutLease,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let sync_mode = match config.mode {
         VaultGitMode::PullOnly => ManagedSyncMode::PullOnly,
@@ -109,8 +117,6 @@ pub fn run_managed_git_turn(
         }
     };
 
-    let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
-        .map_err(classify_checkout_error)?;
     let credentials = config
         .credentials
         .as_ref()
@@ -126,7 +132,7 @@ pub fn run_managed_git_turn(
         vault_subdirectory: config.vault_subdirectory.clone(),
         credentials: credentials.clone(),
     };
-    let checkout = acquire_or_reuse(&lease, &request).map_err(classify_checkout_error)?;
+    let checkout = acquire_or_reuse(lease, &request).map_err(classify_checkout_error)?;
 
     let sync_config = ManagedSyncConfig {
         repository_path: checkout.repository_path,
@@ -148,14 +154,21 @@ pub fn run_managed_git_turn(
 /// Classify a checkout failure. `retryable` decides whether the scheduler
 /// backs off and retries automatically or waits for the normal schedule, a
 /// manual retry, a configuration change, or a restart.
-fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkError {
+///
+/// `pub(crate)`: also used by `vault_runtime::dispatch_managed_git_turn_with`
+/// to classify a lease-acquisition failure at dispatch time (before
+/// `run_managed_git_turn` runs), so both classify the same
+/// `ManagedCheckoutError` the same way instead of duplicating this table.
+pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkError {
     use ManagedCheckoutError::*;
     let (code, retryable) = match error {
         StateDirectoryUnavailable => ("managed_git_state_directory_unavailable", false),
-        // Contention on the process-lifetime lock. In normal operation the
-        // coordinator already keeps at most one turn per Vault in flight, so
-        // this indicates another process (or a concurrent Hatchdoor
-        // instance) holds it; worth a bounded automatic retry.
+        // Contention on the process-lifetime lock. `ManagedGitScheduler`
+        // holds this Vault's lease for as long as it stays active in this
+        // process (see `ManagedGitScheduler::take_or_acquire_checkout_lease`),
+        // so reaching this from a normal turn means another process (or a
+        // concurrent Hatchdoor instance) holds it; worth a bounded automatic
+        // retry.
         OwnershipUnavailable => ("managed_git_checkout_busy", true),
         UnsafeRepositoryUrl => ("managed_git_unsafe_url", false),
         // A preserved-and-rejected structural mismatch (unknown directory,
@@ -197,6 +210,20 @@ struct ScheduleState {
     backoff: Option<Duration>,
 }
 
+/// One tracked Vault's schedule and, once obtained, its held checkout
+/// lease — kept in the *same* map entry, behind the *same* mutex, so a
+/// removal ([`ManagedGitScheduler::deactivate`]) and a check-then-store of
+/// the lease ([`ManagedGitScheduler::keep_checkout_lease`]) can never
+/// interleave. Splitting these into two independently locked maps was
+/// exactly issue #95's reopened race: a `deactivate` running between
+/// `keep_checkout_lease`'s tracked-check and its insert could leave a
+/// lease stored for a Vault `deactivate` had already stopped tracking,
+/// leaking its OS-level lock indefinitely.
+struct VaultScheduleEntry {
+    schedule: ScheduleState,
+    lease: Option<ManagedCheckoutLease>,
+}
+
 /// Decides *when* to request `VaultWorkKind::Git` for each active managed-Git
 /// Vault: a daily tick, an immediate manual Sync/Retry-now, or a bounded
 /// exponential backoff after a transient failure.
@@ -204,10 +231,25 @@ struct ScheduleState {
 /// One instance drives every managed-Git Vault in the process — mirroring
 /// the coordinator's own single-worker design, this adds no per-Vault
 /// execution lane (ADR-13).
+///
+/// Also owns each active Vault's [`ManagedCheckoutLease`] for the Vault's
+/// entire active lifetime in this process (issue #95): the lease is
+/// obtained lazily by the first turn that needs it
+/// ([`Self::take_or_acquire_checkout_lease`]), handed back after every turn
+/// ([`Self::keep_checkout_lease`]), and dropped — releasing the underlying
+/// OS-level lock — only by [`Self::deactivate`]. This is what makes the
+/// checkout ownership boundary process-lifetime rather than turn-scoped: a
+/// second process (or a concurrent Hatchdoor instance) cannot acquire the
+/// same lock in the gap between two scheduled turns. The schedule and the
+/// lease share one [`VaultScheduleEntry`] behind one `Mutex`, so a
+/// concurrent `deactivate` (the coordinator's own doc comment on
+/// `drain_vault` confirms an in-flight turn is never force-cancelled, so
+/// this is the designed-for case, not an edge case) can never race a turn
+/// handing its lease back — see [`VaultScheduleEntry`].
 pub struct ManagedGitScheduler {
     coordinator: VaultWorkCoordinator,
     poll_interval: Duration,
-    state: Mutex<BTreeMap<VaultId, ScheduleState>>,
+    entries: Mutex<BTreeMap<VaultId, VaultScheduleEntry>>,
 }
 
 impl ManagedGitScheduler {
@@ -219,31 +261,99 @@ impl ManagedGitScheduler {
         Self {
             coordinator,
             poll_interval,
-            state: Mutex::new(BTreeMap::new()),
+            entries: Mutex::new(BTreeMap::new()),
         }
     }
 
     /// Register a Vault so it participates in scheduled polling, due
     /// immediately. Idempotent: re-activating an already-tracked Vault
-    /// leaves its current schedule (including an in-progress backoff)
-    /// untouched, so a `reconcile()` that retains an unchanged Vault does
-    /// not reset it.
+    /// leaves its current schedule (including an in-progress backoff and any
+    /// held checkout lease) untouched, so a `reconcile()` that retains an
+    /// unchanged Vault does not reset it.
     pub fn activate(&self, vault_id: VaultId) {
-        let mut state = self.state.lock().expect("managed Git scheduler poisoned");
-        state.entry(vault_id).or_insert(ScheduleState {
-            next_attempt: Instant::now(),
-            backoff: None,
+        let mut entries = self.entries.lock().expect("managed Git scheduler poisoned");
+        entries.entry(vault_id).or_insert(VaultScheduleEntry {
+            schedule: ScheduleState {
+                next_attempt: Instant::now(),
+                backoff: None,
+            },
+            lease: None,
         });
     }
 
     /// Stop tracking a Vault (disabled, disconnected, or retired). Any
     /// coordinator-side pending work is discarded separately by
-    /// `VaultWorkCoordinator::drain_vault`.
+    /// `VaultWorkCoordinator::drain_vault`. Removing the entry also drops
+    /// any checkout lease held for this Vault, releasing its OS-level lock
+    /// immediately so a later re-acquisition — a genuine process restart, or
+    /// this same process reconnecting the Vault — succeeds. Because removal
+    /// happens in the same locked critical section
+    /// [`Self::keep_checkout_lease`] uses to check-then-store a lease, a
+    /// turn's in-flight `keep_checkout_lease` call can never race this: it
+    /// either finds the entry gone (and drops the lease it was holding
+    /// instead of storing it) or completes its store before this removal
+    /// runs (and the lease it stored is removed, and dropped, right here).
     pub fn deactivate(&self, vault_id: VaultId) {
-        self.state
+        self.entries
             .lock()
             .expect("managed Git scheduler poisoned")
             .remove(&vault_id);
+    }
+
+    /// Obtain the checkout lease a turn for `vault_id` should use: the lease
+    /// already held from a previous turn in this process, if any, or a
+    /// freshly acquired one otherwise (the first turn since this Vault was
+    /// activated, or since a previous acquisition failed and was never
+    /// stored).
+    ///
+    /// Takes the lease out of the tracked entry for the duration of the
+    /// caller's turn — pass it back with [`Self::keep_checkout_lease`] once
+    /// the turn completes so it stays held across turns instead of being
+    /// dropped (and its OS-level lock released) at the end of each one.
+    ///
+    /// Reusing an already-held lease is a fast, non-blocking `Mutex`
+    /// operation. Only the fallback first acquisition for a newly activated
+    /// (or previously-failed-and-never-stored) Vault performs blocking,
+    /// local-filesystem-only I/O (directory creation, opening and
+    /// `flock`-ing the lock file) — bounded and one-time per Vault
+    /// activation, so production calls this directly from the async
+    /// dispatch path rather than requiring `spawn_blocking`.
+    pub(crate) fn take_or_acquire_checkout_lease(
+        &self,
+        state_directory: PathBuf,
+        vault_id: VaultId,
+    ) -> Result<ManagedCheckoutLease, ManagedCheckoutError> {
+        let held = {
+            let mut entries = self.entries.lock().expect("managed Git scheduler poisoned");
+            entries
+                .get_mut(&vault_id)
+                .and_then(|entry| entry.lease.take())
+        };
+        match held {
+            Some(lease) => Ok(lease),
+            None => ManagedCheckoutLease::acquire(state_directory, vault_id),
+        }
+    }
+
+    /// Return a lease obtained from [`Self::take_or_acquire_checkout_lease`]
+    /// so it stays held — and its OS-level lock stays exclusive to this
+    /// process — across turns.
+    ///
+    /// Looks up and stores into the tracked entry inside one lock
+    /// acquisition, atomically with [`Self::deactivate`]'s removal (both
+    /// operate on the same `entries` mutex): if `vault_id` was deactivated
+    /// while the turn holding this lease was in flight, the entry is gone by
+    /// the time this runs, so `lease` is dropped here instead of stored,
+    /// releasing the lock right away rather than leaking it for the rest of
+    /// the process's life. There is no window between "check tracked" and
+    /// "store the lease" for a concurrent `deactivate` to land in.
+    pub(crate) fn keep_checkout_lease(&self, vault_id: VaultId, lease: ManagedCheckoutLease) {
+        let mut entries = self.entries.lock().expect("managed Git scheduler poisoned");
+        if let Some(entry) = entries.get_mut(&vault_id) {
+            entry.lease = Some(lease);
+        }
+        // else: `vault_id` is no longer tracked — `lease` is dropped here,
+        // while still holding `entries`' lock, releasing the OS lock.
     }
 
     /// Request an immediate turn for exactly one Vault, bypassing its
@@ -276,25 +386,26 @@ impl ManagedGitScheduler {
         vault_id: VaultId,
         result: &Result<ManagedGitOutcome, VaultWorkError>,
     ) {
-        let mut state = self.state.lock().expect("managed Git scheduler poisoned");
-        let Some(entry) = state.get_mut(&vault_id) else {
+        let mut entries = self.entries.lock().expect("managed Git scheduler poisoned");
+        let Some(entry) = entries.get_mut(&vault_id) else {
             return;
         };
+        let schedule = &mut entry.schedule;
         match result {
             Ok(_) => {
-                entry.backoff = None;
-                entry.next_attempt = Instant::now() + self.poll_interval;
+                schedule.backoff = None;
+                schedule.next_attempt = Instant::now() + self.poll_interval;
             }
             Err(error) if error.retryable() => {
-                let next_backoff = entry
+                let next_backoff = schedule
                     .backoff
                     .map_or(BACKOFF_BASE, |previous| (previous * 2).min(BACKOFF_MAX));
-                entry.backoff = Some(next_backoff);
-                entry.next_attempt = Instant::now() + next_backoff;
+                schedule.backoff = Some(next_backoff);
+                schedule.next_attempt = Instant::now() + next_backoff;
             }
             Err(_) => {
-                entry.backoff = None;
-                entry.next_attempt = Instant::now() + self.poll_interval;
+                schedule.backoff = None;
+                schedule.next_attempt = Instant::now() + self.poll_interval;
             }
         }
     }
@@ -305,10 +416,10 @@ impl ManagedGitScheduler {
     /// (`ScheduleResult::Coalesced`).
     pub fn tick(&self, now: Instant) {
         let due = {
-            let state = self.state.lock().expect("managed Git scheduler poisoned");
-            state
+            let entries = self.entries.lock().expect("managed Git scheduler poisoned");
+            entries
                 .iter()
-                .filter(|(_, schedule)| schedule.next_attempt <= now)
+                .filter(|(_, entry)| entry.schedule.next_attempt <= now)
                 .map(|(vault_id, _)| *vault_id)
                 .collect::<Vec<_>>()
         };
@@ -412,8 +523,10 @@ mod tests {
     #[test]
     fn run_managed_git_turn_acquires_then_synchronizes_a_fresh_pull_only_vault() {
         let (_root, config) = fixture(VaultGitMode::PullOnly);
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
 
-        let outcome = run_managed_git_turn(&config).expect("first turn acquires and syncs");
+        let outcome = run_managed_git_turn(&config, &lease).expect("first turn acquires and syncs");
 
         assert_eq!(outcome, ManagedGitOutcome::UpToDate);
         assert!(
@@ -430,7 +543,14 @@ mod tests {
     #[test]
     fn run_managed_git_turn_reuses_an_existing_checkout_on_a_later_turn() {
         let (_root, config) = fixture(VaultGitMode::TwoWay);
-        run_managed_git_turn(&config).expect("first turn");
+        // The same held lease serves both turns, exactly like
+        // `ManagedGitScheduler` reusing one lease across a Vault's turns in
+        // production (issue #95) — `run_managed_git_turn` itself no longer
+        // cares whether the lease it is lent is freshly acquired or already
+        // held.
+        let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
+            .expect("lease");
+        run_managed_git_turn(&config, &lease).expect("first turn");
 
         let repository_root = config
             .state_directory
@@ -439,7 +559,8 @@ mod tests {
             .join("repository");
         std::fs::write(repository_root.join("vault/Local.md"), "local\n").expect("local edit");
 
-        let outcome = run_managed_git_turn(&config).expect("second turn reuses the checkout");
+        let outcome =
+            run_managed_git_turn(&config, &lease).expect("second turn reuses the checkout");
 
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
     }
@@ -447,8 +568,15 @@ mod tests {
     #[test]
     fn run_managed_git_turn_rejects_local_history_mode_without_touching_the_filesystem() {
         let (_root, config) = fixture(VaultGitMode::LocalHistory);
+        // The Local-history rejection is evaluated before the lease is
+        // used at all, so a lease from an unrelated scratch state
+        // directory proves this without ever touching `config.state_directory`
+        // (asserted below).
+        let scratch = tempfile::tempdir().expect("scratch state directory");
+        let lease = ManagedCheckoutLease::acquire(scratch.path().to_path_buf(), config.vault_id)
+            .expect("scratch lease");
 
-        let error = run_managed_git_turn(&config).expect_err("Local history has no remote");
+        let error = run_managed_git_turn(&config, &lease).expect_err("Local history has no remote");
 
         assert_eq!(error.code(), "managed_git_not_remote");
         assert!(!error.retryable());
@@ -583,15 +711,15 @@ mod tests {
             )),
         );
         let armed_backoff = {
-            let state = scheduler.state.lock().expect("scheduler state");
-            state[&vault].next_attempt
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
         };
 
         scheduler.activate(vault);
 
         let after_reactivate = {
-            let state = scheduler.state.lock().expect("scheduler state");
-            state[&vault].next_attempt
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
         };
         assert_eq!(armed_backoff, after_reactivate);
     }
@@ -641,13 +769,13 @@ mod tests {
         let before = Instant::now();
         scheduler.record_outcome(vault, &transient);
         let first_backoff = {
-            let state = scheduler.state.lock().expect("scheduler state");
-            state[&vault].next_attempt.duration_since(before)
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt.duration_since(before)
         };
         scheduler.record_outcome(vault, &transient);
         let second_backoff = {
-            let state = scheduler.state.lock().expect("scheduler state");
-            state[&vault].next_attempt.duration_since(before)
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt.duration_since(before)
         };
         assert!(
             second_backoff > first_backoff,
@@ -656,8 +784,8 @@ mod tests {
 
         scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
         let after_success = {
-            let state = scheduler.state.lock().expect("scheduler state");
-            state[&vault]
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule
         };
         assert!(after_success.backoff.is_none());
         assert!(
@@ -682,15 +810,17 @@ mod tests {
         let before = Instant::now();
         scheduler.record_outcome(vault, &auth_failure);
 
-        let entry = {
-            let state = scheduler.state.lock().expect("scheduler state");
-            state[&vault]
+        let schedule = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule
         };
         assert!(
-            entry.backoff.is_none(),
+            schedule.backoff.is_none(),
             "authentication failures must not arm exponential backoff"
         );
-        assert!(entry.next_attempt >= before + Duration::from_secs(3600) - Duration::from_secs(1));
+        assert!(
+            schedule.next_attempt >= before + Duration::from_secs(3600) - Duration::from_secs(1)
+        );
     }
 
     #[test]
@@ -701,7 +831,157 @@ mod tests {
         // No panic, no tracked entry created.
         scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
 
-        let state = scheduler.state.lock().expect("scheduler state");
-        assert!(!state.contains_key(&vault));
+        let entries = scheduler.entries.lock().expect("scheduler entries");
+        assert!(!entries.contains_key(&vault));
+    }
+
+    /// Closes issue #95's reopening finding: `run_managed_git_turn` used to
+    /// acquire its own `ManagedCheckoutLease` and drop it (releasing the
+    /// OS-level lock) the instant one turn returned, so a second process
+    /// could acquire the same lock in the gap between two scheduled turns —
+    /// contradicting the documented process-lifetime ownership lease. This
+    /// proves the fix: across two consecutive turns for the same Vault
+    /// driven through `ManagedGitScheduler`'s lease-holding methods (the
+    /// same ones `dispatch_managed_git_turn_with` uses in production), a
+    /// second process's `ManagedCheckoutLease::acquire` for the same
+    /// `(state_directory, vault_id)` fails with `OwnershipUnavailable`
+    /// *during the gap between those two turns* — the lock is held
+    /// continuously, not just while each turn executes.
+    ///
+    /// Before this fix, the equivalent probe (two direct
+    /// `run_managed_git_turn(&config)` calls with an interleaved
+    /// contention check) failed: the interleaved acquire attempt succeeded
+    /// where it should have been refused.
+    #[test]
+    fn scheduler_holds_the_checkout_lease_across_turns_until_deactivated() {
+        let (_root, config) = fixture(VaultGitMode::TwoWay);
+        let (coordinator, _worker) = VaultWorkCoordinator::new();
+        let scheduler = ManagedGitScheduler::new(coordinator);
+        scheduler.activate(config.vault_id);
+
+        // First turn: no lease held yet, so one is acquired fresh and then
+        // handed back to the scheduler instead of being dropped.
+        let lease = scheduler
+            .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
+            .expect("first turn acquires a fresh lease");
+        run_managed_git_turn(&config, &lease).expect("first turn");
+        scheduler.keep_checkout_lease(config.vault_id, lease);
+
+        // Between turns — exactly the gap the old, turn-scoped lease used
+        // to release the lock in — a second process attempting the same
+        // (state_directory, vault_id) must be refused: the scheduler is
+        // still holding the OS-level lock from the first turn.
+        match ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id) {
+            Err(ManagedCheckoutError::OwnershipUnavailable) => {}
+            other => panic!(
+                "a second process must not acquire the lock between turns, got {:?}",
+                other.map(|_| "Ok(lease)")
+            ),
+        }
+
+        // Second turn: the scheduler reuses the held lease (a fresh acquire
+        // would itself fail — the OS lock is still open from the first
+        // turn) and proves the checkout is genuinely reused, not
+        // re-cloned.
+        let repository_root = config
+            .state_directory
+            .join("vaults")
+            .join(config.vault_id.to_string())
+            .join("repository");
+        std::fs::write(repository_root.join("vault/Local.md"), "local\n").expect("local edit");
+        let lease = scheduler
+            .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
+            .expect("second turn reuses the held lease");
+        let outcome =
+            run_managed_git_turn(&config, &lease).expect("second turn reuses the checkout");
+        assert_eq!(outcome, ManagedGitOutcome::Synchronized);
+        scheduler.keep_checkout_lease(config.vault_id, lease);
+
+        // Deactivating the Vault (retirement, disable, disconnect) must
+        // release the held lock: a later acquisition — a genuine process
+        // restart, or this same process reconnecting the Vault — succeeds
+        // again. This is the existing "drop/reacquire models restart"
+        // guarantee from `managed_checkout.rs`'s own tests, now proven at
+        // the point where the fix actually changed *when* the drop
+        // happens: at deactivation instead of at end-of-turn.
+        scheduler.deactivate(config.vault_id);
+        ManagedCheckoutLease::acquire(config.state_directory, config.vault_id)
+            .expect("deactivate must release the held lock so re-acquisition succeeds");
+    }
+
+    /// Closes the race an independent Standards review found in the
+    /// previous version of this fix: `deactivate` and `keep_checkout_lease`
+    /// used to touch two *separate* mutexes (`state` and, formerly,
+    /// `leases`) with independent lock/unlock cycles, so a
+    /// `keep_checkout_lease` that had already read "this Vault is still
+    /// tracked" from `state` could still insert its lease into `leases`
+    /// after a concurrent `deactivate` removed the Vault from both maps —
+    /// leaking the OS-level lock past deactivation.
+    /// `VaultWorkCoordinator::drain_vault`'s own doc comment ("a currently
+    /// active turn is never force-cancelled ... retains the worker until it
+    /// returns at its own safe operation boundary") confirms a `deactivate`
+    /// racing an in-flight turn's `keep_checkout_lease` is the designed-for
+    /// case, not an edge case.
+    ///
+    /// Deterministically reproduces the scenario for that contract —
+    /// `deactivate` landing while a turn is holding the lease, before it is
+    /// handed back — without relying on real thread-timing luck: obtain the
+    /// lease, deactivate the Vault, *then* hand the lease back, and assert
+    /// it is not retained (no resurrected tracking entry) and its OS-level
+    /// lock is genuinely released (a fresh `ManagedCheckoutLease::acquire`
+    /// for the same Vault succeeds immediately afterward).
+    ///
+    /// `entries` now being one `Mutex<BTreeMap<VaultId, VaultScheduleEntry>>`
+    /// — the same lock both `deactivate`'s removal and
+    /// `keep_checkout_lease`'s check-then-store acquire — makes the two
+    /// operations mutually exclusive by construction: there is no longer
+    /// any window, real or reordered, in which `keep_checkout_lease` can
+    /// observe "still tracked" and then store into an entry `deactivate`
+    /// has already removed. (The original defect required a real interleaving
+    /// *inside* the old `keep_checkout_lease`'s two separate lock
+    /// acquisitions — genuine thread parallelism, not reorderable top-level
+    /// calls — so this test encodes the now-guaranteed contract rather than
+    /// a call sequence that would necessarily have failed against the old,
+    /// two-mutex code.)
+    #[test]
+    fn keep_checkout_lease_does_not_resurrect_or_leak_a_lease_after_a_concurrent_deactivate() {
+        let (_root, config) = fixture(VaultGitMode::PullOnly);
+        let (coordinator, _worker) = VaultWorkCoordinator::new();
+        let scheduler = ManagedGitScheduler::new(coordinator);
+        scheduler.activate(config.vault_id);
+
+        // A turn takes the lease to run with — exactly what a real
+        // in-flight Git turn does before `spawn_blocking`.
+        let lease = scheduler
+            .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
+            .expect("turn acquires a fresh lease");
+
+        // While that turn is still in flight (holding `lease`, not yet
+        // handed back), the Vault is deactivated — the coordinator's
+        // documented "never force-cancelled" behavior means this is
+        // expected, not exceptional.
+        scheduler.deactivate(config.vault_id);
+
+        // The turn completes and hands its lease back, unaware the Vault
+        // was deactivated while it ran.
+        scheduler.keep_checkout_lease(config.vault_id, lease);
+
+        // The lease must not have been resurrected into a tracked entry:
+        // no schedule, no held lease, for this Vault.
+        {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            assert!(
+                !entries.contains_key(&config.vault_id),
+                "keep_checkout_lease must not resurrect a deactivated Vault's tracking entry"
+            );
+        }
+
+        // And the OS-level lock must be genuinely released, not leaked: a
+        // fresh acquisition for the same (state_directory, vault_id)
+        // succeeds immediately, with nothing still holding the old file
+        // descriptor open.
+        ManagedCheckoutLease::acquire(config.state_directory, config.vault_id).expect(
+            "a lease handed back after a concurrent deactivate must not leak the OS-level lock",
+        );
     }
 }
