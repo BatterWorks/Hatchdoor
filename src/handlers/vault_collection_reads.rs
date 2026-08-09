@@ -12,9 +12,12 @@
 //! only scope parsing, query decoding, and response shaping: no
 //! collection-read domain logic lives here. Mounted in the same
 //! `/api/v1/vaults` router group as `handlers/vaults.rs` and
-//! `handlers/vault_content.rs`, sharing their demo-mode/auth posture,
-//! `VaultApiError` shape, and rejection-mapping helpers
-//! (`query_rejection_response`, `vault_read_error_response`).
+//! `handlers/vault_content.rs`, sharing their auth posture, `VaultApiError`
+//! shape, and rejection-mapping helpers (`query_rejection_response`,
+//! `vault_read_error_response`). Every route here is a read, so — like exact
+//! reads in `vault_content.rs` — none of them is wrapped in `reject_demo_mutation`
+//! (#109): they stay reachable unauthenticated in demo mode, unlike the
+//! mutation and Vault-control routes in `vaults.rs`/`vault_write.rs`.
 
 use std::collections::BTreeSet;
 use std::str::FromStr;

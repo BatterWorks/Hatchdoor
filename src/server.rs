@@ -12,7 +12,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
@@ -26,14 +26,14 @@ use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
 use crate::git::{self, GitConfig};
 use crate::handlers::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, disable_vault_handler,
-    disconnect_vault_handler, edit_vault_handler, enable_vault_handler, generate_mcp_token_handler,
-    get_git_status_handler, get_index_status_handler, get_settings_handler, health_handler,
-    list_vaults_handler, patch_settings_handler, retry_vault_handler, reveal_mcp_token_handler,
-    reveal_web_token_handler, spa_index_handler, sync_vault_handler,
-    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
-    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
-    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
+    disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
+    generate_mcp_token_handler, get_git_status_handler, get_index_status_handler,
+    get_settings_handler, health_handler, list_vaults_handler, patch_settings_handler,
+    retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler,
+    sync_vault_handler, vault_collection_events_handler, vault_scope_graph_handler,
+    vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
+    vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
     vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
@@ -225,19 +225,27 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // Vaults. Every operation gates per-request on its own targeted Vault
     // instead (`vault_not_found`/`vault_disabled`/`vault_unavailable`/
     // `capability_unavailable` from `VaultReadCore`/`VaultControlBlock`),
-    // which is the per-Vault equivalent this surface needs. Demo-mode posture
-    // (this whole group absent) is unchanged by #101: a demo deployment now
-    // has no working content-serving surface at all, since the legacy
-    // unscoped routes it depended on are retired in the same change — a
-    // documented, deliberate gap (`docs/migrations/vault-scoped-clients.md`),
-    // not something this packet fixes.
-    let vaults_v1 = if state.demo_mode {
-        Router::new()
-    } else {
+    // which is the per-Vault equivalent this surface needs.
+    //
+    // #109: this whole group is now mounted in demo mode too — a demo
+    // deployment publishes every enabled Vault as a public read-only
+    // collection instead of having no working content surface at all
+    // (#101's documented gap). Discovery, events, exact reads, contained
+    // assets/downloads, resolve/resolve-batch, and one-or-all
+    // tree/recent/stats/graph/search stay reachable unauthenticated. Every
+    // mutation and Vault-control route (collection management, manual Git
+    // sync/retry, Markdown mutations, write-capabilities discovery) is
+    // wrapped individually below in `reject_demo_mutation`, which refuses
+    // with the shared `403 demo_read_only` error before running — mounted
+    // per mutating route/method rather than over this whole group, so a GET
+    // read sharing a path with a mutating verb is unaffected.
+    let demo_guard = axum::middleware::from_fn_with_state(state.clone(), reject_demo_mutation);
+    let vaults_v1 = {
         let vaults_v1 = Router::new()
             .route(
                 "/api/v1/vaults",
-                get(list_vaults_handler).post(create_vault_handler),
+                get(list_vaults_handler)
+                    .merge(post(create_vault_handler).layer(demo_guard.clone())),
             )
             .route(
                 "/api/v1/vaults/events",
@@ -245,43 +253,53 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             )
             .route(
                 "/api/v1/vaults/{vault_id}",
-                patch(edit_vault_handler).delete(disconnect_vault_handler),
+                patch(edit_vault_handler)
+                    .delete(disconnect_vault_handler)
+                    .layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/enable",
-                post(enable_vault_handler),
+                post(enable_vault_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/disable",
-                post(disable_vault_handler),
+                post(disable_vault_handler).layer(demo_guard.clone()),
             )
-            .route("/api/v1/vaults/{vault_id}/sync", post(sync_vault_handler))
-            .route("/api/v1/vaults/{vault_id}/retry", post(retry_vault_handler))
+            .route(
+                "/api/v1/vaults/{vault_id}/sync",
+                post(sync_vault_handler).layer(demo_guard.clone()),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/retry",
+                post(retry_vault_handler).layer(demo_guard.clone()),
+            )
             .route(
                 "/api/v1/vaults/{vault_id}/notes",
-                post(vault_scoped_create_note_handler),
+                post(vault_scoped_create_note_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}",
-                get(vault_scoped_note_handler)
-                    .put(vault_scoped_update_note_handler)
-                    .delete(vault_scoped_delete_note_handler),
+                get(vault_scoped_note_handler).merge(
+                    put(vault_scoped_update_note_handler)
+                        .delete(vault_scoped_delete_note_handler)
+                        .layer(demo_guard.clone()),
+                ),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/rename",
-                patch(vault_scoped_rename_note_handler),
+                patch(vault_scoped_rename_note_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/move",
-                patch(vault_scoped_move_note_handler),
+                patch(vault_scoped_move_note_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/move-rename",
-                patch(vault_scoped_move_rename_note_handler),
+                patch(vault_scoped_move_rename_note_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/archive",
-                patch(vault_scoped_archive_note_handler),
+                patch(vault_scoped_archive_note_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes/{slug}/links",
@@ -303,9 +321,12 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/v1/vaults/{vault_id}/assets/{*path}",
                 get(vault_scoped_asset_handler),
             )
+            // Grouped with mutation-related routes (not #109's exposed safe-read
+            // list) since it is write-capability discovery, not content
+            // browsing; gated the same as the mutations it describes.
             .route(
                 "/api/v1/vaults/{vault_id}/write-capabilities",
-                get(vault_scoped_write_capabilities_handler),
+                get(vault_scoped_write_capabilities_handler).layer(demo_guard.clone()),
             )
             // #100: one-or-all collection reads and search. `{vault_id}` here
             // is a Vault-or-`all` scope (parsed by `parse_vault_scope`); the
@@ -348,25 +369,23 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // agent that already holds the MCP bearer token can use it directly,
     // without provisioning the separate web token just for this one route. It
     // still accepts the web token too, since the web UI's paste-to-upload flow
-    // hits the same endpoint. Absent in demo mode like the rest of #101's
-    // Vault-scoped mutations.
-    let vault_attachment = if state.demo_mode {
-        Router::new()
-    } else {
-        Router::new()
-            .route(
-                "/api/v1/vaults/{vault_id}/attachments",
-                post(vault_scoped_upload_attachment_handler)
-                    .layer(DefaultBodyLimit::max(attachment_body_limit)),
-            )
-            .layer(axum::middleware::from_fn_with_state(
-                WebOrLiveMcpToken {
-                    web: web_bearer_token.clone(),
-                    runtime_config: state.runtime_config.clone(),
-                },
-                require_web_or_live_mcp_token,
-            ))
-    };
+    // hits the same endpoint. #109: mounted in demo mode too, like the rest of
+    // this router, but gated by `reject_demo_mutation` since it is a content
+    // mutation.
+    let vault_attachment = Router::new()
+        .route(
+            "/api/v1/vaults/{vault_id}/attachments",
+            post(vault_scoped_upload_attachment_handler)
+                .layer(DefaultBodyLimit::max(attachment_body_limit))
+                .layer(demo_guard.clone()),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            WebOrLiveMcpToken {
+                web: web_bearer_token.clone(),
+                runtime_config: state.runtime_config.clone(),
+            },
+            require_web_or_live_mcp_token,
+        ));
 
     Router::new()
         .route("/health", get(health_handler))
@@ -666,6 +685,25 @@ async fn reject_demo_model_setup(
 ) -> Response {
     if state.demo_mode {
         return StatusCode::NOT_FOUND.into_response();
+    }
+    next.run(request).await
+}
+
+/// Demo mode (#109) publishes the whole enabled Vault collection as public
+/// read-only: every content mutation and Vault-control route stays mounted
+/// and reachable — unlike settings/setup, which stay absent (`404`) as
+/// operator-only surfaces — but refuses with the structured `403
+/// demo_read_only` error before any state changes. Applied per mutating
+/// route/method in `build_router` so a GET read sharing a path with a
+/// mutating verb (e.g. `POST /api/v1/vaults`, `PUT
+/// .../notes/{slug}`) is unaffected.
+async fn reject_demo_mutation(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.demo_mode {
+        return demo_read_only_response();
     }
     next.run(request).await
 }
@@ -3539,10 +3577,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vaults_v1_absent_in_demo_mode() {
+    async fn vaults_v1_discovery_and_events_reachable_unauthenticated_in_demo_mode() {
+        // #109: demo mode publishes the whole enabled Vault collection as
+        // public read-only, so discovery (and, by the same posture, the
+        // collection event stream) must stay reachable with no token at all
+        // — unlike the old #101-era posture where this entire group was
+        // absent (404) in demo mode.
         let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
 
-        let response = app
+        let discovery = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults")
@@ -3551,7 +3595,180 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(discovery.status(), StatusCode::OK);
+        let body = json_body(discovery).await;
+        assert_eq!(body["vaults"], serde_json::json!([]));
+
+        let events = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/events")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(events.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_collection_mutations_refuse_with_demo_read_only_in_demo_mode() {
+        // Every collection-management and manual-Git-control route (#109) —
+        // Vault-control operations, not content mutations, but still gated
+        // the same way — must refuse before touching the registry rather
+        // than being absent, so a demo client gets a clear structured reason
+        // rather than the ambiguity of a 404.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_id = "00000000-0000-4000-8000-000000000000";
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body(
+                        "Demo",
+                        std::path::Path::new("/does-not-matter"),
+                        0,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(create.status(), StatusCode::FORBIDDEN);
+        let create_body = json_body(create).await;
+        assert_eq!(create_body["code"], "demo_read_only");
+
+        for (method, uri) in [
+            ("PATCH", format!("/api/v1/vaults/{vault_id}")),
+            ("DELETE", format!("/api/v1/vaults/{vault_id}")),
+            ("POST", format!("/api/v1/vaults/{vault_id}/enable")),
+            ("POST", format!("/api/v1/vaults/{vault_id}/disable")),
+            ("POST", format!("/api/v1/vaults/{vault_id}/sync")),
+            ("POST", format!("/api/v1/vaults/{vault_id}/retry")),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .method(method)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} should refuse in demo mode"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "demo_read_only", "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_mode_browses_an_enabled_vault_but_still_refuses_its_mutations() {
+        // #109's core scenario: an enabled Vault (added directly to the
+        // registry here, since demo mode itself refuses `POST
+        // /api/v1/vaults`) is publicly browsable end-to-end — listed by
+        // discovery, exact-readable by content — while its content mutations
+        // still refuse with `demo_read_only`.
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_path = tmp.path().join("demo-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        std::fs::write(vault_path.join("Home.md"), "# Home\n\ndemo content\n").expect("write note");
+
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Demo Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_path.clone(),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add vault to registry");
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let vault_id = snapshot.vault_ids().next().expect("one vault id");
+
+        let discovery = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(discovery.status(), StatusCode::OK);
+        let discovery_body = json_body(discovery).await;
+        let vaults = discovery_body["vaults"].as_array().expect("vaults array");
+        assert_eq!(vaults.len(), 1);
+        assert_eq!(vaults[0]["vault_id"], vault_id.to_string());
+
+        let note = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(note.status(), StatusCode::OK);
+        let note_body = json_body(note).await;
+        assert!(
+            note_body["note"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("demo content")
+        );
+
+        let mutation = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "content": "# Home\n\ntampered\n",
+                            "expected_content_hash": "does-not-matter",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(mutation.status(), StatusCode::FORBIDDEN);
+        let mutation_body = json_body(mutation).await;
+        assert_eq!(mutation_body["code"], "demo_read_only");
+
+        // The mutation truly never ran: the note on disk is unchanged.
+        let on_disk = std::fs::read_to_string(vault_path.join("Home.md")).expect("read note");
+        assert!(on_disk.contains("demo content"));
+        assert!(!on_disk.contains("tampered"));
     }
 
     #[tokio::test]
@@ -4456,7 +4673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_scoped_routes_require_web_token_and_are_absent_in_demo_mode() {
+    async fn vault_scoped_routes_require_web_token_when_configured() {
         let (app, tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret")));
         let vault_path = tmp.path().join("token-vault");
         std::fs::create_dir_all(&vault_path).expect("create vault directory");
@@ -4486,7 +4703,15 @@ mod tests {
         // Authorized but the Vault does not exist: proves the token gate was
         // satisfied rather than short-circuiting before the handler ran.
         assert_eq!(authorized.status(), StatusCode::NOT_FOUND);
+    }
 
+    #[tokio::test]
+    async fn vault_scoped_content_reads_reachable_unauthenticated_in_demo_mode() {
+        // #109: exact reads and their contained resources stay reachable in
+        // demo mode with no token — reaching the real handler (proven by the
+        // structured `vault_not_found` body, not a generic router/static-file
+        // 404) rather than the old #101-era posture where this whole group
+        // was absent.
         let (demo_app, _demo_tmp, _demo_state) =
             app_for_tests_with_web_auth_and_demo_mode(None, true);
         let demo_response = demo_app
@@ -4499,6 +4724,75 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(demo_response.status(), StatusCode::NOT_FOUND);
+        let demo_body = json_body(demo_response).await;
+        assert_eq!(demo_body["code"], "vault_not_found");
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_content_mutations_refuse_with_demo_read_only_in_demo_mode() {
+        // Every content-mutation, attachment-upload, and write-capability
+        // route in `vault_write.rs` (#109) must refuse before touching the
+        // Vault's Markdown, rather than being absent.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_id = "00000000-0000-4000-8000-000000000000";
+
+        for (method, uri) in [
+            ("POST", format!("/api/v1/vaults/{vault_id}/notes")),
+            ("PUT", format!("/api/v1/vaults/{vault_id}/notes/home")),
+            ("DELETE", format!("/api/v1/vaults/{vault_id}/notes/home")),
+            (
+                "PATCH",
+                format!("/api/v1/vaults/{vault_id}/notes/home/rename"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/vaults/{vault_id}/notes/home/move"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/vaults/{vault_id}/notes/home/move-rename"),
+            ),
+            (
+                "PATCH",
+                format!("/api/v1/vaults/{vault_id}/notes/home/archive"),
+            ),
+            (
+                "GET",
+                format!("/api/v1/vaults/{vault_id}/write-capabilities"),
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&uri)
+                        .method(method)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{method} {uri} should refuse in demo mode"
+            );
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "demo_read_only", "{method} {uri}");
+        }
+
+        let attachment_response = app
+            .oneshot(attachment_upload_request(
+                vault_id,
+                "Attachments/demo.png",
+                None,
+            ))
+            .await
+            .expect("response");
+        assert_eq!(attachment_response.status(), StatusCode::FORBIDDEN);
+        let attachment_body = json_body(attachment_response).await;
+        assert_eq!(attachment_body["code"], "demo_read_only");
     }
 
     // -----------------------------------------------------------------
@@ -4945,7 +5239,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_scope_routes_require_web_token_and_are_absent_in_demo_mode() {
+    async fn vault_scope_routes_require_web_token_when_configured_and_reachable_unauthenticated_in_demo_mode()
+     {
         let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret")));
 
         let unauthorized = app
@@ -4972,6 +5267,9 @@ mod tests {
             .expect("response");
         assert_eq!(authorized.status(), StatusCode::OK);
 
+        // #109: one-or-all collection reads are pure reads, so they stay
+        // reachable with no token at all in demo mode, unlike the old
+        // #101-era posture where this whole group was absent (404).
         let (demo_app, _demo_tmp, _demo_state) =
             app_for_tests_with_web_auth_and_demo_mode(None, true);
         let demo_response = demo_app
@@ -4983,7 +5281,7 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(demo_response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(demo_response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
