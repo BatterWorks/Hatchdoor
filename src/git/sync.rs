@@ -6,6 +6,9 @@ use git2::{
 };
 
 use super::config::{GitConfig, GitMode};
+use super::managed_task::ManagedGitOutcome;
+use super::message::build_commit_message;
+use crate::vault_work::VaultWorkError;
 
 /// What a sync attempt did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -173,6 +176,71 @@ pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
         )));
     }
     Ok(())
+}
+
+/// Run one local-history Git turn for an `ExistingGit` Vault in
+/// `VaultGitMode::LocalHistory`: validate the enclosing checkout, then commit
+/// whatever Vault-subtree drift has accumulated since the last turn. Never
+/// contacts a remote, regardless of what the enclosing checkout's `origin`
+/// might be — this is `dispatch_managed_git_turn_with`'s counterpart to
+/// `run_managed_git_turn` for that source/mode combination, the concrete
+/// blocking `git2` operation `VaultWorkKind::Git` executes. Must run from
+/// `spawn_blocking`.
+///
+/// Builds its own `GitMode::Local` [`GitConfig`]: `remote`, `branch`,
+/// `username`, and `token` are placeholders that `validate_local_repo` and
+/// `commit_local` never read for that mode (see their doc comments), so a
+/// caller here needs only the Vault's resolved path and commit identity —
+/// not the full settings-derived `GitConfig` the legacy single-Vault path
+/// builds from `HATCHDOOR_GIT_*` configuration.
+pub fn run_local_history_git_turn(
+    vault_path: PathBuf,
+    author_name: String,
+    author_email: String,
+) -> Result<ManagedGitOutcome, VaultWorkError> {
+    let config = GitConfig {
+        vault_path,
+        mode: GitMode::Local,
+        remote: String::new(),
+        branch: String::new(),
+        username: String::new(),
+        token: String::new(),
+        debounce_seconds: 0,
+        author_name,
+        author_email,
+    };
+    validate_local_repo(&config).map_err(classify_local_history_error)?;
+    let message = build_commit_message(&[]);
+    let outcome = commit_local(&config, &[], &message).map_err(classify_local_history_error)?;
+    Ok(if outcome.committed {
+        ManagedGitOutcome::Synchronized
+    } else {
+        ManagedGitOutcome::UpToDate
+    })
+}
+
+/// Classify a [`GitError`] from [`run_local_history_git_turn`] into a
+/// redacted [`VaultWorkError`], mirroring the legacy single-Vault task's
+/// existing transient/non-transient split
+/// (`git/task.rs::run_one_sync_with_message`): `Remote`/`Other` are worth an
+/// automatic retry, everything else needs a human or the enclosing
+/// checkout's state to change first.
+///
+/// `Conflict` and `DirtyWorkingTree` are only ever produced by
+/// `merge_remote`, which `commit_local` never calls for `GitMode::Local`, and
+/// `Remote` similarly never occurs since neither `validate_local_repo` nor
+/// `commit_local` touch network state for that mode — both are classified
+/// defensively here rather than assumed unreachable.
+fn classify_local_history_error(error: GitError) -> VaultWorkError {
+    let code = match &error {
+        GitError::Validation(_) => "existing_git_local_history_validation_failed",
+        GitError::Conflict { .. } => "existing_git_local_history_conflict",
+        GitError::DirtyWorkingTree { .. } => "existing_git_local_history_dirty_working_tree",
+        GitError::Remote(_) => "existing_git_local_history_remote_unexpected",
+        GitError::Other(_) => "existing_git_local_history_git_error",
+    };
+    let retryable = matches!(error, GitError::Remote(_) | GitError::Other(_));
+    VaultWorkError::new(code, error.to_string(), retryable)
 }
 
 /// Initialise a vault for explicitly-confirmed local versioning. The ignore
@@ -782,6 +850,145 @@ mod tests {
             b"operator staging",
             "Local history must not overwrite the operator's staged Vault content"
         );
+    }
+
+    /// `run_local_history_git_turn` is `dispatch_managed_git_turn_with`'s
+    /// `ExistingGit` + `VaultGitMode::LocalHistory` counterpart to
+    /// `run_managed_git_turn`. The composed `vault_runtime` test exercises it
+    /// through the full async dispatch path; this proves its own contract
+    /// directly: repository root and Vault root differ, accumulated
+    /// Vault-subtree drift lands in a new commit, and manual work sitting
+    /// outside the Vault in the same enclosing checkout is left completely
+    /// untouched rather than force-checked-out or swept in (issue #94's
+    /// third and fourth acceptance criteria).
+    #[test]
+    fn run_local_history_git_turn_commits_contained_drift_and_leaves_outside_work_untouched() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        // A HEAD commit unrelated to the Vault, so the repository root and
+        // Vault root genuinely differ and there is a parent to commit atop.
+        fs::write(root.path().join("README.md"), "root readme").expect("root readme");
+        commit_all(&repo, "initial commit");
+
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        // Drift inside the Vault subtree, uncommitted before the turn runs.
+        fs::write(vault_path.join("Idea.md"), "# idea\n").expect("drift note");
+        // Manual work directly in the repository root, outside the Vault,
+        // uncommitted: must never be staged, committed, or discarded.
+        fs::write(root.path().join("outside.md"), "manual outside work").expect("outside file");
+
+        let outcome = run_local_history_git_turn(
+            vault_path.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+        )
+        .expect("local history turn succeeds");
+        assert_eq!(outcome, ManagedGitOutcome::Synchronized);
+
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        assert_eq!(head.parent_count(), 1, "exactly one new commit was made");
+        let tree = head.tree().expect("tree");
+        assert!(
+            tree.get_path(Path::new("notes/Idea.md")).is_ok(),
+            "the Vault-subtree drift was committed"
+        );
+        assert!(
+            tree.get_path(Path::new("outside.md")).is_err(),
+            "work outside the Vault must never be swept into Local history"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("outside.md")).expect("outside file survives"),
+            "manual outside work",
+            "manual outside work must survive byte-for-byte, never force-checked-out over"
+        );
+        let mut status_options = git2::StatusOptions::new();
+        status_options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true);
+        assert!(
+            repo.statuses(Some(&mut status_options))
+                .expect("statuses")
+                .iter()
+                .any(|entry| entry.path().is_ok_and(|path| path == "outside.md")
+                    && entry.status().contains(git2::Status::WT_NEW)),
+            "the outside file remains untracked, exactly as the operator left it"
+        );
+
+        // A second turn with nothing new to commit reports UpToDate.
+        let second = run_local_history_git_turn(
+            vault_path,
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+        )
+        .expect("second local history turn succeeds");
+        assert_eq!(second, ManagedGitOutcome::UpToDate);
+    }
+
+    /// Direct proof of issue #94's fourth acceptance criterion for a tracked
+    /// (not merely untracked) manual edit: an uncommitted change to a file
+    /// already inside the Vault subtree is committed with its edited
+    /// content, never reverted or discarded — there is no interrupted-merge
+    /// hard reset in `GitMode::Local` (that recovery path is gated to
+    /// `GitMode::Remote` in `commit_local`) to force-checkout over it.
+    #[test]
+    fn run_local_history_git_turn_preserves_an_uncommitted_tracked_edit_instead_of_discarding_it() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        fs::write(vault_path.join("Idea.md"), "v1").expect("initial note content");
+        commit_all(&repo, "initial commit");
+
+        // A manual, uncommitted edit to the already-tracked file.
+        fs::write(vault_path.join("Idea.md"), "v2 - manual edit").expect("manual edit");
+
+        let outcome = run_local_history_git_turn(
+            vault_path,
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+        )
+        .expect("local history turn succeeds");
+        assert_eq!(outcome, ManagedGitOutcome::Synchronized);
+
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        let committed = head
+            .tree()
+            .expect("tree")
+            .get_path(Path::new("notes/Idea.md"))
+            .expect("committed note")
+            .to_object(&repo)
+            .expect("note object")
+            .peel_to_blob()
+            .expect("note blob");
+        assert_eq!(
+            committed.content(),
+            b"v2 - manual edit",
+            "the manual edit was committed, not discarded or reverted to v1"
+        );
+    }
+
+    #[test]
+    fn run_local_history_git_turn_classifies_a_bare_repository_as_non_retryable() {
+        // A bare repository has no working tree to version, so
+        // `validate_local_repo`'s "repository is bare" check must reject it.
+        // Deliberately does not rely on "no repository at all" here: with
+        // `TMPDIR` redirected onto real disk (see repo docs), a plain
+        // non-repo tempdir can still land inside some ambient enclosing
+        // checkout and make `Repository::discover` succeed unexpectedly.
+        let root = tempfile::tempdir().expect("bare repository directory");
+        Repository::init_bare(root.path()).expect("init bare repository");
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+
+        let error = run_local_history_git_turn(
+            vault_path,
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+        )
+        .expect_err("bare repository has no working tree to version");
+        assert_eq!(error.code(), "existing_git_local_history_validation_failed");
+        assert!(!error.retryable());
     }
 
     fn base_config(vault: &Path) -> GitConfig {

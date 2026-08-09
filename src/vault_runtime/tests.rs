@@ -817,6 +817,147 @@ async fn dispatch_managed_git_turn_is_a_no_op_for_a_non_managed_git_vault() {
     assert!(snapshot.git_error.is_none());
 }
 
+/// Closes issue #94's reopening gap: no composed runtime test previously
+/// activated a real `ExistingGit` + `VaultGitMode::LocalHistory` Vault and
+/// observed the subtree commit. Drives the *full* dispatch path — a real
+/// `VaultWorkCoordinator`/`VaultWorkWorker` running production's
+/// `dispatch_managed_git_turn`, which resolves to `run_local_history_git_turn`
+/// — against a real `git2::Repository` whose root differs from the Vault
+/// root, exactly like `dispatch_managed_git_turn_with_publishes_a_real_failure_through_the_full_async_path`
+/// does for the managed-Git case above.
+#[tokio::test]
+async fn dispatch_managed_git_turn_commits_existing_git_local_history_drift_through_the_full_async_path()
+ {
+    let directory = tempdir().expect("temporary state directory");
+    let repository_path = directory.path().join("repository");
+    let repo = git2::Repository::init(&repository_path).expect("initialize repository");
+    std::fs::write(repository_path.join("README.md"), "root readme").expect("root readme");
+    {
+        let mut index = repo.index().expect("index");
+        index
+            .add_path(Path::new("README.md"))
+            .expect("stage readme");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let signature =
+            git2::Signature::now("Test", "test@example.test").expect("commit signature");
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "initial commit",
+            &tree,
+            &[],
+        )
+        .expect("initial commit");
+    }
+    let vault_subdirectory = repository_path.join("notes");
+    std::fs::create_dir(&vault_subdirectory).expect("create Vault subdirectory");
+
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Local history".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ExistingGit {
+                    repository_path: repository_path.clone(),
+                    repository_url: None,
+                    branch: None,
+                    vault_subdirectory: Some(PathBuf::from("notes")),
+                    mode: VaultGitMode::LocalHistory,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+            },
+        )
+        .expect("add local-history Vault");
+    let vault_id = vault_id_named(&committed, "Local history");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    let control_block = collection.runtime(vault_id).expect("active runtime");
+
+    // Drift existing before the Git turn runs: an uncommitted file inside
+    // the Vault subdirectory.
+    std::fs::write(vault_subdirectory.join("Idea.md"), "# idea\n").expect("write drift file");
+    // Manual work directly in the repository root, outside the Vault
+    // subdirectory: must never be staged or touched (containment).
+    std::fs::write(repository_path.join("outside.md"), "manual outside work")
+        .expect("write outside file");
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    coordinator.request(vault_id, VaultWorkKind::Git);
+
+    let outcome = worker
+        .run_next(|request| {
+            dispatch_managed_git_turn(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("Git turn dequeued");
+    outcome.result.expect("local-history commit turn succeeds");
+
+    // A new commit now exists containing exactly the Vault-subtree file.
+    let repo = git2::Repository::open(&repository_path).expect("reopen repository");
+    let head_commit = repo
+        .head()
+        .expect("HEAD")
+        .peel_to_commit()
+        .expect("HEAD commit");
+    assert_eq!(head_commit.parent_count(), 1, "exactly one new commit made");
+    let tree = head_commit.tree().expect("HEAD tree");
+    assert!(
+        tree.get_path(Path::new("notes/Idea.md")).is_ok(),
+        "the Vault-subtree drift was committed"
+    );
+    assert!(
+        tree.get_path(Path::new("outside.md")).is_err(),
+        "work outside the Vault must never be staged or committed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repository_path.join("outside.md"))
+            .expect("outside file survives on disk"),
+        "manual outside work",
+        "manual local work must never be discarded or force-checked-out over"
+    );
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Ready);
+    assert!(after.git_error.is_none());
+    assert_eq!(after.local_content, LocalContentStatus::ReadWrite);
+    assert!(after.capabilities.browse);
+    assert!(after.capabilities.mutate);
+    assert!(
+        !after.capabilities.pull && !after.capabilities.push,
+        "Local history must never expose remote capabilities"
+    );
+
+    // A successful turn queues an Index turn, exactly like the managed-Git
+    // path.
+    let index_turn = worker
+        .run_next(|request| async move {
+            assert_eq!(request.vault_id(), vault_id);
+            assert_eq!(request.kind(), VaultWorkKind::Index);
+            Ok::<(), VaultWorkError>(())
+        })
+        .await
+        .expect("successful local-history turn queues Index work");
+    index_turn.result.expect("Index turn can proceed");
+}
+
 #[tokio::test]
 async fn status_changes_advance_and_publish_collection_revisions() {
     let directory = tempdir().expect("temporary state directory");

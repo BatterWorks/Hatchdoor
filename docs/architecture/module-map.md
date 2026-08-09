@@ -882,6 +882,19 @@ waits for a configuration change, a manual `sync_now`/`retry_now`, a restart, or
 the normal schedule), or bounded exponential backoff after a retryable
 (transient) failure. `spawn_scheduler_tick` drives it on `DEFAULT_TICK_INTERVAL`.
 
+`run_local_history_git_turn` is an `ExistingGit` + `VaultGitMode::LocalHistory`
+Vault's counterpart to `run_managed_git_turn`: given the Vault's already-resolved
+path and commit identity, it builds its own placeholder `GitMode::Local`
+`GitConfig` and calls `validate_local_repo` then `commit_local`, committing
+only the contained Vault subtree of whatever enclosing checkout the Vault sits
+in and never contacting a remote. It classifies every `GitError` into a
+redacted `VaultWorkError`, mirroring the legacy single-Vault task's transient
+split (`Remote`/`Other` retry; validation, conflict, and dirty-tree do not).
+Unlike managed-Git Vaults, an `ExistingGit` Local-history Vault is never
+registered with `ManagedGitScheduler`: it receives only the one `Pending`-
+triggered Git turn `reconcile_and_reconstruct` already requests at activation,
+with no ongoing re-commit-on-later-drift schedule.
+
 **Consumed dependencies:** local Git repository through `git2`, the live
 configuration snapshot for startup parsing, and the registry's shared
 credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
@@ -895,7 +908,12 @@ composition (`src/vault_runtime.rs::dispatch_managed_git_turn` and
 schedule alongside its coordinator admission) and by `src/server.rs`, which
 owns the one global consumer loop driving `VaultWorkWorker::run_next` — the
 worker/scheduler-tick construction and dispatch this module map previously
-noted as missing. `VaultWorkKind::Index` is consumed by runtime composition's
+noted as missing. `run_local_history_git_turn` is likewise consumed by
+`dispatch_managed_git_turn_with`'s `ExistingGit` + `VaultGitMode::LocalHistory`
+match arm, off the async runtime via `spawn_blocking`, publishing through the
+same `publish_managed_git_turn_outcome` a managed-Git turn uses; that Vault is
+never registered with `ManagedGitScheduler`, so this arm is its whole
+Git-turn responsibility. `VaultWorkKind::Index` is consumed by runtime composition's
 `dispatch_vault_index_turn`, which publishes only that Vault's disposable
 snapshot and reports its per-Vault search outcome; `Repair` remains an explicit
 non-retryable "not yet implemented" `VaultWorkError` so a Vault's shared FIFO
