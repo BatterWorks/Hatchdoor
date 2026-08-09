@@ -6,21 +6,17 @@
 mod read;
 mod write;
 
-use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::app_state::AppState;
-use crate::vault::allowed_attachment_extensions;
-
 use super::config::McpConfig;
-use super::protocol::{JsonRpcFailure, tool_error, tool_success};
+use super::protocol::{JsonRpcFailure, tool_error, tool_structured_error, tool_success};
+use crate::app_state::AppState;
 
 pub async fn handle_tools_call(
     state: AppState,
     params: Option<Value>,
     config: &McpConfig,
 ) -> Result<Value, JsonRpcFailure> {
-    let lifecycle_write_enabled = state.startup.snapshot().capabilities.mutate;
     let params =
         params.ok_or_else(|| JsonRpcFailure::invalid_params("Missing tool call params"))?;
     let name = params
@@ -75,55 +71,61 @@ pub async fn handle_tools_call(
     }
 
     let outcome = match name {
+        "list_vaults" => read::list_vaults_tool(state, arguments).await,
         "search_notes" => read::search_notes_tool(state, arguments).await,
-        "query_notes" => read::query_notes_tool(state, arguments).await,
         "get_note" => read::get_note_tool(state, arguments).await,
         "get_note_links" => read::get_note_links_tool(state, arguments).await,
         "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
         "get_tree" => read::get_tree_tool(state, arguments).await,
+        "get_stats" => read::get_stats_tool(state, arguments).await,
+        "get_graph" => read::get_graph_tool(state, arguments).await,
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
-        "refresh_index" => read::refresh_index_tool(state, arguments).await,
-        "get_git_sync_status" => read::get_git_sync_status_tool(state).await,
-        "layer_diagnostics" => read::layer_diagnostics_tool(state, arguments).await,
-        "get_attachment_import_config" if config.write_enabled && lifecycle_write_enabled => {
-            read::get_attachment_import_config_tool(config)
+        "create_vault" if config.write_enabled => read::create_vault_tool(state, arguments).await,
+        "edit_vault" if config.write_enabled => read::edit_vault_tool(state, arguments).await,
+        "enable_vault" if config.write_enabled => read::enable_vault_tool(state, arguments).await,
+        "disable_vault" if config.write_enabled => read::disable_vault_tool(state, arguments).await,
+        "disconnect_vault" if config.write_enabled => {
+            read::disconnect_vault_tool(state, arguments).await
         }
-        "get_attachment_import_config" => Ok(tool_success(json!({
-            "enabled": false,
-            "allowed_extensions": allowed_attachment_extensions(),
-            "methods": [],
-            "usage": "Attachment upload is unavailable for the current vault lifecycle capabilities."
-        }))),
+        "sync_vault" if config.write_enabled => read::sync_vault_tool(state, arguments).await,
+        "retry_vault" if config.write_enabled => read::retry_vault_tool(state, arguments).await,
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
         | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
         | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
-            if config.write_enabled && lifecycle_write_enabled =>
+            if config.write_enabled =>
         {
-            // Hold the vault write lock for the whole tool call so a concurrent
-            // git-sync merge/reset cannot race a filesystem write.
-            let _guard = state.vault_write_lock.clone().lock_owned().await;
+            let vault = write::scoped_vault(&state, &arguments)?;
+            // This is the same per-Vault mutation lock used by the V1 HTTP
+            // adapter.  The legacy instance-wide AppState lock deliberately
+            // does not participate in this scoped path.
+            let _guard = write::acquire_mutation(&vault).await?;
             match name {
-                "create_note" => write::create_note_tool(state, arguments).await,
-                "update_note" => write::update_note_tool(state, arguments).await,
-                "append_to_note" => write::append_to_note_tool(state, arguments).await,
-                "edit_note" => write::edit_note_tool(state, arguments).await,
-                "replace_section" => write::replace_section_tool(state, arguments).await,
-                "rename_note" => write::rename_note_tool(state, arguments).await,
-                "move_note" => write::move_note_tool(state, arguments).await,
-                "move_rename_note" => write::move_rename_note_tool(state, arguments).await,
-                "archive_note" => write::archive_note_tool(state, arguments).await,
-                "delete_note" => write::delete_note_tool(state, arguments).await,
+                "create_note" => write::create_note_tool(state, &vault, arguments).await,
+                "update_note" => write::update_note_tool(state, &vault, arguments).await,
+                "append_to_note" => write::append_to_note_tool(state, &vault, arguments).await,
+                "edit_note" => write::edit_note_tool(state, &vault, arguments).await,
+                "replace_section" => write::replace_section_tool(state, &vault, arguments).await,
+                "rename_note" => write::rename_note_tool(state, &vault, arguments).await,
+                "move_note" => write::move_note_tool(state, &vault, arguments).await,
+                "move_rename_note" => write::move_rename_note_tool(state, &vault, arguments).await,
+                "archive_note" => write::archive_note_tool(state, &vault, arguments).await,
+                "delete_note" => write::delete_note_tool(state, &vault, arguments).await,
                 "import_attachment" => {
-                    write::import_attachment_tool(state, arguments, config).await
+                    write::import_attachment_tool(state, &vault, arguments, config).await
                 }
-                "move_attachment" => write::move_attachment_tool(state, arguments).await,
-                "rename_attachment" => write::rename_attachment_tool(state, arguments).await,
-                "delete_attachment" => write::delete_attachment_tool(state, arguments).await,
+                "move_attachment" => write::move_attachment_tool(state, &vault, arguments).await,
+                "rename_attachment" => {
+                    write::rename_attachment_tool(state, &vault, arguments).await
+                }
+                "delete_attachment" => {
+                    write::delete_attachment_tool(state, &vault, arguments).await
+                }
                 _ => unreachable!(),
             }
         }
-        "list_note_attachments" if config.write_enabled && lifecycle_write_enabled => {
-            write::list_note_attachments_tool(state, arguments).await
+        "list_note_attachments" if config.write_enabled => {
+            let vault = write::scoped_vault(&state, &arguments)?;
+            write::list_note_attachments_tool(state, &vault, arguments).await
         }
         "create_note"
         | "update_note"
@@ -139,14 +141,13 @@ pub async fn handle_tools_call(
         | "move_attachment"
         | "rename_attachment"
         | "delete_attachment"
-        | "list_note_attachments" => {
-            let message = if !config.write_enabled {
-                "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED"
-            } else {
-                "MCP write tools are disabled by the vault lifecycle"
-            };
-            Err(JsonRpcFailure::invalid_params(message))
-        }
+        | "list_note_attachments" => Err(JsonRpcFailure::invalid_params(
+            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
+        )),
+        "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
+        | "sync_vault" | "retry_vault" => Err(JsonRpcFailure::invalid_params(
+            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
+        )),
         other => Err(JsonRpcFailure::invalid_params(format!(
             "Unknown MCP tool: {other}"
         ))),
@@ -156,7 +157,11 @@ pub async fn handle_tools_call(
     // tool result so read and write tools report the same conditions the same
     // way; genuine protocol errors stay JSON-RPC errors.
     match outcome {
-        Err(failure) if failure.tool_level => Ok(tool_error(failure.message)),
+        Err(failure) if failure.tool_level => match serde_json::from_str::<Value>(&failure.message)
+        {
+            Ok(error) => Ok(tool_structured_error(error)),
+            Err(_) => Ok(tool_error(failure.message)),
+        },
         other => other,
     }
 }
@@ -180,13 +185,10 @@ fn model_setup_status_payload(state: &AppState) -> Value {
     })
 }
 
-pub fn tools_list(
-    config: &McpConfig,
-    layers: &[crate::search::LayerInfo],
-    lifecycle_write_enabled: bool,
-) -> Vec<Value> {
-    let mut tools = read::read_tools_list(layers);
-    if config.write_enabled && lifecycle_write_enabled {
+pub fn tools_list(config: &McpConfig) -> Vec<Value> {
+    let mut tools = read::read_tools_list();
+    if config.write_enabled {
+        tools.extend(read::management_tools_list());
         tools.extend(write::write_tools_list());
     }
     tools
@@ -218,13 +220,6 @@ pub fn setup_tools_list() -> Vec<Value> {
     ]
 }
 
-/// Arguments for the several tools keyed only by a note slug (read and write).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct SlugArgs {
-    pub slug: String,
-}
-
 pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
     let value = value.trim().to_string();
     if value.is_empty() {
@@ -238,15 +233,6 @@ pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, Js
 pub(super) fn read_only_tool_annotations() -> Value {
     json!({
         "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false,
-    })
-}
-
-pub(super) fn refresh_tool_annotations() -> Value {
-    json!({
-        "readOnlyHint": false,
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false,

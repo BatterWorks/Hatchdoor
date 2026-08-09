@@ -4,10 +4,10 @@ pub mod diagnostics;
 mod downloads;
 mod settings;
 mod spa;
-mod vault_collection_reads;
-mod vault_content;
+pub(crate) mod vault_collection_reads;
+pub(crate) mod vault_content;
 mod vault_write;
-mod vaults;
+pub(crate) mod vaults;
 
 pub use api::health_handler;
 pub use settings::{

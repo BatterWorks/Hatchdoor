@@ -524,9 +524,9 @@ causes startup indexing to fail, correcting it lets the vault watcher recover
 without restarting the server.
 
 To inspect the active rules, markers, layer counts, and conflicts, call
-`GET /api/diagnostics` (optionally `?path=sources/Clip.md`) or the MCP
-`layer_diagnostics` tool. Diagnostics are disabled in demo mode because they can
-reveal demoted paths.
+`GET /api/diagnostics` (optionally `?path=sources/Clip.md`). Diagnostics are
+disabled in demo mode because they can reveal demoted paths; they have no
+Vault-scoped MCP replacement.
 
 ### Note URLs And Links
 
@@ -594,24 +594,16 @@ Send:
 Authorization: Bearer <token>
 ```
 
-### MCP Metadata Queries
+### MCP Vault scope
 
-`search_notes` accepts optional exact metadata filters alongside semantic or
-keyword retrieval. Filters support all-of exact tag matching, hierarchical tag
-prefixes (a `topic/selfhosting` prefix also matches `topic/selfhosting/immich`),
-a vault-relative path prefix, required property names, and typed property equality. Search results
-always include normalized tags and aliases; use `include_properties` to return
-only the frontmatter fields the agent needs.
-
-Use `query_notes` when metadata completely defines the request and there is no
-meaningful content query—for example, listing every note tagged `type/device`
-with `status: active`. It requires at least one filter and returns note summaries
-rather than repeated chunks. `get_note` returns the complete normalized metadata
-object for a single note.
-
-Date values are currently exposed as frontmatter values and support exact
-matching. Date ranges and a broader Dataview-style query language are not part
-of the 2.3.0 metadata filter contract.
+Start every agent session with `list_vaults`; it returns immutable `vault_id`
+values, collection/registry revisions, capabilities, status, and only a
+redacted credential indicator. There is no selected or default Vault.
+Collection reads (`search_notes`, `get_tree`, `get_stats`, `get_graph`, and
+`recently_modified`) require `scope`, set to one Vault ID or `all`. Exact reads,
+Markdown mutations, and controls of an existing Vault require `vault_id`.
+Collection results include `scope`, `collection_revision`, `partial`, and
+participants; agents should branch on structured error `code`, never text.
 
 ### Agent Skill
 
@@ -630,7 +622,7 @@ backlinks, moves, and git sync.
 Agents and the web UI upload attachments directly — no shared staging folder to
 mount. Two paths cover the size/compatibility trade-off:
 
-- **`POST /api/attachment`** (multipart) — the default. Used by the web UI and
+- **`POST /api/v1/vaults/{vault_id}/attachments`** (multipart) — the default. Used by the web UI and
   by any agent that can make an HTTP request (e.g. shell out to `curl`).
   Accepts either the web bearer token or the MCP bearer token, so an MCP agent
   can reuse its existing credential. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES`
@@ -642,8 +634,7 @@ mount. Two paths cover the size/compatibility trade-off:
   (default 5 MiB), measured on the decoded file.
 
 Use **Settings → Uploads** to change either limit while Hatchdoor is running.
-Agents can call `get_attachment_import_config` to discover both methods, their
-current size limits, and which to use.
+The `import_attachment` MCP fallback requires the same explicit `vault_id`.
 
 ## Versioning and Git Sync
 
@@ -671,8 +662,8 @@ Requirements:
 - Merge conflicts are kept for human resolution on the server; Hatchdoor never
   force-checks out over uncommitted manual vault edits.
 
-Use the `get_git_sync_status` MCP tool to check whether recent writes were
-committed and pushed.
+Use `list_vaults` to inspect each Vault's Git status, and `sync_vault` or
+`retry_vault` (with that `vault_id`) for eligible managed-Git Vaults.
 
 ## Running Without Docker
 
@@ -806,7 +797,7 @@ Common routes:
 | `PATCH` | `/api/note/:slug/archive` | Archive a note |
 | `PATCH` | `/api/note/:slug/move-rename` | Move and rename a note |
 | `DELETE` | `/api/note/:slug` | Move a note to trash |
-| `POST` | `/api/attachment` | Upload an attachment |
+| `POST` | `/api/v1/vaults/{vault_id}/attachments` | Upload an attachment |
 | `GET` | `/vault-assets/*path` | Serve vault assets |
 | `POST` | `/mcp` | Streamable HTTP MCP endpoint |
 

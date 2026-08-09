@@ -71,7 +71,11 @@ client can work around today.
 
 ## MCP before and after
 
-Tool names remain stable. Their schemas gain required scope fields.
+The supported MCP catalogue is deliberately Vault-scoped. Retired scope-less
+tools (`query_notes`, `refresh_index`, `layer_diagnostics`, and
+`get_git_sync_status`) have no compatibility aliases. Surviving collection
+reads gain a required `scope`; exact reads, mutations, write-capability checks,
+and existing-Vault controls gain a required `vault_id`.
 
 Broad search across every enabled Vault:
 
@@ -121,9 +125,12 @@ Fetch or update an exact Note:
 }
 ```
 
-Collection-shaped MCP reads such as `search_notes`, `query_notes`, `get_tree`,
-and `recently_modified` accept `scope`. Exact Note/link/resolve operations and
-every mutation or control operation require `vault_id`.
+Collection-shaped MCP reads such as `search_notes`, `get_tree`, `get_stats`,
+`get_graph`, and `recently_modified` accept `scope`. Exact Note/link/resolve
+operations and every mutation or control operation on an existing Vault require
+`vault_id`. `create_vault` is the revisioned collection-creation exception: the
+registry assigns its immutable ID after the successful create, which callers
+discover with `list_vaults`.
 
 ## Note identity and results
 

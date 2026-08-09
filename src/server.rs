@@ -1665,9 +1665,9 @@ mod tests {
                     .method("POST")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"import_attachment","arguments":{"target_relative_path":"Attachments/limited.png","content":"cG5nLWJ5dGVz"}}}"#,
-                    ))
+                    .body(Body::from(format!(
+                        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"import_attachment","arguments":{{"vault_id":"{vault_id}","target_relative_path":"Attachments/limited.png","content":"cG5nLWJ5dGVz"}}}}}}"#,
+                    )))
                     .expect("request"),
             )
             .await

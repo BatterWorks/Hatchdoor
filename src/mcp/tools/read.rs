@@ -1,627 +1,53 @@
-//! Read-only MCP tools: search, note/link/tree lookups, and status. Always
-//! available whenever MCP is enabled.
+//! Vault-scoped MCP read tools.  These are deliberately thin in-process
+//! adapters over the same V1 handlers and shared cores used by HTTP: MCP owns
+//! JSON-RPC framing, while scope parsing, projections, and error shapes stay
+//! in the Vault API surface.
 
+use axum::body::to_bytes;
+use axum::extract::{Path, Query, State};
+use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::api_types::RefreshResponse;
-use crate::app_state::{AppState, refresh_now, sqlite_cache};
-use crate::search::SearchRequest;
-use crate::vault::allowed_attachment_extensions;
+use crate::app_state::AppState;
+use crate::handlers::{vault_collection_reads, vault_content, vaults};
 
-use super::super::config::McpConfig;
-use super::super::protocol::{JsonRpcFailure, tool_error, tool_success};
-use super::{non_empty_argument, read_only_tool_annotations, refresh_tool_annotations};
+use super::super::protocol::{JsonRpcFailure, tool_structured_error, tool_success};
+use super::read_only_tool_annotations;
 
-pub(super) async fn search_notes_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: SearchNotesArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid search_notes arguments: {error}"))
+const MAX_TOOL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+pub(super) async fn handler_payload(response: Response) -> Result<Value, JsonRpcFailure> {
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), MAX_TOOL_RESPONSE_BYTES)
+        .await
+        .map_err(|error| JsonRpcFailure::internal(format!("read Vault response body: {error}")))?;
+    let payload = serde_json::from_slice(&bytes).map_err(|error| {
+        JsonRpcFailure::internal(format!("decode Vault response body: {error}"))
     })?;
-    validate_metadata_query(&args.filters, &args.include_properties)?;
-    let query = args.query.trim().to_string();
-    if query.is_empty() {
-        return Err(JsonRpcFailure::invalid_params(
-            "search_notes query cannot be empty",
-        ));
-    }
-
-    let limit = args.limit.unwrap_or(10).clamp(1, 50);
-    let per_note_cap = args.per_note_cap.unwrap_or(2).clamp(1, 10);
-    let mode = args.mode.unwrap_or_default();
-
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let embedder = state.embedder.as_ref();
-
-    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
-    check_path_prefix_precedence(cache.as_ref(), &args.filters, &layers)?;
-    let req = SearchRequest {
-        query,
-        mode,
-        limit,
-        per_note_cap,
-        filters: args.filters,
-        include_properties: args.include_properties,
-        layers,
-    };
-    let response =
-        crate::search::run(cache.as_ref(), embedder, req).map_err(JsonRpcFailure::internal)?;
-
-    Ok(tool_success(serde_json::to_value(&response).map_err(
-        |e| JsonRpcFailure::internal(format!("serialize search response: {e}")),
-    )?))
-}
-
-pub(super) async fn query_notes_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: QueryNotesArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid query_notes arguments: {error}"))
-    })?;
-    validate_metadata_query(&args.filters, &args.include_properties)?;
-    if args.filters.is_empty() {
-        return Err(JsonRpcFailure::invalid_params(
-            "query_notes requires at least one metadata filter",
-        ));
-    }
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
-    check_path_prefix_precedence(cache.as_ref(), &args.filters, &layers)?;
-    let notes = crate::search::query_notes(
-        cache.as_ref(),
-        &args.filters,
-        &args.include_properties,
-        args.limit.unwrap_or(50).clamp(1, 200),
-        &layers,
-    )
-    .map_err(JsonRpcFailure::internal)?;
-    Ok(tool_success(json!({ "notes": notes })))
-}
-
-pub(super) async fn get_note_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: GetNoteArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_note arguments: {error}"))
-    })?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    // Exactly one of `slug` or `path` addresses the note. Both reach any layer;
-    // the response carries the note's `layer` so the caller knows its surface.
-    let (note, address) = match (args.slug, args.path) {
-        (Some(slug), None) => {
-            let slug = non_empty_argument("slug", slug)?;
-            let note = cache
-                .read_note_by_slug(&slug)
-                .map_err(JsonRpcFailure::internal)?;
-            (note, slug)
-        }
-        (None, Some(path)) => {
-            let path = non_empty_argument("path", path)?;
-            let note = cache
-                .read_note_by_path(&path)
-                .map_err(JsonRpcFailure::internal)?;
-            (note, path)
-        }
-        (Some(_), Some(_)) => {
-            return Err(JsonRpcFailure::invalid_params(
-                "get_note takes exactly one of slug or path, not both",
-            ));
-        }
-        (None, None) => {
-            return Err(JsonRpcFailure::invalid_params(
-                "get_note requires either slug or path",
-            ));
-        }
-    };
-
-    match note {
-        Some(note) => Ok(tool_success(json!({ "note": note }))),
-        None => Ok(tool_error(format!("Note not found: {address}"))),
-    }
-}
-
-pub(super) async fn get_note_links_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: LinksArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_note_links arguments: {error}"))
-    })?;
-    let slug = non_empty_argument("slug", args.slug)?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    // The selection scopes which backlinks are visible; forward links always
-    // resolve across the boundary regardless (a default-surface note may point
-    // into a demoted one).
-    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
-    match cache
-        .note_links(&slug, &layers)
-        .map_err(JsonRpcFailure::internal)?
-    {
-        Some(links) => Ok(tool_success(json!({ "links": links }))),
-        None => Ok(tool_error(format!("Note not found: {slug}"))),
-    }
-}
-
-pub(super) async fn resolve_wikilink_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: ResolveWikilinkArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid resolve_wikilink arguments: {error}"))
-    })?;
-    let target = non_empty_argument("target", args.target)?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    let slug = cache
-        .resolve_wikilink(&target)
-        .map_err(JsonRpcFailure::internal)?;
-    Ok(tool_success(json!({ "slug": slug })))
-}
-
-pub(super) async fn get_tree_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: LayersOnlyArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_tree arguments: {error}"))
-    })?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
-    let tree = cache
-        .explorer_tree(&layers)
-        .map_err(JsonRpcFailure::internal)?;
-
-    Ok(tool_success(json!({ "tree": tree })))
-}
-
-pub(super) async fn recently_modified_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: RecentlyModifiedArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid recently_modified arguments: {error}"))
-    })?;
-    let limit = args.limit.unwrap_or(20).clamp(1, 100);
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let layers = parse_layer_selection(cache.as_ref(), &args.layers)?;
-    let notes = cache
-        .recently_modified_notes(limit, &layers)
-        .map_err(JsonRpcFailure::internal)?;
-
-    Ok(tool_success(json!({ "notes": notes })))
-}
-
-pub(super) async fn refresh_index_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    reject_non_empty_arguments("refresh_index", &arguments)?;
-    refresh_now(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-
-    Ok(tool_success(json!(RefreshResponse { refreshed: true })))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LayerDiagnosticsArgs {
-    #[serde(default)]
-    path: Option<String>,
-}
-
-pub(super) async fn layer_diagnostics_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    // Disabled under demo mode (it reveals demoted paths). MCP is already refused
-    // alongside demo_mode at startup, so this is a defensive belt-and-braces guard.
-    if state.demo_mode {
-        return Err(JsonRpcFailure::invalid_params(
-            "layer_diagnostics is disabled in demo mode",
-        ));
-    }
-    let args: LayerDiagnosticsArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid layer_diagnostics arguments: {error}"))
-    })?;
-    let cache = sqlite_cache(&state)
-        .await
-        .map_err(|(_status, body)| JsonRpcFailure::internal(body.0.error))?;
-    let vault_path = state
-        .vault_path()
-        .await
-        .ok_or_else(|| JsonRpcFailure::internal("Vault is not ready"))?;
-    let scan_config = state.live_scan_config().map_err(JsonRpcFailure::internal)?;
-    let diagnostics = tokio::task::spawn_blocking(move || {
-        crate::handlers::diagnostics::build_layer_diagnostics(
-            &vault_path,
-            &scan_config,
-            &cache,
-            args.path.as_deref(),
-        )
-    })
-    .await
-    .map_err(|join_error| {
-        JsonRpcFailure::internal(format!("diagnostics task panicked: {join_error}"))
-    })?
-    .map_err(JsonRpcFailure::internal)?;
-
-    Ok(tool_success(serde_json::to_value(&diagnostics).map_err(
-        |e| JsonRpcFailure::internal(format!("serialize diagnostics: {e}")),
-    )?))
-}
-
-pub(super) async fn get_git_sync_status_tool(state: AppState) -> Result<Value, JsonRpcFailure> {
-    let sync = state.git_sync.read().await;
-    let status = match sync.as_ref() {
-        Some(handle) => {
-            let guard = handle.status();
-            let snapshot = guard.read().await;
-            serde_json::to_value(&*snapshot)
-                .map_err(|e| JsonRpcFailure::internal(format!("serialize git status: {e}")))?
-        }
-        None => json!({
-            "enabled": false,
-            "state": "disabled",
-            "mode": "off",
-            "last_sync_at": null,
-            "last_ok": false,
-            "last_error": null,
-            "last_error_kind": null,
-            "pending": 0
-        }),
-    };
-    Ok(tool_success(status))
-}
-
-/// Describe the available attachment-upload methods so an agent can pick one:
-/// the HTTP endpoint (the default — it now accepts the MCP token directly,
-/// so no separate credential is needed) and the base64 MCP tool (the
-/// fallback, for clients that cannot make an out-of-band HTTP request).
-pub(super) fn get_attachment_import_config_tool(
-    config: &McpConfig,
-) -> Result<Value, JsonRpcFailure> {
-    let enabled = config.write_enabled;
-    let methods = if enabled {
-        json!([
-            {
-                "id": "http_multipart",
-                "role": "default",
-                "method": "POST",
-                "path": "/api/attachment",
-                "path_note": "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
-                "max_bytes": config.max_attachment_bytes,
-                "recommended_for": "the default for any file size; use unless the client cannot make an out-of-band HTTP request",
-                "auth": "Accepts either the web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) or the MCP token as `Authorization: Bearer <token>` — an agent can reuse its existing MCP token here, no separate credential needed. No token is required when neither is configured.",
-                "requires": "ability to make an HTTP request outside MCP (e.g. shell/curl)",
-                "usage": "POST multipart/form-data with fields `target_relative_path` and `file`."
-            },
-            {
-                "id": "mcp_base64",
-                "tool": "import_attachment",
-                "role": "fallback",
-                "max_bytes": config.max_base64_bytes,
-                "recommended_for": "fallback when an out-of-band HTTP request is not possible; universal, works with any MCP client, but size-limited",
-                "usage": "Call import_attachment with base64-encoded `content` and a vault-relative `target_relative_path`."
-            }
-        ])
+    Ok(if status.is_success() {
+        tool_success(payload)
     } else {
-        json!([])
-    };
-    Ok(tool_success(json!({
-        "enabled": enabled,
-        "allowed_extensions": allowed_attachment_extensions(),
-        "methods": methods,
-        "usage": if enabled {
-            "Two upload methods are available. Prefer the HTTP endpoint (POST /api/attachment) by default; fall back to import_attachment (base64) only when an out-of-band HTTP request is not possible."
-        } else {
-            "Attachment upload is disabled. Set HATCHDOOR_MCP_WRITE_ENABLED to enable it."
-        }
-    })))
+        tool_structured_error(payload)
+    })
 }
 
-fn reject_non_empty_arguments(tool_name: &str, arguments: &Value) -> Result<(), JsonRpcFailure> {
-    if arguments
-        .as_object()
-        .map(|object| object.is_empty())
-        .unwrap_or(false)
-    {
-        return Ok(());
-    }
-
-    Err(JsonRpcFailure::invalid_params(format!(
-        "{tool_name} does not accept arguments"
-    )))
-}
-
-/// Tools whose queries accept a `layers` selector. Kept in one place so the
-/// schema injection below and any future per-tool logic agree on the set.
-const LAYER_AWARE_READ_TOOLS: [&str; 5] = [
-    "search_notes",
-    "query_notes",
-    "get_note_links",
-    "get_tree",
-    "recently_modified",
-];
-
-/// The JSON-schema fragment for the `layers` array parameter, or `None` for a
-/// vault with no layers (in which case the parameter is omitted entirely). The
-/// enum is `default`/`all` plus every discovered layer name; each named layer's
-/// marker description (already sanitized in phase 1) is folded into the
-/// parameter description, since JSON Schema has no per-enum-value docs.
-fn layers_param_schema(layers: &[crate::search::LayerInfo]) -> Option<Value> {
-    if layers.is_empty() {
-        return None;
-    }
-    let mut enum_values = vec![json!("default"), json!("all")];
-    let mut described = Vec::new();
-    for layer in layers {
-        enum_values.push(json!(layer.name));
-        match &layer.description {
-            Some(description) => described.push(format!("'{}' — {}", layer.name, description)),
-            None => described.push(format!("'{}'", layer.name)),
-        }
-    }
-    Some(json!({
-        "type": "array",
-        "items": {"type": "string", "enum": enum_values},
-        "default": [],
-        "description": format!(
-            "Which vault layers to include. Omit for the default surface only. \
-             'default' adds the default surface; 'all' selects every layer. \
-             Named demoted layers: {}.",
-            described.join("; ")
-        )
-    }))
-}
-
-pub(super) fn read_tools_list(layers: &[crate::search::LayerInfo]) -> Vec<Value> {
-    let mut tools = read_tools_list_base();
-    if let Some(schema) = layers_param_schema(layers) {
-        for tool in tools.iter_mut() {
-            let is_layer_aware = tool
-                .get("name")
-                .and_then(Value::as_str)
-                .is_some_and(|name| LAYER_AWARE_READ_TOOLS.contains(&name));
-            if !is_layer_aware {
-                continue;
-            }
-            if let Some(properties) = tool
-                .get_mut("inputSchema")
-                .and_then(|schema| schema.get_mut("properties"))
-                .and_then(Value::as_object_mut)
-            {
-                properties.insert("layers".to_string(), schema.clone());
-            }
-        }
-    }
-    tools
-}
-
-fn read_tools_list_base() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "search_notes",
-            "description": "Semantic-first chunk search across the vault. Optional metadata filters restrict eligible notes before results are returned. Results always include normalized tags and aliases; include_properties selects frontmatter fields to return. Use query_notes instead when metadata alone defines the request.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Search query."
-                    },
-                    "mode": {
-                        "type": "string",
-                        "enum": ["semantic", "keyword"],
-                        "default": "semantic",
-                        "description": "Retrieval mode. semantic = vector similarity (default). keyword = FTS5 BM25 over chunk content."
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 50,
-                        "default": 10
-                    },
-                    "per_note_cap": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 10,
-                        "default": 2,
-                        "description": "Maximum number of chunks returned from any single note."
-                    },
-                    "filters": note_filters_schema(),
-                    "include_properties": {
-                        "type": "array",
-                        "items": {"type":"string"},
-                        "maxItems": 50,
-                        "default": [],
-                        "description": "Frontmatter property names to include in each result."
-                    }
-                },
-                "required": ["query"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "query_notes",
-            "description": "List notes using exact metadata filters without semantic or keyword retrieval. Use for requests such as all notes with a tag, property, status, or path prefix.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "filters": note_filters_schema(),
-                    "include_properties": {
-                        "type": "array",
-                        "items": {"type":"string"},
-                        "maxItems": 50,
-                        "default": []
-                    },
-                    "limit": {
-                        "type":"integer",
-                        "minimum":1,
-                        "maximum":200,
-                        "default":50
-                    }
-                },
-                "required": ["filters"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_note",
-            "description": "Fetch full Markdown content for one note, addressed by exactly one of `slug` or `path` (a vault-relative path, with or without .md). Both reach any layer; the response carries the note's `layer`. Use only after search_notes or resolve_wikilink identifies the note; avoid fetching many full notes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Hatchdoor note slug. Provide slug or path, not both."
-                    },
-                    "path": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Vault-relative path (e.g. 'sources/Clip.md'). Reaches demoted notes by a stable address. Provide slug or path, not both."
-                    }
-                },
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_note_links",
-            "description": "Fetch outgoing links and backlinks for one known slug. Use when note relationships help answer the user.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Hatchdoor note slug."
-                    }
-                },
-                "required": ["slug"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "resolve_wikilink",
-            "description": "Resolve an Obsidian wikilink target to a Hatchdoor slug before fetching a note.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "target": {
-                        "type": "string",
-                        "minLength": 1,
-                        "description": "Wikilink target without surrounding [[ ]]."
-                    }
-                },
-                "required": ["target"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_tree",
-            "description": "Return the full explorer tree. Use only for vault structure, folders, or navigation questions; do not use for normal search or Q&A.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "recently_modified",
-            "description": "List the most recently modified notes, newest first. The agent's ingest-discovery path: use it to find notes changed since a checkpoint. Returns title, slug, relative_path, mtime_ns and layer.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "maximum": 100,
-                        "default": 20
-                    }
-                },
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "refresh_index",
-            "description": "Refresh Hatchdoor's SQLite view of the vault. Only needed for changes made outside this MCP session (e.g. the user edited a note directly). All write tools already trigger a synchronous reindex before returning, so do not call this after create_note, update_note, append_to_note, or any other write tool.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": refresh_tool_annotations()
-        }),
-        json!({
-            "name": "get_attachment_import_config",
-            "description": "Return the available attachment upload methods (base64 MCP tool and HTTP endpoint), their size limits, allowed extensions, and which to use. Call before uploading attachments.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "get_git_sync_status",
-            "description": "Report local or remote versioning lifecycle state, the last attempt, failures, and pending writes. In remote mode it also reports commits not yet pushed; that field is absent for local history.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-        json!({
-            "name": "layer_diagnostics",
-            "description": "Explain the vault's layer and noise classification. Dumps the active noise-exclusion ruleset with provenance (built-in vs HATCHDOOR_EXCLUDE), the discovered layer markers, per-layer note counts, and any conflicts (a marker directory that is itself noise-excluded, a vanished marker whose notes are retained, disagreeing marker descriptions). Pass an optional `path` to classify an arbitrary path string by re-running the matchers, whether or not it is indexed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "A vault-relative path to classify (noise? which layer?). Re-runs the matchers on the raw string; does not require the path to exist or be indexed."
-                    }
-                },
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
-        }),
-    ]
+fn parse<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T, JsonRpcFailure> {
+    serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid {tool} arguments: {error}"))
+    })
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SearchNotesArgs {
+struct ScopeArgs {
+    scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchArgs {
+    scope: String,
     query: String,
     #[serde(default)]
     mode: Option<crate::search::SearchMode>,
@@ -630,205 +56,440 @@ struct SearchNotesArgs {
     #[serde(default)]
     per_note_cap: Option<usize>,
     #[serde(default)]
-    filters: crate::search::NoteFilters,
-    #[serde(default)]
-    include_properties: Vec<String>,
-    #[serde(default)]
     layers: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct QueryNotesArgs {
-    filters: crate::search::NoteFilters,
-    #[serde(default)]
-    include_properties: Vec<String>,
+struct RecentArgs {
+    scope: String,
     #[serde(default)]
     limit: Option<usize>,
-    #[serde(default)]
-    layers: Vec<String>,
 }
 
-/// get_note addresses a note by exactly one of `slug` or `path`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GetNoteArgs {
-    #[serde(default)]
-    slug: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-}
-
-/// A note slug plus an optional `layers` selector (get_note_links).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LinksArgs {
+struct ExactSlugArgs {
+    vault_id: String,
     slug: String,
-    #[serde(default)]
-    layers: Vec<String>,
 }
 
-/// recently_modified: a result cap plus an optional `layers` selector.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RecentlyModifiedArgs {
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    layers: Vec<String>,
+struct ResolveArgs {
+    vault_id: String,
+    target: String,
 }
 
-/// Only a `layers` selector (get_tree, recently_modified).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct LayersOnlyArgs {
+struct VaultControlArgs {
+    vault_id: String,
+    expected_registry_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultIdArgs {
+    vault_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditVaultArgs {
+    vault_id: String,
+    expected_registry_revision: u64,
+    name: String,
+    source: crate::vault_registry::VaultSource,
     #[serde(default)]
-    layers: Vec<String>,
+    exclude_patterns: Vec<String>,
+    #[serde(default)]
+    https_credentials: Option<crate::handlers::vaults::HttpsCredentialsPatch>,
+    #[serde(default)]
+    confirm_identity_change: bool,
 }
 
-/// Reject a `path_prefix` that points wholly inside a demoted layer the current
-/// selection does not include, with an error naming the layer and the parameter
-/// to pass — never a silently empty result (spec "Addressing"/precedence).
-fn check_path_prefix_precedence(
-    cache: &crate::cache::SqliteCache,
-    filters: &crate::search::NoteFilters,
-    selection: &crate::search::LayerSelection,
-) -> Result<(), JsonRpcFailure> {
-    let Some(prefix) = filters.path_prefix.as_deref() else {
-        return Ok(());
+pub(super) async fn list_vaults_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let _: EmptyArgs = parse("list_vaults", arguments)?;
+    handler_payload(vaults::list_vaults_handler(State(state)).await).await
+}
+
+pub(super) async fn search_notes_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: SearchArgs = parse("search_notes", arguments)?;
+    let query = vault_collection_reads::VaultScopeSearchQuery {
+        q: args.query,
+        mode: args.mode,
+        limit: args.limit,
+        per_note_cap: args.per_note_cap,
+        layers: (!args.layers.is_empty()).then(|| args.layers.join(",")),
     };
-    if prefix.trim().is_empty() || selection.is_all() {
-        return Ok(());
-    }
-    let Some(layers) = cache
-        .demoted_layers_under_prefix(prefix)
-        .map_err(JsonRpcFailure::internal)?
-    else {
-        return Ok(());
+    handler_payload(
+        vault_collection_reads::vault_scope_search_handler(
+            State(state),
+            Path(args.scope),
+            Ok(Query(query)),
+        )
+        .await,
+    )
+    .await
+}
+
+pub(super) async fn get_note_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ExactSlugArgs = parse("get_note", arguments)?;
+    handler_payload(
+        vault_content::vault_scoped_note_handler(State(state), Path((args.vault_id, args.slug)))
+            .await,
+    )
+    .await
+}
+
+pub(super) async fn get_note_links_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ExactSlugArgs = parse("get_note_links", arguments)?;
+    handler_payload(
+        vault_content::vault_scoped_note_links_handler(
+            State(state),
+            Path((args.vault_id, args.slug)),
+        )
+        .await,
+    )
+    .await
+}
+
+pub(super) async fn resolve_wikilink_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ResolveArgs = parse("resolve_wikilink", arguments)?;
+    handler_payload(
+        vault_content::vault_scoped_resolve_handler(
+            State(state),
+            Path(args.vault_id),
+            Ok(Query(crate::api_types::ResolveQuery {
+                target: args.target,
+            })),
+        )
+        .await,
+    )
+    .await
+}
+
+pub(super) async fn get_tree_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ScopeArgs = parse("get_tree", arguments)?;
+    handler_payload(
+        vault_collection_reads::vault_scope_tree_handler(State(state), Path(args.scope)).await,
+    )
+    .await
+}
+
+pub(super) async fn get_stats_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ScopeArgs = parse("get_stats", arguments)?;
+    handler_payload(
+        vault_collection_reads::vault_scope_stats_handler(State(state), Path(args.scope)).await,
+    )
+    .await
+}
+
+pub(super) async fn get_graph_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ScopeArgs = parse("get_graph", arguments)?;
+    handler_payload(
+        vault_collection_reads::vault_scope_graph_handler(State(state), Path(args.scope)).await,
+    )
+    .await
+}
+
+pub(super) async fn recently_modified_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: RecentArgs = parse("recently_modified", arguments)?;
+    handler_payload(
+        vault_collection_reads::vault_scope_recent_handler(
+            State(state),
+            Path(args.scope),
+            Ok(Query(crate::api_types::RecentlyModifiedQuery {
+                limit: args.limit,
+            })),
+        )
+        .await,
+    )
+    .await
+}
+
+/// Registry writes deliberately call the same revisioned collection handlers
+/// as HTTP.  The create operation is the sole control exception without a
+/// `vault_id`: the shared registry generates the immutable ID atomically when
+/// the expected registry revision commits; every control of an existing Vault
+/// takes exactly one `vault_id`.
+pub(super) async fn create_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let request: vaults::CreateVaultRequest = parse("create_vault", arguments)?;
+    handler_payload(vaults::create_vault_handler(State(state), Ok(axum::Json(request))).await).await
+}
+
+pub(super) async fn edit_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: EditVaultArgs = parse("edit_vault", arguments)?;
+    let request = vaults::EditVaultRequest {
+        expected_registry_revision: args.expected_registry_revision,
+        name: args.name,
+        source: args.source,
+        exclude_patterns: args.exclude_patterns,
+        https_credentials: args
+            .https_credentials
+            .unwrap_or(vaults::HttpsCredentialsPatch::Keep),
+        confirm_identity_change: args.confirm_identity_change,
     };
-    // The prefix is wholly inside demoted space. If the selection already covers
-    // one of those layers the query returns something, so let it through; only
-    // when it covers none of them would the result be silently empty — error
-    // instead, naming the layer(s) and how to include them.
-    let selected = selection.named_layers();
-    if layers.iter().any(|layer| selected.contains(layer)) {
-        return Ok(());
-    }
-    let names = layers
-        .iter()
-        .map(|layer| format!("\"{layer}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let plural = if layers.len() == 1 { "layer" } else { "layers" };
-    Err(JsonRpcFailure::invalid_params(format!(
-        "path_prefix '{prefix}' is inside the demoted {plural} {names}, which is not selected. \
-         Pass layers: [{names}] (or [\"all\"]) to include it."
-    )))
+    handler_payload(
+        vaults::edit_vault_handler(State(state), Path(args.vault_id), Ok(axum::Json(request)))
+            .await,
+    )
+    .await
 }
 
-/// Parse the MCP `layers` tokens against the vault's persisted layer catalog,
-/// logging any degrade warnings. An unknown layer name is not a hard error: it
-/// degrades to the default surface (see [`crate::search::LayerSelection::parse`]),
-/// so a stale client holding a since-removed layer name keeps working.
-fn parse_layer_selection(
-    cache: &crate::cache::SqliteCache,
-    tokens: &[String],
-) -> Result<crate::search::LayerSelection, JsonRpcFailure> {
-    let known: Vec<String> = cache
-        .layer_catalog()
-        .map_err(JsonRpcFailure::internal)?
-        .into_iter()
-        .map(|layer| layer.name)
-        .collect();
-    let (selection, warnings) = crate::search::LayerSelection::parse(tokens, &known);
-    for warning in warnings {
-        tracing::warn!(%warning, "MCP layers selector degraded to the default surface");
-    }
-    Ok(selection)
+pub(super) async fn enable_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultControlArgs = parse("enable_vault", arguments)?;
+    handler_payload(
+        vaults::enable_vault_handler(
+            State(state),
+            Path(args.vault_id),
+            Ok(Query(vaults::RevisionQuery {
+                expected_registry_revision: args.expected_registry_revision,
+            })),
+        )
+        .await,
+    )
+    .await
 }
 
-fn note_filters_schema() -> Value {
-    json!({
-        "type":"object",
-        "properties": {
-            "tags": {
-                "type":"array",
-                "items":{"type":"string"},
-                "maxItems":50,
-                "default":[],
-                "description":"All listed tags must be present; matching is case-insensitive and ignores a leading #."
-            },
-            "tag_prefixes": {
-                "type":"array",
-                "items":{"type":"string"},
-                "maxItems":50,
-                "default":[],
-                "description":"All listed tag paths must match exactly or as ancestors of a note tag; matching is case-insensitive and ignores a leading #."
-            },
-            "path_prefix": {
-                "type":"string",
-                "description":"Case-insensitive vault-relative path prefix."
-            },
-            "property_exists": {
-                "type":"array",
-                "items":{"type":"string"},
-                "maxItems":50,
-                "default":[]
-            },
-            "property_equals": {
-                "type":"object",
-                "additionalProperties": true,
-                "description":"Exact typed frontmatter property matches."
-            }
-        },
-        "additionalProperties":false
-    })
+pub(super) async fn disable_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultControlArgs = parse("disable_vault", arguments)?;
+    handler_payload(
+        vaults::disable_vault_handler(
+            State(state),
+            Path(args.vault_id),
+            Ok(Query(vaults::RevisionQuery {
+                expected_registry_revision: args.expected_registry_revision,
+            })),
+        )
+        .await,
+    )
+    .await
 }
 
-fn validate_metadata_query(
-    filters: &crate::search::NoteFilters,
-    include_properties: &[String],
-) -> Result<(), JsonRpcFailure> {
-    const MAX_METADATA_TERMS: usize = 50;
-    for (name, count) in [
-        ("tags", filters.tags.len()),
-        ("tag_prefixes", filters.tag_prefixes.len()),
-        ("property_exists", filters.property_exists.len()),
-        ("property_equals", filters.property_equals.len()),
-        ("include_properties", include_properties.len()),
-    ] {
-        if count > MAX_METADATA_TERMS {
-            return Err(JsonRpcFailure::invalid_params(format!(
-                "{name} accepts at most {MAX_METADATA_TERMS} entries"
-            )));
+pub(super) async fn disconnect_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultControlArgs = parse("disconnect_vault", arguments)?;
+    handler_payload(
+        vaults::disconnect_vault_handler(
+            State(state),
+            Path(args.vault_id),
+            Ok(Query(vaults::RevisionQuery {
+                expected_registry_revision: args.expected_registry_revision,
+            })),
+        )
+        .await,
+    )
+    .await
+}
+
+pub(super) async fn sync_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultIdArgs = parse("sync_vault", arguments)?;
+    handler_payload(vaults::sync_vault_handler(State(state), Path(args.vault_id)).await).await
+}
+
+pub(super) async fn retry_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultIdArgs = parse("retry_vault", arguments)?;
+    handler_payload(vaults::retry_vault_handler(State(state), Path(args.vault_id)).await).await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyArgs {}
+
+fn scope_schema() -> Value {
+    json!({"type":"string", "minLength":1, "description":"A canonical Vault ID or the literal all."})
+}
+
+fn vault_id_schema() -> Value {
+    json!({"type":"string", "minLength":1, "description":"A canonical Vault ID. The literal all is invalid."})
+}
+
+pub(super) fn read_tools_list() -> Vec<Value> {
+    vec![
+        json!({"name":"list_vaults", "description":"Discover the Vault collection, its registry and collection revisions, redacted credentials, status, and capabilities before calling any Vault-dependent tool.", "inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"search_notes", "description":"Search one Vault or all enabled Vaults. Results use the shared partial-participant envelope and every hit is Vault-qualified.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"query":{"type":"string","minLength":1},"mode":{"type":"string","enum":["semantic","keyword"],"default":"semantic"},"limit":{"type":"integer","minimum":1,"maximum":50,"default":10},"per_note_cap":{"type":"integer","minimum":1,"maximum":10,"default":2},"layers":{"type":"array","items":{"type":"string"},"default":[]}},"required":["scope","query"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+        collection_tool(
+            "get_tree",
+            "Return grouped explorer trees for one Vault or all enabled Vaults.",
+        ),
+        collection_tool(
+            "get_stats",
+            "Return grouped statistics for one Vault or all enabled Vaults.",
+        ),
+        collection_tool(
+            "get_graph",
+            "Return grouped graphs for one Vault or all enabled Vaults.",
+        ),
+        json!({"name":"recently_modified", "description":"List recently modified Notes for one Vault or all enabled Vaults.", "inputSchema":{"type":"object","properties":{"scope":scope_schema(),"limit":{"type":"integer","minimum":1,"maximum":25,"default":5}},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
+    ]
+}
+
+pub(super) fn management_tools_list() -> Vec<Value> {
+    let vault_control = |name: &str, description: &str| {
+        json!({
+            "name": name,
+            "description": description,
+            "inputSchema": {"type":"object","properties":{
+                "vault_id": vault_id_schema(),
+                "expected_registry_revision":{"type":"integer","minimum":0}
+            },"required":["vault_id","expected_registry_revision"],"additionalProperties":false},
+            "annotations": super::write_tool_annotations(true, false)
+        })
+    };
+    vec![
+        json!({"name":"create_vault","description":"Create a Vault definition with the shared revisioned collection contract. The registry assigns its immutable Vault ID after a successful create; use list_vaults to discover it.","inputSchema":{"type":"object","properties":{"expected_registry_revision":{"type":"integer","minimum":0},"name":{"type":"string","minLength":1},"enabled":{"type":"boolean","default":true},"source":{"type":"object","description":"A shared VaultSource object: local, existing_git, or managed_git."},"exclude_patterns":{"type":"array","items":{"type":"string"},"default":[]},"https_credentials":{"type":"object","description":"Optional HTTPS username/token input. It is redacted from every response."}},"required":["expected_registry_revision","name","source"],"additionalProperties":false},"annotations":super::write_tool_annotations(true, false)}),
+        json!({"name":"edit_vault","description":"Edit exactly one Vault definition with optimistic registry revision control.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"expected_registry_revision":{"type":"integer","minimum":0},"name":{"type":"string","minLength":1},"source":{"type":"object","description":"A shared VaultSource object: local, existing_git, or managed_git."},"exclude_patterns":{"type":"array","items":{"type":"string"},"default":[]},"https_credentials":{"type":"object","description":"A shared credentials patch: {action: keep|remove|replace}; replacement input is never echoed."},"confirm_identity_change":{"type":"boolean","default":false}},"required":["vault_id","expected_registry_revision","name","source"],"additionalProperties":false},"annotations":super::write_tool_annotations(true, false)}),
+        vault_control("enable_vault", "Enable exactly one Vault definition."),
+        vault_control(
+            "disable_vault",
+            "Disable exactly one Vault definition without deleting its files.",
+        ),
+        vault_control(
+            "disconnect_vault",
+            "Disconnect exactly one Vault definition without deleting local files, checkouts, Git history, or credentials outside its registry record.",
+        ),
+        json!({"name":"sync_vault","description":"Request immediate managed-Git synchronization for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+    ]
+}
+
+fn collection_tool(name: &str, description: &str) -> Value {
+    json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{"scope":scope_schema()},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_catalogue_requires_explicit_scope_and_retires_legacy_tools() {
+        let tools = read_tools_list();
+        let named = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is advertised"))
+        };
+        for name in [
+            "search_notes",
+            "get_tree",
+            "get_stats",
+            "get_graph",
+            "recently_modified",
+        ] {
+            let tool = named(name);
+            assert!(
+                tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("scope"))
+            );
+        }
+        for name in ["get_note", "get_note_links", "resolve_wikilink"] {
+            let tool = named(name);
+            assert!(
+                tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("vault_id"))
+            );
+        }
+        for retired in ["refresh_index", "layer_diagnostics", "get_git_sync_status"] {
+            assert!(!tools.iter().any(|tool| tool["name"] == retired));
         }
     }
-    let names = filters
-        .tags
-        .iter()
-        .chain(filters.tag_prefixes.iter())
-        .chain(filters.property_exists.iter())
-        .chain(filters.property_equals.keys())
-        .chain(include_properties.iter());
-    if names.into_iter().any(|value| value.trim().is_empty()) {
-        return Err(JsonRpcFailure::invalid_params(
-            "metadata filter names cannot be empty",
-        ));
-    }
-    if filters
-        .path_prefix
-        .as_deref()
-        .is_some_and(|prefix| prefix.len() > 4_096)
-    {
-        return Err(JsonRpcFailure::invalid_params(
-            "path_prefix cannot exceed 4096 bytes",
-        ));
-    }
-    Ok(())
-}
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResolveWikilinkArgs {
-    target: String,
+    #[test]
+    fn management_catalogue_uses_revisioned_shared_contracts() {
+        let tools = management_tools_list();
+        for name in [
+            "edit_vault",
+            "enable_vault",
+            "disable_vault",
+            "disconnect_vault",
+            "sync_vault",
+            "retry_vault",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .expect("tool");
+            assert!(
+                tool["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("vault_id")),
+                "{name}"
+            );
+        }
+        let create = tools
+            .iter()
+            .find(|tool| tool["name"] == "create_vault")
+            .expect("create");
+        assert!(
+            create["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("expected_registry_revision"))
+        );
+        assert!(
+            !create["inputSchema"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("vault_id")),
+            "the shared registry assigns IDs only after a successful create"
+        );
+    }
 }
