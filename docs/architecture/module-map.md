@@ -923,14 +923,23 @@ of the Vault collection registry's write operations and of
 `VaultCollectionRuntime::reconcile_and_reconstruct`, which every mutation calls
 in the same request so background Index/Git work is requested for a newly
 enabled Vault without a separate reconciliation pass. Deliberately not gated by
-`require_vault_ready` (a legacy single-configured-Vault signal) or reachable in
-demo mode (mirrors `settings.rs`'s operator-controls posture): discovery and
+`require_vault_ready` (a legacy single-configured-Vault signal): discovery and
 creating the first Vault stay reachable at zero enabled Vaults, and discovery
 reports an explicit `recovery` object rather than erroring when the persisted
 registry itself needs operator recovery. Every response uses the shared
 `VaultApiError{code, message, vault_id?, retryable}` shape and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
 duplicating them. MCP discovery is #103.
+
+Discovery and the event stream are pure reads and stay reachable in demo mode
+(#109: demo mode publishes every enabled Vault in the instance as a public
+read-only collection, unlike `settings.rs`'s operator-controls posture, which
+remains absent). Collection management and manual Git sync/retry are
+Vault-control operations, so `src/server.rs` wraps each of their routes —
+individually, since some share a path with a read (`POST /api/v1/vaults`
+alongside `GET`) — in `reject_demo_mutation`, which calls this file's
+`demo_read_only_response` to refuse with a shared `403 demo_read_only`
+`VaultApiError` before any registry mutation runs, rather than being absent.
 
 `vault_content.rs` owns exact Vault-scoped content reads and their contained
 resources, mounted in the same `/api/v1/vaults/{vault_id}/...` router group as
@@ -1013,6 +1022,14 @@ to report that Vault discovery does not already expose. `refresh` and
 `VaultWorkKind::Index` dispatch, the latter needs new per-Vault cache-query
 domain methods, and neither exists yet (a documented gap, not an oversight;
 see `docs/migrations/vault-scoped-clients.md`).
+
+Every route here is a content mutation, attachment upload, or write-capability
+discovery, so `src/server.rs` wraps each one — individually, since Markdown
+mutations share a path with a read (`PUT`/`DELETE .../notes/{slug}` alongside
+`GET`) — in `reject_demo_mutation` (#109): in demo mode it refuses with
+`vaults.rs`'s shared `403 demo_read_only` error before any mutation runs,
+unlike `vault_content.rs`'s exact reads and `vault_collection_reads.rs`'s
+one-or-all reads, which are pure reads and stay reachable in demo mode.
 
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`

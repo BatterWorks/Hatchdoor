@@ -9,9 +9,14 @@
 //! already-implemented, already-unit-tested write functions. It reuses
 //! `handlers/vaults.rs`'s `VaultApiError`/`parse_vault_id`/rejection helpers
 //! and `handlers/vault_content.rs`'s `vault_read_error_response`, mounted
-//! alongside them in the same router group and sharing its demo-mode/auth
-//! posture. The literal `all` is never accepted (mutations always name
-//! exactly one Vault ID — issue #62).
+//! alongside them in the same router group and sharing its auth posture.
+//! Every route here is a content mutation or write-capability discovery, so
+//! `src/server.rs` wraps each one in `reject_demo_mutation` (#109): in demo
+//! mode it refuses with the shared `403 demo_read_only` error before running,
+//! unlike `vault_content.rs`'s exact reads and `vault_collection_reads.rs`'s
+//! one-or-all reads, which stay reachable unauthenticated in demo mode. The
+//! literal `all` is never accepted (mutations always name exactly one Vault
+//! ID — issue #62).
 //!
 //! Unlike the legacy single-Vault write API, a mutation response never
 //! includes a `git_sync_warning`: the managed-Git scheduler has no

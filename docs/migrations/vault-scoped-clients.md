@@ -180,5 +180,14 @@ malformed requests use `400`, missing resources use `404`, state or concurrency
 conflicts use `409`, and temporary unavailability uses `503`. Existing security,
 body, media-type, and internal-error statuses remain unchanged.
 
+On a public demo instance (`HATCHDOOR_DEMO_MODE=true`), every content
+mutation and Vault-control route (collection management, manual Git
+sync/retry, Markdown mutations, attachment upload, write-capabilities
+discovery) refuses with a `403` and the structured code `demo_read_only`
+before any state change, rather than being absent. Discovery, events, exact
+reads, contained assets/downloads, and one-or-all tree/recent/stats/graph/
+search remain reachable with no token. MCP and Git writeback remain
+unavailable in demo mode regardless.
+
 MCP returns the same domain details in an error tool result. Messages are for
 people and may change; automation must branch on `code`.

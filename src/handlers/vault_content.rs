@@ -10,7 +10,10 @@
 //! is the one-or-all collection-read surface owned by #100). Exact reads
 //! always inspect the requested Vault's authoritative Markdown directory
 //! (never the disposable shared cache), so indexing lag never applies to
-//! them.
+//! them. Every route here is a read, so none of them is wrapped in
+//! `reject_demo_mutation` (#109): they stay reachable unauthenticated in demo
+//! mode, unlike the mutation and Vault-control routes in
+//! `vaults.rs`/`vault_write.rs`.
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, QueryRejection};

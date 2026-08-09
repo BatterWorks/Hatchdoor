@@ -13,6 +13,14 @@
 //! (#100); Markdown mutations, attachment upload, and write-capabilities are
 //! `handlers/vault_write.rs` (#101), which retired the entire legacy unscoped
 //! API in the same change. MCP discovery is #103.
+//!
+//! Discovery and the event stream are pure reads and stay reachable
+//! unauthenticated in demo mode; collection management (create/edit/enable/
+//! disable/disconnect) and manual Git sync/retry are Vault-control
+//! operations, so `src/server.rs` wraps each of their routes in
+//! `reject_demo_mutation` (#109), which calls this file's
+//! `demo_read_only_response` to refuse with the shared `403 demo_read_only`
+//! error before any registry mutation runs.
 
 use std::convert::Infallible;
 use std::str::FromStr;
@@ -256,6 +264,24 @@ pub(crate) fn internal_error_response(
     error!(detail = %detail.as_ref(), "Vault collection API internal error");
     VaultApiError::new("internal_error", "Internal server error", vault_id, false)
         .respond(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Shared `403` refusal for every mutation and Vault-control route when demo
+/// mode publishes the whole enabled Vault collection as public read-only
+/// (#109). Reused directly — rather than duplicated per adapter — so
+/// collection management here and content mutations/attachment upload in
+/// `vault_write.rs` report the same stable `demo_read_only` code and message.
+/// Carries no `vault_id`: the refusal is a global instance posture, not a
+/// per-Vault condition, and applies uniformly before any per-Vault check
+/// (existence, capability, and so on) runs.
+pub(crate) fn demo_read_only_response() -> Response {
+    VaultApiError::new(
+        "demo_read_only",
+        "This is a public read-only demo instance; mutations and Vault-control operations are disabled.",
+        None,
+        false,
+    )
+    .respond(StatusCode::FORBIDDEN)
 }
 
 fn recovery_response(recovery: &VaultRegistryRecovery) -> Response {

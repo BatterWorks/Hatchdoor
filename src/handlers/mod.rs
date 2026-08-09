@@ -32,6 +32,7 @@ pub use vault_write::{
     vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
     vault_scoped_write_capabilities_handler,
 };
+pub(crate) use vaults::demo_read_only_response;
 pub use vaults::{
     create_vault_handler, disable_vault_handler, disconnect_vault_handler, edit_vault_handler,
     enable_vault_handler, list_vaults_handler, retry_vault_handler, sync_vault_handler,
