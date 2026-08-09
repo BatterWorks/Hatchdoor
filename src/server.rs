@@ -4072,6 +4072,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vaults_v1_disable_waits_for_an_active_foreground_mutation() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("lifecycle-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Lifecycle", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+        let parsed_vault_id = vault_id.parse().expect("canonical vault id");
+        let mutation = state
+            .vaults
+            .runtime(parsed_vault_id)
+            .expect("enabled runtime")
+            .acquire_mutation()
+            .await
+            .expect("foreground mutation acquires its Vault lock");
+
+        let disabled = app.clone().oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/vaults/{vault_id}/disable?expected_registry_revision=1"
+                ))
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        );
+        tokio::pin!(disabled);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut disabled)
+                .await
+                .is_err(),
+            "the disable response waits for the foreground mutation"
+        );
+
+        drop(mutation);
+        assert_eq!(disabled.await.expect("response").status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn vaults_v1_edit_identity_change_requires_disabled_then_confirmation() {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let first_path = tmp.path().join("identity-first");

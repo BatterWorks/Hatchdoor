@@ -1020,6 +1020,179 @@ async fn disable_enable_and_disconnect_only_replace_the_target_runtime() {
     ));
 }
 
+#[test]
+fn an_older_registry_snapshot_cannot_replace_a_newer_live_collection() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    std::fs::create_dir_all(&first_path).expect("first Vault directory");
+    std::fs::create_dir_all(&second_path).expect("second Vault directory");
+    let one = add_local_vault(&registry, &empty, "First", first_path);
+    let two = add_local_vault(&registry, &one, "Second", second_path);
+    let second_id = vault_id_named(&two, "Second");
+    let collection = VaultCollectionRuntime::new();
+
+    collection.reconcile(&registry, &one);
+    collection.reconcile(&registry, &two);
+    collection.reconcile(&registry, &one);
+
+    let live = collection.snapshot();
+    assert_eq!(live.registry_revision, two.revision());
+    assert!(live.vaults.contains_key(&second_id));
+}
+
+#[tokio::test]
+async fn disabling_a_vault_waits_for_an_active_foreground_mutation_safe_boundary() {
+    use crate::vault_work::VaultWorkCoordinator;
+
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path);
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    let runtime = collection.runtime(vault_id).expect("enabled runtime");
+    let mutation = runtime
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation acquires its Vault lock");
+    let disabled = registry
+        .disable(enabled.revision(), vault_id)
+        .expect("disable Vault");
+
+    let reconciliation =
+        collection.reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git);
+    tokio::pin!(reconciliation);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut reconciliation)
+            .await
+            .is_err(),
+        "disable waits for the active foreground mutation"
+    );
+    assert!(!runtime.is_accepting_operations());
+
+    drop(mutation);
+    reconciliation.await;
+    assert!(collection.runtime(vault_id).is_none());
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_an_active_foreground_mutation_safe_boundary() {
+    use crate::vault_work::VaultWorkCoordinator;
+
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path);
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _) = VaultWorkCoordinator::new();
+    collection.reconcile(&registry, &enabled);
+    let runtime = collection.runtime(vault_id).expect("enabled runtime");
+    let mutation = runtime
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation acquires its Vault lock");
+
+    let shutdown = collection.shutdown(&coordinator);
+    tokio::pin!(shutdown);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown waits for the active foreground mutation"
+    );
+    assert!(!runtime.is_accepting_operations());
+
+    drop(mutation);
+    shutdown.await;
+}
+
+#[tokio::test]
+async fn an_older_reconciliation_cannot_readmit_work_after_a_newer_snapshot_applies() {
+    use crate::vault_work::{ScheduleResult, VaultWorkCoordinator, VaultWorkKind};
+
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path.clone());
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    let original = collection.runtime(vault_id).expect("enabled runtime");
+    let mutation = original
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation acquires its Vault lock");
+    let replacement = registry
+        .edit(
+            enabled.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Vault".to_string(),
+                source: RegistryVaultSource::Local { path: vault_path },
+                exclude_patterns: vec!["ignored/**".to_string()],
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+            },
+        )
+        .expect("replace enabled Vault definition");
+    let older =
+        collection.reconcile_and_reconstruct(&registry, &replacement, &coordinator, &managed_git);
+    tokio::pin!(older);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut older)
+            .await
+            .is_err(),
+        "replacement waits at the old mutation boundary"
+    );
+    let disabled = registry
+        .disable(replacement.revision(), vault_id)
+        .expect("disable replacement Vault");
+    collection
+        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+        .await;
+
+    drop(mutation);
+    older.await;
+
+    assert!(collection.runtime(vault_id).is_none());
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Index),
+        ScheduleResult::Rejected,
+        "the resumed older reconciliation cannot re-admit retired work"
+    );
+}
+
 #[tokio::test]
 async fn restart_reconstructs_index_work_for_each_enabled_vault_from_the_collection() {
     use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
