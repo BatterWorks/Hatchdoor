@@ -6,6 +6,8 @@ use std::sync::{Arc, RwLock, Weak};
 
 use serde::Serialize;
 
+use crate::cache::SqliteCache;
+use crate::embed::Embedder;
 use crate::git::{ManagedGitScheduler, ManagedGitTurnConfig, run_managed_git_turn};
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault_registry::{
@@ -1178,6 +1180,100 @@ fn is_managed_git(source: &RegistryVaultSource) -> bool {
     matches!(source, RegistryVaultSource::ManagedGit { .. })
 }
 
+/// Execute one `VaultWorkKind::Index` turn for exactly one active Vault.
+///
+/// The authoritative Markdown scan and disposable candidate-cache build run
+/// off the async runtime. Publication replaces only this Vault's rows in the
+/// shared read model, so readers either retain its prior complete snapshot or
+/// observe the new complete snapshot. A failed scan or candidate build keeps a
+/// prior snapshot available but marks it stale; without a prior snapshot the
+/// Vault remains unavailable for search.
+pub(crate) async fn dispatch_vault_index_turn(
+    collection: &VaultCollectionRuntime,
+    cache: Arc<SqliteCache>,
+    embedder: Arc<dyn Embedder>,
+    request: VaultWorkRequest,
+) -> Result<(), VaultWorkError> {
+    let vault_id = request.vault_id();
+    let Some(control_block) = collection.runtime(vault_id) else {
+        return Ok(());
+    };
+
+    control_block
+        .set_search_status(VaultSearchStatus::Indexing, None)
+        .map_err(vault_index_error)?;
+    let (result, stale_mark_required) = {
+        let _refresh = control_block
+            .acquire_refresh()
+            .await
+            .map_err(vault_index_error)?;
+        let indexing_control = control_block.clone();
+        let indexing_cache = cache.clone();
+        match tokio::task::spawn_blocking(move || {
+            let index = indexing_control
+                .authoritative_index()
+                .map_err(|error| (vault_index_error(error), true))?;
+            indexing_cache
+                .replace_vault_snapshot(vault_id, &index, embedder.as_ref())
+                .map_err(|message| {
+                    (
+                        VaultWorkError::new("vault_index_failed", message, true),
+                        false,
+                    )
+                })
+        })
+        .await
+        {
+            Ok(Ok(())) => (Ok(()), false),
+            Ok(Err((error, stale_mark_required))) => (Err(error), stale_mark_required),
+            Err(error) => (
+                Err(VaultWorkError::new(
+                    "vault_index_task_panicked",
+                    error.to_string(),
+                    false,
+                )),
+                true,
+            ),
+        }
+    };
+
+    match &result {
+        Ok(()) => {
+            let _ = control_block.set_search_status(VaultSearchStatus::Ready, None);
+        }
+        Err(error) => {
+            let stale_mark_error = stale_mark_required
+                .then(|| cache.mark_vault_snapshot_stale(vault_id))
+                .transpose()
+                .err();
+            let status = match cache.snapshot_status(vault_id) {
+                Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Stale,
+                Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
+            };
+            let message = match stale_mark_error {
+                Some(mark_error) => format!(
+                    "{} (also could not mark the retained snapshot stale: {mark_error})",
+                    error.message()
+                ),
+                None => error.message().to_string(),
+            };
+            let _ = control_block.set_search_status(
+                status,
+                Some(VaultRuntimeError {
+                    code: error.code().to_string(),
+                    message,
+                    retryable: error.retryable(),
+                }),
+            );
+        }
+    }
+    result
+}
+
+fn vault_index_error(error: VaultRuntimeError) -> VaultWorkError {
+    VaultWorkError::new("vault_index_failed", error.message, error.retryable)
+}
+
 /// Execute one `VaultWorkKind::Git` turn for `request` and publish its
 /// result: Git status always, and — since `activation_snapshot` only stats
 /// `vault_path` once, at `reconcile()` time, before any managed checkout
@@ -1193,6 +1289,7 @@ fn is_managed_git(source: &RegistryVaultSource) -> bool {
 pub async fn dispatch_managed_git_turn(
     collection: &VaultCollectionRuntime,
     registry: &VaultRegistryStore,
+    coordinator: &VaultWorkCoordinator,
     managed_git: &ManagedGitScheduler,
     author_name: &str,
     author_email: &str,
@@ -1201,6 +1298,7 @@ pub async fn dispatch_managed_git_turn(
     dispatch_managed_git_turn_with(
         collection,
         registry,
+        coordinator,
         managed_git,
         author_name,
         author_email,
@@ -1216,9 +1314,11 @@ pub async fn dispatch_managed_git_turn(
 /// deterministic fake in tests that need to drive a real failure through the
 /// full async path (credential resolution, `spawn_blocking`, status
 /// publishing, scheduler recording) without a reachable remote.
+#[allow(clippy::too_many_arguments)] // Production arguments plus the test-only executor.
 async fn dispatch_managed_git_turn_with<F>(
     collection: &VaultCollectionRuntime,
     registry: &VaultRegistryStore,
+    coordinator: &VaultWorkCoordinator,
     managed_git: &ManagedGitScheduler,
     author_name: &str,
     author_email: &str,
@@ -1260,7 +1360,13 @@ where
                 error.to_string(),
                 true,
             ));
-            publish_managed_git_turn_outcome(&control_block, managed_git, vault_id, &result);
+            publish_managed_git_turn_outcome(
+                &control_block,
+                coordinator,
+                managed_git,
+                vault_id,
+                &result,
+            );
             return result.map(|_: crate::git::ManagedGitOutcome| ());
         }
     };
@@ -1290,7 +1396,7 @@ where
             ))
         });
 
-    publish_managed_git_turn_outcome(&control_block, managed_git, vault_id, &result);
+    publish_managed_git_turn_outcome(&control_block, coordinator, managed_git, vault_id, &result);
     result.map(|_| ())
 }
 
@@ -1307,6 +1413,7 @@ where
 /// real `git2` clone/fetch against a reachable remote.
 fn publish_managed_git_turn_outcome(
     control_block: &VaultControlBlock,
+    coordinator: &VaultWorkCoordinator,
     managed_git: &ManagedGitScheduler,
     vault_id: VaultId,
     result: &Result<crate::git::ManagedGitOutcome, VaultWorkError>,
@@ -1315,6 +1422,14 @@ fn publish_managed_git_turn_outcome(
         Ok(_) => {
             let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
             publish_local_content_after_git_success(control_block);
+            if control_block.is_accepting_operations()
+                && matches!(
+                    control_block.snapshot().local_content,
+                    LocalContentStatus::ReadWrite | LocalContentStatus::ReadOnly
+                )
+            {
+                coordinator.request(vault_id, VaultWorkKind::Index);
+            }
         }
         Err(error) => {
             let _ = control_block.set_git_status(
@@ -1344,10 +1459,29 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    use crate::cache::SqliteCache;
+    use crate::cache::vault_snapshots::{VaultSnapshotFreshness, VaultSnapshotStatus};
+    use crate::embed::{Embedder, StubEmbedder};
     use crate::vault_registry::{
         HttpsCredentialUpdate, NewVaultDefinition, VaultDefinitionEdit, VaultGitMode,
         VaultRegistrySnapshot, VaultRegistryStore, VaultSource as RegistryVaultSource,
     };
+
+    struct PanicEmbedder;
+
+    impl Embedder for PanicEmbedder {
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            panic!("test candidate task panic");
+        }
+
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+
+        fn token_count(&self, _text: &str, _add_special_tokens: bool) -> Result<usize, String> {
+            Ok(1)
+        }
+    }
 
     fn managed(mode: ManagedGitMode) -> VaultSource {
         VaultSource::ManagedGit(ManagedGitSource {
@@ -1449,6 +1583,153 @@ mod tests {
             .find(|definition| definition.name() == name)
             .expect("named Vault definition")
             .vault_id()
+    }
+
+    #[tokio::test]
+    async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale() {
+        let directory = tempdir().expect("temporary state directory");
+        let first_path = directory.path().join("first");
+        let second_path = directory.path().join("second");
+        std::fs::create_dir_all(&first_path).expect("create first Vault");
+        std::fs::create_dir_all(&second_path).expect("create second Vault");
+        std::fs::write(first_path.join("Home.md"), "# Home\n\nfirst version")
+            .expect("write first note");
+        std::fs::write(second_path.join("Home.md"), "# Home\n\nsecond version")
+            .expect("write second note");
+
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+        let both = add_local_vault(&registry, &one, "Second", second_path);
+        let first = vault_id_named(&both, "First");
+        let second = vault_id_named(&both, "Second");
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
+        collection
+            .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
+            .await;
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+
+        for _ in [first, second] {
+            let outcome = worker
+                .run_next({
+                    let collection = collection.clone();
+                    let cache = cache.clone();
+                    let working = working.clone();
+                    move |request| async move {
+                        dispatch_vault_index_turn(&collection, cache, working, request).await
+                    }
+                })
+                .await
+                .expect("queued Index turn");
+            assert_eq!(outcome.request.kind(), VaultWorkKind::Index);
+            outcome.result.expect("Index publication succeeds");
+        }
+
+        assert_eq!(
+            cache
+                .snapshot_note_content(first, "home")
+                .expect("read first snapshot")
+                .as_deref(),
+            Some("# Home\n\nfirst version")
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(second, "home")
+                .expect("read second snapshot")
+                .as_deref(),
+            Some("# Home\n\nsecond version")
+        );
+
+        coordinator.request(second, VaultWorkKind::Index);
+        let panicked = worker
+            .run_next({
+                let collection = collection.clone();
+                let cache = cache.clone();
+                move |request| async move {
+                    dispatch_vault_index_turn(&collection, cache, Arc::new(PanicEmbedder), request)
+                        .await
+                }
+            })
+            .await
+            .expect("panicking candidate turn");
+        assert_eq!(panicked.request.vault_id(), second);
+        assert_eq!(
+            panicked
+                .result
+                .expect_err("candidate task panic is returned")
+                .code(),
+            "vault_index_task_panicked"
+        );
+        assert_eq!(
+            cache.snapshot_status(second).expect("read stale status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Stale,
+            })
+        );
+
+        std::fs::remove_dir_all(&first_path).expect("make first Vault unavailable");
+        coordinator.request(first, VaultWorkKind::Index);
+        coordinator.request(second, VaultWorkKind::Index);
+        let failed = worker
+            .run_next({
+                let collection = collection.clone();
+                let cache = cache.clone();
+                let working = working.clone();
+                move |request| async move {
+                    dispatch_vault_index_turn(&collection, cache, working, request).await
+                }
+            })
+            .await
+            .expect("failing Index turn");
+        assert_eq!(failed.request.vault_id(), first);
+        assert_eq!(
+            failed.result.expect_err("scan failure is returned").code(),
+            "vault_index_failed"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(first, "home")
+                .expect("read retained first snapshot")
+                .as_deref(),
+            Some("# Home\n\nfirst version")
+        );
+        assert_eq!(
+            collection
+                .runtime(first)
+                .expect("first runtime")
+                .snapshot()
+                .search,
+            VaultSearchStatus::Stale
+        );
+
+        let healthy = worker
+            .run_next({
+                let collection = collection.clone();
+                let cache = cache.clone();
+                let working = working.clone();
+                move |request| async move {
+                    dispatch_vault_index_turn(&collection, cache, working, request).await
+                }
+            })
+            .await
+            .expect("healthy Vault follows failed turn");
+        assert_eq!(healthy.request.vault_id(), second);
+        healthy.result.expect("healthy Index succeeds");
+        assert_eq!(
+            collection
+                .runtime(second)
+                .expect("second runtime")
+                .snapshot()
+                .search,
+            VaultSearchStatus::Ready
+        );
     }
 
     #[test]
@@ -1731,8 +2012,8 @@ mod tests {
         (collection, registry, control_block, vault_id)
     }
 
-    #[test]
-    fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_browsable() {
+    #[tokio::test]
+    async fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_browsable() {
         let directory = tempdir().expect("temporary state directory");
         let (_collection, _registry, control_block, vault_id) =
             managed_git_control_block(directory.path());
@@ -1740,8 +2021,8 @@ mod tests {
         // resolved for this Vault ID — `run_managed_git_turn` installs there
         // in production; this test fabricates that outcome directly.
         std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
-        let (coordinator, _worker) = VaultWorkCoordinator::new();
-        let managed_git = ManagedGitScheduler::new(coordinator);
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
         managed_git.activate(vault_id);
         assert_eq!(
             control_block.snapshot().local_content,
@@ -1750,6 +2031,7 @@ mod tests {
 
         publish_managed_git_turn_outcome(
             &control_block,
+            &coordinator,
             &managed_git,
             vault_id,
             &Ok(crate::git::ManagedGitOutcome::Synchronized),
@@ -1761,6 +2043,15 @@ mod tests {
         assert_eq!(after.local_content, LocalContentStatus::ReadWrite);
         assert!(after.activation_error.is_none());
         assert!(after.capabilities.browse);
+        let index_turn = worker
+            .run_next(|request| async move {
+                assert_eq!(request.vault_id(), vault_id);
+                assert_eq!(request.kind(), VaultWorkKind::Index);
+                Ok::<(), VaultWorkError>(())
+            })
+            .await
+            .expect("successful acquisition queues Index work");
+        index_turn.result.expect("Index turn can proceed");
     }
 
     #[test]
@@ -1770,10 +2061,11 @@ mod tests {
             managed_git_control_block(directory.path());
         std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
         let (coordinator, _worker) = VaultWorkCoordinator::new();
-        let managed_git = ManagedGitScheduler::new(coordinator);
+        let managed_git = ManagedGitScheduler::new(coordinator.clone());
         managed_git.activate(vault_id);
         publish_managed_git_turn_outcome(
             &control_block,
+            &coordinator,
             &managed_git,
             vault_id,
             &Ok(crate::git::ManagedGitOutcome::UpToDate),
@@ -1787,6 +2079,7 @@ mod tests {
         // Markdown access must not regress just because Git did.
         publish_managed_git_turn_outcome(
             &control_block,
+            &coordinator,
             &managed_git,
             vault_id,
             &Err(VaultWorkError::new(
@@ -1841,6 +2134,7 @@ mod tests {
                 dispatch_managed_git_turn_with(
                     &collection,
                     &registry,
+                    &coordinator,
                     &managed_git,
                     "Hatchdoor",
                     "hatchdoor@example.test",
@@ -1856,6 +2150,15 @@ mod tests {
             control_block.snapshot().local_content,
             LocalContentStatus::ReadWrite
         );
+        let index_turn = worker
+            .run_next(|request| async move {
+                assert_eq!(request.vault_id(), vault_id);
+                assert_eq!(request.kind(), VaultWorkKind::Index);
+                Ok::<(), VaultWorkError>(())
+            })
+            .await
+            .expect("successful managed Git turn queues Index work");
+        index_turn.result.expect("Index turn can proceed");
 
         // A later turn fails for real, through the same dispatch path.
         coordinator.request(vault_id, VaultWorkKind::Git);
@@ -1864,6 +2167,7 @@ mod tests {
                 dispatch_managed_git_turn_with(
                     &collection,
                     &registry,
+                    &coordinator,
                     &managed_git,
                     "Hatchdoor",
                     "hatchdoor@example.test",
@@ -1946,6 +2250,7 @@ mod tests {
                 dispatch_managed_git_turn(
                     &collection,
                     &registry,
+                    &coordinator,
                     &managed_git,
                     "Hatchdoor",
                     "hatchdoor@example.test",

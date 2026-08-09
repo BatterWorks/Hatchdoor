@@ -49,6 +49,7 @@ use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migra
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
 use crate::vault_runtime::{
     VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
+    dispatch_vault_index_turn,
 };
 use crate::vault_watcher::spawn_vault_watcher;
 use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
@@ -580,6 +581,13 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
 
         match load_result {
             Ok(Ok(())) => {
+                // Lifecycle reconstruction may have queued Index work before
+                // the shared embedder finished loading. Re-request every
+                // active Vault through the same coalescing FIFO now that its
+                // candidate snapshots can be built.
+                for vault_id in state.vaults.active_vault_ids() {
+                    state.vault_work.request(vault_id, VaultWorkKind::Index);
+                }
                 tracker.set_scanning();
                 let progress_tracker = tracker.clone();
                 let on_progress = Arc::new(move |progress| progress_tracker.set_indexing(progress));
@@ -923,11 +931,12 @@ pub async fn run_server() {
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let vaults = VaultCollectionRuntime::with_watching(config.cache_db_path.clone());
-    // #90 establishes durable reconstruction and lifecycle admission. #97
-    // owns the concrete worker loop and Git operation dispatch, spawned
-    // below once `vault_work`/`managed_git` and the collection/registry
-    // handles they dispatch against all exist. Index/Repair dispatch remains
-    // for a later cache/repair packet.
+    // Subscribe before reconciliation starts per-Vault watchers, so an early
+    // filesystem event is retained in the bounded intent channel until the
+    // forwarding task starts below.
+    let watcher_changes = vaults.subscribe_changes();
+    // #90 establishes durable reconstruction and lifecycle admission. The
+    // worker loop below is the one global dispatcher for all admitted turns.
     let (vault_work, vault_worker) = VaultWorkCoordinator::new();
     let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
     let git_author_name =
@@ -1002,22 +1011,27 @@ pub async fn run_server() {
     });
 
     // The one global consumer of `vault_work`/`vault_worker`: dispatches
-    // `Git` turns through #97's managed-Git scheduler and marks `Index`/
-    // `Repair` explicitly not-yet-implemented so they release a Vault's
-    // single FIFO position instead of blocking a later Git turn behind a
-    // request nobody drains (a later cache/repair packet supplies those).
+    // Git turns through the managed-Git scheduler and Index turns through the
+    // Vault-qualified disposable snapshot builder. Repair remains owned by
+    // its later packet.
     // Exits on its own once `vault_work.shutdown()` drains to quiescence.
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
         let dispatch_vaults = state.vaults.clone();
         let dispatch_registry = state.vault_registry.clone();
+        let dispatch_work = vault_work.clone();
         let dispatch_managed_git = managed_git.clone();
+        let dispatch_cache = state.startup_sqlite.clone();
+        let dispatch_embedder = state.embedder.clone();
         async move {
             while let Some(outcome) = vault_worker
                 .run_next(|request| {
                     let vaults = dispatch_vaults.clone();
                     let registry = dispatch_registry.clone();
+                    let work = dispatch_work.clone();
                     let managed_git = dispatch_managed_git.clone();
+                    let cache = dispatch_cache.clone();
+                    let embedder = dispatch_embedder.clone();
                     let author_name = git_author_name.clone();
                     let author_email = git_author_email.clone();
                     async move {
@@ -1026,6 +1040,7 @@ pub async fn run_server() {
                                 dispatch_managed_git_turn(
                                     &vaults,
                                     &registry,
+                                    &work,
                                     &managed_git,
                                     &author_name,
                                     &author_email,
@@ -1033,23 +1048,22 @@ pub async fn run_server() {
                                 )
                                 .await
                             }
-                            VaultWorkKind::Index | VaultWorkKind::Repair => {
-                                Err(VaultWorkError::new(
-                                    "vault_work_kind_not_yet_implemented",
-                                    format!("{:?} dispatch is not implemented yet", request.kind()),
-                                    false,
-                                ))
+                            VaultWorkKind::Index => {
+                                dispatch_vault_index_turn(&vaults, cache, embedder, request).await
                             }
+                            VaultWorkKind::Repair => Err(VaultWorkError::new(
+                                "vault_work_kind_not_yet_implemented",
+                                format!("{:?} dispatch is not implemented yet", request.kind()),
+                                false,
+                            )),
                         }
                     }
                 })
                 .await
             {
                 if let Err(error) = outcome.result {
-                    // Expected and permanent until a later cache/repair
-                    // packet lands (see the `Index`/`Repair` arm above); log
-                    // it quietly rather than as a recurring warning on every
-                    // Vault activation.
+                    // Repair remains expected until its dedicated packet;
+                    // Index and Git failures are actionable per-Vault status.
                     if error.code() == "vault_work_kind_not_yet_implemented" {
                         debug!(
                             vault_id = %outcome.request.vault_id(),
@@ -1068,6 +1082,15 @@ pub async fn run_server() {
                 }
             }
         }
+    });
+    let watcher_index_task = watcher_changes.map(|mut changes| {
+        let watcher_work = vault_work.clone();
+        let watcher_vaults = state.vaults.clone();
+        tokio::spawn(async move {
+            while forward_vault_change_intent(changes.recv().await, &watcher_work, &watcher_vaults)
+            {
+            }
+        })
     });
     let scheduler_tick_task =
         crate::git::spawn_scheduler_tick(managed_git.clone(), crate::git::DEFAULT_TICK_INTERVAL);
@@ -1120,6 +1143,9 @@ pub async fn run_server() {
     // coordinator has stopped accepting work; the dispatch loop drains and
     // exits on its own now that `shutdown()` above reached quiescence.
     scheduler_tick_task.abort();
+    if let Some(task) = watcher_index_task {
+        task.abort();
+    }
     if let Err(error) = dispatch_task.await {
         error!(%error, "Vault background work dispatch loop exited unexpectedly");
     }
@@ -1133,10 +1159,96 @@ pub async fn run_server() {
     }
 }
 
+/// Forward a per-Vault watcher invalidation to the one shared Index queue.
+/// A lagged broadcast intentionally falls back to every active Vault because
+/// the channel is a coalescible hint rather than a durable event log.
+fn forward_vault_change_intent(
+    change: Result<crate::vault_registry::VaultId, tokio::sync::broadcast::error::RecvError>,
+    coordinator: &VaultWorkCoordinator,
+    vaults: &VaultCollectionRuntime,
+) -> bool {
+    match change {
+        Ok(vault_id) => {
+            coordinator.request(vault_id, VaultWorkKind::Index);
+            true
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+            for vault_id in vaults.active_vault_ids() {
+                coordinator.request(vault_id, VaultWorkKind::Index);
+            }
+            true
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_state::ReadyVault;
+
+    #[tokio::test]
+    async fn watcher_index_intents_use_the_shared_fifo_and_lag_requeues_active_vaults() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Watcher Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add Vault");
+        let vault_id = snapshot
+            .definitions()
+            .next()
+            .expect("Vault definition")
+            .vault_id();
+        let vaults = VaultCollectionRuntime::new();
+        vaults.reconcile(&registry, &snapshot);
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+
+        assert!(forward_vault_change_intent(
+            Ok(vault_id),
+            &coordinator,
+            &vaults
+        ));
+        let direct = worker
+            .run_next(|request| async move {
+                assert_eq!(request.vault_id(), vault_id);
+                assert_eq!(request.kind(), VaultWorkKind::Index);
+                Ok::<(), VaultWorkError>(())
+            })
+            .await
+            .expect("watcher intent queues Index");
+        direct.result.expect("watcher Index turn succeeds");
+
+        assert!(forward_vault_change_intent(
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(1)),
+            &coordinator,
+            &vaults,
+        ));
+        let after_lag = worker
+            .run_next(|request| async move {
+                assert_eq!(request.vault_id(), vault_id);
+                assert_eq!(request.kind(), VaultWorkKind::Index);
+                Ok::<(), VaultWorkError>(())
+            })
+            .await
+            .expect("lag requeues active Vault Index");
+        after_lag.result.expect("lag recovery turn succeeds");
+        assert!(!forward_vault_change_intent(
+            Err(tokio::sync::broadcast::error::RecvError::Closed),
+            &coordinator,
+            &vaults,
+        ));
+    }
 
     #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
@@ -4801,18 +4913,10 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// Collection reads (unlike exact reads) serve only the shared disposable
-    /// cache's already-published Vault snapshot. `VaultWorkKind::Index`
-    /// dispatch — the background turn that would build and publish that
-    /// snapshot after a real Vault creation — is explicitly not yet
-    /// implemented (`src/server.rs`'s dispatch loop returns
-    /// `vault_work_kind_not_yet_implemented` for it, and the test harness's
-    /// `_vault_worker` is never driven regardless), so a Vault created only
-    /// through the HTTP surface never becomes a fresh collection-read
-    /// participant in this test process. Publish its snapshot directly
-    /// through the same shared cache `VaultReadCore`/`VaultSearchCore` read
-    /// from, mirroring what `vault_read.rs`'s and `search/vault_scoped.rs`'s
-    /// own unit tests already do, and what the eventual indexing dispatch
-    /// will do in production.
+    /// cache's already-published Vault snapshot. The process-level worker that
+    /// dispatches `VaultWorkKind::Index` is not started by this router fixture,
+    /// so publish fixture snapshots directly through the same shared cache
+    /// `VaultReadCore`/`VaultSearchCore` read from.
     fn publish_vault_snapshot(state: &AppState, vault_id: &str, vault_root: &std::path::Path) {
         use std::str::FromStr;
         let vault_id = crate::vault_registry::VaultId::from_str(vault_id).expect("parse vault id");
