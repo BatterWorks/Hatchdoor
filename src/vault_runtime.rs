@@ -13,7 +13,8 @@ use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::VaultSnapshotFreshness;
 use crate::embed::Embedder;
 use crate::git::{
-    ManagedCheckoutLease, ManagedGitScheduler, ManagedGitTurnConfig, run_managed_git_turn,
+    ManagedCheckoutLease, ManagedGitScheduler, ManagedGitTurnConfig, run_existing_git_remote_turn,
+    run_managed_git_turn,
 };
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault_registry::{
@@ -1590,6 +1591,19 @@ fn vault_index_error(error: VaultRuntimeError) -> VaultWorkError {
     VaultWorkError::new("vault_index_failed", error.message, error.retryable)
 }
 
+/// Convert a [`VaultRuntimeError`] from [`VaultControlBlock::acquire_mutation`]
+/// into the [`VaultWorkError`] a Git turn's dispatch returns. Distinct from
+/// [`vault_index_error`] (Index-turn errors use `"vault_index_failed"`) so a
+/// failure to acquire the mutation lock ahead of a Git turn is never
+/// misreported as an indexing failure.
+fn managed_git_mutation_error(error: VaultRuntimeError) -> VaultWorkError {
+    VaultWorkError::new(
+        "managed_git_mutation_unavailable",
+        error.message,
+        error.retryable,
+    )
+}
+
 /// Execute one `VaultWorkKind::Git` turn for `request` and publish its
 /// result: Git status always, and — since `activation_snapshot` only stats
 /// `vault_path` once, at `reconcile()` time, before any managed checkout
@@ -1701,10 +1715,90 @@ where
                 );
                 return result.map(|_: crate::git::ManagedGitOutcome| ());
             }
-            // `Local` has no Git turn at all; `ExistingGit` in `PullOnly`/
-            // `TwoWay` is remote sync, issue #96's territory (blocked on
-            // #95) — leave both as a no-op.
-            RegistryVaultSource::Local { .. } | RegistryVaultSource::ExistingGit { .. } => {
+            // An existing checkout under Pull-only or Two-way versioning is
+            // remote sync against the checkout that already exists at
+            // `repository_path` — no managed-checkout acquisition or lease:
+            // see `run_existing_git_remote_turn`'s doc comment for why
+            // `ManagedCheckoutLease` does not apply to an `ExistingGit`
+            // source. Holds the same per-Vault mutation lock a managed-Git
+            // turn holds below (defect 2 of issue #96's reopening): without
+            // it, a foreground Markdown write could race this turn's
+            // fetch/integrate/reset phases.
+            RegistryVaultSource::ExistingGit {
+                mode: existing_mode @ (VaultGitMode::PullOnly | VaultGitMode::TwoWay),
+                repository_path,
+                branch,
+                ..
+            } => {
+                let repository_path = repository_path.clone();
+                let vault_path = control_block.vault_path().to_path_buf();
+                let branch = branch.clone();
+                let mode = *existing_mode;
+                let credentials = match registry.https_credentials(vault_id) {
+                    Ok(credentials) => credentials,
+                    Err(error) => {
+                        let result = Err(VaultWorkError::new(
+                            "managed_git_registry_unavailable",
+                            error.to_string(),
+                            true,
+                        ));
+                        publish_managed_git_turn_outcome(
+                            &control_block,
+                            coordinator,
+                            managed_git,
+                            vault_id,
+                            &result,
+                        );
+                        return result.map(|_: crate::git::ManagedGitOutcome| ());
+                    }
+                };
+                let mutation_guard = match control_block.acquire_mutation().await {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        let result = Err(managed_git_mutation_error(error));
+                        publish_managed_git_turn_outcome(
+                            &control_block,
+                            coordinator,
+                            managed_git,
+                            vault_id,
+                            &result,
+                        );
+                        return result.map(|_: crate::git::ManagedGitOutcome| ());
+                    }
+                };
+                let author_name = author_name.to_string();
+                let author_email = author_email.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    run_existing_git_remote_turn(
+                        repository_path,
+                        vault_path,
+                        branch,
+                        mode,
+                        credentials,
+                        author_name,
+                        author_email,
+                    )
+                })
+                .await
+                .unwrap_or_else(|join_error| {
+                    Err(VaultWorkError::new(
+                        "existing_git_remote_task_panicked",
+                        join_error.to_string(),
+                        false,
+                    ))
+                });
+                drop(mutation_guard);
+                publish_managed_git_turn_outcome(
+                    &control_block,
+                    coordinator,
+                    managed_git,
+                    vault_id,
+                    &result,
+                );
+                return result.map(|_: crate::git::ManagedGitOutcome| ());
+            }
+            // `Local` has no Git turn at all.
+            RegistryVaultSource::Local { .. } => {
                 return Ok(());
             }
         };
@@ -1769,6 +1863,39 @@ where
         }
     };
 
+    // Hold the same per-Vault mutation lock a foreground Markdown write
+    // acquires (`handlers::vault_write`/`mcp::tools::write`'s own
+    // `acquire_mutation`) across this turn's blocking `git2` work (issue
+    // #96's reopening defect 2): without it, a write could land mid-merge,
+    // or this turn's checkout/reset could stomp a write mid-flight.
+    // Acquired *after* the checkout lease so a lease-acquisition failure
+    // above never blocks on it; the two locks are always acquired in this
+    // same order for the same Vault, and nothing else in this codebase ever
+    // acquires the checkout lease, so there is no risk of the mutation lock
+    // and the checkout lease being acquired in opposite orders elsewhere.
+    // Coarser than the legacy single-Vault path's fine-grained per-phase
+    // locking (`git/task.rs::run_sync_phases` releases its lock across the
+    // network-only fetch/push phases) — held for this whole turn instead,
+    // including `synchronize_managed_checkout`'s network round-trip.
+    // Reproducing the fine-grained scheme here would require splitting
+    // `synchronize_managed_checkout`'s monolithic fetch+integrate+push call
+    // into phases callable independently from this async dispatch layer, a
+    // substantially larger change than this fix warrants on its own.
+    let mutation_guard = match control_block.acquire_mutation().await {
+        Ok(guard) => guard,
+        Err(error) => {
+            let result = Err(managed_git_mutation_error(error));
+            publish_managed_git_turn_outcome(
+                &control_block,
+                coordinator,
+                managed_git,
+                vault_id,
+                &result,
+            );
+            return result.map(|_: crate::git::ManagedGitOutcome| ());
+        }
+    };
+
     // The lease travels into the blocking task and back out again — it is
     // never dropped here, only borrowed by `execute` — so the scheduler can
     // hand it back to `keep_checkout_lease` afterward and keep holding it
@@ -1779,6 +1906,7 @@ where
         (result, lease)
     })
     .await;
+    drop(mutation_guard);
     let (result, lease) = match outcome {
         Ok((result, lease)) => (result, Some(lease)),
         Err(join_error) => (

@@ -158,18 +158,34 @@ that production inventory are still checked for stale paths and duplicates.
   `spawn_vault_watcher` remains the transitional single-Vault adapter until
   later application-surface packets.
 - `dispatch_managed_git_turn` is the `VaultWorkKind::Git` execution closure
-  `src/server.rs`'s worker loop calls: it resolves one managed-Git Vault's
-  current definition and credentials, obtains that Vault's checkout lease
+  `src/server.rs`'s worker loop calls: for a `ManagedGit` Vault it resolves
+  the current definition and credentials, obtains that Vault's checkout lease
   from `ManagedGitScheduler` (reused across turns for as long as the Vault
-  stays active in this process — issue #95), runs `git::run_managed_git_turn`
-  off the async runtime via `spawn_blocking`, hands the lease back to the
-  scheduler afterward, and publishes the result through
-  `VaultControlBlock::set_git_status`/`set_local_content_status` and
+  stays active in this process — issue #95), holds
+  `VaultControlBlock::acquire_mutation` for the duration, runs
+  `git::run_managed_git_turn` off the async runtime via `spawn_blocking`,
+  hands the lease back to the scheduler afterward, and publishes the result
+  through `VaultControlBlock::set_git_status`/`set_local_content_status` and
   `ManagedGitScheduler::record_outcome`; a successful acquisition with usable
   local Markdown also requests that Vault's Index turn through the same
-  coordinator. `reconcile_and_reconstruct` activates or deactivates a
-  managed-Git Vault's scheduler entry (and, on deactivation, releases any
-  held checkout lease) alongside its coordinator admission.
+  coordinator. For an `ExistingGit` Vault in `PullOnly`/`TwoWay` mode it
+  instead resolves credentials and runs `git::run_existing_git_remote_turn`
+  off the async runtime via `spawn_blocking` against the checkout that
+  already exists at the Vault's `repository_path` — no checkout lease: see
+  the Git synchronization boundary below for why `ManagedCheckoutLease` does
+  not apply to an already-existing, operator-owned checkout — but under the
+  same `acquire_mutation` hold as the managed-Git path, so a foreground
+  Markdown write can never race either kind of Git turn's working-tree
+  phases. Both paths hold the mutation lock for the whole blocking turn
+  (coarser than the legacy single-Vault task's fine-grained per-phase
+  locking that releases across network-only fetch/push) rather than only
+  across working-tree-mutating phases; splitting `synchronize_managed_checkout`
+  into independently lockable phases to match that finer discipline was
+  judged a materially larger change than issue #96's reopening warranted.
+  `reconcile_and_reconstruct` activates or deactivates a managed-Git Vault's
+  scheduler entry (and, on deactivation, releases any held checkout lease)
+  alongside its coordinator admission; `ExistingGit` Vaults are never
+  registered with `ManagedGitScheduler` regardless of mode.
   `set_local_content_status` (mirroring
   `set_search_status`/`set_git_status`) republishes authoritative
   local-content availability after a Git turn, since `activation_snapshot`
@@ -911,6 +927,25 @@ registered with `ManagedGitScheduler`: it receives only the one `Pending`-
 triggered Git turn `reconcile_and_reconstruct` already requests at activation,
 with no ongoing re-commit-on-later-drift schedule.
 
+`run_existing_git_remote_turn` is an `ExistingGit` + `VaultGitMode::PullOnly`/
+`TwoWay` Vault's counterpart to `run_managed_git_turn` (issue #96's reopening
+defect 1): it builds a `ManagedSyncConfig` directly from the Vault's
+already-existing `repository_path`/resolved Vault path and calls
+`synchronize_managed_checkout` against it — no `ManagedCheckoutLease`
+acquisition: that machinery exists specifically for Hatchdoor-managed clones
+into Hatchdoor-owned state directories tracked via a receipt file, and an
+`ExistingGit` checkout is the operator's own pre-existing directory with
+nothing to clone or track, the same reasoning that already applied to
+`run_local_history_git_turn`. When the registry's `branch` is unconfigured
+(`ExistingGit`, unlike `ManagedGit`, has no receipt-file-persisted resolved
+branch and the registry does not require one for `PullOnly`/`TwoWay`), it
+falls back to whatever branch is currently checked out at `repository_path`,
+extending `validate_local_repo`'s Local-history "follows whatever branch the
+operator has checked out" policy to the remote-sync target. It classifies
+every `ManagedSyncError` through the same `classify_sync_error` table
+`run_managed_git_turn` uses. Like Local-history, an `ExistingGit` Vault in
+this mode is never registered with `ManagedGitScheduler`.
+
 **Consumed dependencies:** local Git repository through `git2`, the live
 configuration snapshot for startup parsing, and the registry's shared
 credential-free HTTPS URL validator, `VaultId` identity, and the crate-private
@@ -936,7 +971,13 @@ noted as missing. `run_local_history_git_turn` is likewise consumed by
 match arm, off the async runtime via `spawn_blocking`, publishing through the
 same `publish_managed_git_turn_outcome` a managed-Git turn uses; that Vault is
 never registered with `ManagedGitScheduler`, so this arm is its whole
-Git-turn responsibility. `VaultWorkKind::Index` is consumed by runtime composition's
+Git-turn responsibility. `run_existing_git_remote_turn` is consumed the same
+way by `dispatch_managed_git_turn_with`'s `ExistingGit` +
+`VaultGitMode::PullOnly`/`TwoWay` match arm (issue #96's reopening defect 1):
+no checkout lease, but the same `VaultControlBlock::acquire_mutation` hold
+across `spawn_blocking` that the `ManagedGit` arm below now also takes
+(defect 2), and publication through the same `publish_managed_git_turn_outcome`.
+`VaultWorkKind::Index` is consumed by runtime composition's
 `dispatch_vault_index_turn`, which publishes only that Vault's disposable
 snapshot and reports its per-Vault search outcome; `Repair` remains an explicit
 non-retryable "not yet implemented" `VaultWorkError` so a Vault's shared FIFO
@@ -948,15 +989,27 @@ position is not blocked ahead of its Git turn.
 adapters, configuration, frontend settings UI, and vault watcher Git
 exclusions.
 
-**Invariants:** optional and debounced; writes do not block on sync; task
-replacement drains before another task can start; local mode never contacts a
-remote; remote mode never force-checks out over uncommitted manual vault edits
-(ADR-10). Managed acquisition never writes credentials to URLs, Git
-configuration, reads, logs, errors, or status; it never deletes, overwrites,
-or silently adopts a checkout destination. The managed-Git scheduler adds no
-persisted queue, priority, or second execution lane (ADR-13); a Git turn's
-returned failure always completes that Vault's turn so the shared worker is
-released for the next Vault.
+**Invariants:** optional and debounced; writes do not block on sync, except
+while a managed-Git or `ExistingGit` remote-sync turn is in flight for that
+Vault, see below; task replacement drains before another task can start;
+local mode never contacts a remote; remote mode never force-checks out over
+uncommitted manual vault edits (ADR-10). Managed acquisition never writes
+credentials to URLs, Git configuration, reads, logs, errors, or status; it
+never deletes, overwrites, or silently adopts a checkout destination. The
+managed-Git scheduler adds no persisted queue, priority, or second execution
+lane (ADR-13); a Git turn's returned failure always completes that Vault's
+turn so the shared worker is released for the next Vault. A `ManagedGit` or
+`ExistingGit` `PullOnly`/`TwoWay` Git turn holds `VaultControlBlock::acquire_mutation`
+for its whole blocking duration (issue #96's reopening defect 2), so it can
+never race a foreground Markdown write's own hold of the same lock — this is
+the exception to "writes do not block on sync" above, scoped to exactly the
+Vault whose turn is running; this is coarser than the legacy single-Vault
+task's fine-grained per-phase locking (which releases across network-only
+fetch/push), a deliberate trade favoring a small, low-risk diff over matching
+that finer discipline. `commit_vault_drift` preserves an
+operator's already-staged Vault-subtree index content across a Two-way
+commit rather than overwriting it with working-tree drift (issue #96's
+reopening defect 3), mirroring `sync.rs`'s `commit_working_tree`.
 
 **Validation:** `cargo test git`, `cargo test managed_checkout`, and affected
 adapter/server tests. Managed graph changes additionally run `cargo test

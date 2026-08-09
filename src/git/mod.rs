@@ -18,7 +18,7 @@ pub use managed_sync::{
 };
 pub use managed_task::{
     DEFAULT_POLL_INTERVAL, DEFAULT_TICK_INTERVAL, ManagedGitOutcome, ManagedGitScheduler,
-    ManagedGitTurnConfig, run_managed_git_turn, spawn_scheduler_tick,
+    ManagedGitTurnConfig, run_existing_git_remote_turn, run_managed_git_turn, spawn_scheduler_tick,
 };
 pub use message::{WriteRecord, build_commit_message};
 pub use status::GitSyncStatus;

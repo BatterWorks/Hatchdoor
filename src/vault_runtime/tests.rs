@@ -769,6 +769,69 @@ async fn dispatch_managed_git_turn_with_publishes_a_real_failure_through_the_ful
     assert_eq!(healthy_turn.request.vault_id(), healthy);
 }
 
+/// Closes issue #96's reopening defect 2: `dispatch_managed_git_turn_with`
+/// used to run its blocking `git2` turn without ever acquiring
+/// `VaultControlBlock::mutation_lock`, so a foreground Markdown write (which
+/// acquires that same lock — see `handlers::vault_write::acquire_mutation`
+/// and `mcp::tools::write::acquire_mutation`) could race a Git turn's
+/// fetch/integrate/reset phases.
+///
+/// Proves the fix by acquiring the mutation lock directly in the test —
+/// simulating a foreground write already in flight — then driving a real
+/// managed-Git turn (via `dispatch_managed_git_turn_with`'s injected
+/// executor, so no reachable remote is needed) through the same worker.
+/// Before defect 2's fix, the dispatch path never awaited the lock at all,
+/// so the turn would race straight through even while the guard below is
+/// held, and the first assertion below would fail (the turn would resolve
+/// well inside the 200ms window instead of timing out).
+#[tokio::test]
+async fn a_managed_git_turn_waits_for_a_concurrent_foreground_mutation_to_release_the_lock() {
+    let directory = tempdir().expect("temporary state directory");
+    let (collection, registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    managed_git.activate(vault_id);
+    coordinator.request(vault_id, VaultWorkKind::Git);
+
+    // Simulate a foreground Markdown write already in flight, holding
+    // exactly the lock a real write handler acquires.
+    let mutation_guard = control_block
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation lock");
+
+    let dispatch = worker.run_next(|request| {
+        dispatch_managed_git_turn_with(
+            &collection,
+            &registry,
+            &coordinator,
+            &managed_git,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+            request,
+            |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+        )
+    });
+    tokio::pin!(dispatch);
+
+    let raced = tokio::time::timeout(std::time::Duration::from_millis(200), &mut dispatch).await;
+    assert!(
+        raced.is_err(),
+        "the Git turn must block on the foreground mutation lock, not race past it"
+    );
+
+    drop(mutation_guard);
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), dispatch)
+        .await
+        .expect("Git turn proceeds once the foreground mutation releases the lock")
+        .expect("Git turn dequeued");
+    outcome
+        .result
+        .expect("Git turn succeeds after the lock is released");
+}
+
 #[tokio::test]
 async fn dispatch_managed_git_turn_is_a_no_op_for_a_non_managed_git_vault() {
     let directory = tempdir().expect("temporary state directory");
@@ -956,6 +1019,285 @@ async fn dispatch_managed_git_turn_commits_existing_git_local_history_drift_thro
         .await
         .expect("successful local-history turn queues Index work");
     index_turn.result.expect("Index turn can proceed");
+}
+
+fn commit_file(repository: &git2::Repository, path: &str, contents: &str, message: &str) {
+    let workdir = repository.workdir().expect("workdir");
+    std::fs::write(workdir.join(path), contents).expect("write file");
+    let mut index = repository.index().expect("index");
+    index.add_path(Path::new(path)).expect("stage file");
+    index.write().expect("write index");
+    let tree = repository
+        .find_tree(index.write_tree().expect("write tree"))
+        .expect("find tree");
+    let signature = git2::Signature::now("Test", "test@example.test").expect("signature");
+    let parent = repository
+        .head()
+        .ok()
+        .and_then(|head| head.peel_to_commit().ok());
+    let parents = parent.iter().collect::<Vec<_>>();
+    repository
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &parents,
+        )
+        .expect("commit");
+}
+
+/// Build a local bare-repository fixture for an `ExistingGit` `PullOnly`/
+/// `TwoWay` Vault: a source repository with one commit under `vault/`,
+/// pushed to a bare "remote", and a `checkout` clone of that remote — the
+/// `repository_path` an `ExistingGit` Vault's registry entry points at,
+/// distinct from any Hatchdoor-managed clone. Mirrors `managed_sync.rs`'s
+/// own `fixture` helper. Returns `(repository_path, remote_path)`; reused by
+/// both the defect-1 composed dispatch test and the defect-2 `ExistingGit`
+/// lock-contention test below, per the reopening's Spec review finding that
+/// the two should share fixture-building rather than duplicate it.
+fn existing_git_checkout_fixture(directory: &Path) -> (PathBuf, PathBuf) {
+    let source_path = directory.join("source");
+    let source = git2::Repository::init(&source_path).expect("source repository");
+    std::fs::create_dir(source_path.join("vault")).expect("vault directory");
+    commit_file(&source, "vault/Home.md", "# Home\n", "initial");
+    let remote_path = directory.join("remote.git");
+    git2::Repository::init_bare(&remote_path).expect("bare remote");
+    source
+        .find_remote("origin")
+        .or_else(|_| source.remote("origin", remote_path.to_str().expect("remote path")))
+        .expect("origin")
+        .push(&["refs/heads/master:refs/heads/master"], None)
+        .expect("initial push");
+
+    let repository_path = directory.join("checkout");
+    git2::Repository::clone(remote_path.to_str().expect("remote path"), &repository_path)
+        .expect("existing checkout");
+    (repository_path, remote_path)
+}
+
+/// Register an `ExistingGit` Vault in `mode` against `repository_path`,
+/// activate it, and return its collection/registry/control-block/ID —
+/// shared registration plumbing for the defect-1 and defect-2 `ExistingGit`
+/// composed tests below, mirroring `managed_git_control_block`'s role for
+/// the `ManagedGit` path.
+fn existing_git_control_block(
+    directory: &Path,
+    name: &str,
+    repository_path: PathBuf,
+    mode: VaultGitMode,
+) -> (
+    VaultCollectionRuntime,
+    VaultRegistryStore,
+    VaultControlBlock,
+    VaultId,
+) {
+    let registry = VaultRegistryStore::new(directory.join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: name.to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ExistingGit {
+                    repository_path,
+                    // Registry-level validation requires a syntactically
+                    // valid `https://` URL for `PullOnly`/`TwoWay`
+                    // (`vault_registry.rs::normalize_https_repository_url`
+                    // has no test-local-path allowance), but the real sync
+                    // only ever reads the checkout's actual `origin` remote
+                    // — never this field — so an unreachable placeholder is
+                    // fine here.
+                    repository_url: Some("https://example.test/vault.git".to_string()),
+                    // Deliberately unconfigured: proves the fallback to the
+                    // checkout's currently-checked-out branch.
+                    branch: None,
+                    vault_subdirectory: Some(PathBuf::from("vault")),
+                    mode,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+            },
+        )
+        .expect("add ExistingGit Vault");
+    let vault_id = vault_id_named(&committed, name);
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    let control_block = collection.runtime(vault_id).expect("active runtime");
+    (collection, registry, control_block, vault_id)
+}
+
+/// Closes issue #96's reopening defect 1: `dispatch_managed_git_turn_with`
+/// used to return `Ok(())` immediately for every `ExistingGit` source in
+/// `PullOnly`/`TwoWay` mode, so a real Pull-only or Two-way `ExistingGit`
+/// Vault never actually synced with its remote. Drives a real `PullOnly`
+/// `ExistingGit` Vault through the full async dispatch path — registry,
+/// `VaultCollectionRuntime`, `VaultWorkCoordinator`/`VaultWorkWorker`,
+/// `dispatch_managed_git_turn` — against a local bare-repository fixture
+/// (the same `cfg!(test)` local-path allowance
+/// `managed_sync.rs`'s own tests rely on), the same pattern as #94's
+/// `dispatch_managed_git_turn_commits_existing_git_local_history_drift_through_the_full_async_path`.
+///
+/// Also exercises this ticket's open branch-resolution design decision: the
+/// registry's `branch` is deliberately left `None`, proving the turn falls
+/// back to whatever branch is currently checked out at `repository_path`
+/// (`master`, from `git2::Repository::init`'s default) rather than failing
+/// or guessing a different one.
+///
+/// Before defect 1's fix this failed: the remote commit made after the
+/// checkout was created would never be fetched, since the turn was a no-op.
+#[tokio::test]
+async fn dispatch_managed_git_turn_synchronizes_existing_git_pull_only_through_the_full_async_path()
+{
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, remote_path) = existing_git_checkout_fixture(directory.path());
+
+    // Someone else pushes a new commit to the remote before the turn runs.
+    let actor_path = directory.path().join("actor");
+    let actor = git2::Repository::clone(remote_path.to_str().expect("remote path"), &actor_path)
+        .expect("actor checkout");
+    commit_file(&actor, "vault/Remote.md", "remote note\n", "remote change");
+    actor
+        .find_remote("origin")
+        .expect("origin")
+        .push(&["refs/heads/master:refs/heads/master"], None)
+        .expect("actor push");
+
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Existing pull-only",
+        repository_path.clone(),
+        VaultGitMode::PullOnly,
+    );
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    coordinator.request(vault_id, VaultWorkKind::Git);
+
+    let outcome = worker
+        .run_next(|request| {
+            dispatch_managed_git_turn(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+            )
+        })
+        .await
+        .expect("Git turn dequeued");
+    outcome.result.expect("pull-only sync succeeds");
+
+    // The remote commit actually landed in the existing checkout — before
+    // the fix this dispatch arm was a no-op and it never would have.
+    assert_eq!(
+        std::fs::read_to_string(repository_path.join("vault/Remote.md"))
+            .expect("remote commit was pulled into the existing checkout"),
+        "remote note\n"
+    );
+
+    let after = control_block.snapshot();
+    assert_eq!(after.git, VaultGitStatus::Ready);
+    assert!(after.git_error.is_none());
+    assert!(after.capabilities.pull);
+    assert!(
+        !after.capabilities.mutate,
+        "pull-only must never allow local mutation"
+    );
+
+    let index_turn = worker
+        .run_next(|request| async move {
+            assert_eq!(request.vault_id(), vault_id);
+            assert_eq!(request.kind(), VaultWorkKind::Index);
+            Ok::<(), VaultWorkError>(())
+        })
+        .await
+        .expect("successful pull-only turn queues Index work");
+    index_turn.result.expect("Index turn can proceed");
+}
+
+/// Closes issue #96's reopening defect 2 for the `ExistingGit` path
+/// specifically (Spec review finding on this ticket's second round): the
+/// `a_managed_git_turn_waits_for_a_concurrent_foreground_mutation_to_release_the_lock`
+/// test above proves `acquire_mutation()` blocks a Git turn at the
+/// `ManagedGit` call site, but the `ExistingGit` `PullOnly`/`TwoWay` arm
+/// added for defect 1 has its own, separate `acquire_mutation()` call
+/// site — same lock, same pattern, but not the same code, and this campaign
+/// already hit a case (issue #95) where a "structurally identical" pair of
+/// call sites diverged in a way code-review-by-inspection alone missed.
+///
+/// Proves the `ExistingGit` call site the same way, reusing
+/// `existing_git_checkout_fixture`/`existing_git_control_block` (the same
+/// fixture-building code `dispatch_managed_git_turn_synchronizes_existing_git_pull_only_through_the_full_async_path`
+/// above uses, per that finding's request not to invent a new one):
+/// acquires the mutation lock directly (simulating a foreground write), then
+/// drives a real Pull-only `ExistingGit` turn through `dispatch_managed_git_turn`
+/// (a real local sync against the bare-repository fixture — no injected
+/// executor exists for this arm, unlike the `ManagedGit` test above), and
+/// asserts it cannot complete while the lock is held and proceeds once it is
+/// released.
+///
+/// Before defect 2's fix this failed the same way the `ManagedGit` test
+/// above did: the turn raced straight through the 200ms window instead of
+/// blocking, because the `ExistingGit` arm never acquired the lock at all.
+#[tokio::test]
+async fn an_existing_git_pull_only_turn_waits_for_a_concurrent_foreground_mutation_to_release_the_lock()
+ {
+    let directory = tempdir().expect("temporary state directory");
+    let (repository_path, _remote_path) = existing_git_checkout_fixture(directory.path());
+    let (collection, registry, control_block, vault_id) = existing_git_control_block(
+        directory.path(),
+        "Existing pull-only lock",
+        repository_path,
+        VaultGitMode::PullOnly,
+    );
+
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    coordinator.request(vault_id, VaultWorkKind::Git);
+
+    // Simulate a foreground Markdown write already in flight, holding
+    // exactly the lock a real write handler acquires.
+    let mutation_guard = control_block
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation lock");
+
+    let dispatch = worker.run_next(|request| {
+        dispatch_managed_git_turn(
+            &collection,
+            &registry,
+            &coordinator,
+            &managed_git,
+            "Hatchdoor",
+            "hatchdoor@example.test",
+            request,
+        )
+    });
+    tokio::pin!(dispatch);
+
+    let raced = tokio::time::timeout(std::time::Duration::from_millis(200), &mut dispatch).await;
+    assert!(
+        raced.is_err(),
+        "the ExistingGit Git turn must block on the foreground mutation lock, not race past it"
+    );
+
+    drop(mutation_guard);
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), dispatch)
+        .await
+        .expect("Git turn proceeds once the foreground mutation releases the lock")
+        .expect("Git turn dequeued");
+    outcome
+        .result
+        .expect("Git turn succeeds after the lock is released");
 }
 
 #[tokio::test]

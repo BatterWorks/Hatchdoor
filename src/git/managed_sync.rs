@@ -354,6 +354,13 @@ fn commit_vault_drift(
     config: &ManagedSyncConfig,
     vault_relative: &Path,
 ) -> Result<bool, ManagedSyncError> {
+    // Read the operator's on-disk index status *before* building this
+    // commit's own in-memory index below: `has_staged_vault_changes` reads
+    // the real `.git/index` file, and nothing before the post-commit
+    // refresh at the bottom of this function ever calls `.write()` on it, so
+    // this check's result stays valid for the whole function regardless of
+    // exactly when it runs — but checking first keeps the intent obvious.
+    let preserve_vault_index = has_staged_vault_changes(repository, vault_relative)?;
     let parent = repository
         .head()
         .ok()
@@ -397,14 +404,52 @@ fn commit_vault_drift(
         )
         .map_err(|_| ManagedSyncError::Validation)?;
 
-    let mut worktree_index = repository
-        .index()
-        .map_err(|_| ManagedSyncError::Validation)?;
-    stage_vault_drift(repository, &mut worktree_index, vault_relative)?;
-    worktree_index
-        .write()
-        .map_err(|_| ManagedSyncError::Validation)?;
+    // `commit` advances HEAD but does not update the on-disk index. Refresh
+    // precisely the Vault subtree when it had no existing staging. If an
+    // operator did stage Vault content (a manual `git add` distinct from
+    // HEAD), retain that index exactly: it may intentionally differ from
+    // both the working tree and the just-created commit. Mirrors
+    // `sync.rs`'s `commit_working_tree`, the analogous Local-history/legacy
+    // function this one otherwise duplicates.
+    if !preserve_vault_index {
+        let mut worktree_index = repository
+            .index()
+            .map_err(|_| ManagedSyncError::Validation)?;
+        stage_vault_drift(repository, &mut worktree_index, vault_relative)?;
+        worktree_index
+            .write()
+            .map_err(|_| ManagedSyncError::Validation)?;
+    }
     Ok(true)
+}
+
+/// True when the Vault subtree already has genuinely staged changes distinct
+/// from HEAD — an operator's manual `git add` inside the Vault, not yet
+/// committed. Mirrors `sync.rs`'s `has_staged_vault_changes` (used by
+/// `commit_working_tree` for the exact same "retain the operator's staged
+/// index" contract) with `ManagedSyncError` in place of `GitError`, since
+/// `managed_sync.rs` and `sync.rs` do not share one error enum and this
+/// ~15-line function is cheaper to mirror than to unify.
+fn has_staged_vault_changes(
+    repository: &Repository,
+    vault_relative: &Path,
+) -> Result<bool, ManagedSyncError> {
+    let staged = git2::Status::INDEX_NEW
+        | git2::Status::INDEX_MODIFIED
+        | git2::Status::INDEX_DELETED
+        | git2::Status::INDEX_RENAMED
+        | git2::Status::INDEX_TYPECHANGE;
+    repository
+        .statuses(None)
+        .map_err(|_| ManagedSyncError::Validation)?
+        .iter()
+        .try_fold(false, |found, entry| {
+            if found {
+                return Ok(true);
+            }
+            let path = entry.path().map_err(|_| ManagedSyncError::Validation)?;
+            Ok(Path::new(path).starts_with(vault_relative) && entry.status().intersects(staged))
+        })
 }
 
 fn stage_vault_drift(
@@ -1069,6 +1114,79 @@ mod tests {
         let error = synchronize_managed_checkout(&config).expect_err("malformed origin");
 
         assert_eq!(error, ManagedSyncError::Validation);
+    }
+
+    /// Closes issue #96's reopening defect 3: `commit_vault_drift` used to
+    /// unconditionally reload the on-disk index from the current working
+    /// tree after committing, silently discarding any content an operator
+    /// had staged but not yet committed. For HEAD=A ("# Home\n" from
+    /// `fixture`), operator-staged=B ("operator staged\n", staged via a
+    /// manual `git add` and never committed), worktree=C ("working tree
+    /// content\n", edited again after staging): the commit correctly
+    /// reflects C (already-correct existing behavior — `stage_vault_drift`
+    /// stages current working-tree content, not the pre-existing staged
+    /// index), but B must survive in the index afterward rather than being
+    /// silently replaced by C.
+    ///
+    /// Before the fix this failed: the final assertion saw
+    /// `"working tree content\n"` in the index instead of the preserved
+    /// `"operator staged\n"`. Mirrors `sync.rs`'s
+    /// `local_history_preserves_staged_vault_content`, the analogous
+    /// already-correct test for the Local-history path.
+    #[test]
+    fn two_way_commit_preserves_an_operators_staged_vault_content_distinct_from_head_and_worktree()
+    {
+        let (_root, config) = fixture(ManagedSyncMode::TwoWay);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+
+        // Operator stages B without committing.
+        std::fs::write(config.vault_path.join("Home.md"), "operator staged\n")
+            .expect("staged content");
+        let mut operator_index = checkout.index().expect("operator index");
+        operator_index
+            .add_path(Path::new("vault/Home.md"))
+            .expect("stage Vault content");
+        operator_index.write().expect("persist operator staging");
+
+        // Working tree is edited again after staging, to C, distinct from
+        // both HEAD (A) and the staged content (B).
+        std::fs::write(config.vault_path.join("Home.md"), "working tree content\n")
+            .expect("working tree edit after staging");
+
+        let outcome = synchronize_managed_checkout(&config).expect("two-way sync");
+
+        assert_eq!(
+            outcome,
+            ManagedSyncOutcome::TwoWaySynchronized {
+                committed: true,
+                integrated: false,
+            }
+        );
+
+        // The commit reflects the working tree, matching the already-correct
+        // existing behavior for the no-staged-content case.
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        assert_eq!(
+            file_at_head(&checkout, "vault/Home.md"),
+            "working tree content\n"
+        );
+
+        // The operator's staged content must survive: it must not have been
+        // silently replaced by the working-tree content during the
+        // post-commit index refresh.
+        let staged_entry = checkout
+            .index()
+            .expect("index after sync")
+            .get_path(Path::new("vault/Home.md"), 0)
+            .expect("preserved staged entry");
+        assert_eq!(
+            checkout
+                .find_blob(staged_entry.id)
+                .expect("preserved staged blob")
+                .content(),
+            b"operator staged\n",
+            "two-way sync must not silently discard the operator's staged Vault content"
+        );
     }
 
     #[test]
