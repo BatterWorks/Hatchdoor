@@ -130,7 +130,10 @@ that production inventory are still checked for stale paths and duplicates.
 - `VaultCollectionRuntime` reconciles only newer registry snapshots into zero,
   one, or many Vault-ID-keyed `VaultControlBlock` values; an older asynchronous
   reconciliation cannot replace or re-admit work after a newer collection is
-  live. Each enabled block owns its
+  live. During activation, it derives Ready or Stale search capability from a
+  retained participating SQLite snapshot before its reconstructed Index turn
+  runs; a missing, nonparticipating, or unreadable snapshot remains
+  Unavailable. Each enabled block owns its
   definition and resolved Markdown root, capability-specific activation/local
   content/search/Git/watcher status and errors, mutation and refresh locks, and
   independently cancellable watcher. Status changes and `reconcile()` advance a
