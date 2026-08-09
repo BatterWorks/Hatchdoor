@@ -397,20 +397,35 @@ fn validate_named_layers<'a>(
     if names.is_empty() {
         return Ok(());
     }
-    if snapshots
-        .flat_map(|snapshot| snapshot.notes.iter())
-        .any(|note| {
-            note.layer
-                .as_deref()
-                .is_some_and(|layer| names.iter().any(|name| name == layer))
-        })
-    {
+    // Each requested name is validated independently: a name is only
+    // "absent" if it exists in no participant's declared layer catalog.
+    // A name valid in one Vault and absent from another is expected, not an
+    // error (layer selection applies per participant Vault). Existence comes
+    // from each Vault's declared `.hatchdoor-layer` catalog, not from
+    // current note counts, so a declared-but-currently-empty layer still
+    // validates.
+    let known: std::collections::BTreeSet<&str> = snapshots
+        .flat_map(|snapshot| snapshot.layer_catalog.iter())
+        .map(|info| info.name.as_str())
+        .collect();
+    let missing: Vec<&String> = names
+        .iter()
+        .filter(|name| !known.contains(name.as_str()))
+        .collect();
+    if missing.is_empty() {
         Ok(())
     } else {
         Err(error(
             None,
             "invalid_layer_selection",
-            "the requested named layers are absent from every usable Vault",
+            &format!(
+                "the requested named layer(s) are absent from every usable Vault: {}",
+                missing
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             false,
         ))
     }
@@ -776,6 +791,67 @@ mod tests {
             })
             .expect_err("globally absent named layer must fail");
         assert_eq!(error.code, "invalid_layer_selection");
+    }
+
+    #[test]
+    fn one_absent_named_layer_fails_even_when_another_requested_name_exists() {
+        // Regression for #93: validation must check each requested name
+        // independently. A single existential OR across all requested names
+        // and all notes let `sources,ghost` succeed whenever `sources` alone
+        // existed anywhere, silently swallowing the absent `ghost` layer.
+        let workspace = workspace(&[
+            (
+                "Layered",
+                &[
+                    ("sources/.hatchdoor-layer", "sources"),
+                    ("sources/Clipping.md", "# Clipping\n\nneedle"),
+                ],
+            ),
+            ("Plain", &[("Home.md", "# Home\n\nneedle")]),
+        ]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let (selection, warnings) = LayerSelection::parse(
+            &["sources".to_string(), "ghost".to_string()],
+            &["sources".to_string(), "ghost".to_string()],
+        );
+        assert!(warnings.is_empty());
+
+        let error = core
+            .search(VaultSearchRequest {
+                layers: selection,
+                ..request(VaultScope::All, "needle")
+            })
+            .expect_err("a request naming one existent and one globally absent layer must fail");
+        assert_eq!(error.code, "invalid_layer_selection");
+    }
+
+    #[test]
+    fn a_declared_layer_with_currently_no_notes_is_a_valid_selection() {
+        // Regression for #93: layer existence must come from the declared
+        // `.hatchdoor-layer` catalog, not be inferred from note counts. A
+        // layer marker with zero notes classified under it today must still
+        // validate, not be wrongly rejected as nonexistent.
+        let workspace = workspace(&[(
+            "Layered",
+            &[
+                ("archive/.hatchdoor-layer", "archive"),
+                ("Home.md", "# Home\n\nneedle"),
+            ],
+        )]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let (selection, warnings) =
+            LayerSelection::parse(&["archive".to_string()], &["archive".to_string()]);
+        assert!(warnings.is_empty());
+
+        let response = core
+            .search(VaultSearchRequest {
+                layers: selection,
+                ..request(VaultScope::All, "needle")
+            })
+            .expect("a declared but currently empty layer must be a valid selection");
+        assert!(response.data.results.is_empty());
     }
 
     #[test]
