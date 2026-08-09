@@ -9,7 +9,7 @@
 //! runs the turn, and publishes the result.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -149,6 +149,107 @@ pub fn run_managed_git_turn(
         ManagedSyncOutcome::PullOnlyFastForwarded
         | ManagedSyncOutcome::TwoWaySynchronized { .. } => ManagedGitOutcome::Synchronized,
     })
+}
+
+/// Run one remote-sync turn for an `ExistingGit` Vault in `PullOnly` or
+/// `TwoWay` mode against its already-existing checkout at `repository_path`.
+///
+/// Unlike [`run_managed_git_turn`], there is no managed-checkout acquisition
+/// here: `repository_path` is the operator's own pre-existing directory, not
+/// a Hatchdoor-owned clone placed under a `state_directory`, so there is
+/// nothing to clone, lease, or track via `ManagedCheckoutLease`'s receipt
+/// file — that machinery exists specifically for Hatchdoor-managed clones
+/// into Hatchdoor-owned state directories (see its own doc comments), and
+/// `ExistingGit` was never routed through it even for its already-implemented
+/// `LocalHistory` mode (`super::sync::run_local_history_git_turn` opens the
+/// checkout directly, the same way this function does).
+///
+/// `branch` mirrors `ExistingGit`'s registry field: unlike `ManagedGit`,
+/// which always has a resolved branch by the time it reaches a turn (either
+/// operator-configured, or resolved once from the remote default and
+/// persisted in the managed checkout's receipt file at first acquisition),
+/// an `ExistingGit` Vault's `branch` may be genuinely unconfigured — the
+/// registry does not require one for `PullOnly`/`TwoWay` (only
+/// `repository_url` is required; see `vault_registry.rs`'s
+/// `normalize_structural_source`). When `None`, this falls back to whatever
+/// branch is currently checked out at `repository_path` — mirroring
+/// `super::sync::validate_local_repo`'s Local-history policy ("local history
+/// follows whatever branch the operator has checked out") extended to the
+/// remote-sync target.
+///
+/// Must run from `spawn_blocking`.
+pub fn run_existing_git_remote_turn(
+    repository_path: PathBuf,
+    vault_path: PathBuf,
+    branch: Option<String>,
+    mode: VaultGitMode,
+    credentials: Option<HttpsCredentials>,
+    author_name: String,
+    author_email: String,
+) -> Result<ManagedGitOutcome, VaultWorkError> {
+    let sync_mode = match mode {
+        VaultGitMode::PullOnly => ManagedSyncMode::PullOnly,
+        VaultGitMode::TwoWay => ManagedSyncMode::TwoWay,
+        VaultGitMode::LocalHistory => {
+            // Defensive, mirroring `run_managed_git_turn`'s own defensive
+            // rejection: callers only reach this function for `PullOnly`/
+            // `TwoWay`, but this seam does not assume that holds forever.
+            return Err(VaultWorkError::new(
+                "managed_git_not_remote",
+                "existing Git remote-sync turn requested for a Local history Vault",
+                false,
+            ));
+        }
+    };
+
+    let branch = match branch {
+        Some(branch) => branch,
+        None => resolve_checked_out_branch(&repository_path).map_err(|_| {
+            VaultWorkError::new(
+                "existing_git_branch_unresolved",
+                format!(
+                    "cannot determine the currently checked-out branch of '{}'",
+                    repository_path.display()
+                ),
+                false,
+            )
+        })?,
+    };
+
+    let credentials = credentials.map(|credentials| ManagedHttpsCredentials {
+        username: credentials.username,
+        token: credentials.token,
+    });
+    let sync_config = ManagedSyncConfig {
+        repository_path,
+        vault_path,
+        branch,
+        mode: sync_mode,
+        credentials,
+        author_name,
+        author_email,
+    };
+    let outcome = synchronize_managed_checkout(&sync_config).map_err(classify_sync_error)?;
+    Ok(match outcome {
+        ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
+        ManagedSyncOutcome::PullOnlyFastForwarded
+        | ManagedSyncOutcome::TwoWaySynchronized { .. } => ManagedGitOutcome::Synchronized,
+    })
+}
+
+/// The branch currently checked out at `repository_path`, used by
+/// [`run_existing_git_remote_turn`] when an `ExistingGit` Vault has no
+/// configured `branch`. Fails rather than guessing on a detached HEAD or an
+/// unreadable repository — `repository_path` is a directory the operator
+/// controls and could change at any time, not a Hatchdoor-owned clone whose
+/// shape this process can assume.
+fn resolve_checked_out_branch(repository_path: &Path) -> Result<String, ()> {
+    let repository = git2::Repository::open(repository_path).map_err(|_| ())?;
+    let head = repository.head().map_err(|_| ())?;
+    if !head.is_branch() {
+        return Err(());
+    }
+    head.shorthand().map(str::to_owned).map_err(|_| ())
 }
 
 /// Classify a checkout failure. `retryable` decides whether the scheduler
