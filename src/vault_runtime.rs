@@ -1,10 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use serde::Serialize;
+use tracing::error;
 
 use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::VaultSnapshotFreshness;
@@ -678,12 +681,20 @@ impl VaultCollectionEntry {
     }
 }
 
+#[cfg(test)]
+type ReconcileTestHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 #[derive(Clone)]
 pub struct VaultCollectionRuntime {
     state: Arc<RwLock<VaultCollectionState>>,
     revisions: tokio::sync::watch::Sender<VaultCollectionRevisionEvent>,
     watching: Option<WatcherContext>,
     snapshot_cache: Option<Arc<SqliteCache>>,
+    reconcile_phase_lock: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    after_reconcile_before_drain_hook: ReconcileTestHook,
+    #[cfg(test)]
+    after_post_wait_before_retirement_hook: ReconcileTestHook,
 }
 
 #[derive(Clone)]
@@ -723,6 +734,28 @@ struct VaultCollectionState {
 }
 
 impl VaultCollectionRuntime {
+    #[cfg(test)]
+    pub(crate) fn set_after_reconcile_before_drain_hook(
+        &self,
+        hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        *self
+            .after_reconcile_before_drain_hook
+            .lock()
+            .expect("reconcile phase hook poisoned") = hook;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_after_post_wait_before_retirement_hook(
+        &self,
+        hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) {
+        *self
+            .after_post_wait_before_retirement_hook
+            .lock()
+            .expect("post-wait hook poisoned") = hook;
+    }
+
     pub fn new() -> Self {
         let (revisions, _) = tokio::sync::watch::channel(VaultCollectionRevisionEvent::initial());
         Self {
@@ -734,6 +767,11 @@ impl VaultCollectionRuntime {
             revisions,
             watching: None,
             snapshot_cache: None,
+            reconcile_phase_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            after_reconcile_before_drain_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_post_wait_before_retirement_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -752,6 +790,11 @@ impl VaultCollectionRuntime {
                 changes,
             }),
             snapshot_cache: None,
+            reconcile_phase_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            after_reconcile_before_drain_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_post_wait_before_retirement_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -776,6 +819,11 @@ impl VaultCollectionRuntime {
                 changes,
             }),
             snapshot_cache: Some(snapshot_cache),
+            reconcile_phase_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            after_reconcile_before_drain_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            after_post_wait_before_retirement_hook: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -907,7 +955,7 @@ impl VaultCollectionRuntime {
         snapshot: &VaultRegistrySnapshot,
         coordinator: &VaultWorkCoordinator,
         managed_git: &ManagedGitScheduler,
-        mutation_boundary: tokio::sync::oneshot::Sender<()>,
+        mutation_boundary: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
         self.reconcile_and_reconstruct_with_mutation_boundary(
             registry,
@@ -925,14 +973,37 @@ impl VaultCollectionRuntime {
         snapshot: &VaultRegistrySnapshot,
         coordinator: &VaultWorkCoordinator,
         managed_git: &ManagedGitScheduler,
-        mutation_boundary: Option<tokio::sync::oneshot::Sender<()>>,
+        mutation_boundary: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
     ) {
+        let phase_guard = self.reconcile_phase_lock.lock().await;
         let previously_active = self.active_runtimes();
-        if !self.reconcile(registry, snapshot) {
+        let previous_collection = self.snapshot();
+        let previously_present = previous_collection
+            .vaults
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let previously_disabled = previous_collection
+            .vaults
+            .iter()
+            .filter_map(|(id, snapshot)| (!snapshot.enabled).then_some(*id))
+            .collect::<BTreeSet<_>>();
+        let changed = self.reconcile(registry, snapshot);
+        if !changed && !self.has_registry_revision(snapshot.revision()) {
             if let Some(mutation_boundary) = mutation_boundary {
-                let _ = mutation_boundary.send(());
+                let _ = mutation_boundary.send(Ok(()));
             }
             return;
+        }
+        #[cfg(test)]
+        let phase_hook = self
+            .after_reconcile_before_drain_hook
+            .lock()
+            .expect("reconcile phase hook poisoned")
+            .clone();
+        #[cfg(test)]
+        if let Some(phase_hook) = phase_hook {
+            phase_hook();
         }
         let active = self.active_runtimes();
         let retired = previously_active
@@ -945,18 +1016,134 @@ impl VaultCollectionRuntime {
             })
             .collect::<Vec<_>>();
 
+        let mut retirement_error = None;
         for (vault_id, _) in &retired {
             coordinator.drain_vault(*vault_id);
             managed_git.deactivate(*vault_id);
         }
+        drop(phase_guard);
         for (_, runtime) in &retired {
             runtime.wait_for_mutation_safe_boundary().await;
         }
-        if let Some(mutation_boundary) = mutation_boundary {
-            let _ = mutation_boundary.send(());
-        }
         for (vault_id, _) in &retired {
             coordinator.wait_for_vault_safe_boundary(*vault_id).await;
+        }
+        // Reacquire only after every await. This makes the post-wait revision
+        // fence, cache retirement/convergence, and new-work admission one
+        // short phase: a newer lifecycle cannot slip between the fence and
+        // retirement, while no safe-boundary wait is ever lock-held.
+        let _post_wait_phase_guard = self.reconcile_phase_lock.lock().await;
+        // A newer registry revision may have superseded this lifecycle while
+        // it waited for old work. Do not let stale retirement/quarantine
+        // side effects undo that newer collection.
+        if !self.has_registry_revision(snapshot.revision()) {
+            if let Some(mutation_boundary) = mutation_boundary {
+                let _ = mutation_boundary.send(Ok(()));
+            }
+            return;
+        }
+        #[cfg(test)]
+        let retirement_hook = self
+            .after_post_wait_before_retirement_hook
+            .lock()
+            .expect("post-wait hook poisoned")
+            .clone();
+        #[cfg(test)]
+        if let Some(retirement_hook) = retirement_hook {
+            retirement_hook();
+        }
+        // An admitted Index turn may publish after its control block is
+        // revoked, so retire its cache rows only after its coordinator safe
+        // boundary. This makes disable/disconnect the final writer.
+        for (vault_id, _) in &retired {
+            let result = match snapshot.definition(*vault_id) {
+                Some(definition) if !definition.enabled() => self
+                    .snapshot_cache
+                    .as_deref()
+                    .map(|cache| cache.disable_vault_snapshot(*vault_id)),
+                None => self
+                    .snapshot_cache
+                    .as_deref()
+                    .map(|cache| cache.disconnect_vault_snapshot(*vault_id)),
+                Some(_) => None,
+            };
+            if let Some(Err(message)) = result {
+                error!(%vault_id, %message, "failed to retire disposable Vault snapshot");
+                retirement_error = Some(message);
+            }
+        }
+        // Disabled entries have no active control block, but a later
+        // disconnect must still remove their retained nonparticipating rows.
+        let active_retired = retired
+            .iter()
+            .map(|(vault_id, _)| *vault_id)
+            .collect::<BTreeSet<_>>();
+        let currently_present = self
+            .snapshot()
+            .vaults
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for vault_id in previously_present.difference(&currently_present) {
+            if active_retired.contains(vault_id) {
+                continue;
+            }
+            if let Some(cache) = self.snapshot_cache.as_deref()
+                && let Err(message) = cache.disconnect_vault_snapshot(*vault_id)
+            {
+                error!(%vault_id, %message, "failed to disconnect retained disposable Vault snapshot");
+                retirement_error = Some(message);
+            }
+        }
+        // A prior retirement failure can leave rows behind. Re-enabling must
+        // explicitly remove their participation before activation can expose
+        // the reconstructed control block or queue its fresh Index turn.
+        for (vault_id, runtime) in &active {
+            if !previously_disabled.contains(vault_id) {
+                continue;
+            }
+            match self
+                .snapshot_cache
+                .as_deref()
+                .map(|cache| cache.disable_vault_snapshot(*vault_id))
+            {
+                Some(Ok(())) => {
+                    let _ = runtime.set_search_status(VaultSearchStatus::Unavailable, None);
+                }
+                Some(Err(message)) => {
+                    retirement_error = Some(message);
+                    let _ = runtime.set_search_status(VaultSearchStatus::Unavailable, None);
+                }
+                None => {}
+            }
+        }
+        // Reconciliation is idempotent for the current registry revision:
+        // retries and restart reconstruction converge retained disabled rows
+        // and disconnected orphans even when `reconcile()` made no state edit.
+        if let Some(cache) = self.snapshot_cache.as_deref() {
+            for definition in snapshot
+                .definitions()
+                .filter(|definition| !definition.enabled())
+            {
+                if let Err(message) = cache.disable_vault_snapshot(definition.vault_id()) {
+                    retirement_error = Some(message);
+                }
+            }
+            match cache.snapshot_vault_ids() {
+                Ok(ids) => {
+                    for vault_id in ids {
+                        if snapshot.definition(vault_id).is_none()
+                            && let Err(message) = cache.disconnect_vault_snapshot(vault_id)
+                        {
+                            retirement_error = Some(message);
+                        }
+                    }
+                }
+                Err(message) => retirement_error = Some(message),
+            }
+        }
+        if let Some(mutation_boundary) = mutation_boundary {
+            let _ = mutation_boundary.send(retirement_error.map_or(Ok(()), Err));
         }
         if !self.has_registry_revision(snapshot.revision()) {
             return;

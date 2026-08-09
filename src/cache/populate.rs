@@ -120,6 +120,21 @@ impl SqliteCache {
         embed_layers: bool,
         opts: &BuildOptions,
     ) -> Result<(), String> {
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.replace_with_options_unlocked(index, embedder, on_progress, embed_layers, opts)
+    }
+
+    fn replace_with_options_unlocked(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        embed_layers: bool,
+        opts: &BuildOptions,
+    ) -> Result<(), String> {
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
@@ -438,8 +453,12 @@ impl SqliteCache {
         embedder_id: &str,
         opts: &BuildOptions,
     ) -> Result<(), String> {
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let started = std::time::Instant::now();
-        self.replace_from_index_with_options(index, embedder, opts)?;
+        self.replace_with_options_unlocked(index, embedder, None, true, opts)?;
         let secs = started.elapsed().as_secs_f64();
         self.set_metadata("embedder_id", embedder_id)?;
         self.set_metadata("build_duration_secs", &format!("{secs:.3}"))?;

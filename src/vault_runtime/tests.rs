@@ -20,6 +20,10 @@ impl Embedder for PanicEmbedder {
         384
     }
 
+    fn identity(&self) -> String {
+        "stub-384".to_string()
+    }
+
     fn token_count(&self, _text: &str, _add_special_tokens: bool) -> Result<usize, String> {
         Ok(1)
     }
@@ -1020,6 +1024,94 @@ async fn disable_enable_and_disconnect_only_replace_the_target_runtime() {
     ));
 }
 
+#[tokio::test]
+async fn lifecycle_retirement_updates_only_the_target_published_snapshot() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for path in [&first_path, &second_path] {
+        std::fs::create_dir_all(path).expect("Vault directory");
+        std::fs::write(path.join("Home.md"), "# Home\n\nsearchable").expect("Vault note");
+    }
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let two = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first_id = vault_id_named(&two, "First");
+    let second_id = vault_id_named(&two, "Second");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let embedder = StubEmbedder::new(384);
+    for (vault_id, path) in [(first_id, &first_path), (second_id, &second_path)] {
+        cache
+            .replace_vault_snapshot(
+                vault_id,
+                &crate::vault::VaultIndex::build(path).expect("build Vault index"),
+                &embedder,
+            )
+            .expect("publish Vault snapshot");
+    }
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &two, &coordinator, &managed_git)
+        .await;
+
+    let disabled = registry
+        .disable(two.revision(), first_id)
+        .expect("disable first Vault");
+    collection
+        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+        .await;
+    assert_eq!(
+        cache.snapshot_status(first_id).expect("first status"),
+        Some(VaultSnapshotStatus {
+            participating: false,
+            freshness: VaultSnapshotFreshness::Fresh,
+        })
+    );
+    assert!(
+        cache
+            .snapshot_status(second_id)
+            .expect("second status")
+            .expect("second snapshot")
+            .participating
+    );
+
+    let enabled = registry
+        .enable(disabled.revision(), first_id)
+        .expect("enable first Vault");
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    assert!(
+        !cache
+            .snapshot_status(first_id)
+            .expect("first status after re-enable")
+            .expect("retained first snapshot")
+            .participating,
+        "re-enabling must wait for successful Index publication"
+    );
+
+    let disconnected = registry
+        .disconnect(enabled.revision(), first_id)
+        .expect("disconnect first Vault");
+    collection
+        .reconcile_and_reconstruct(&registry, &disconnected, &coordinator, &managed_git)
+        .await;
+    assert_eq!(cache.snapshot_status(first_id).expect("first status"), None);
+    assert_eq!(
+        cache.snapshot_note_count(second_id).expect("second notes"),
+        1
+    );
+}
+
 #[test]
 fn an_older_registry_snapshot_cannot_replace_a_newer_live_collection() {
     let directory = tempdir().expect("temporary state directory");
@@ -1385,6 +1477,632 @@ async fn disabling_a_vault_waits_for_its_active_work_safe_boundary() {
         .result
         .expect("active work succeeds");
     assert!(collection.runtime(vault_id).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_after_an_admitted_index_retires_its_late_publication() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for path in [&first_path, &second_path] {
+        std::fs::create_dir_all(path).expect("Vault directory");
+        std::fs::write(path.join("Home.md"), "# Home\n\nold").expect("Vault note");
+    }
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let both = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first = vault_id_named(&both, "First");
+    let second = vault_id_named(&both, "Second");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+    for (id, path) in [(first, &first_path), (second, &second_path)] {
+        cache
+            .replace_vault_snapshot(
+                id,
+                &crate::vault::VaultIndex::build(path).expect("index"),
+                embedder.as_ref(),
+            )
+            .expect("publish");
+    }
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::new(coordinator.clone()));
+    collection
+        .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
+        .await;
+    // Drain reconstruction requests; snapshots above are the retained baseline.
+    for _ in [first, second] {
+        worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("turn");
+    }
+    std::fs::write(first_path.join("Home.md"), "# Home\n\nnew").expect("new note");
+    coordinator.request(first, VaultWorkKind::Index);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let running = tokio::spawn({
+        let collection = collection.clone();
+        let cache = cache.clone();
+        let embedder = embedder.clone();
+        let started = started.clone();
+        let release = release.clone();
+        async move {
+            let first_collection = collection.clone();
+            let first_cache = cache.clone();
+            let first_embedder = embedder.clone();
+            let outcome = worker
+                .run_next(move |request| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        dispatch_vault_index_turn(
+                            &first_collection,
+                            first_cache,
+                            first_embedder,
+                            request,
+                        )
+                        .await
+                    }
+                })
+                .await;
+            let rerun = worker
+                .run_next({
+                    let collection = collection.clone();
+                    let cache = cache.clone();
+                    let embedder = embedder.clone();
+                    move |request| async move {
+                        dispatch_vault_index_turn(&collection, cache, embedder, request).await
+                    }
+                })
+                .await;
+            (worker, outcome, rerun)
+        }
+    });
+    started.notified().await;
+    let phase_entered = Arc::new(std::sync::Barrier::new(2));
+    let release_phase = Arc::new(std::sync::Barrier::new(2));
+    collection.set_after_reconcile_before_drain_hook(Some(Arc::new({
+        let phase_entered = phase_entered.clone();
+        let release_phase = release_phase.clone();
+        move || {
+            phase_entered.wait();
+            release_phase.wait();
+        }
+    })));
+    let disabled = registry.disable(both.revision(), first).expect("disable");
+    let disable_reconcile = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        let disabled = disabled.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    tokio::task::spawn_blocking({
+        let phase_entered = phase_entered.clone();
+        move || phase_entered.wait()
+    })
+    .await
+    .expect("disable reaches its reconcile phase");
+    collection.set_after_reconcile_before_drain_hook(None);
+    let enabled = registry.enable(disabled.revision(), first).expect("enable");
+    let mut enable_reconcile = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut enable_reconcile,)
+            .await
+            .is_err(),
+        "newer enable waits until the older reconcile finishes its drain phase"
+    );
+    tokio::task::spawn_blocking(move || release_phase.wait())
+        .await
+        .expect("release disable reconcile phase");
+    release.notify_one();
+    disable_reconcile.await.expect("disable reconciliation");
+    enable_reconcile.await.expect("enable reconciliation");
+    let (_worker, outcome, rerun) = running.await.expect("worker");
+    outcome.expect("turn").result.expect("index");
+    rerun
+        .expect("enabled Index")
+        .result
+        .expect("enabled publication");
+    assert!(
+        cache
+            .snapshot_status(first)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+    assert!(
+        cache
+            .snapshot_status(second)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reenable_waits_until_disable_finishes_cache_retirement() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let enabled = add_local_vault(&registry, &empty, "Vault", vault_path.clone());
+    let vault_id = vault_id_named(&enabled, "Vault");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+    cache
+        .replace_vault_snapshot(
+            vault_id,
+            &crate::vault::VaultIndex::build(&vault_path).expect("index"),
+            embedder.as_ref(),
+        )
+        .expect("publish retained snapshot");
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = Arc::new(ManagedGitScheduler::new(coordinator.clone()));
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
+        .await;
+    worker
+        .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+        .await
+        .expect("initial reconstruction turn");
+
+    let retirement_entered = Arc::new(std::sync::Barrier::new(2));
+    let release_retirement = Arc::new(std::sync::Barrier::new(2));
+    collection.set_after_post_wait_before_retirement_hook(Some(Arc::new({
+        let retirement_entered = retirement_entered.clone();
+        let release_retirement = release_retirement.clone();
+        move || {
+            retirement_entered.wait();
+            release_retirement.wait();
+        }
+    })));
+    let disabled = registry
+        .disable(enabled.revision(), vault_id)
+        .expect("disable Vault");
+    let disable_reconcile = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        let disabled = disabled.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    tokio::task::spawn_blocking({
+        let retirement_entered = retirement_entered.clone();
+        move || retirement_entered.wait()
+    })
+    .await
+    .expect("disable reaches cache-retirement phase");
+    collection.set_after_post_wait_before_retirement_hook(None);
+
+    let reenabled = registry
+        .enable(disabled.revision(), vault_id)
+        .expect("re-enable Vault");
+    let mut enable_reconcile = tokio::spawn({
+        let collection = collection.clone();
+        let registry = registry.clone();
+        let coordinator = coordinator.clone();
+        let managed_git = managed_git.clone();
+        async move {
+            collection
+                .reconcile_and_reconstruct(&registry, &reenabled, &coordinator, &managed_git)
+                .await;
+        }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut enable_reconcile)
+            .await
+            .is_err(),
+        "re-enable waits until disable completes cache retirement"
+    );
+    tokio::task::spawn_blocking(move || release_retirement.wait())
+        .await
+        .expect("release cache-retirement phase");
+    disable_reconcile.await.expect("disable reconciliation");
+    enable_reconcile.await.expect("enable reconciliation");
+
+    worker
+        .run_next({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            let embedder = embedder.clone();
+            move |request| async move {
+                dispatch_vault_index_turn(&collection, cache, embedder, request).await
+            }
+        })
+        .await
+        .expect("re-enabled Index turn")
+        .result
+        .expect("re-enabled publication");
+    assert!(collection.runtime(vault_id).is_some());
+    assert!(
+        cache
+            .snapshot_status(vault_id)
+            .expect("snapshot status")
+            .expect("snapshot")
+            .participating
+    );
+}
+
+#[tokio::test]
+async fn disconnecting_after_an_admitted_index_deletes_its_late_publication() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for path in [&first_path, &second_path] {
+        std::fs::create_dir_all(path).expect("Vault directory");
+        std::fs::write(path.join("Home.md"), "# Home\n\nold").expect("Vault note");
+    }
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let both = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first = vault_id_named(&both, "First");
+    let second = vault_id_named(&both, "Second");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+    for (id, path) in [(first, &first_path), (second, &second_path)] {
+        cache
+            .replace_vault_snapshot(
+                id,
+                &crate::vault::VaultIndex::build(path).expect("index"),
+                embedder.as_ref(),
+            )
+            .expect("publish");
+    }
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
+        .await;
+    for _ in [first, second] {
+        worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("turn");
+    }
+    coordinator.request(first, VaultWorkKind::Index);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let running = tokio::spawn({
+        let collection = collection.clone();
+        let cache = cache.clone();
+        let embedder = embedder.clone();
+        let started = started.clone();
+        let release = release.clone();
+        async move {
+            worker
+                .run_next(move |request| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        dispatch_vault_index_turn(&collection, cache, embedder, request).await
+                    }
+                })
+                .await
+        }
+    });
+    started.notified().await;
+    let disconnected = registry
+        .disconnect(both.revision(), first)
+        .expect("disconnect");
+    let reconcile =
+        collection.reconcile_and_reconstruct(&registry, &disconnected, &coordinator, &managed_git);
+    tokio::pin!(reconcile);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(25), &mut reconcile)
+            .await
+            .is_err()
+    );
+    release.notify_one();
+    reconcile.await;
+    running
+        .await
+        .expect("worker")
+        .expect("turn")
+        .result
+        .expect("index");
+    assert_eq!(cache.snapshot_status(first).expect("status"), None);
+    assert_eq!(cache.snapshot_note_count(first).expect("rows"), 0);
+    assert!(
+        cache
+            .snapshot_status(second)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+}
+
+#[tokio::test]
+async fn disconnecting_a_disabled_vault_deletes_its_retained_snapshot() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for path in [&first_path, &second_path] {
+        std::fs::create_dir_all(path).expect("Vault directory");
+        std::fs::write(path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    }
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let both = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first = vault_id_named(&both, "First");
+    let second = vault_id_named(&both, "Second");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+    let embedder = StubEmbedder::new(384);
+    for (id, path) in [(first, &first_path), (second, &second_path)] {
+        cache
+            .replace_vault_snapshot(
+                id,
+                &crate::vault::VaultIndex::build(path).expect("index"),
+                &embedder,
+            )
+            .expect("publish");
+    }
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
+        .await;
+    let disabled = registry.disable(both.revision(), first).expect("disable");
+    collection
+        .reconcile_and_reconstruct(&registry, &disabled, &coordinator, &managed_git)
+        .await;
+    assert!(
+        !cache
+            .snapshot_status(first)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+    let disconnected = registry
+        .disconnect(disabled.revision(), first)
+        .expect("disconnect");
+    collection
+        .reconcile_and_reconstruct(&registry, &disconnected, &coordinator, &managed_git)
+        .await;
+    assert_eq!(cache.snapshot_status(first).expect("status"), None);
+    assert_eq!(cache.snapshot_note_count(first).expect("rows"), 0);
+    assert!(
+        cache
+            .snapshot_status(second)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+}
+
+#[tokio::test]
+async fn restart_retries_a_failed_disconnect_retirement() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for path in [&first_path, &second_path] {
+        std::fs::create_dir_all(path).expect("dir");
+        std::fs::write(path.join("Home.md"), "# Home").expect("note");
+    }
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("recovery"),
+    };
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let both = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first = vault_id_named(&both, "First");
+    let second = vault_id_named(&both, "Second");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+    let embedder = StubEmbedder::new(384);
+    for (id, path) in [(first, &first_path), (second, &second_path)] {
+        cache
+            .replace_vault_snapshot(
+                id,
+                &crate::vault::VaultIndex::build(path).expect("index"),
+                &embedder,
+            )
+            .expect("publish");
+    }
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed)
+        .await;
+    cache.connection().expect("conn").execute_batch(&format!("CREATE TRIGGER fail_disconnect BEFORE DELETE ON vault_snapshots WHEN OLD.vault_id = '{}' BEGIN SELECT RAISE(ABORT, 'disconnect failed'); END;", first)).expect("trigger");
+    let disconnected = registry
+        .disconnect(both.revision(), first)
+        .expect("disconnect");
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    collection
+        .reconcile_and_reconstruct_and_wait_for_mutation_boundary(
+            &registry,
+            &disconnected,
+            &coordinator,
+            &managed,
+            sender,
+        )
+        .await;
+    assert!(receiver.await.expect("boundary").is_err());
+    cache
+        .connection()
+        .expect("conn")
+        .execute_batch("DROP TRIGGER fail_disconnect;")
+        .expect("drop trigger");
+    let restarted = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("restart.sqlite3"),
+        cache.clone(),
+    );
+    let (restart_work, _worker) = VaultWorkCoordinator::new();
+    let restart_managed = ManagedGitScheduler::new(restart_work.clone());
+    restarted
+        .reconcile_and_reconstruct(&registry, &disconnected, &restart_work, &restart_managed)
+        .await;
+    assert_eq!(cache.snapshot_status(first).expect("status"), None);
+    assert_eq!(cache.snapshot_note_count(first).expect("rows"), 0);
+    assert!(
+        cache
+            .snapshot_status(second)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+}
+
+#[tokio::test]
+async fn disable_reports_a_target_scoped_snapshot_retirement_failure() {
+    let directory = tempdir().expect("temporary state directory");
+    let first_path = directory.path().join("first");
+    let second_path = directory.path().join("second");
+    for path in [&first_path, &second_path] {
+        std::fs::create_dir_all(path).expect("dir");
+        std::fs::write(path.join("Home.md"), "# Home").expect("note");
+    }
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("recovery"),
+    };
+    let one = add_local_vault(&registry, &empty, "First", first_path.clone());
+    let both = add_local_vault(&registry, &one, "Second", second_path.clone());
+    let first = vault_id_named(&both, "First");
+    let second = vault_id_named(&both, "Second");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("cache"));
+    let embedder = StubEmbedder::new(384);
+    for (id, path) in [(first, &first_path), (second, &second_path)] {
+        cache
+            .replace_vault_snapshot(
+                id,
+                &crate::vault::VaultIndex::build(path).expect("index"),
+                &embedder,
+            )
+            .expect("publish");
+    }
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache.clone(),
+    );
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed)
+        .await;
+    cache.connection().expect("conn").execute_batch(&format!("CREATE TRIGGER fail_disable BEFORE UPDATE OF participating ON vault_snapshots WHEN OLD.vault_id = '{}' BEGIN SELECT RAISE(ABORT, 'injected retirement failure'); END;", first)).expect("trigger");
+    let disabled = registry
+        .disable(both.revision(), first)
+        .expect("disable committed");
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    collection
+        .reconcile_and_reconstruct_and_wait_for_mutation_boundary(
+            &registry,
+            &disabled,
+            &coordinator,
+            &managed,
+            sender,
+        )
+        .await;
+    assert!(receiver.await.expect("boundary").is_err());
+    assert!(!collection.snapshot().vaults[&first].enabled);
+    assert!(
+        cache
+            .snapshot_status(second)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+    cache
+        .connection()
+        .expect("conn")
+        .execute_batch("DROP TRIGGER fail_disable;")
+        .expect("drop trigger");
+    let (retry_sender, retry_receiver) = tokio::sync::oneshot::channel();
+    collection
+        .reconcile_and_reconstruct_and_wait_for_mutation_boundary(
+            &registry,
+            &disabled,
+            &coordinator,
+            &managed,
+            retry_sender,
+        )
+        .await;
+    assert!(retry_receiver.await.expect("retry boundary").is_ok());
+    assert!(
+        !cache
+            .snapshot_status(first)
+            .expect("status")
+            .expect("snapshot")
+            .participating
+    );
+    let enabled = registry
+        .enable(disabled.revision(), first)
+        .expect("enable committed");
+    collection
+        .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed)
+        .await;
+    assert!(
+        !cache
+            .snapshot_status(first)
+            .expect("status")
+            .expect("snapshot")
+            .participating,
+        "re-enable must wait for a successful new Index publication"
+    );
 }
 
 #[tokio::test]

@@ -414,7 +414,10 @@ fn vault_summary_for(
     Some(vault_summary(&definition, &runtime_snapshot))
 }
 
-async fn reconcile_after_commit(state: &AppState, snapshot: &VaultRegistrySnapshot) {
+async fn reconcile_after_commit(
+    state: &AppState,
+    snapshot: &VaultRegistrySnapshot,
+) -> Result<(), String> {
     let vaults = state.vaults.clone();
     let registry = state.vault_registry.clone();
     let vault_work = state.vault_work.clone();
@@ -434,7 +437,7 @@ async fn reconcile_after_commit(state: &AppState, snapshot: &VaultRegistrySnapsh
     });
     mutation_safe
         .await
-        .expect("Vault reconciliation task must report its mutation safe boundary");
+        .map_err(|_| "Vault reconciliation task ended before its mutation boundary".to_string())?
 }
 
 fn mutation_response(
@@ -534,7 +537,9 @@ pub async fn create_vault_handler(
     {
         Ok(snapshot) => {
             let vault_id = snapshot.vault_ids().find(|id| !before_ids.contains(id));
-            reconcile_after_commit(&state, &snapshot).await;
+            if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
+                return internal_error_response(error, vault_id);
+            }
             (
                 StatusCode::CREATED,
                 mutation_response(&state, &snapshot, vault_id),
@@ -572,7 +577,9 @@ pub async fn edit_vault_handler(
         .edit(request.expected_registry_revision, vault_id, edit)
     {
         Ok(snapshot) => {
-            reconcile_after_commit(&state, &snapshot).await;
+            if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
+                return internal_error_response(error, Some(vault_id));
+            }
             mutation_response(&state, &snapshot, Some(vault_id))
         }
         Err(error) => registry_error_response(error, Some(vault_id)),
@@ -596,7 +603,9 @@ async fn set_enabled_handler(
     };
     match result {
         Ok(snapshot) => {
-            reconcile_after_commit(&state, &snapshot).await;
+            if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
+                return internal_error_response(error, Some(vault_id));
+            }
             mutation_response(&state, &snapshot, Some(vault_id))
         }
         Err(error) => registry_error_response(error, Some(vault_id)),
@@ -657,7 +666,9 @@ pub async fn disconnect_vault_handler(
         .disconnect(query.expected_registry_revision, vault_id)
     {
         Ok(snapshot) => {
-            reconcile_after_commit(&state, &snapshot).await;
+            if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
+                return internal_error_response(error, Some(vault_id));
+            }
             mutation_response(&state, &snapshot, None)
         }
         Err(error) => registry_error_response(error, Some(vault_id)),

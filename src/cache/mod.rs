@@ -45,6 +45,9 @@ pub struct SqliteCache {
     /// source remains untouched.
     #[allow(dead_code)]
     vault_snapshot_attempts: Mutex<BTreeMap<VaultId, u64>>,
+    /// Serializes model identity reset, candidate construction, and shared
+    /// snapshot publication so two Vault rebuilds cannot interleave models.
+    pub(crate) snapshot_model_epoch: Mutex<()>,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -91,6 +94,39 @@ pub struct ReadConn<'a> {
     cache: &'a SqliteCache,
     pooled: Option<Connection>,
     shared: Option<MutexGuard<'a, Connection>>,
+}
+
+/// A pinned SQLite read snapshot. Dropping an unfinished snapshot rolls it
+/// back before its connection returns to the pool.
+pub(crate) struct ReadSnapshot<'a> {
+    conn: ReadConn<'a>,
+    complete: bool,
+}
+
+impl Deref for ReadSnapshot<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl ReadSnapshot<'_> {
+    pub(crate) fn commit(&mut self) -> Result<(), String> {
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|error| format!("commit SQLite read snapshot: {error}"))?;
+        self.complete = true;
+        Ok(())
+    }
+}
+
+impl Drop for ReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
 }
 
 impl Deref for ReadConn<'_> {
@@ -150,6 +186,7 @@ impl SqliteCache {
             source: CacheSource::File(path.to_path_buf()),
             read_pool: Mutex::new(Vec::new()),
             vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
+            snapshot_model_epoch: Mutex::new(()),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -165,6 +202,7 @@ impl SqliteCache {
             source: CacheSource::Memory,
             read_pool: Mutex::new(Vec::new()),
             vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
+            snapshot_model_epoch: Mutex::new(()),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -218,6 +256,16 @@ impl SqliteCache {
                 })
             }
         }
+    }
+
+    pub(crate) fn read_snapshot(&self) -> Result<ReadSnapshot<'_>, String> {
+        let conn = self.read()?;
+        conn.execute_batch("BEGIN")
+            .map_err(|error| format!("begin SQLite read snapshot: {error}"))?;
+        Ok(ReadSnapshot {
+            conn,
+            complete: false,
+        })
     }
 
     fn return_read_connection(&self, conn: Connection) {

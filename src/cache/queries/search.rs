@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::cache::SqliteCache;
 use crate::cache::parse::{build_fts_query, fts_query_terms};
@@ -92,6 +92,7 @@ impl SqliteCache {
     /// merged set of per-Vault windows.
     pub(crate) fn vault_semantic_search_layered(
         &self,
+        conn: &Connection,
         vault_ids: &[VaultId],
         embedder: &dyn Embedder,
         query: &str,
@@ -113,7 +114,6 @@ impl SqliteCache {
             .map(|vault_id| format!("'{}'", vault_id))
             .collect::<Vec<_>>()
             .join(", ");
-        let conn = self.read()?;
         let mut hits = Vec::new();
         let mut collect = |sql: String| -> Result<(), String> {
             let mut statement = conn
@@ -190,6 +190,7 @@ impl SqliteCache {
     /// BM25 window global rather than merging per-Vault result windows.
     pub(crate) fn vault_fts_search_chunks(
         &self,
+        conn: &Connection,
         vault_ids: &[VaultId],
         query: &str,
         selection: &LayerSelection,
@@ -218,7 +219,6 @@ impl SqliteCache {
             "#,
             layer = selection.sql_filter("n.layer"),
         );
-        let conn = self.read()?;
         let mut statement = conn
             .prepare(&sql)
             .map_err(|error| format!("prepare Vault FTS search: {error}"))?;
