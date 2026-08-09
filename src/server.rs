@@ -30,11 +30,11 @@ use crate::handlers::{
     disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
     generate_mcp_token_handler, get_git_status_handler, get_index_status_handler,
     get_settings_handler, health_handler, list_vaults_handler, patch_settings_handler,
-    retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler, spa_index_handler,
-    sync_vault_handler, vault_collection_events_handler, vault_scope_graph_handler,
-    vault_scope_recent_handler, vault_scope_search_handler, vault_scope_stats_handler,
-    vault_scope_tree_handler, vault_scoped_archive_note_handler, vault_scoped_asset_handler,
-    vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
+    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
+    spa_index_handler, sync_vault_handler, vault_collection_events_handler,
+    vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,
+    vault_scope_stats_handler, vault_scope_tree_handler, vault_scoped_archive_note_handler,
+    vault_scoped_asset_handler, vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
     vault_scoped_rename_note_handler, vault_scoped_resolve_batch_handler,
@@ -273,6 +273,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/retry",
                 post(retry_vault_handler).layer(demo_guard.clone()),
+            )
+            .route(
+                "/api/v1/vaults/{vault_id}/refresh",
+                post(refresh_vault_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}/notes",
@@ -2803,6 +2807,7 @@ mod tests {
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
         let authorized = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/vaults/{vault_id}/write-capabilities"))
@@ -2814,6 +2819,7 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(authorized.status(), StatusCode::OK);
+
         let payload = json_body(authorized).await;
         assert_eq!(payload["enabled"], true);
         assert!(payload["warnings"].as_array().expect("warnings").is_empty());
@@ -3676,6 +3682,7 @@ mod tests {
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 
         let authorized = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/vaults")
@@ -3686,6 +3693,18 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(authorized.status(), StatusCode::OK);
+
+        let refresh = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/refresh")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(refresh.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
@@ -3760,6 +3779,7 @@ mod tests {
             ("POST", format!("/api/v1/vaults/{vault_id}/disable")),
             ("POST", format!("/api/v1/vaults/{vault_id}/sync")),
             ("POST", format!("/api/v1/vaults/{vault_id}/retry")),
+            ("POST", format!("/api/v1/vaults/{vault_id}/refresh")),
         ] {
             let response = app
                 .clone()
@@ -4208,6 +4228,200 @@ mod tests {
             .expect("response");
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         assert_eq!(json_body(missing).await["code"], "vault_not_found");
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_refresh_enqueues_one_enabled_vault_without_inline_indexing() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let vault_path = tmp.path().join("refreshable");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        std::fs::write(vault_path.join("Home.md"), "# Home\n").expect("write note");
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body("Refreshable", &vault_path, 0))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let vault_id = json_body(created).await["vault"]["vault_id"]
+            .as_str()
+            .expect("vault id")
+            .to_string();
+
+        let refresh = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/refresh"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(refresh.status(), StatusCode::ACCEPTED);
+        let refresh_body = json_body(refresh).await;
+        assert_eq!(refresh_body["vault_id"], vault_id);
+        assert_eq!(refresh_body["schedule"], "coalesced");
+        assert_eq!(
+            state.vaults.snapshot().vaults[&vault_id.parse().expect("vault id")].search,
+            crate::vault_runtime::VaultSearchStatus::Unavailable,
+            "the response returns before the queued Index turn builds a snapshot"
+        );
+
+        let all = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/all/refresh")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(all.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(json_body(all).await["code"], "invalid_vault_id");
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_refresh_reports_capability_and_coordinator_unavailability() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let unavailable_path = tmp.path().join("unavailable");
+        std::fs::create_dir_all(&unavailable_path).expect("create vault directory");
+        let unavailable_snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Unavailable".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: unavailable_path,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add unavailable vault");
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &unavailable_snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let unavailable_id = unavailable_snapshot.vault_ids().next().expect("vault id");
+        state
+            .vaults
+            .runtime(unavailable_id)
+            .expect("active runtime")
+            .set_local_content_status(
+                crate::vault_runtime::LocalContentStatus::Unavailable,
+                Some(crate::vault_runtime::VaultRuntimeError {
+                    code: "vault_read_unavailable".to_string(),
+                    message: "Vault directory became unavailable".to_string(),
+                    retryable: true,
+                }),
+            )
+            .expect("publish unavailable local content");
+
+        let unavailable = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{unavailable_id}/refresh"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(unavailable.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            json_body(unavailable).await["code"],
+            "capability_unavailable"
+        );
+
+        let disabled_snapshot = state
+            .vault_registry
+            .disable(1, unavailable_id)
+            .expect("disable unavailable vault");
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &disabled_snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let disabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{unavailable_id}/refresh"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(disabled.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(disabled).await["code"], "vault_disabled");
+
+        let available_path = tmp.path().join("available");
+        std::fs::create_dir_all(&available_path).expect("create vault directory");
+        std::fs::write(available_path.join("Home.md"), "# Home\n").expect("write note");
+        let available_snapshot = state
+            .vault_registry
+            .add(
+                2,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Available".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: available_path,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add available vault");
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &available_snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let available_id = available_snapshot
+            .definitions()
+            .find(|definition| definition.name() == "Available")
+            .expect("available definition")
+            .vault_id();
+        state.vault_work.drain_vault(available_id);
+
+        let rejected = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{available_id}/refresh"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(json_body(rejected).await["code"], "vault_unavailable");
     }
 
     #[tokio::test]

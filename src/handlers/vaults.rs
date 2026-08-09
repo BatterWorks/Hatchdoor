@@ -47,7 +47,7 @@ use crate::vault_runtime::{
     VaultChangeCategory, VaultCollectionRevisionEvent, VaultGitStatus, VaultRuntimeError,
     VaultSearchStatus, VaultWatcherStatus,
 };
-use crate::vault_work::ScheduleResult;
+use crate::vault_work::{ScheduleResult, VaultWorkKind};
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -762,6 +762,76 @@ pub async fn retry_vault_handler(
     match parse_vault_id(&raw_id) {
         Ok(vault_id) => managed_git_control_handler(state, vault_id, true).await,
         Err(error) => error.respond(StatusCode::BAD_REQUEST),
+    }
+}
+
+/// `POST /api/v1/vaults/{vault_id}/refresh` — request one Vault's next Index
+/// turn. The handler only admits work to the shared FIFO; the runtime worker
+/// performs the authoritative Markdown scan and atomic snapshot publication.
+pub async fn refresh_vault_handler(
+    State(state): State<AppState>,
+    Path(raw_id): Path<String>,
+) -> Response {
+    let vault_id = match parse_vault_id(&raw_id) {
+        Ok(vault_id) => vault_id,
+        Err(error) => return error.respond(StatusCode::BAD_REQUEST),
+    };
+    let registry_snapshot = match state.vault_registry.load() {
+        Ok(VaultRegistryState::Ready(snapshot)) => snapshot,
+        Ok(VaultRegistryState::Recovery(recovery)) => return recovery_response(&recovery),
+        Err(error) => return internal_error_response(error.to_string(), Some(vault_id)),
+    };
+    let Some(definition) = registry_snapshot.definition(vault_id) else {
+        return VaultApiError::new(
+            "vault_not_found",
+            "Vault definition was not found",
+            Some(vault_id),
+            false,
+        )
+        .respond(StatusCode::NOT_FOUND);
+    };
+    if !definition.enabled() {
+        return VaultApiError::new("vault_disabled", "Vault is disabled", Some(vault_id), false)
+            .respond(StatusCode::CONFLICT);
+    }
+    if state
+        .vaults
+        .runtime(vault_id)
+        .is_none_or(|runtime| !runtime.snapshot().capabilities.browse)
+    {
+        return VaultApiError::new(
+            "capability_unavailable",
+            "Vault refresh requires currently usable local Markdown content",
+            Some(vault_id),
+            true,
+        )
+        .respond(StatusCode::CONFLICT);
+    }
+
+    match state.vault_work.request(vault_id, VaultWorkKind::Index) {
+        ScheduleResult::Queued => (
+            StatusCode::ACCEPTED,
+            Json(VaultScheduleResponse {
+                vault_id,
+                schedule: "queued",
+            }),
+        )
+            .into_response(),
+        ScheduleResult::Coalesced => (
+            StatusCode::ACCEPTED,
+            Json(VaultScheduleResponse {
+                vault_id,
+                schedule: "coalesced",
+            }),
+        )
+            .into_response(),
+        ScheduleResult::Rejected => VaultApiError::new(
+            "vault_unavailable",
+            "Vault is not currently accepting background work",
+            Some(vault_id),
+            true,
+        )
+        .respond(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 

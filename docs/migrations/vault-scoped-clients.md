@@ -62,12 +62,30 @@ assets, downloads, tree, recent Notes, statistics, graph, and write-capability
 routes. Existing authentication, query-token fallback, optimistic content
 hashes, and safe-write semantics remain in force.
 
-`refresh` and `diagnostics` are retired with the rest of the unscoped API and
-have no Vault-scoped replacement: a working per-Vault refresh needs
-`VaultWorkKind::Index` dispatch, which does not exist yet, and a Vault-scoped
-diagnostics route needs new per-Vault cache-query domain methods that do not
-exist either. Both are adapter-only gaps for a later ticket, not something a
-client can work around today.
+The unscoped `POST /api/refresh` remains retired. To request a rebuild for one
+enabled Vault with usable local Markdown, use the authenticated control route:
+
+```http
+POST /api/v1/vaults/550e8400-e29b-41d4-a716-446655440000/refresh
+Authorization: Bearer <web-token>
+```
+
+It returns `202 Accepted` immediately and never builds a snapshot in the HTTP
+request. The response identifies the exact Vault and whether the shared FIFO
+added the Index turn or joined one already pending:
+
+```json
+{
+  "vault_id": "550e8400-e29b-41d4-a716-446655440000",
+  "schedule": "queued"
+}
+```
+
+`schedule` may instead be `"coalesced"`. The literal `"all"`, an omitted
+Vault ID, and every legacy unscoped refresh form are invalid; clients must not
+poll for this route. Read the normal Vault-scoped search/status projections to
+observe the resulting fresh, stale, or unavailable state. `diagnostics`
+remains retired with no Vault-scoped replacement.
 
 ## MCP before and after
 
@@ -186,6 +204,14 @@ HTTP and MCP share stable domain error codes such as `invalid_scope`,
 malformed requests use `400`, missing resources use `404`, state or concurrency
 conflicts use `409`, and temporary unavailability uses `503`. Existing security,
 body, media-type, and internal-error statuses remain unchanged.
+
+For `POST /api/v1/vaults/{vault_id}/refresh`, malformed or `"all"` IDs return
+`400 invalid_vault_id`; a missing Vault returns `404 vault_not_found`; a disabled
+Vault or one without usable local Markdown returns `409 vault_disabled` or
+`409 capability_unavailable`; and a Vault that cannot currently accept a
+background turn returns retryable `503 vault_unavailable`. As a Vault-control
+route, refresh returns `403 demo_read_only` in demo mode before any Vault lookup
+or scheduling.
 
 On a public demo instance (`HATCHDOOR_DEMO_MODE=true`), every content
 mutation and Vault-control route (collection management, manual Git
