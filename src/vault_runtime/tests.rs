@@ -685,7 +685,7 @@ async fn dispatch_managed_git_turn_with_publishes_a_real_failure_through_the_ful
                 "Hatchdoor",
                 "hatchdoor@example.test",
                 request,
-                |_config| Ok(crate::git::ManagedGitOutcome::UpToDate),
+                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
             )
         })
         .await
@@ -718,7 +718,7 @@ async fn dispatch_managed_git_turn_with_publishes_a_real_failure_through_the_ful
                 "Hatchdoor",
                 "hatchdoor@example.test",
                 request,
-                |_config| {
+                |_config, _lease| {
                     Err(VaultWorkError::new(
                         "managed_git_remote_unreachable",
                         "simulated remote outage",
