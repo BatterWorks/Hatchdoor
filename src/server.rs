@@ -934,7 +934,10 @@ pub async fn run_server() {
 
     let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-    let vaults = VaultCollectionRuntime::with_watching(config.cache_db_path.clone());
+    let vaults = VaultCollectionRuntime::with_watching_and_cache(
+        config.cache_db_path.clone(),
+        sqlite.clone(),
+    );
     // Subscribe before reconciliation starts per-Vault watchers, so an early
     // filesystem event is retained in the bounded intent channel until the
     // forwarding task starts below.

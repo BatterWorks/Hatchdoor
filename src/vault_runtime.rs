@@ -7,6 +7,7 @@ use std::sync::{Arc, RwLock, Weak};
 use serde::Serialize;
 
 use crate::cache::SqliteCache;
+use crate::cache::vault_snapshots::VaultSnapshotFreshness;
 use crate::embed::Embedder;
 use crate::git::{ManagedGitScheduler, ManagedGitTurnConfig, run_managed_git_turn};
 use crate::startup::IndexingProgressSnapshot;
@@ -405,9 +406,10 @@ impl VaultControlBlock {
         definition: VaultDefinition,
         vault_path: PathBuf,
         watching: Option<&WatcherContext>,
+        snapshot_cache: Option<&SqliteCache>,
         revisions: CollectionRevisionPublisher,
     ) -> Self {
-        let mut snapshot = activation_snapshot(&definition, &vault_path);
+        let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache);
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
             watching.and_then(|watching| {
                 let exclude = match crate::vault::ExcludeMatcher::new(definition.exclude_patterns())
@@ -681,6 +683,7 @@ pub struct VaultCollectionRuntime {
     state: Arc<RwLock<VaultCollectionState>>,
     revisions: tokio::sync::watch::Sender<VaultCollectionRevisionEvent>,
     watching: Option<WatcherContext>,
+    snapshot_cache: Option<Arc<SqliteCache>>,
 }
 
 #[derive(Clone)]
@@ -730,6 +733,7 @@ impl VaultCollectionRuntime {
             })),
             revisions,
             watching: None,
+            snapshot_cache: None,
         }
     }
 
@@ -747,6 +751,31 @@ impl VaultCollectionRuntime {
                 cache_db_path: Arc::new(cache_db_path),
                 changes,
             }),
+            snapshot_cache: None,
+        }
+    }
+
+    /// Construct a watched collection that derives initial search capability
+    /// from the existing disposable cache snapshot before rebuilt Index work
+    /// has a chance to run.
+    pub(crate) fn with_watching_and_cache(
+        cache_db_path: PathBuf,
+        snapshot_cache: Arc<SqliteCache>,
+    ) -> Self {
+        let (changes, _) = tokio::sync::broadcast::channel(64);
+        let (revisions, _) = tokio::sync::watch::channel(VaultCollectionRevisionEvent::initial());
+        Self {
+            state: Arc::new(RwLock::new(VaultCollectionState {
+                registry_revision: 0,
+                collection_revision: 0,
+                vaults: BTreeMap::new(),
+            })),
+            revisions,
+            watching: Some(WatcherContext {
+                cache_db_path: Arc::new(cache_db_path),
+                changes,
+            }),
+            snapshot_cache: Some(snapshot_cache),
         }
     }
 
@@ -790,6 +819,7 @@ impl VaultCollectionRuntime {
                         definition,
                         vault_path,
                         self.watching.as_ref(),
+                        self.snapshot_cache.as_deref(),
                         revision_publisher.clone(),
                     )),
                 }
@@ -1068,7 +1098,11 @@ fn collection_snapshots(
         .collect()
 }
 
-fn activation_snapshot(definition: &VaultDefinition, vault_path: &Path) -> CollectionVaultSnapshot {
+fn activation_snapshot(
+    definition: &VaultDefinition,
+    vault_path: &Path,
+    snapshot_cache: Option<&SqliteCache>,
+) -> CollectionVaultSnapshot {
     let (local_content, activation_error) = stat_local_content(vault_path);
     let activation = if local_content == LocalContentStatus::Unavailable {
         VaultActivationStatus::Unavailable
@@ -1086,7 +1120,7 @@ fn activation_snapshot(definition: &VaultDefinition, vault_path: &Path) -> Colle
         enabled: true,
         activation,
         local_content,
-        search: VaultSearchStatus::Unavailable,
+        search: retained_snapshot_search_status(snapshot_cache, definition.vault_id()),
         git,
         watcher: VaultWatcherStatus::Disabled,
         capabilities: VaultCapabilities::default(),
@@ -1097,6 +1131,22 @@ fn activation_snapshot(definition: &VaultDefinition, vault_path: &Path) -> Colle
     };
     snapshot.capabilities = collection_capabilities(definition, &snapshot);
     snapshot
+}
+
+/// A retained participating snapshot is immediately searchable after process
+/// reconstruction, even while the coordinator has queued a fresh Index turn.
+/// Cache read failure and nonparticipation remain conservatively unavailable.
+fn retained_snapshot_search_status(
+    snapshot_cache: Option<&SqliteCache>,
+    vault_id: VaultId,
+) -> VaultSearchStatus {
+    match snapshot_cache.and_then(|cache| cache.snapshot_status(vault_id).ok().flatten()) {
+        Some(status) if status.participating => match status.freshness {
+            VaultSnapshotFreshness::Fresh => VaultSearchStatus::Ready,
+            VaultSnapshotFreshness::Stale => VaultSearchStatus::Stale,
+        },
+        Some(_) | None => VaultSearchStatus::Unavailable,
+    }
 }
 
 /// Stat `vault_path` and derive its current local-content availability. The

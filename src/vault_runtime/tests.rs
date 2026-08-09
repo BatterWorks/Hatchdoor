@@ -1235,6 +1235,86 @@ async fn restart_reconstructs_index_work_for_each_enabled_vault_from_the_collect
 }
 
 #[tokio::test]
+async fn restart_reports_retained_cache_freshness_while_reconstructing_index_work() {
+    use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
+
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let fresh_path = directory.path().join("fresh");
+    let stale_path = directory.path().join("stale");
+    let absent_path = directory.path().join("absent");
+    for path in [&fresh_path, &stale_path, &absent_path] {
+        std::fs::create_dir_all(path).expect("Vault directory");
+        std::fs::write(path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    }
+    let one = add_local_vault(&registry, &empty, "Fresh", fresh_path.clone());
+    let two = add_local_vault(&registry, &one, "Stale", stale_path.clone());
+    let three = add_local_vault(&registry, &two, "Absent", absent_path);
+    let fresh_id = vault_id_named(&three, "Fresh");
+    let stale_id = vault_id_named(&three, "Stale");
+    let absent_id = vault_id_named(&three, "Absent");
+
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let embedder = StubEmbedder::new(384);
+    cache
+        .replace_vault_snapshot(
+            fresh_id,
+            &crate::vault::VaultIndex::build(&fresh_path).expect("build fresh index"),
+            &embedder,
+        )
+        .expect("publish fresh snapshot");
+    cache
+        .replace_vault_snapshot(
+            stale_id,
+            &crate::vault::VaultIndex::build(&stale_path).expect("build stale index"),
+            &embedder,
+        )
+        .expect("publish stale snapshot");
+    cache
+        .mark_vault_snapshot_stale(stale_id)
+        .expect("mark retained snapshot stale");
+
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache,
+    );
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &three, &coordinator, &managed_git)
+        .await;
+
+    let runtime = collection.snapshot();
+    assert_eq!(runtime.vaults[&fresh_id].search, VaultSearchStatus::Ready);
+    assert!(runtime.vaults[&fresh_id].capabilities.search);
+    assert_eq!(runtime.vaults[&stale_id].search, VaultSearchStatus::Stale);
+    assert!(runtime.vaults[&stale_id].capabilities.search);
+    assert_eq!(
+        runtime.vaults[&absent_id].search,
+        VaultSearchStatus::Unavailable
+    );
+    assert!(!runtime.vaults[&absent_id].capabilities.search);
+
+    let mut reconstructed = Vec::new();
+    for _ in [fresh_id, stale_id, absent_id] {
+        let turn = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("reconstructed Index turn");
+        assert_eq!(turn.request.kind(), VaultWorkKind::Index);
+        reconstructed.push(turn.request.vault_id());
+    }
+    reconstructed.sort();
+    let mut expected = vec![fresh_id, stale_id, absent_id];
+    expected.sort();
+    assert_eq!(reconstructed, expected);
+}
+
+#[tokio::test]
 async fn disabling_a_vault_waits_for_its_active_work_safe_boundary() {
     use std::sync::Arc;
 
