@@ -85,6 +85,7 @@ that production inventory are still checked for stale paths and duplicates.
 - `src/config.rs`
 - `src/startup.rs`
 - `src/vault_runtime.rs`
+- `src/vault_runtime/tests.rs`
 - `src/model_setup.rs`
 - `src/vault_watcher.rs`
 
@@ -288,7 +289,10 @@ checks.
 
 **Kind:** infrastructure/persistent domain state.
 
-**Owned paths:** `src/vault_registry.rs`.
+**Owned paths:**
+
+- `src/vault_registry.rs`
+- `src/vault_registry/tests.rs`
 
 **Public contract:** `DEFAULT_VAULT_REGISTRY_PATH`,
 `REGISTRY_SCHEMA_VERSION`, canonical `VaultId` generation and parsing,
