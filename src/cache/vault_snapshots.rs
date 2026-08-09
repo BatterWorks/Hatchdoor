@@ -107,6 +107,13 @@ impl SqliteCache {
         result
     }
 
+    /// Mark a retained Vault snapshot stale when rebuilding its authoritative
+    /// Markdown index fails before candidate-cache publication begins.
+    pub(crate) fn mark_vault_snapshot_stale(&self, vault_id: VaultId) -> Result<(), String> {
+        let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
+        self.mark_vault_snapshot_stale_if_current(vault_id, attempt)
+    }
+
     /// Remove a Vault from shared-cache participation without deleting its
     /// last successful rows. Re-enabling is intentionally coupled to a later
     /// successful [`Self::replace_vault_snapshot`] publication.

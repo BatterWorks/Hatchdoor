@@ -110,8 +110,11 @@ that production inventory are still checked for stale paths and duplicates.
   `AppState::managed_git` expose the same background-work coordinator and
   managed-Git scheduler `run_server()` wires into the one dispatch loop, so an
   HTTP adapter (`handlers/vaults.rs`) can reconcile a registry mutation into
-  live runtime effects and request an immediate Git turn without a second
-  execution lane.
+  live runtime effects and request an immediate Git or Index turn without a
+  second execution lane. The same loop dispatches each Index turn through the
+  Vault-qualified Markdown scan and disposable snapshot publisher; the
+  runtime's watcher intents re-enter that coordinator rather than creating a
+  separate indexing path.
   `AppState::index_status` separately tracks setting-triggered rebuild drift,
   progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
@@ -143,21 +146,30 @@ that production inventory are still checked for stale paths and duplicates.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
   and persistent setup records.
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
-  an independently cancellable handle. Queueing/coalescing those intents is
-  deliberately deferred to #89. The existing `spawn_vault_watcher` remains the
-  transitional single-Vault adapter until later application-surface packets.
+  an independently cancellable handle. `run_server()` coalesces those intents
+  through the shared `VaultWorkCoordinator` as Index requests. The existing
+  `spawn_vault_watcher` remains the transitional single-Vault adapter until
+  later application-surface packets.
 - `dispatch_managed_git_turn` is the `VaultWorkKind::Git` execution closure
   `src/server.rs`'s worker loop calls: it resolves one managed-Git Vault's
   current definition and credentials, runs `git::run_managed_git_turn` off the
   async runtime via `spawn_blocking`, and publishes the result through
   `VaultControlBlock::set_git_status`/`set_local_content_status` and
-  `ManagedGitScheduler::record_outcome`. `reconcile_and_reconstruct` activates
-  or deactivates a managed-Git Vault's scheduler entry alongside its
-  coordinator admission. `set_local_content_status` (mirroring
+  `ManagedGitScheduler::record_outcome`; a successful acquisition with usable
+  local Markdown also requests that Vault's Index turn through the same
+  coordinator. `reconcile_and_reconstruct` activates or deactivates a
+  managed-Git Vault's scheduler entry alongside its coordinator admission.
+  `set_local_content_status` (mirroring
   `set_search_status`/`set_git_status`) republishes authoritative
   local-content availability after a Git turn, since `activation_snapshot`
   only stats `vault_path` once, at `reconcile()` time, before a managed
   checkout exists.
+- `dispatch_vault_index_turn` is the `VaultWorkKind::Index` execution closure
+  the same worker loop calls. It acquires one Vault's refresh boundary, builds
+  an authoritative Markdown index and isolated candidate cache off the async
+  runtime, atomically publishes only that Vault's shared snapshot, and
+  publishes Ready, Stale, or Unavailable search state without changing another
+  Vault's snapshot or status.
 
 **Consumed dependencies:** nearly every backend boundary. This is expected for
 a composition boundary and is not a reason to introduce per-domain service
@@ -205,9 +217,10 @@ The queue owns no Markdown, SQLite, Git, or lifecycle state.
 transitions. `handlers/vaults.rs` reaches the coordinator only indirectly,
 through `VaultCollectionRuntime::reconcile_and_reconstruct` after a registry
 mutation, and directly through `ManagedGitScheduler::sync_now`/`retry_now` for
-manual Git control — it never calls `request`/`drain_vault` itself. Later
-cache and Git packets supply concrete operations without creating additional
-execution lanes.
+manual Git control — it never calls `request`/`drain_vault` itself. Runtime
+composition dispatches Index through the Vault-qualified snapshot publisher
+and Git through the managed-Git operation without additional execution lanes;
+Repair remains separately owned.
 
 **Coordination paths:** `src/lib.rs` for the module export; runtime composition,
 per-Vault watcher intent, cache refresh, Git lifecycle, and repair producers
@@ -412,8 +425,8 @@ Endpoint-local wire types remain owned by their handlers, notably write types
 in `handlers/vault_write.rs` and diagnostics types in
 `handlers/diagnostics.rs`. `RefreshResponse` remains only for legacy internal
 compatibility; #103 retires the scope-less MCP refresh tool alongside the HTTP
-`/api/refresh` route, with no Vault-scoped replacement because
-`VaultWorkKind::Index` has no production dispatch consumer yet.
+`/api/refresh` route. Index now has a production dispatch consumer, but this
+packet adds no Vault-scoped refresh control; that remains separately owned.
 
 **Consumers:** `src/handlers/**` and the manually corresponding frontend types
 in `frontend/src/types.ts` or feature-local client types.
@@ -605,13 +618,14 @@ fingerprint and opens existing files read-only for the one-time migration.
 **Consumed dependencies:** Vault IDs and index/types, chunking, embeddings, SQLite,
 FTS5, and sqlite-vec.
 
-**Consumers:** application state/reindexing, Vault-qualified read projections,
-Search, handlers, MCP reads, evaluation tooling, diagnostics, and the one-time
-legacy single-Vault migration's read-only evidence check.
+**Consumers:** application state/reindexing, runtime composition's per-Vault
+Index dispatch, Vault-qualified read projections, Search, handlers, MCP reads,
+evaluation tooling, diagnostics, and the one-time legacy single-Vault
+migration's read-only evidence check.
 
-**Coordination paths:** `src/app_state.rs`, `src/vault_read.rs`,
-`src/search/**`, `src/vault/index.rs`, `src/chunk/**`, and embedder
-identity/dimensions.
+**Coordination paths:** `src/app_state.rs`, `src/vault_runtime.rs`,
+`src/vault_read.rs`, `src/search/**`, `src/vault/index.rs`, `src/chunk/**`,
+and embedder identity/dimensions.
 
 **Invariants:**
 
@@ -850,9 +864,10 @@ composition (`src/vault_runtime.rs::dispatch_managed_git_turn` and
 schedule alongside its coordinator admission) and by `src/server.rs`, which
 owns the one global consumer loop driving `VaultWorkWorker::run_next` — the
 worker/scheduler-tick construction and dispatch this module map previously
-noted as missing. `VaultWorkKind::Index`/`Repair` dispatch remains for a later
-cache/repair packet; `src/server.rs` returns an explicit non-retryable
-"not yet implemented" `VaultWorkError` for those kinds so a Vault's shared FIFO
+noted as missing. `VaultWorkKind::Index` is consumed by runtime composition's
+`dispatch_vault_index_turn`, which publishes only that Vault's disposable
+snapshot and reports its per-Vault search outcome; `Repair` remains an explicit
+non-retryable "not yet implemented" `VaultWorkError` so a Vault's shared FIFO
 position is not blocked ahead of its Git turn.
 
 **Coordination paths:** `src/app_state.rs`, `src/server.rs`,
@@ -1015,10 +1030,11 @@ the same `AppState::runtime_snapshot`/`runtime_archive_prefix`/
 omits `git_sync_warning`: the managed-Git scheduler has no debounced-on-write
 hook, unlike the legacy single `git_sync` task, so there is nothing per-write
 to report that Vault discovery does not already expose. `refresh` and
-`diagnostics` are retired with no Vault-scoped replacement — the former needs
-`VaultWorkKind::Index` dispatch, the latter needs new per-Vault cache-query
-domain methods, and neither exists yet (a documented gap, not an oversight;
-see `docs/migrations/vault-scoped-clients.md`).
+`diagnostics` are retired with no Vault-scoped replacement — the former still
+needs its separately scoped HTTP control contract despite Index dispatch now
+being available, while the latter needs new per-Vault cache-query domain
+methods (documented gaps, not oversights; see
+`docs/migrations/vault-scoped-clients.md`).
 
 Every route here is a content mutation, attachment upload, or write-capability
 discovery, so `src/server.rs` wraps each one — individually, since Markdown
