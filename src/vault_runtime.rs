@@ -1662,6 +1662,43 @@ where
                 vault_subdirectory.clone(),
                 *mode,
             ),
+            // An existing checkout under Local-history versioning has no
+            // remote to sync: flush whatever Vault-subtree drift has
+            // accumulated into a local commit, off the async runtime, then
+            // publish through the exact same status/scheduler path a
+            // managed-Git turn uses. `run_local_history_git_turn` resolves
+            // its own placeholder `GitConfig` from `control_block.vault_path()`
+            // alone, so nothing else needs to be read off `source()` here.
+            RegistryVaultSource::ExistingGit {
+                mode: VaultGitMode::LocalHistory,
+                ..
+            } => {
+                let vault_path = control_block.vault_path().to_path_buf();
+                let author_name = author_name.to_string();
+                let author_email = author_email.to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::git::run_local_history_git_turn(vault_path, author_name, author_email)
+                })
+                .await
+                .unwrap_or_else(|join_error| {
+                    Err(VaultWorkError::new(
+                        "existing_git_local_history_task_panicked",
+                        join_error.to_string(),
+                        false,
+                    ))
+                });
+                publish_managed_git_turn_outcome(
+                    &control_block,
+                    coordinator,
+                    managed_git,
+                    vault_id,
+                    &result,
+                );
+                return result.map(|_: crate::git::ManagedGitOutcome| ());
+            }
+            // `Local` has no Git turn at all; `ExistingGit` in `PullOnly`/
+            // `TwoWay` is remote sync, issue #96's territory (blocked on
+            // #95) — leave both as a no-op.
             RegistryVaultSource::Local { .. } | RegistryVaultSource::ExistingGit { .. } => {
                 return Ok(());
             }
