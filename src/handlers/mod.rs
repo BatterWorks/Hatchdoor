@@ -35,6 +35,6 @@ pub use vault_write::{
 pub(crate) use vaults::demo_read_only_response;
 pub use vaults::{
     create_vault_handler, disable_vault_handler, disconnect_vault_handler, edit_vault_handler,
-    enable_vault_handler, list_vaults_handler, retry_vault_handler, sync_vault_handler,
-    vault_collection_events_handler,
+    enable_vault_handler, list_vaults_handler, refresh_vault_handler, retry_vault_handler,
+    sync_vault_handler, vault_collection_events_handler,
 };

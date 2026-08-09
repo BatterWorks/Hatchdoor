@@ -217,7 +217,8 @@ The queue owns no Markdown, SQLite, Git, or lifecycle state.
 transitions. `handlers/vaults.rs` reaches the coordinator only indirectly,
 through `VaultCollectionRuntime::reconcile_and_reconstruct` after a registry
 mutation, and directly through `ManagedGitScheduler::sync_now`/`retry_now` for
-manual Git control — it never calls `request`/`drain_vault` itself. Runtime
+manual Git control and `VaultWorkCoordinator::request` for the one-Vault HTTP
+refresh control — it never calls `drain_vault` itself. Runtime
 composition dispatches Index through the Vault-qualified snapshot publisher
 and Git through the managed-Git operation without additional execution lanes;
 Repair remains separately owned.
@@ -928,7 +929,8 @@ rebuild's staleness, progress, ETA, and last failure without reusing startup
 readiness.
 
 `vaults.rs` owns `/api/v1/vaults` discovery, collection management (create/
-edit/enable/disable/disconnect), manual Git sync/retry, and the collection-wide
+edit/enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh,
+and the collection-wide
 SSE event stream — the first `/api/v1` surface. It is the first HTTP consumer
 of the Vault collection registry's write operations and of
 `VaultCollectionRuntime::reconcile_and_reconstruct`, which every mutation calls
@@ -945,8 +947,8 @@ duplicating them. MCP discovery is #103.
 Discovery and the event stream are pure reads and stay reachable in demo mode
 (#109: demo mode publishes every enabled Vault in the instance as a public
 read-only collection, unlike `settings.rs`'s operator-controls posture, which
-remains absent). Collection management and manual Git sync/retry are
-Vault-control operations, so `src/server.rs` wraps each of their routes —
+remains absent). Collection management, manual Git sync/retry, and one-Vault
+Index refresh are Vault-control operations, so `src/server.rs` wraps each of their routes —
 individually, since some share a path with a read (`POST /api/v1/vaults`
 alongside `GET`) — in `reject_demo_mutation`, which calls this file's
 `demo_read_only_response` to refuse with a shared `403 demo_read_only`
@@ -1029,12 +1031,16 @@ the same `AppState::runtime_snapshot`/`runtime_archive_prefix`/
 `runtime_mcp_config` calls the legacy write API used. A mutation response
 omits `git_sync_warning`: the managed-Git scheduler has no debounced-on-write
 hook, unlike the legacy single `git_sync` task, so there is nothing per-write
-to report that Vault discovery does not already expose. `refresh` and
-`diagnostics` are retired with no Vault-scoped replacement — the former still
-needs its separately scoped HTTP control contract despite Index dispatch now
-being available, while the latter needs new per-Vault cache-query domain
-methods (documented gaps, not oversights; see
-`docs/migrations/vault-scoped-clients.md`).
+to report that Vault discovery does not already expose. `vaults.rs` owns the
+additive authenticated `POST /api/v1/vaults/{vault_id}/refresh` control: it
+requires one enabled Vault with usable local Markdown, asks
+`VaultWorkCoordinator` for `VaultWorkKind::Index`, and returns its immediate
+`202 VaultScheduleResponse` acknowledgement (`queued` or `coalesced`) without
+waiting for a snapshot build. It uses the shared `VaultApiError` conventions
+for malformed IDs, missing/disabled Vaults, unavailable local capability, and
+coordinator rejection; the migration guide documents external clients. The
+legacy unscoped refresh and all-Vault refresh remain absent. `diagnostics`
+remains retired because it needs new per-Vault cache-query domain methods.
 
 Every route here is a content mutation, attachment upload, or write-capability
 discovery, so `src/server.rs` wraps each one — individually, since Markdown
@@ -1049,8 +1055,8 @@ one-or-all reads, which are pure reads and stay reachable in demo mode.
 only — the Vault collection registry's mutation/load operations,
 `VaultCollectionRuntime::{snapshot, reconcile_and_reconstruct,
 subscribe_revisions}`, `VaultWorkCoordinator`, and
-`ManagedGitScheduler::{sync_now, retry_now}` via `AppState::{vault_work,
-managed_git}`. `vault_content.rs` is the first HTTP consumer of
+`ManagedGitScheduler::{sync_now, retry_now}` and `VaultWorkCoordinator::request`
+via `AppState::{vault_work, managed_git}`. `vault_content.rs` is the first HTTP consumer of
 Vault-qualified read projections (`vault_read.rs`'s `VaultReadCore`, including
 its `vault_directory` accessor); `vault_collection_reads.rs` is the first HTTP
 consumer of that core's collection-read projections and of
