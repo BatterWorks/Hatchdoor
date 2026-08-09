@@ -410,10 +410,10 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 defined here, including resolve, refresh, recent, stats, and graph shapes.
 Endpoint-local wire types remain owned by their handlers, notably write types
 in `handlers/vault_write.rs` and diagnostics types in
-`handlers/diagnostics.rs`. `RefreshResponse` is retained only for
-`src/mcp/tools/read.rs`'s still-unscoped refresh tool (#103); the HTTP
-`/api/refresh` route it once also served was retired in #101 with no
-Vault-scoped replacement.
+`handlers/diagnostics.rs`. `RefreshResponse` remains only for legacy internal
+compatibility; #103 retires the scope-less MCP refresh tool alongside the HTTP
+`/api/refresh` route, with no Vault-scoped replacement because
+`VaultWorkKind::Index` has no production dispatch consumer yet.
 
 **Consumers:** `src/handlers/**` and the manually corresponding frontend types
 in `frontend/src/types.ts` or feature-local client types.
@@ -501,16 +501,12 @@ configuration for archive or upload limits.
 - Paths remain within the canonical vault root.
 - Layer marker and excluded/noise writes remain protected at adapter and domain
   boundaries as applicable.
-- **Known gap (#101, tracked for MCP's #103 migration):** `vault_write.rs`
+- **Known gap resolved by #103:** `vault_write.rs`
   serializes concurrent writes to one Vault through
   `VaultControlBlock::acquire_mutation` (a genuine per-Vault lock). MCP write
-  tools and the legacy single-Vault Git-sync task still serialize only through
-  the older, separate `AppState::vault_write_lock`. For a Vault that is both
-  the still-active legacy single-configured Vault (MCP/Git-sync's only target
-  today) and a Vault reachable through the registry (the common
-  already-migrated-deployment case), the two lanes do not exclude each other.
-  Unifying them needs MCP's own migration onto the Vault collection runtime
-  and is explicitly out of this ticket's scope (`src/mcp/**` is untouched).
+  tools now resolve one registered Vault and acquire that same control-block
+  lock before calling `vault/write`; the older `AppState::vault_write_lock`
+  remains only for the isolated legacy single-Vault Git-sync task.
 
 **Validation:** `cargo test vault::write`, adapter write tests, and the full
 backend checks.
@@ -670,8 +666,8 @@ commands when retrieval behavior may change.
 - `src/search/vault_scoped.rs`
 
 **Public contract:** `SearchMode`, `SearchRequest`, `NoteFilters`,
-`LayerSelection`, `LayerInfo`, `SearchResult`, `SearchResponse`, `run`, and
-`query_notes`. The Vault-qualified shared-core contract is `VaultSearchCore`,
+`LayerSelection`, `LayerInfo`, `SearchResult`, `SearchResponse`, and `run`.
+The Vault-qualified shared-core contract is `VaultSearchCore`,
 `VaultSearchRequest`, `VaultSearchResponse`, and `VaultSearchResult`; it uses
 the explicit `VaultScope` and common projection/participant envelope from the
 Vault-read core without owning any HTTP, MCP, or frontend adapter.
@@ -1000,10 +996,11 @@ rest of this group so it can also accept a live MCP bearer token, mirroring
 the retired `/api/attachment` route), and `GET .../write-capabilities`. It
 calls unchanged `vault/write/**` functions exactly as the legacy write API
 did, gates every mutation on the requested Vault's own control block —
-`VaultControlBlock::acquire_mutation` (a genuine per-Vault lock, distinct from
-the legacy single instance-wide `AppState::vault_write_lock` MCP write tools
-and the legacy Git-sync task still use — see the "Vault mutation" boundary's
-known-gap invariant) and `capabilities.mutate` (a `capability_unavailable`/
+`VaultControlBlock::acquire_mutation` (a genuine per-Vault lock, shared by the
+MCP and HTTP write adapters; the legacy single instance-wide
+`AppState::vault_write_lock` remains only for the legacy Git-sync task — see
+the "Vault mutation" boundary's known-gap invariant) and
+`capabilities.mutate` (a `capability_unavailable`/
 `409` for a Pull-only or otherwise non-mutable Vault, new in #101 since the
 legacy single-Vault write
 API had no per-Vault mode to check) — and checks noise-exclusion against that
@@ -1076,10 +1073,18 @@ files, checkouts, Git history, or credentials outside the registry record.
 
 **Public contract:** `/mcp` Streamable HTTP behavior, `McpConfig`, protocol
 version negotiation, server instructions, tool names/schemas/results, and
-`mcp_get_handler`/`mcp_post_handler`.
+`mcp_get_handler`/`mcp_post_handler`. `list_vaults` exposes the shared redacted
+Vault discovery/status/capability and revision shape. Every collection read
+names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
+existing-Vault control names `vault_id`. Revisioned registry management uses
+the same shared collection shapes as HTTP; `create_vault` is the only zero-ID
+exception because the registry atomically generates its immutable ID. MCP
+returns shared domain failures as structured error tool results. No
+scope-less/default/sole-Vault tool remains reachable.
 
-**Consumed dependencies:** `AppState`, Search, vault reads, `vault/write`, Git
-status, model setup, cache refresh, attachment limits, and the live
+**Consumed dependencies:** `AppState`, the Vault discovery/content/collection
+read/write HTTP adapters as shared contract producers, Vault registry/runtime,
+Search, `vault/write`, model setup, attachment limits, and the live
 configuration snapshot bound at each request.
 
 **Coordination paths:** `src/server.rs`, domains exposed as tools, and
@@ -1089,7 +1094,8 @@ documentation describing agent behavior.
 Origins, and keeps read-only access credentialed (ADR-09). Token changes,
 write enablement, Origins, and attachment limits apply to the next request;
 attachment authorization never retains a rotated MCP token. Write tools use
-`vault/write` and retain optimistic concurrency and path protections (ADR-03).
+`vault/write`, the requested Vault's `acquire_mutation` lock, and retain
+optimistic concurrency and path protections (ADR-03).
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes, and
 server router tests.

@@ -127,6 +127,18 @@ pub fn tool_error(message: String) -> Value {
     })
 }
 
+/// A domain failure returned by a tool.  Unlike a JSON-RPC invalid-params
+/// error, this preserves the shared Vault API's stable error object so agents
+/// can branch on `code` rather than matching human text.
+pub fn tool_structured_error(payload: Value) -> Value {
+    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": payload,
+        "isError": true
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
