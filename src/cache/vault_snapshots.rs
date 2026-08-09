@@ -31,6 +31,13 @@ pub(crate) struct VaultSnapshotRead {
     pub(crate) links: Vec<VaultSnapshotLink>,
     pub(crate) tags_by_note: BTreeMap<String, Vec<String>>,
     pub(crate) chunks: Vec<VaultSnapshotChunk>,
+    /// This Vault's declared layer catalog (name + optional description), as
+    /// published alongside this generation's other snapshot rows. Sourced
+    /// from `.hatchdoor-layer` markers at populate time, not inferred from
+    /// current note counts, so a declared layer with zero notes still
+    /// appears here. Empty for a generation published before this key
+    /// existed, or a Vault with no layer markers.
+    pub(crate) layer_catalog: Vec<crate::search::LayerInfo>,
 }
 
 /// A participant state and every row used to project it, read from one pinned
@@ -397,11 +404,26 @@ impl SqliteCache {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|error| format!("read Vault snapshot chunks: {error}"))?;
 
+        let layer_catalog_json: Option<String> = conn
+            .query_row(
+                "SELECT value FROM vault_snapshot_metadata WHERE vault_id = ?1 AND key = 'layer_catalog'",
+                params![&vault_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("read Vault snapshot layer catalog: {error}"))?;
+        let layer_catalog = match layer_catalog_json {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|error| format!("parse Vault snapshot layer catalog: {error}"))?,
+            None => Vec::new(),
+        };
+
         Ok(VaultSnapshotRead {
             notes,
             links,
             tags_by_note,
             chunks,
+            layer_catalog,
         })
     }
 
