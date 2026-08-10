@@ -303,6 +303,11 @@ Authentication, user accounts, authorization, isolation, and audit policy form
 a separate product initiative that should be designed explicitly if Hatchdoor
 is later intended to serve mutually untrusted users.
 
+Vault-level access scoping for multiple users/agents is tracked as its own
+initiative — see [Multi-user, network-exposed deployment](product-roadmap.md#multi-user-network-exposed-deployment)
+in the product roadmap — but this document's multi-vault work is a
+prerequisite for it.
+
 ## Decisions to Make Together
 
 These questions should be resolved during roadmap review or the later design

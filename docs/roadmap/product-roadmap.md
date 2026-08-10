@@ -111,16 +111,41 @@ a directory, so parts of a vault can be kept out of the index.
 _Horizon: ongoing; managed Git vaults are proposed in
 [PR #18](https://github.com/BattermanZ/Hatchdoor/pull/18)._
 
+### Adopt the 2026-07-28 MCP specification
+
+**Problem:** Hatchdoor's MCP server implements protocol version `2025-11-25`
+(`src/mcp/config.rs`); the current spec, `2026-07-28`, is a substantial rewrite,
+not an incremental bump.
+
+Direction: migrate to `2026-07-28`. Headline changes to account for: the
+protocol becomes **stateless** (handshake and session header removed, replaced
+by a mandatory `server/discover` RPC and per-request `_meta`); live updates
+move to a single opt-in `subscriptions/listen` stream, replacing SSE
+subscribe/unsubscribe; `ping`, `logging/setLevel`, and stream resumability are
+removed; **Roots, Sampling, and Logging are deprecated**; server-initiated
+requests (elicitation, sampling) move to a request/retry pattern instead of
+being pushed mid-call. HTTP+SSE transport is now formally deprecated too.
+
+_Horizon: **v2.6.0**._
+
 ### Multi-user, network-exposed deployment
 
 **Problem:** Hatchdoor assumes a single trusted user on a private deployment.
 
-Direction: support **several users on one instance with scoped permissions**, with
-the app **exposed online**. This is a multi-tenancy initiative — authentication,
-accounts, authorization, isolation, and audit must be designed explicitly, since
-it means serving mutually untrusted users.
+Direction: support **several users and agents on one shared instance**, each
+scoped to the vaults they're permitted to see. A user or agent should only be
+able to list, search, read, and write the vaults granted to them — e.g. a
+personal vault, a shared/common vault, and nothing else — while an admin role
+sees and manages everything. This turns vault access into a first-class
+permission boundary, not just a UI convenience, and is what makes Hatchdoor
+usable by more than one person/agent per instance (a household, a small team)
+rather than only self-hosted single-tenant. Authentication, accounts,
+authorization, isolation, and audit must be designed explicitly, since it means
+serving mutually untrusted users and agents on shared infrastructure.
 
-_Horizon: **v3** (long-term)._
+_Horizon: **v3** (long-term). Depends on the multi-vault work in
+[vault lifecycle & multi-vault](vault-lifecycle.md) existing first — you can't
+scope access to vaults that aren't yet independent, addressable entities._
 
 ## How to Use This Roadmap
 
