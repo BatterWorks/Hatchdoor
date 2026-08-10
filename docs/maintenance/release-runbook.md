@@ -18,6 +18,22 @@ Before approving or merging the release PR, verify:
   do not contradict the release changes.
 - `CHANGELOG.md` has an entry for the intended version and records any required
   upgrade action, including a cache rebuild or reindex when applicable.
+- `CHANGELOG.md`'s entry for the intended version is complete and accurate:
+  every user-facing change actually merged into `development` since the
+  previous release is listed, and nothing listed was reverted, superseded, or
+  not actually shipped.
+- `README.md` describes every user-facing capability actually shipped in this
+  release — new features, endpoints, config options, and MCP tools are
+  documented, and nothing it describes was removed or changed behavior
+  without a corresponding update.
+- [`docs/roadmap/`](../roadmap/product-roadmap.md) reflects reality: any
+  workstream or item this release completed is marked done or removed from
+  the roadmap rather than left as still-pending; horizon/version hints
+  (`v2.x`, `v3`) that no longer match are corrected.
+- Other affected docs under `docs/` — architecture records, ADRs, the module
+  map — are consistent with what was actually built. If an ADR was
+  contradicted by this release's changes, it was amended or superseded, not
+  silently left stale.
 
 ## Merge and realignment
 
