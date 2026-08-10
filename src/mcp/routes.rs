@@ -248,6 +248,52 @@ mod tests {
         (scoped_test_state(state, registered_root), tmp)
     }
 
+    /// A zero-Vault registry, for the discovery/repair reachability tests
+    /// (#103 reopening finding 1): `ready_vault` genuinely can be `None`
+    /// since nothing under test reads the legacy single-Vault field.
+    fn empty_test_state() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let state = AppState {
+            cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: crate::vault_registry::VaultRegistryStore::new(
+                tmp.path().join("state/vaults.json"),
+            ),
+            vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
+            legacy_migration_recovery: None,
+            startup_sqlite: Arc::new(
+                crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
+            ),
+            ready_vault: Arc::new(RwLock::new(None)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            mcp_tools_changed,
+            embedder: test_embedder(),
+            runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
+            model_setup: Arc::new(crate::model_setup::ModelSetup::new(
+                tmp.path().join("models"),
+            )),
+            model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
+            web_auth_enabled: false,
+            demo_mode: false,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: Arc::new(tokio::sync::RwLock::new(None)),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
+            startup: crate::startup::StartupTracker::ready(),
+        };
+        (state, tmp)
+    }
+
     /// A vault with a demoted `sources/` layer (described) and a demoted note,
     /// plus a default-surface note that shares a tag with it.
     fn layered_test_state() -> (AppState, TempDir) {
@@ -474,6 +520,86 @@ mod tests {
         .await;
         let body = response_json(response).await;
         assert_eq!(body["result"]["isError"], false);
+    }
+
+    /// #103 reopening finding 1: `state.startup` tracks the legacy
+    /// single-Vault embedding-model setup, which has no correct meaning for
+    /// the Vault registry. An agent must be able to discover the collection
+    /// while the model is still being set up — exactly when the registry is
+    /// most likely to need attention.
+    #[tokio::test]
+    async fn readiness_gate_exempts_vault_collection_discovery() {
+        let (state, _tmp) = test_state();
+        state.startup.set_terms_required();
+
+        let listed = post_json(
+            state.clone(),
+            json!({"jsonrpc":"2.0","id":80,"method":"tools/call","params":{"name":"list_vaults","arguments":{}}}),
+            enabled_config(),
+        )
+        .await;
+        let body = response_json(listed).await;
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(
+            body["result"]["structuredContent"]["vaults"]
+                .as_array()
+                .expect("vaults array")
+                .len(),
+            1
+        );
+
+        // Content tools remain gated on the legacy readiness signal: it still
+        // legitimately protects operations that need the real embedding
+        // model loaded.
+        let blocked = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":81,"method":"tools/call",
+                "params": {"name":"search_notes","arguments":{"query":"alpha"}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let blocked_body = response_json(blocked).await;
+        assert_eq!(blocked_body["result"]["isError"], true);
+        assert_eq!(
+            blocked_body["result"]["content"][0]["text"],
+            "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first."
+        );
+    }
+
+    /// #103 reopening finding 1, the zero-Vault half: at zero Vaults, an
+    /// agent must be able to create the first one to repair the collection,
+    /// regardless of legacy model-setup readiness.
+    #[tokio::test]
+    async fn readiness_gate_exempts_create_vault_at_zero_vaults() {
+        let (state, tmp) = empty_test_state();
+        state.startup.set_terms_required();
+        let vault_path = tmp.path().join("new-vault");
+        std::fs::create_dir_all(&vault_path).expect("vault dir");
+
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":82,"method":"tools/call",
+                "params": {
+                    "name":"create_vault",
+                    "arguments": {
+                        "expected_registry_revision": 0,
+                        "name": "First Vault",
+                        "source": {"type":"local","path": vault_path},
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["isError"], false);
+        assert!(
+            body["result"]["structuredContent"]["vault"]["vault_id"].is_string(),
+            "expected a created Vault summary, got {body}"
+        );
     }
 
     #[tokio::test]
@@ -1516,6 +1642,20 @@ mod tests {
             conflict_body["result"]["structuredContent"]["code"],
             "write_conflict"
         );
+        // #103 reopening finding 2: a write failure must carry the same
+        // structured Vault identity HTTP failures already do.
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .expect("vault id");
+        assert_eq!(
+            conflict_body["result"]["structuredContent"]["vault_id"],
+            json!(vault_id)
+        );
         let vault_path = state.vault_path().await.expect("ready vault");
         assert_eq!(
             std::fs::read(vault_path.join("Assets/diagram.png")).expect("read"),
@@ -1541,6 +1681,51 @@ mod tests {
             )
             .expect("read"),
             b"second"
+        );
+    }
+
+    /// #103 reopening finding 2: `current_index` must preserve the
+    /// structured domain code and Vault ID from a failed index build rather
+    /// than degrading to an unstructured human message.
+    #[tokio::test]
+    async fn note_write_through_missing_vault_directory_preserves_structured_error() {
+        let (state, _tmp) = test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .expect("vault id");
+        let vault_path = state.vault_path().await.expect("ready vault");
+        std::fs::remove_dir_all(&vault_path).expect("remove vault dir");
+
+        let response = post_json(
+            state,
+            json!({
+                "jsonrpc":"2.0","id":83,"method":"tools/call",
+                "params": {
+                    "name":"update_note",
+                    "arguments": {
+                        "slug": "home",
+                        "content": "new",
+                        "expected_content_hash": "irrelevant"
+                    }
+                }
+            }),
+            write_config(),
+        )
+        .await;
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["structuredContent"]["code"],
+            "vault_read_unavailable"
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["vault_id"],
+            json!(vault_id)
         );
     }
 

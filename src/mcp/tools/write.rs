@@ -95,7 +95,7 @@ pub(super) async fn create_note_tool(
     refuse_noise_write(&vault.exclude()?, &relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
     let outcome = create_note(&vault_path(vault), &relative_path, &args.content, overwrite)
-        .map_err(write_error_to_jsonrpc)?;
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -110,7 +110,7 @@ pub(super) async fn update_note_tool(
     let index = current_index(vault).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
-        .map_err(write_error_to_jsonrpc)?;
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -126,7 +126,7 @@ pub(super) async fn append_to_note_tool(
     let index = current_index(vault).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
-        .map_err(write_error_to_jsonrpc)?;
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -147,7 +147,7 @@ pub(super) async fn edit_note_tool(
         &args.expected_content_hash,
         args.replace_all.unwrap_or(false),
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -179,7 +179,7 @@ pub(super) async fn replace_section_tool(
         &args.content,
         &args.expected_content_hash,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -208,7 +208,7 @@ pub(super) async fn rename_note_tool(
         &target,
         &args.expected_content_hash,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -241,7 +241,7 @@ pub(super) async fn move_note_tool(
         &target,
         &args.expected_content_hash,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -265,7 +265,7 @@ pub(super) async fn move_rename_note_tool(
         &target_relative_path,
         &args.expected_content_hash,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -297,7 +297,7 @@ pub(super) async fn archive_note_tool(
         &archive_prefix,
         &args.expected_content_hash,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -317,7 +317,7 @@ pub(super) async fn delete_note_tool(
         &entry,
         &args.expected_content_hash,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     finalize_note_write(vault, outcome).await
 }
 
@@ -374,7 +374,7 @@ pub(super) async fn import_attachment_tool(
         config.max_base64_bytes,
         overwrite,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
@@ -400,7 +400,7 @@ pub(super) async fn move_attachment_tool(
         &source_relative_path,
         &target_relative_path,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
@@ -426,7 +426,7 @@ pub(super) async fn rename_attachment_tool(
         &source_relative_path,
         &new_filename,
     )
-    .map_err(write_error_to_jsonrpc)?;
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
@@ -442,7 +442,7 @@ pub(super) async fn delete_attachment_tool(
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let index = current_index(vault).await?;
     let outcome = delete_attachment(&vault_path(vault), &index, &source_relative_path)
-        .map_err(write_error_to_jsonrpc)?;
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
@@ -457,7 +457,7 @@ pub(super) async fn list_note_attachments_tool(
     let index = current_index(vault).await?;
     let entry = note_entry(&index, &args.slug)?;
     let attachments = list_note_attachments(&vault_path(vault), &index.layers, &entry)
-        .map_err(write_error_to_jsonrpc)?;
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(tool_success(
         json!({ "vault_id": vault.vault_id, "attachments": attachments }),
     ))
@@ -470,7 +470,10 @@ async fn current_index(vault: &McpVault) -> Result<VaultIndex, JsonRpcFailure> {
     let control = vault.control.clone();
     match tokio::task::spawn_blocking(move || control.authoritative_index()).await {
         Ok(Ok(index)) => Ok(index),
-        Ok(Err(error)) => Err(JsonRpcFailure::not_found(error.message)),
+        Ok(Err(error)) => Err(vault_error(crate::vault_read::runtime_error(
+            vault.vault_id,
+            error,
+        ))),
         Err(join_error) => Err(JsonRpcFailure::internal(format!(
             "vault index build panicked: {join_error}"
         ))),
@@ -573,15 +576,15 @@ fn refuse_noise_write(
     Ok(())
 }
 
-fn write_error_to_jsonrpc(error: WriteError) -> JsonRpcFailure {
+fn write_error_to_jsonrpc(vault_id: VaultId, error: WriteError) -> JsonRpcFailure {
     let (code, message, retryable) = match error {
         WriteError::InvalidInput(message) => ("invalid_write_input", message, false),
         WriteError::Conflict(message) => ("write_conflict", message, true),
         WriteError::Io(message) => ("write_failed", message, false),
     };
-    JsonRpcFailure::not_found(
-        json!({ "code": code, "message": message, "retryable": retryable }).to_string(),
-    )
+    let error =
+        crate::handlers::vaults::VaultApiError::new(code, message, Some(vault_id), retryable);
+    JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message))
 }
 
 fn write_success(vault_id: VaultId, outcome: WriteOutcome, layer: Option<String>) -> Value {

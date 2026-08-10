@@ -32,10 +32,16 @@ pub async fn handle_tools_call(
         return Ok(tool_success(model_setup_status_payload(&state)));
     }
 
-    // Before the first index exists, only the explicit model-setup calls may
-    // run. The full tool catalogue is still advertised so MCP clients that cache
-    // tools at connection time need no restart once setup completes.
-    if !state.startup.is_ready() {
+    // Before the first index exists, only the explicit model-setup calls and
+    // Vault collection discovery/management may run. `state.startup` tracks
+    // the legacy single-Vault embedding-model setup, which has no bearing on
+    // the Vault registry: zero Vaults or a registry in Recovery are normal,
+    // expected states, and an agent must be able to see and repair the
+    // collection precisely then. This mirrors `handlers/vaults.rs`, whose
+    // whole HTTP surface is deliberately not gated by this legacy readiness
+    // signal. The full tool catalogue is still advertised so MCP clients that
+    // cache tools at connection time need no restart once setup completes.
+    if !state.startup.is_ready() && !is_collection_management_tool(name) {
         return match name {
             "accept_gemma_terms" => {
                 state
@@ -218,6 +224,25 @@ pub fn setup_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(true, true),
         }),
     ]
+}
+
+/// Vault collection discovery/management tools mirror `handlers/vaults.rs`'s
+/// `/api/v1/vaults` surface, which stays reachable at zero enabled Vaults or a
+/// registry needing recovery. `config.write_enabled` still gates the
+/// mutating ones exactly as it does when the legacy readiness gate is not the
+/// blocker in play.
+fn is_collection_management_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "list_vaults"
+            | "create_vault"
+            | "edit_vault"
+            | "enable_vault"
+            | "disable_vault"
+            | "disconnect_vault"
+            | "sync_vault"
+            | "retry_vault"
+    )
 }
 
 pub(super) fn non_empty_argument(name: &str, value: String) -> Result<String, JsonRpcFailure> {
