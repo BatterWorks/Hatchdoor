@@ -1,5 +1,6 @@
-//! Per-Vault managed-Git scheduling: daily polling, manual Sync/Retry now,
-//! and bounded exponential backoff on transient failure — plus the concrete
+//! Per-Vault managed-Git scheduling: each Vault polls on its own configured
+//! interval (defaulting to daily), plus manual Sync/Retry now, and bounded
+//! exponential backoff on transient failure — plus the concrete
 //! acquire-or-reuse-then-synchronize turn `VaultWorkKind::Git` executes.
 //!
 //! This boundary decides *when* to request a Git turn for a Vault and *what*
@@ -25,10 +26,13 @@ use super::managed_sync::{
     synchronize_managed_checkout,
 };
 
-/// How long a healthy or non-retryably-failed (including authentication)
-/// managed Vault waits before its next scheduled Git turn. Not yet
-/// user-configurable: Phase 1 has no UI-managed Vault configuration, so every
-/// managed-Git Vault currently shares this one default.
+/// The default interval a managed Vault waits before its next scheduled Git
+/// turn after a success or non-retryable failure, absent an explicitly
+/// configured `poll_interval_secs` (issue #97's reopening finding 2: the
+/// interval is now per-Vault, carried by `VaultSource::ManagedGit` and set
+/// on `ManagedGitScheduler` at [`ManagedGitScheduler::activate`] time — see
+/// `vault_registry::DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS`, which mirrors
+/// this same 24h value for the registry's own serde default).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Backoff bounds for re-attempting a turn that failed for a retryable
@@ -322,11 +326,20 @@ struct ScheduleState {
 /// leaking its OS-level lock indefinitely.
 struct VaultScheduleEntry {
     schedule: ScheduleState,
+    /// This Vault's own poll interval (issue #97's reopening finding 2),
+    /// read from `VaultSource::ManagedGit::poll_interval_secs` at
+    /// [`ManagedGitScheduler::activate`] time. Independent of `schedule`:
+    /// [`ManagedGitScheduler::activate`] updates this in place on a
+    /// definition change without touching `schedule.next_attempt` or
+    /// `schedule.backoff`, so an interval change never resets an
+    /// in-progress backoff.
+    poll_interval: Duration,
     lease: Option<ManagedCheckoutLease>,
 }
 
 /// Decides *when* to request `VaultWorkKind::Git` for each active managed-Git
-/// Vault: a daily tick, an immediate manual Sync/Retry-now, or a bounded
+/// Vault: that Vault's own configured poll interval (see
+/// [`Self::activate`]), an immediate manual Sync/Retry-now, or a bounded
 /// exponential backoff after a transient failure.
 ///
 /// One instance drives every managed-Git Vault in the process — mirroring
@@ -349,37 +362,47 @@ struct VaultScheduleEntry {
 /// handing its lease back — see [`VaultScheduleEntry`].
 pub struct ManagedGitScheduler {
     coordinator: VaultWorkCoordinator,
-    poll_interval: Duration,
     entries: Mutex<BTreeMap<VaultId, VaultScheduleEntry>>,
 }
 
 impl ManagedGitScheduler {
     pub fn new(coordinator: VaultWorkCoordinator) -> Self {
-        Self::with_poll_interval(coordinator, DEFAULT_POLL_INTERVAL)
-    }
-
-    pub fn with_poll_interval(coordinator: VaultWorkCoordinator, poll_interval: Duration) -> Self {
         Self {
             coordinator,
-            poll_interval,
             entries: Mutex::new(BTreeMap::new()),
         }
     }
 
     /// Register a Vault so it participates in scheduled polling, due
-    /// immediately. Idempotent: re-activating an already-tracked Vault
-    /// leaves its current schedule (including an in-progress backoff and any
-    /// held checkout lease) untouched, so a `reconcile()` that retains an
-    /// unchanged Vault does not reset it.
-    pub fn activate(&self, vault_id: VaultId) {
+    /// immediately, using `poll_interval` for its daily-equivalent re-arm
+    /// (see [`Self::record_outcome`]). Idempotent for the schedule itself:
+    /// re-activating an already-tracked Vault leaves its current schedule
+    /// (including an in-progress backoff and any held checkout lease)
+    /// untouched, so a `reconcile()` that retains an unchanged Vault does not
+    /// reset it — but `poll_interval` is always applied, even to an
+    /// already-tracked Vault (issue #97's reopening finding 2): an edit that
+    /// changes only a Vault's configured interval must take effect on its
+    /// next re-arm without disturbing an in-progress backoff or lease, so the
+    /// interval update and schedule-state preservation are handled as two
+    /// independent concerns rather than both being gated by "already
+    /// tracked."
+    pub fn activate(&self, vault_id: VaultId, poll_interval: Duration) {
         let mut entries = self.entries.lock().expect("managed Git scheduler poisoned");
-        entries.entry(vault_id).or_insert(VaultScheduleEntry {
-            schedule: ScheduleState {
-                next_attempt: Instant::now(),
-                backoff: None,
-            },
-            lease: None,
-        });
+        match entries.entry(vault_id) {
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                occupied.get_mut().poll_interval = poll_interval;
+            }
+            std::collections::btree_map::Entry::Vacant(vacant) => {
+                vacant.insert(VaultScheduleEntry {
+                    schedule: ScheduleState {
+                        next_attempt: Instant::now(),
+                        backoff: None,
+                    },
+                    poll_interval,
+                    lease: None,
+                });
+            }
+        }
     }
 
     /// Stop tracking a Vault (disabled, disconnected, or retired). Any
@@ -457,12 +480,46 @@ impl ManagedGitScheduler {
         // while still holding `entries`' lock, releasing the OS lock.
     }
 
+    /// Test-only observation of a tracked Vault's currently stored interval.
+    /// `entries` is private and behind a `Mutex`, so a cross-module
+    /// end-to-end test (e.g. `handlers/vaults.rs`'s edit-path regression
+    /// test for issue #97's reopening finding 2) has no other way to prove
+    /// an edit actually reached the live scheduler without either
+    /// duplicating this module's internal state or waiting on real
+    /// wall-clock scheduling.
+    #[cfg(test)]
+    pub(crate) fn poll_interval_for_test(&self, vault_id: VaultId) -> Option<Duration> {
+        self.entries
+            .lock()
+            .expect("managed Git scheduler poisoned")
+            .get(&vault_id)
+            .map(|entry| entry.poll_interval)
+    }
+
+    /// Test-only observation of a tracked Vault's currently armed
+    /// `next_attempt`, so a cross-module test can prove an interval update
+    /// left an in-progress backoff untouched. See
+    /// [`Self::poll_interval_for_test`].
+    #[cfg(test)]
+    pub(crate) fn next_attempt_for_test(&self, vault_id: VaultId) -> Option<Instant> {
+        self.entries
+            .lock()
+            .expect("managed Git scheduler poisoned")
+            .get(&vault_id)
+            .map(|entry| entry.schedule.next_attempt)
+    }
+
     /// Request an immediate turn for exactly one Vault, bypassing its
     /// schedule. Registers the Vault if it was not already tracked, so a
-    /// manual sync can never be silently dropped. Coalesces with any
-    /// already-pending Git turn for that Vault.
-    pub fn sync_now(&self, vault_id: VaultId) -> ScheduleResult {
-        self.activate(vault_id);
+    /// manual sync can never be silently dropped — `poll_interval` is the
+    /// value that registration (or an already-tracked Vault's refreshed
+    /// interval, per [`Self::activate`]) uses; callers already have the
+    /// Vault's current definition in hand (e.g. `handlers/vaults.rs`'s
+    /// manual control endpoint, which reads it off the same definition it
+    /// just validated is `ManagedGit`). Coalesces with any already-pending
+    /// Git turn for that Vault.
+    pub fn sync_now(&self, vault_id: VaultId, poll_interval: Duration) -> ScheduleResult {
+        self.activate(vault_id, poll_interval);
         self.coordinator.request(vault_id, VaultWorkKind::Git)
     }
 
@@ -470,8 +527,8 @@ impl ManagedGitScheduler {
     /// named entry point because "retry a failed Vault" and "sync a healthy
     /// one" are different user intents even though both resolve to the same
     /// coordinator request.
-    pub fn retry_now(&self, vault_id: VaultId) -> ScheduleResult {
-        self.sync_now(vault_id)
+    pub fn retry_now(&self, vault_id: VaultId, poll_interval: Duration) -> ScheduleResult {
+        self.sync_now(vault_id, poll_interval)
     }
 
     /// Record one Git turn's outcome and arm the next attempt: the daily
@@ -491,11 +548,12 @@ impl ManagedGitScheduler {
         let Some(entry) = entries.get_mut(&vault_id) else {
             return;
         };
+        let poll_interval = entry.poll_interval;
         let schedule = &mut entry.schedule;
         match result {
             Ok(_) => {
                 schedule.backoff = None;
-                schedule.next_attempt = Instant::now() + self.poll_interval;
+                schedule.next_attempt = Instant::now() + poll_interval;
             }
             Err(error) if error.retryable() => {
                 let next_backoff = schedule
@@ -506,15 +564,30 @@ impl ManagedGitScheduler {
             }
             Err(_) => {
                 schedule.backoff = None;
-                schedule.next_attempt = Instant::now() + self.poll_interval;
+                schedule.next_attempt = Instant::now() + poll_interval;
             }
         }
     }
 
     /// Request a Git turn for every tracked Vault whose schedule is due as of
-    /// `now`. Naturally coalesces with the coordinator: a Vault whose
-    /// previous turn is still active or already queued is a no-op
-    /// (`ScheduleResult::Coalesced`).
+    /// `now`.
+    ///
+    /// Skips a Vault whose Git turn is already active or already has a
+    /// pending rerun queued, rather than calling
+    /// [`VaultWorkCoordinator::request`] unconditionally. `request` itself
+    /// only coalesces *duplicate* requests of an already-active turn into
+    /// one guaranteed rerun — it cannot know that rerun would fire the
+    /// instant the active turn's `execute` closure returns, before
+    /// `record_outcome` (called from inside that same closure, once the
+    /// turn's result is known) has a chance to arm backoff. A Git turn can
+    /// easily outlast `DEFAULT_TICK_INTERVAL`, so an unconditional `request`
+    /// here would pre-queue that zero-delay rerun on every tick during the
+    /// active window, defeating backoff on every retryable failure. This
+    /// check is intentionally scoped to `tick()`'s own automatic due-check;
+    /// [`Self::sync_now`]/[`Self::retry_now`] must still coalesce a manual
+    /// request into the turn's one guaranteed rerun exactly as before — a
+    /// user explicitly asking for a resync is not a case this skip should
+    /// swallow.
     pub fn tick(&self, now: Instant) {
         let due = {
             let entries = self.entries.lock().expect("managed Git scheduler poisoned");
@@ -525,15 +598,19 @@ impl ManagedGitScheduler {
                 .collect::<Vec<_>>()
         };
         for vault_id in due {
+            if self.coordinator.has_work(vault_id, VaultWorkKind::Git) {
+                continue;
+            }
             self.coordinator.request(vault_id, VaultWorkKind::Git);
         }
     }
 }
 
-/// Spawn the periodic tick that keeps every tracked Vault's daily schedule
-/// (and any armed backoff) moving forward. `tick_interval` controls how often
-/// the schedule is *checked*, not how often a Vault actually syncs — keep it
-/// well below `poll_interval` and `BACKOFF_BASE`. Aborting the returned
+/// Spawn the periodic tick that keeps every tracked Vault's own configured
+/// schedule (and any armed backoff) moving forward. `tick_interval` controls
+/// how often the schedule is *checked*, not how often a Vault actually syncs
+/// — keep it well below every Vault's own poll interval and `BACKOFF_BASE`.
+/// Aborting the returned
 /// handle is sufficient to stop it: the task holds no resources of its own
 /// and issues no destructive operations, only coordinator requests, which
 /// have their own independent shutdown draining.
@@ -554,9 +631,11 @@ pub fn spawn_scheduler_tick(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
 
     use git2::{Repository, Signature};
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -754,10 +833,16 @@ mod tests {
         );
     }
 
+    /// A test-only stand-in for a Vault's configured poll interval. Shorter
+    /// than `DEFAULT_POLL_INTERVAL` so interval-independent assertions stay
+    /// easy to reason about; tests that specifically exercise per-Vault
+    /// interval differences (issue #97's reopening finding 2) use their own
+    /// explicit values instead.
+    const TEST_POLL_INTERVAL: Duration = Duration::from_secs(3600);
+
     fn scheduler() -> (VaultWorkCoordinator, ManagedGitScheduler) {
         let (coordinator, _worker) = VaultWorkCoordinator::new();
-        let scheduler =
-            ManagedGitScheduler::with_poll_interval(coordinator.clone(), Duration::from_secs(3600));
+        let scheduler = ManagedGitScheduler::new(coordinator.clone());
         (coordinator, scheduler)
     }
 
@@ -770,7 +855,7 @@ mod tests {
         let (coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
 
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
         scheduler.tick(Instant::now());
 
         assert_eq!(
@@ -784,7 +869,7 @@ mod tests {
     fn tick_does_not_request_work_for_a_vault_not_yet_due() {
         let (coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
         // A recorded success re-arms the daily interval, so this Vault is no
         // longer due at `Instant::now()`.
         scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
@@ -802,7 +887,7 @@ mod tests {
     fn reactivating_a_tracked_vault_does_not_reset_an_armed_backoff() {
         let (_coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
         scheduler.record_outcome(
             vault,
             &Err(VaultWorkError::new(
@@ -816,7 +901,7 @@ mod tests {
             entries[&vault].schedule.next_attempt
         };
 
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
 
         let after_reactivate = {
             let entries = scheduler.entries.lock().expect("scheduler entries");
@@ -825,11 +910,110 @@ mod tests {
         assert_eq!(armed_backoff, after_reactivate);
     }
 
+    /// Closes issue #97's reopening finding 2: a definition change that only
+    /// updates a Vault's configured `poll_interval_secs` must take effect —
+    /// `activate()` must update an already-tracked Vault's interval in
+    /// place — without disturbing an in-progress backoff, which is a
+    /// completely independent concern (see the doc comment on
+    /// `ManagedGitScheduler::activate`).
+    #[test]
+    fn reactivating_with_a_changed_interval_updates_it_without_resetting_an_armed_backoff() {
+        let (_coordinator, scheduler) = scheduler();
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
+        scheduler.record_outcome(
+            vault,
+            &Err(VaultWorkError::new(
+                "managed_git_remote_unreachable",
+                "x",
+                true,
+            )),
+        );
+        let armed_backoff = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
+        };
+
+        let new_interval = TEST_POLL_INTERVAL * 2;
+        scheduler.activate(vault, new_interval);
+
+        let (after_reactivate, stored_interval) = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            (
+                entries[&vault].schedule.next_attempt,
+                entries[&vault].poll_interval,
+            )
+        };
+        assert_eq!(
+            armed_backoff, after_reactivate,
+            "an interval change must not reset an in-progress backoff"
+        );
+        assert_eq!(
+            stored_interval, new_interval,
+            "activate() must update the tracked interval even for an already-tracked Vault"
+        );
+
+        // The *new* interval, not the original one, is what actually gets
+        // used once the in-progress backoff resolves and a success re-arms
+        // the daily-equivalent schedule.
+        let before = Instant::now();
+        scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
+        let next_attempt = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
+        };
+        assert!(next_attempt >= before + new_interval - Duration::from_secs(1));
+        assert!(next_attempt < before + new_interval + Duration::from_secs(5));
+    }
+
+    /// Closes issue #97's reopening finding 2: before this fix,
+    /// `ManagedGitScheduler` had exactly one `poll_interval` shared by every
+    /// tracked Vault. Proves two Vaults activated with different intervals
+    /// re-arm and become due independently.
+    #[test]
+    fn two_vaults_with_different_poll_intervals_get_independent_schedules() {
+        let (coordinator, scheduler) = scheduler();
+        let short_vault = vault_id("00000000-0000-4000-8000-000000000001");
+        let long_vault = vault_id("00000000-0000-4000-8000-000000000002");
+        let short_interval = Duration::from_secs(3600);
+        let long_interval = Duration::from_secs(6 * 3600);
+        scheduler.activate(short_vault, short_interval);
+        scheduler.activate(long_vault, long_interval);
+        scheduler.record_outcome(short_vault, &Ok(ManagedGitOutcome::UpToDate));
+        scheduler.record_outcome(long_vault, &Ok(ManagedGitOutcome::UpToDate));
+
+        let (short_next, long_next) = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            (
+                entries[&short_vault].schedule.next_attempt,
+                entries[&long_vault].schedule.next_attempt,
+            )
+        };
+        assert!(
+            long_next > short_next,
+            "a Vault configured with a longer poll interval must re-arm further out than one with a shorter interval"
+        );
+
+        // A tick at a time past only the short Vault's re-arm point must
+        // request just that Vault, leaving the long-interval Vault alone.
+        scheduler.tick(short_next + Duration::from_millis(1));
+        assert_eq!(
+            coordinator.request(short_vault, VaultWorkKind::Git),
+            ScheduleResult::Coalesced,
+            "the short-interval Vault must already be due and requested by tick()"
+        );
+        assert_eq!(
+            coordinator.request(long_vault, VaultWorkKind::Git),
+            ScheduleResult::Queued,
+            "the long-interval Vault must not yet be due"
+        );
+    }
+
     #[test]
     fn deactivate_stops_tracking_so_a_later_tick_does_not_request_it() {
         let (coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
 
         scheduler.deactivate(vault);
         scheduler.tick(Instant::now());
@@ -846,7 +1030,10 @@ mod tests {
         let (coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
 
-        assert_eq!(scheduler.sync_now(vault), ScheduleResult::Queued);
+        assert_eq!(
+            scheduler.sync_now(vault, TEST_POLL_INTERVAL),
+            ScheduleResult::Queued
+        );
         assert_eq!(
             coordinator.request(vault, VaultWorkKind::Git),
             ScheduleResult::Coalesced,
@@ -856,11 +1043,107 @@ mod tests {
         scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
     }
 
+    /// Closes issue #97's reopening finding 1: `tick()` used to call
+    /// `coordinator.request()` unconditionally for every due Vault, even one
+    /// whose turn was already active. Because `request()` treats a duplicate
+    /// of active work as "queue exactly one guaranteed rerun," a tick landing
+    /// mid-turn pre-queued a rerun that would fire the instant the active
+    /// turn completed — before `record_outcome` (called from inside that same
+    /// turn, once its result is known) had a chance to arm backoff. A
+    /// retryable failure's backoff was therefore defeated: the Vault retried
+    /// immediately instead of waiting.
+    ///
+    /// Drives the coordinator and scheduler directly, without a real
+    /// `VaultWorkWorker::run_next` loop consuming turns automatically
+    /// (mirroring `vault_work.rs`'s own `repeated_active_requests_coalesce_to_one_required_rerun`
+    /// pattern), so a turn can be held "active" under direct control while
+    /// `tick()` runs against it.
+    #[tokio::test]
+    async fn tick_does_not_pre_queue_a_zero_delay_rerun_for_an_already_active_turn() {
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let scheduler = ManagedGitScheduler::new(coordinator);
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        assert_eq!(
+            scheduler.sync_now(vault, TEST_POLL_INTERVAL),
+            ScheduleResult::Queued
+        );
+
+        // Take the turn active under direct control (no automatic worker
+        // loop), mirroring `vault_work.rs`'s own
+        // `repeated_active_requests_coalesce_to_one_required_rerun` pattern.
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                let outcome = worker
+                    .run_next(move |request| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            let _ = request;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await
+                    .expect("active turn");
+                (worker, outcome)
+            }
+        });
+        started.notified().await;
+
+        // The turn is now active. A tick landing here, before the fix, would
+        // pre-queue a guaranteed immediate rerun regardless of what backoff
+        // the turn's own outcome is about to arm.
+        scheduler.tick(Instant::now());
+
+        // The turn fails for a retryable reason. Production calls
+        // `record_outcome` from inside the `execute` closure — i.e. before
+        // `run_next` clears `active` — so this call is placed the same way
+        // here, between the tick above and the turn's completion below.
+        let transient = Err(VaultWorkError::new(
+            "managed_git_remote_unreachable",
+            "x",
+            true,
+        ));
+        scheduler.record_outcome(vault, &transient);
+        let armed_next_attempt = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
+        };
+        assert!(
+            armed_next_attempt > Instant::now(),
+            "a retryable failure must arm a future backoff, not an immediate retry"
+        );
+
+        release.notify_one();
+        let (mut worker, outcome) = running.await.expect("worker task");
+        assert_eq!(outcome.request.vault_id(), vault);
+
+        // If `tick()` had pre-queued a rerun, it would be ready here
+        // immediately — proving backoff was defeated. With the fix, no
+        // rerun exists yet: the next turn only becomes available once
+        // `armed_next_attempt` actually elapses and a later `tick()` finds
+        // it due.
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            )
+            .await
+            .is_err(),
+            "tick() must not have queued an immediate rerun for a Vault whose turn was still active"
+        );
+    }
+
     #[test]
     fn a_retryable_failure_backs_off_exponentially_and_a_success_resets_it() {
         let (_coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
         let transient = Err(VaultWorkError::new(
             "managed_git_remote_unreachable",
             "x",
@@ -889,11 +1172,7 @@ mod tests {
             entries[&vault].schedule
         };
         assert!(after_success.backoff.is_none());
-        assert!(
-            after_success.next_attempt
-                >= before + DEFAULT_POLL_INTERVAL.min(Duration::from_secs(3600))
-                    - Duration::from_secs(1)
-        );
+        assert!(after_success.next_attempt >= before + TEST_POLL_INTERVAL - Duration::from_secs(1));
     }
 
     #[test]
@@ -901,7 +1180,7 @@ mod tests {
     {
         let (_coordinator, scheduler) = scheduler();
         let vault = vault_id("00000000-0000-4000-8000-000000000001");
-        scheduler.activate(vault);
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
         let auth_failure = Err(VaultWorkError::new(
             "managed_git_authentication_failed",
             "bad credentials",
@@ -919,9 +1198,7 @@ mod tests {
             schedule.backoff.is_none(),
             "authentication failures must not arm exponential backoff"
         );
-        assert!(
-            schedule.next_attempt >= before + Duration::from_secs(3600) - Duration::from_secs(1)
-        );
+        assert!(schedule.next_attempt >= before + TEST_POLL_INTERVAL - Duration::from_secs(1));
     }
 
     #[test]
@@ -958,7 +1235,7 @@ mod tests {
         let (_root, config) = fixture(VaultGitMode::TwoWay);
         let (coordinator, _worker) = VaultWorkCoordinator::new();
         let scheduler = ManagedGitScheduler::new(coordinator);
-        scheduler.activate(config.vault_id);
+        scheduler.activate(config.vault_id, TEST_POLL_INTERVAL);
 
         // First turn: no lease held yet, so one is acquired fresh and then
         // handed back to the scheduler instead of being dropped.
@@ -1049,7 +1326,7 @@ mod tests {
         let (_root, config) = fixture(VaultGitMode::PullOnly);
         let (coordinator, _worker) = VaultWorkCoordinator::new();
         let scheduler = ManagedGitScheduler::new(coordinator);
-        scheduler.activate(config.vault_id);
+        scheduler.activate(config.vault_id, TEST_POLL_INTERVAL);
 
         // A turn takes the lease to run with — exactly what a real
         // in-flight Git turn does before `spawn_blocking`.

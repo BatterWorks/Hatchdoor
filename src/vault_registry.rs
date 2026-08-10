@@ -12,6 +12,7 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -20,6 +21,27 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const REGISTRY_SCHEMA_VERSION: u32 = 1;
 /// The authoritative Vault collection registry in persistent instance state.
 pub const DEFAULT_VAULT_REGISTRY_PATH: &str = "/data/state/vaults.json";
+
+/// Default `poll_interval_secs` for a managed-Git source: 24h, mirroring
+/// `git::managed_task::DEFAULT_POLL_INTERVAL`. Kept as an independent
+/// constant here rather than imported from `git::managed_task` so this
+/// lower-level persistence boundary does not take on a reverse dependency
+/// on the Git scheduling boundary that already consumes it (see
+/// `docs/architecture/module-map.md`'s "Vault collection registry" versus
+/// "Git synchronization" consumer direction) — this is the same tradeoff
+/// `BACKOFF_MAX`-mirroring `MIN_MANAGED_GIT_POLL_INTERVAL_SECS` below makes.
+pub(crate) const DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS: u64 = 24 * 60 * 60;
+
+/// The shortest allowed `poll_interval_secs`: mirrors
+/// `git::managed_task::BACKOFF_MAX` (1h). A shorter "normal" schedule than
+/// the bound meant to throttle repeated transient failures would make the
+/// bound meaningless, and a near-zero interval would turn periodic polling
+/// into a busy loop.
+const MIN_MANAGED_GIT_POLL_INTERVAL_SECS: u64 = 60 * 60;
+
+fn default_managed_git_poll_interval_secs() -> u64 {
+    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct VaultId([u8; 16]);
@@ -158,6 +180,13 @@ pub enum VaultSource {
         branch: Option<String>,
         vault_subdirectory: Option<PathBuf>,
         mode: VaultGitMode,
+        /// How often `ManagedGitScheduler` polls this Vault's remote absent
+        /// a manual Sync/Retry or a backoff-triggering transient failure.
+        /// Defaulted on deserialization so an on-disk registry written before
+        /// this field existed keeps loading under the same
+        /// `REGISTRY_SCHEMA_VERSION` (see `default_managed_git_poll_interval_secs`).
+        #[serde(default = "default_managed_git_poll_interval_secs")]
+        poll_interval_secs: u64,
     },
 }
 
@@ -186,6 +215,7 @@ impl fmt::Debug for VaultSource {
                 branch,
                 vault_subdirectory,
                 mode,
+                poll_interval_secs,
                 ..
             } => formatter
                 .debug_struct("ManagedGit")
@@ -193,7 +223,24 @@ impl fmt::Debug for VaultSource {
                 .field("branch", branch)
                 .field("vault_subdirectory", vault_subdirectory)
                 .field("mode", mode)
+                .field("poll_interval_secs", poll_interval_secs)
                 .finish(),
+        }
+    }
+}
+
+impl VaultSource {
+    /// The configured poll interval for a managed-Git source, or `None` for
+    /// any other source kind. `Local` never polls; `ExistingGit`
+    /// `PullOnly`/`TwoWay` Vaults get only the one-shot Git turn activation
+    /// already requests and are never registered with `ManagedGitScheduler`
+    /// (see `git::managed_task`'s module doc), so they carry no interval.
+    pub fn managed_git_poll_interval(&self) -> Option<Duration> {
+        match self {
+            Self::ManagedGit {
+                poll_interval_secs, ..
+            } => Some(Duration::from_secs(*poll_interval_secs)),
+            Self::Local { .. } | Self::ExistingGit { .. } => None,
         }
     }
 }
@@ -1132,11 +1179,13 @@ fn normalize_source(source: VaultSource) -> Result<VaultSource, VaultRegistryErr
             branch,
             vault_subdirectory,
             mode,
+            poll_interval_secs,
         } => Ok(VaultSource::ManagedGit {
             repository_url,
             branch,
             vault_subdirectory,
             mode,
+            poll_interval_secs,
         }),
         VaultSource::ExistingGit {
             repository_path,
@@ -1219,11 +1268,17 @@ fn normalize_structural_source(source: VaultSource) -> Result<VaultSource, Vault
             branch,
             vault_subdirectory,
             mode,
+            poll_interval_secs,
         } => {
             if mode == VaultGitMode::LocalHistory {
                 return Err(invalid_source(
                     "managed Git requires pull_only or two_way mode",
                 ));
+            }
+            if poll_interval_secs < MIN_MANAGED_GIT_POLL_INTERVAL_SECS {
+                return Err(invalid_source(&format!(
+                    "managed Git poll interval must be at least {MIN_MANAGED_GIT_POLL_INTERVAL_SECS} seconds"
+                )));
             }
             Ok(VaultSource::ManagedGit {
                 repository_url: normalize_https_repository_url(repository_url)?,
@@ -1232,6 +1287,7 @@ fn normalize_structural_source(source: VaultSource) -> Result<VaultSource, Vault
                     .map(normalize_relative_subdirectory)
                     .transpose()?,
                 mode,
+                poll_interval_secs,
             })
         }
         VaultSource::ExistingGit {

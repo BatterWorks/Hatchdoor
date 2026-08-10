@@ -5,8 +5,9 @@ use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::{VaultSnapshotFreshness, VaultSnapshotStatus};
 use crate::embed::{Embedder, StubEmbedder};
 use crate::vault_registry::{
-    HttpsCredentialUpdate, NewVaultDefinition, VaultDefinitionEdit, VaultGitMode,
-    VaultRegistrySnapshot, VaultRegistryStore, VaultSource as RegistryVaultSource,
+    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, HttpsCredentialUpdate, NewVaultDefinition,
+    VaultDefinitionEdit, VaultGitMode, VaultRegistrySnapshot, VaultRegistryStore,
+    VaultSource as RegistryVaultSource,
 };
 
 struct PanicEmbedder;
@@ -336,6 +337,7 @@ fn activation_failure_is_isolated_from_healthy_local_markdown() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -447,6 +449,7 @@ fn set_local_content_status_makes_a_managed_vault_browsable_after_first_acquisit
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -509,6 +512,173 @@ fn set_local_content_status_makes_a_managed_vault_browsable_after_first_acquisit
     );
 }
 
+/// Closes a Spec-review finding on issue #97's reopening findings 1/2: an
+/// in-place edit to a non-identity field (anything that does not require
+/// disabling the Vault first — interval, name, exclude patterns, mode,
+/// credentials) on an already-active managed-Git Vault constructs a fresh
+/// `VaultControlBlock` (any definition change breaks `reconcile()`'s
+/// ptr_eq retention), but must carry the *retiring* control block's actual
+/// current Git status through to the replacement rather than resetting it
+/// to `Pending`. Forcing `Pending` would make the active loop request an
+/// immediate real Git turn regardless of an armed backoff or other real
+/// status — silently bypassing finding 1's whole point. `Pending` remains
+/// correct for a genuinely new Vault or a disabled-to-enabled transition;
+/// see `disabling_and_reenabling_a_managed_git_vault_forces_a_fresh_pending_sync`
+/// below for that complementary case.
+#[test]
+fn editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Remote notes".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Remote notes");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    assert_eq!(runtime.snapshot().git, VaultGitStatus::Pending);
+
+    // A real turn moves the Vault to `Unavailable` mid-backoff from a
+    // transient failure — exactly the status a benign edit below must not
+    // silently discard.
+    let transient_error = VaultRuntimeError {
+        code: "managed_git_remote_unreachable".to_string(),
+        message: "temporary DNS failure".to_string(),
+        retryable: true,
+    };
+    runtime
+        .set_git_status(VaultGitStatus::Unavailable, Some(transient_error.clone()))
+        .expect("publish a real transient Git failure");
+
+    // Edit only the poll interval: a non-identity field, so the Vault stays
+    // enabled and active with the same remote identity throughout.
+    let edited = registry
+        .edit(
+            committed.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Remote notes".to_string(),
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS * 2,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+            },
+        )
+        .expect("edit only the poll interval");
+    collection.reconcile(&registry, &edited);
+
+    let after_edit = collection
+        .runtime(vault_id)
+        .expect("Vault remains active after a non-identity edit")
+        .snapshot();
+    assert_eq!(
+        after_edit.git,
+        VaultGitStatus::Unavailable,
+        "a benign edit must not force the Git status back to Pending, \
+         which would trigger an unwanted immediate resync"
+    );
+    assert_eq!(
+        after_edit
+            .git_error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("managed_git_remote_unreachable"),
+        "the actual prior error must be carried over too, not just the status enum"
+    );
+}
+
+/// Complements
+/// `editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status`:
+/// a Vault that goes disabled then re-enabled again is not an in-place edit
+/// of a still-active Vault — it genuinely leaves and rejoins the active
+/// collection — so it must still get a fresh `Pending` status (an
+/// immediate first sync) exactly as a brand-new Vault does, regardless of
+/// whatever Git status it had before being disabled.
+#[test]
+fn disabling_and_reenabling_a_managed_git_vault_forces_a_fresh_pending_sync() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Remote notes".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Remote notes");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    let runtime = collection.runtime(vault_id).expect("active runtime");
+    runtime
+        .set_git_status(
+            VaultGitStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: "managed_git_remote_unreachable".to_string(),
+                message: "x".to_string(),
+                retryable: true,
+            }),
+        )
+        .expect("publish a real Git failure before disabling");
+
+    let disabled = registry
+        .disable(committed.revision(), vault_id)
+        .expect("disable");
+    collection.reconcile(&registry, &disabled);
+    assert!(collection.runtime(vault_id).is_none());
+
+    let reenabled = registry
+        .enable(disabled.revision(), vault_id)
+        .expect("enable");
+    collection.reconcile(&registry, &reenabled);
+    let runtime = collection.runtime(vault_id).expect("reenabled runtime");
+    assert_eq!(
+        runtime.snapshot().git,
+        VaultGitStatus::Pending,
+        "a Vault transitioning from disabled to enabled must get a fresh Pending \
+         status and an immediate first sync, not whatever Git status it had before disabling"
+    );
+}
+
 /// A managed-Git Vault's control block, activated through the real
 /// registry and collection runtime exactly like production. Uses a
 /// syntactically valid but unreachable `https://` URL — like
@@ -545,6 +715,7 @@ fn managed_git_control_block(
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -569,7 +740,10 @@ async fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_bro
     std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
     let managed_git = ManagedGitScheduler::new(coordinator.clone());
-    managed_git.activate(vault_id);
+    managed_git.activate(
+        vault_id,
+        std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+    );
     assert_eq!(
         control_block.snapshot().local_content,
         LocalContentStatus::Unavailable
@@ -608,7 +782,10 @@ fn publish_managed_git_turn_outcome_isolates_a_failure_from_already_acquired_loc
     std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
     let (coordinator, _worker) = VaultWorkCoordinator::new();
     let managed_git = ManagedGitScheduler::new(coordinator.clone());
-    managed_git.activate(vault_id);
+    managed_git.activate(
+        vault_id,
+        std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+    );
     publish_managed_git_turn_outcome(
         &control_block,
         &coordinator,
@@ -670,7 +847,10 @@ async fn dispatch_managed_git_turn_with_publishes_a_real_failure_through_the_ful
     std::fs::create_dir_all(control_block.vault_path()).expect("already-acquired checkout");
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
     let managed_git = ManagedGitScheduler::new(coordinator.clone());
-    managed_git.activate(vault_id);
+    managed_git.activate(
+        vault_id,
+        std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+    );
 
     // First turn succeeds (fabricated), establishing already-acquired
     // local content exactly like a real prior sync would.
@@ -791,7 +971,10 @@ async fn a_managed_git_turn_waits_for_a_concurrent_foreground_mutation_to_releas
         managed_git_control_block(directory.path());
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
     let managed_git = ManagedGitScheduler::new(coordinator.clone());
-    managed_git.activate(vault_id);
+    managed_git.activate(
+        vault_id,
+        std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+    );
     coordinator.request(vault_id, VaultWorkKind::Git);
 
     // Simulate a foreground Markdown write already in flight, holding
