@@ -214,7 +214,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     };
 
     // MCP remains reachable during initial setup. It advertises the full stable
-    // tool list, while tools::dispatch blocks vault operations until ready.
+    // tool list; `tools::dispatch` blocks content read/write/search tools
+    // until the legacy embedding-model setup is ready, but Vault collection
+    // discovery/management tools stay reachable throughout (#103), mirroring
+    // `vaults_v1`'s own independence from that legacy readiness signal below.
     let mcp = Router::new()
         .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
         .layer(DefaultBodyLimit::max(mcp_body_limit));
