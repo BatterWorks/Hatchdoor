@@ -190,7 +190,15 @@ that production inventory are still checked for stale paths and duplicates.
   `set_search_status`/`set_git_status`) republishes authoritative
   local-content availability after a Git turn, since `activation_snapshot`
   only stats `vault_path` once, at `reconcile()` time, before a managed
-  checkout exists.
+  checkout exists. `activation_snapshot`'s Git status defaults to `Pending`
+  (an immediate first sync) for a genuinely new Vault or a
+  disabled-to-enabled transition only; `reconcile()`'s non-retained-
+  definition branch (an in-place edit to an already-active Vault) instead
+  carries the retiring control block's actual current Git status and error
+  through to the replacement (issue #97's reopening findings 1/2 follow-up)
+  — otherwise every edit, not just an identity change, would force `Pending`
+  and trigger an unwanted immediate real Git turn, bypassing an armed
+  backoff or any other real status.
 - `dispatch_vault_index_turn` is the `VaultWorkKind::Index` execution closure
   the same worker loop calls. It acquires one Vault's refresh boundary, builds
   an authoritative Markdown index and isolated candidate cache off the async
@@ -248,6 +256,11 @@ and `VaultWorkError` expose deterministic one-operation turns, request
 coalescing, lifecycle rejection, and Vault-qualified returned outcomes. Index
 work includes local embedding work; Git and repair remain distinct operation
 kinds. A stopped worker returns `None` rather than waiting for discarded work.
+`VaultWorkCoordinator::has_work` is a read-only query over the same per-Vault
+state `request` consults ("is `kind` currently active or already pending for
+`vault_id`") — added for issue #97's reopening finding 1, so a caller that
+must avoid adding a redundant queued turn can check first instead of
+maintaining its own, independently trackable notion of "is this Vault busy."
 
 **Consumed dependencies:** durable `VaultId` identity and Tokio notification.
 The queue owns no Markdown, SQLite, Git, or lifecycle state.
@@ -340,6 +353,12 @@ types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
 operations, store-owned `vault_path` resolution for runtime consumers,
+a managed-Git source's own `poll_interval_secs` (issue #97's reopening
+finding 2: per-Vault, not scheduler-wide; `#[serde(default)]`s to 24h so a
+registry record written before this field existed keeps loading under the
+same `REGISTRY_SCHEMA_VERSION`, and `add`/`edit` reject a value below 1h,
+mirroring `git::managed_task::BACKOFF_MAX`) and `VaultSource::managed_git_poll_interval`,
+the read accessor `ManagedGitScheduler`/`handlers/vaults.rs` use to consume it,
 the crate-private `is_safe_https_repository_url` validator shared with the
 managed-checkout boundary, the crate-private `https_credentials` accessor
 that returns plaintext credentials for one Vault ID (`None` for both an
@@ -363,6 +382,9 @@ projections and resolved paths; its managed-Git Git-turn dispatch
 `https_credentials` accessor. `handlers/vaults.rs` is the first HTTP consumer
 of the `add`/`edit`/`enable`/`disable`/`disconnect` mutation contracts and of
 `load` for authenticated discovery, including its explicit `Recovery` state.
+`ManagedGitScheduler::activate` (runtime composition's reconcile loop) and
+`handlers/vaults.rs`'s manual sync/retry and credential-replacement-retry
+controls consume `VaultSource::managed_git_poll_interval`.
 MCP, frontend, cache, and search adapters remain separately owned later
 packets.
 
@@ -899,11 +921,29 @@ lease documents is held by the caller across every turn for a Vault, not
 reacquired and dropped within each one. `ManagedGitScheduler` is one
 process-wide instance — mirroring the coordinator's single-worker design, it
 adds no per-Vault execution lane — that decides *when* to request a Vault's
-next Git turn: `DEFAULT_POLL_INTERVAL` (24h, not yet user-configurable) after a
-success or any non-retryable failure (including authentication, which never
-backs off — it waits for a configuration change, a manual `sync_now`/
-`retry_now`, a restart, or the normal schedule), or bounded exponential backoff
-after a retryable (transient) failure. `spawn_scheduler_tick` drives it on
+next Git turn: that Vault's own configured `poll_interval_secs` (issue #97's
+reopening finding 2 — previously one `poll_interval` shared by the whole
+scheduler; `DEFAULT_POLL_INTERVAL`, 24h, is now only the fallback default a
+Vault's registry record defaults to, mirrored by
+`vault_registry::DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS`) after a success or
+any non-retryable failure (including authentication, which never backs off —
+it waits for a configuration change, a manual `sync_now`/`retry_now`, a
+restart, or the normal schedule), or bounded exponential backoff after a
+retryable (transient) failure. `activate(vault_id, poll_interval)` registers a
+newly tracked Vault due immediately, or — for an already-tracked Vault — only
+updates its stored interval in place, leaving an in-progress backoff or held
+checkout lease untouched; `sync_now`/`retry_now` take the same `poll_interval`
+so a manual control before a Vault's first turn still registers it correctly.
+`tick()` skips a Vault whose Git turn is already active or already has a
+pending rerun queued (via `VaultWorkCoordinator::has_work`) rather than
+calling `request` unconditionally (issue #97's reopening finding 1): a Git
+turn can outlast `DEFAULT_TICK_INTERVAL`, and requesting for an
+already-active Vault would otherwise pre-queue a zero-delay rerun that fires
+the instant that turn completes, before its outcome's backoff is armed —
+defeating backoff on every retryable failure. This skip is scoped to
+`tick()`'s own automatic due-check; `sync_now`/`retry_now` still coalesce a
+manual request into the turn's one guaranteed rerun exactly as before.
+`spawn_scheduler_tick` drives it on
 `DEFAULT_TICK_INTERVAL`. `ManagedGitScheduler` also holds each active Vault's
 `ManagedCheckoutLease` for that Vault's entire activation lifetime in this
 process, through its crate-private `take_or_acquire_checkout_lease`/
@@ -1068,6 +1108,20 @@ registry itself needs operator recovery. Every response uses the shared
 `VaultApiError{code, message, vault_id?, retryable}` shape and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
 duplicating them. MCP discovery is #103.
+
+`edit_vault_handler` requests an immediate Git turn after a successful edit
+whose `https_credentials` was `Replace` (issue #97's reopening finding 3):
+`VaultDefinition`'s redaction-safe equality only ever compares
+`credential_configured: bool`, never the credential value, by design — so a
+replaced-but-still-configured credential leaves `reconcile()` retaining the
+existing `VaultControlBlock` and never re-evaluating a prior authentication
+failure. The trigger is per-source-kind: `ManagedGitScheduler::retry_now` for
+`ManagedGit` (tracked, coalesces with any pending turn), a direct
+`VaultWorkCoordinator::request(Git)` for `ExistingGit` (never scheduler-
+tracked). `edit_vault_handler` is the sole call site of
+`VaultRegistryStore::edit`/`VaultDefinitionEdit` — including its MCP
+`edit_vault` proxy, which calls this same handler — so this handler-level
+trigger covers every path that can write `https_credentials`.
 
 Discovery and the event stream are pure reads and stay reachable in demo mode
 (#109: demo mode publishes every enabled Vault in the instance as a public

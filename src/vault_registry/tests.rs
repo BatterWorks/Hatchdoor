@@ -6,10 +6,10 @@ use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
 use super::{
-    DEFAULT_VAULT_REGISTRY_PATH, HttpsCredentialUpdate, HttpsCredentials, NewVaultDefinition,
-    REGISTRY_SCHEMA_VERSION, VaultDefinitionEdit, VaultDefinitionError, VaultGitMode, VaultId,
-    VaultRecord, VaultRegistryError, VaultRegistryRecoveryKind, VaultRegistryState,
-    VaultRegistryStore, VaultSource,
+    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, DEFAULT_VAULT_REGISTRY_PATH, HttpsCredentialUpdate,
+    HttpsCredentials, NewVaultDefinition, REGISTRY_SCHEMA_VERSION, VaultDefinitionEdit,
+    VaultDefinitionError, VaultGitMode, VaultId, VaultRecord, VaultRegistryError,
+    VaultRegistryRecoveryKind, VaultRegistryState, VaultRegistryStore, VaultSource,
 };
 
 #[test]
@@ -217,6 +217,7 @@ fn managed_https_credentials_are_persisted_but_redacted_from_reads_and_debug() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: Some(PathBuf::from("knowledge/notes")),
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: Some(credentials),
@@ -234,6 +235,7 @@ fn managed_https_credentials_are_persisted_but_redacted_from_reads_and_debug() {
             branch: Some("main".to_string()),
             vault_subdirectory: Some(PathBuf::from("knowledge/notes")),
             mode: VaultGitMode::PullOnly,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
         }
     );
     let encoded = std::fs::read_to_string(store.path()).expect("persisted registry");
@@ -260,6 +262,7 @@ fn crate_private_https_credentials_accessor_returns_plaintext_only_for_configure
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: Some(credentials.clone()),
@@ -538,6 +541,7 @@ fn malformed_https_repository_urls_save_nothing() {
                         branch: None,
                         vault_subdirectory: None,
                         mode: VaultGitMode::PullOnly,
+                        poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
@@ -551,6 +555,87 @@ fn malformed_https_repository_urls_save_nothing() {
         ));
         assert!(!path.exists());
     }
+}
+
+/// Issue #97's reopening finding 2: a per-Vault managed-Git poll interval
+/// shorter than `MIN_MANAGED_GIT_POLL_INTERVAL_SECS` (mirroring
+/// `git::managed_task::BACKOFF_MAX`) must be rejected rather than silently
+/// accepted — a "normal" schedule tighter than the bound meant to throttle
+/// repeated transient failures would make that bound meaningless.
+#[test]
+fn a_poll_interval_below_the_minimum_saves_nothing() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("vaults.json");
+    let store = VaultRegistryStore::new(&path);
+
+    let error = store
+        .add(
+            0,
+            NewVaultDefinition {
+                name: "Too-frequent remote".to_string(),
+                enabled: true,
+                source: VaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: 1,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+            },
+        )
+        .expect_err("below-minimum poll interval accepted");
+
+    assert!(matches!(
+        error,
+        VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+    ));
+    assert!(!path.exists());
+}
+
+/// Issue #97's reopening finding 2: adding `poll_interval_secs` to
+/// `VaultSource::ManagedGit` must not require a `REGISTRY_SCHEMA_VERSION`
+/// bump — a registry record written before this field existed (same schema
+/// version 1, no `poll_interval_secs` key at all) must still load `Ready`,
+/// with the field defaulting rather than the whole registry entering
+/// recovery.
+#[test]
+fn a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_with_the_default() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("vaults.json");
+    let original = br#"{
+        "schema_version": 1,
+        "revision": 1,
+        "vaults": {
+            "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {
+                "name": "Pre-interval managed Vault",
+                "enabled": true,
+                "source": {
+                    "type": "managed_git",
+                    "repository_url": "https://example.test/owner/notes.git",
+                    "branch": null,
+                    "vault_subdirectory": null,
+                    "mode": "pull_only"
+                },
+                "exclude_patterns": []
+            }
+        }
+    }"#;
+    std::fs::write(&path, original).expect("write pre-interval registry");
+    let store = VaultRegistryStore::new(&path);
+
+    let VaultRegistryState::Ready(snapshot) = store.load().expect("load registry") else {
+        panic!("a schema-compatible pre-interval record entered recovery");
+    };
+
+    let definition = snapshot.definitions().next().expect("one definition");
+    assert_eq!(
+        definition.source().managed_git_poll_interval(),
+        Some(std::time::Duration::from_secs(
+            DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
+        ))
+    );
 }
 
 #[test]
@@ -759,6 +844,7 @@ fn enabled_definitions_allow_name_mode_and_credential_changes() {
         branch: Some("main".to_string()),
         vault_subdirectory: None,
         mode: VaultGitMode::PullOnly,
+        poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
     };
     let added = store
         .add(
@@ -788,6 +874,7 @@ fn enabled_definitions_allow_name_mode_and_credential_changes() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: vec!["drafts/**".to_string()],
                 https_credentials: HttpsCredentialUpdate::Replace(HttpsCredentials {
@@ -881,6 +968,7 @@ fn invalid_sources_reject_the_transaction_without_leaking_credentials() {
         branch: None,
         vault_subdirectory: None,
         mode: VaultGitMode::PullOnly,
+        poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
     };
     assert!(!format!("{unsafe_source:?}").contains("embedded-secret"));
     let error = store
@@ -909,6 +997,7 @@ fn invalid_sources_reject_the_transaction_without_leaking_credentials() {
                     branch: None,
                     vault_subdirectory: Some(PathBuf::from("../outside")),
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -1008,6 +1097,7 @@ fn confirmed_repository_change_does_not_carry_an_old_credential() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: Some(HttpsCredentials {
@@ -1030,6 +1120,7 @@ fn confirmed_repository_change_does_not_carry_an_old_credential() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: HttpsCredentialUpdate::Keep,
@@ -1067,6 +1158,7 @@ fn managed_checkout_paths_participate_in_overlap_validation() {
                     branch: None,
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -1117,6 +1209,7 @@ fn absent_managed_checkout_resolves_a_symlinked_state_parent_for_overlap_checks(
                     branch: None,
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,

@@ -414,8 +414,9 @@ impl VaultControlBlock {
         watching: Option<&WatcherContext>,
         snapshot_cache: Option<&SqliteCache>,
         revisions: CollectionRevisionPublisher,
+        prior_git: Option<(VaultGitStatus, Option<VaultRuntimeError>)>,
     ) -> Self {
-        let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache);
+        let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache, prior_git);
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
             watching.and_then(|watching| {
                 let exclude = match crate::vault::ExcludeMatcher::new(definition.exclude_patterns())
@@ -866,13 +867,33 @@ impl VaultCollectionRuntime {
                     {
                         VaultCollectionEntry::Active(runtime.clone())
                     }
-                    _ => VaultCollectionEntry::Active(VaultControlBlock::activate(
-                        definition,
-                        vault_path,
-                        self.watching.as_ref(),
-                        self.snapshot_cache.as_deref(),
-                        revision_publisher.clone(),
-                    )),
+                    previous_entry => {
+                        // An in-place edit on a Vault that was already
+                        // active (as opposed to a genuinely new Vault, or
+                        // one transitioning from disabled to enabled) must
+                        // not force its Git status back to `Pending`: that
+                        // would make the active loop below request an
+                        // immediate real Git turn regardless of whatever
+                        // status (e.g. `Unavailable` mid-backoff from a real
+                        // transient failure) the retiring control block
+                        // actually had. See `activation_snapshot`'s doc
+                        // comment.
+                        let prior_git =
+                            if let Some(VaultCollectionEntry::Active(runtime)) = previous_entry {
+                                let prior_snapshot = runtime.snapshot();
+                                Some((prior_snapshot.git, prior_snapshot.git_error.clone()))
+                            } else {
+                                None
+                            };
+                        VaultCollectionEntry::Active(VaultControlBlock::activate(
+                            definition,
+                            vault_path,
+                            self.watching.as_ref(),
+                            self.snapshot_cache.as_deref(),
+                            revision_publisher.clone(),
+                            prior_git,
+                        ))
+                    }
                 }
             };
             next.insert(vault_id, entry);
@@ -1022,7 +1043,36 @@ impl VaultCollectionRuntime {
         let mut retirement_error = None;
         for (vault_id, _) in &retired {
             coordinator.drain_vault(*vault_id);
-            managed_git.deactivate(*vault_id);
+            // A Vault edited while it stays enabled is "retired" here only
+            // because any definition change constructs a fresh
+            // `VaultControlBlock` (a new `Arc`, so `reconcile()`'s ptr_eq
+            // retention check fails) — it is not actually leaving the
+            // collection. `managed_git.deactivate` genuinely stops tracking
+            // a Vault: it drops the scheduler's schedule/backoff state and
+            // releases the held checkout lease's OS-level lock, which is
+            // correct for disable/disconnect/identity-change (source type
+            // or remote identity actually changed, which the registry
+            // requires disabling the Vault for first — so it would not be
+            // simultaneously present in both `previously_active` and
+            // `active` here) but wrong for a benign edit (interval, name,
+            // exclude patterns, mode, credentials) to a Vault that remains
+            // enabled with the same managed-Git identity: skipping it here
+            // lets the active loop below's `managed_git.activate` see the
+            // still-tracked entry and update it in place — issue #97's
+            // reopening finding 2 requires this so an interval-only edit
+            // does not also reset an in-progress backoff (or drop and
+            // reacquire the checkout lease) as a side effect of the
+            // control block being replaced.
+            let still_active_managed_git = active.get(vault_id).is_some_and(|runtime| {
+                runtime
+                    .definition()
+                    .source()
+                    .managed_git_poll_interval()
+                    .is_some()
+            });
+            if !still_active_managed_git {
+                managed_git.deactivate(*vault_id);
+            }
         }
         drop(phase_guard);
         for (_, runtime) in &retired {
@@ -1170,10 +1220,16 @@ impl VaultCollectionRuntime {
             {
                 coordinator.request(*vault_id, VaultWorkKind::Index);
             }
+            // Register/refresh the scheduler's per-Vault interval for every
+            // newly (re)activated managed-Git definition, independent of
+            // Git status: an edit that only changes `poll_interval_secs`
+            // still produces a non-retained control block here (its
+            // `VaultDefinition` compares unequal), but must not itself
+            // request a Git turn — only a `Pending` status does that, below.
+            if let Some(poll_interval) = runtime.definition().source().managed_git_poll_interval() {
+                managed_git.activate(*vault_id, poll_interval);
+            }
             if snapshot.git == VaultGitStatus::Pending {
-                if is_managed_git(runtime.definition().source()) {
-                    managed_git.activate(*vault_id);
-                }
                 coordinator.request(*vault_id, VaultWorkKind::Git);
             }
         }
@@ -1288,10 +1344,24 @@ fn collection_snapshots(
         .collect()
 }
 
+/// `prior_git` carries a retiring control block's *actual* current Git
+/// status (and its paired error, if any) into a freshly constructed
+/// replacement for the *same* Vault — an in-place edit
+/// (`reconcile()`'s non-retained-definition branch when `previous` held an
+/// `Active` entry for this Vault) rather than a genuinely new activation.
+/// Without this, every edit — not just a credential or interval change, any
+/// field — would force `git` back to `Pending`, which the active loop below
+/// treats as "needs an immediate first sync" and requests a real Git turn
+/// for, bypassing whatever backoff a real transient failure had armed
+/// (issue #97's reopening finding 1 exists specifically to prevent that
+/// kind of forced immediate retry). `None` means "no prior control block to
+/// carry over" — a genuinely new Vault or one transitioning from disabled
+/// to enabled — where `Pending` (an immediate first sync) is correct.
 fn activation_snapshot(
     definition: &VaultDefinition,
     vault_path: &Path,
     snapshot_cache: Option<&SqliteCache>,
+    prior_git: Option<(VaultGitStatus, Option<VaultRuntimeError>)>,
 ) -> CollectionVaultSnapshot {
     let (local_content, activation_error) = stat_local_content(vault_path);
     let activation = if local_content == LocalContentStatus::Unavailable {
@@ -1299,10 +1369,12 @@ fn activation_snapshot(
     } else {
         VaultActivationStatus::Active
     };
-    let git = if matches!(definition.source(), RegistryVaultSource::Local { .. }) {
-        VaultGitStatus::Disabled
-    } else {
-        VaultGitStatus::Pending
+    let (git, git_error) = match prior_git {
+        Some((status, error)) => (status, error),
+        None if matches!(definition.source(), RegistryVaultSource::Local { .. }) => {
+            (VaultGitStatus::Disabled, None)
+        }
+        None => (VaultGitStatus::Pending, None),
     };
     let mut snapshot = CollectionVaultSnapshot {
         vault_id: definition.vault_id(),
@@ -1316,7 +1388,7 @@ fn activation_snapshot(
         capabilities: VaultCapabilities::default(),
         activation_error,
         search_error: None,
-        git_error: None,
+        git_error,
         watcher_error: None,
     };
     snapshot.capabilities = collection_capabilities(definition, &snapshot);
@@ -1491,10 +1563,6 @@ fn collection_capabilities(
         .flatten()
         .any(|error| error.retryable),
     }
-}
-
-fn is_managed_git(source: &RegistryVaultSource) -> bool {
-    matches!(source, RegistryVaultSource::ManagedGit { .. })
 }
 
 /// Execute one `VaultWorkKind::Index` turn for exactly one active Vault.
@@ -1675,6 +1743,7 @@ where
                 branch,
                 vault_subdirectory,
                 mode,
+                poll_interval_secs: _,
             } => (
                 repository_url.clone(),
                 branch.clone(),

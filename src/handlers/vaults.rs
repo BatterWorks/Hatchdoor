@@ -565,6 +565,20 @@ pub async fn edit_vault_handler(
         Err(error) => return json_rejection_response(error),
     };
 
+    // Captured before `request.https_credentials` moves into `edit` below.
+    // `VaultDefinition`'s `PartialEq` only ever compares `credential_configured`
+    // (a bool), never the redacted credential value itself — by design, so
+    // retention/reconciliation never needs to see a plaintext secret. That
+    // means replacing token A with token B leaves `credential_configured`
+    // `true` before and after, so nothing downstream of the registry commit
+    // can observe "credentials actually changed" from the definition alone;
+    // this flag is the one place that genuinely knows a new value was
+    // written this request (issue #97's reopening finding 3).
+    let credentials_replaced = matches!(
+        request.https_credentials,
+        HttpsCredentialsPatch::Replace { .. }
+    );
+
     let edit = VaultDefinitionEdit {
         name: request.name,
         source: request.source,
@@ -580,9 +594,54 @@ pub async fn edit_vault_handler(
             if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
                 return internal_error_response(error, Some(vault_id));
             }
+            if credentials_replaced {
+                request_git_retry_after_credential_replacement(&state, &snapshot, vault_id);
+            }
             mutation_response(&state, &snapshot, Some(vault_id))
         }
         Err(error) => registry_error_response(error, Some(vault_id)),
+    }
+}
+
+/// Request an immediate Git turn for `vault_id` after its edit just wrote new
+/// HTTPS credentials (issue #97's reopening finding 3): a prior
+/// authentication failure otherwise sits unretried until the normal
+/// schedule, since `VaultDefinition` equality — which `reconcile()` uses to
+/// decide whether to retain the existing `VaultControlBlock` and skip its
+/// Pending-status Git-turn request — cannot see the credential value change,
+/// only whether a credential is configured at all (`true` both before and
+/// after a Replace-over-Replace).
+///
+/// `edit_vault_handler` (including its MCP `edit_vault` proxy, which calls
+/// this same handler) is the only call site of
+/// `VaultRegistryStore::edit`/`VaultDefinitionEdit`, so this handler-level
+/// trigger, run once per successful edit after `reconcile_after_commit`
+/// completes, covers every path that can write `https_credentials`.
+///
+/// Per-source-kind because only `ManagedGit` is tracked by
+/// `ManagedGitScheduler`: an `ExistingGit` `PullOnly`/`TwoWay` Vault gets
+/// only the one-shot `coordinator.request` its Pending-status activation
+/// already uses (mirrored here), never scheduler-tracked polling. `Local`
+/// never accepts credentials (rejected earlier at commit time), so it never
+/// reaches here with `credentials_replaced` true.
+fn request_git_retry_after_credential_replacement(
+    state: &AppState,
+    snapshot: &VaultRegistrySnapshot,
+    vault_id: VaultId,
+) {
+    let Some(definition) = snapshot.definition(vault_id) else {
+        return;
+    };
+    match definition.source() {
+        VaultSource::ManagedGit { .. } => {
+            if let Some(poll_interval) = definition.source().managed_git_poll_interval() {
+                state.managed_git.retry_now(vault_id, poll_interval);
+            }
+        }
+        VaultSource::ExistingGit { .. } => {
+            state.vault_work.request(vault_id, VaultWorkKind::Git);
+        }
+        VaultSource::Local { .. } => {}
     }
 }
 
@@ -694,7 +753,7 @@ async fn managed_git_control_handler(state: AppState, vault_id: VaultId, retry: 
         return VaultApiError::new("vault_disabled", "Vault is disabled", Some(vault_id), false)
             .respond(StatusCode::CONFLICT);
     }
-    if !matches!(definition.source(), VaultSource::ManagedGit { .. }) {
+    let Some(poll_interval) = definition.source().managed_git_poll_interval() else {
         return VaultApiError::new(
             "capability_unavailable",
             "Manual Git sync is only available for managed-Git Vaults",
@@ -702,12 +761,12 @@ async fn managed_git_control_handler(state: AppState, vault_id: VaultId, retry: 
             false,
         )
         .respond(StatusCode::CONFLICT);
-    }
+    };
 
     let schedule = if retry {
-        state.managed_git.retry_now(vault_id)
+        state.managed_git.retry_now(vault_id, poll_interval)
     } else {
-        state.managed_git.sync_now(vault_id)
+        state.managed_git.sync_now(vault_id, poll_interval)
     };
     match schedule {
         ScheduleResult::Queued => (
@@ -870,6 +929,67 @@ pub async fn vault_collection_events_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::SqliteCache;
+    use crate::vault_registry::{DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, VaultGitMode};
+    use crate::vault_work::VaultWorkError;
+
+    /// A minimal `AppState` for exercising `handlers/vaults.rs` request
+    /// handlers directly, without the legacy single-Vault cache/embedder
+    /// machinery those handlers never touch (mirrors `mcp/routes.rs`'s own
+    /// `test_state` shape). `startup_sqlite` still needs a real (in-memory,
+    /// so cheap) `SqliteCache` because the field is not optional;
+    /// `ready_vault` genuinely can be `None` since nothing under test reads
+    /// it. Returns the coordinator's worker too — discarded by most callers,
+    /// but a test that needs to drain a queued turn (e.g. the one Vault
+    /// activation itself requests) needs direct access to it, since nothing
+    /// else in this process consumes the coordinator's queue. Also returns
+    /// the backing `TempDir` so it outlives the state.
+    fn test_state() -> (
+        AppState,
+        crate::vault_work::VaultWorkWorker,
+        tempfile::TempDir,
+    ) {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git =
+            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let state = AppState {
+            cache_db_path: directory.path().join("cache.sqlite3"),
+            vault_registry: crate::vault_registry::VaultRegistryStore::new(
+                directory.path().join("state/vaults.json"),
+            ),
+            vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
+            legacy_migration_recovery: None,
+            startup_sqlite: std::sync::Arc::new(
+                SqliteCache::in_memory(384).expect("in-memory cache"),
+            ),
+            ready_vault: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            vault_revision: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            mcp_tools_changed,
+            embedder: crate::app_state::test_embedder(),
+            runtime_embedder: std::sync::Arc::new(crate::embed::RuntimeEmbedder::new()),
+            model_setup: std::sync::Arc::new(crate::model_setup::ModelSetup::new(
+                directory.path().join("models"),
+            )),
+            model_setup_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            startup_git_config: std::sync::Arc::new(None),
+            web_auth_enabled: false,
+            demo_mode: false,
+            vault_write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+            scan_config_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
+            startup: crate::startup::StartupTracker::ready(),
+        };
+        (state, worker, directory)
+    }
 
     #[test]
     fn unreconciled_snapshot_reports_a_retryable_status_error() {
@@ -910,5 +1030,301 @@ mod tests {
             update,
             crate::vault_registry::HttpsCredentialUpdate::Keep
         ));
+    }
+
+    /// Closes issue #97's reopening finding 3: replacing a Vault's HTTPS
+    /// credentials while it sits in an authentication-failure Git status
+    /// used to leave it unretried until the normal (non-backoff, "wait for
+    /// a configuration change, a manual retry, or a restart") schedule,
+    /// because `VaultDefinition`'s `PartialEq` only ever sees
+    /// `credential_configured: bool` — `true` both before and after a
+    /// Replace-over-Replace — never the actual credential value, so
+    /// `reconcile()` retained the same `VaultControlBlock` and never
+    /// reached the Git-turn-request logic gated behind a *new* control
+    /// block's `Pending` status.
+    #[tokio::test]
+    async fn credential_replacement_requests_an_immediate_retry_after_an_authentication_failure() {
+        let (state, mut worker, _directory) = test_state();
+
+        let create_request = CreateVaultRequest {
+            expected_registry_revision: 0,
+            name: "Remote notes".to_string(),
+            enabled: true,
+            source: VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: Some(HttpsCredentialsInput {
+                username: "git-user".to_string(),
+                token: "old-token".to_string(),
+            }),
+        };
+        let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        // Drain the one Git turn Vault activation itself requests (the fresh
+        // Vault starts `Pending`) and record it as an authentication
+        // failure — exactly what a real turn's outcome publication does,
+        // without needing a live network call. This leaves the Vault
+        // quiescent (no automatic retry pending) in an authentication-
+        // failure Git status, matching the finding's precondition.
+        let auth_failure = VaultWorkError::new(
+            "managed_git_authentication_failed",
+            "bad credentials",
+            false,
+        );
+        let outcome = worker
+            .run_next(|_| {
+                let auth_failure = auth_failure.clone();
+                async move { Err::<(), _>(auth_failure) }
+            })
+            .await
+            .expect("Vault activation's initial Git turn");
+        assert_eq!(outcome.request.vault_id(), vault_id);
+        state
+            .managed_git
+            .record_outcome(vault_id, &Err(auth_failure.clone()));
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("active runtime")
+            .set_git_status(
+                VaultGitStatus::Unavailable,
+                Some(VaultRuntimeError {
+                    code: auth_failure.code().to_string(),
+                    message: auth_failure.message().to_string(),
+                    retryable: auth_failure.retryable(),
+                }),
+            )
+            .expect("publish authentication-failure status");
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "the Vault must be quiescent before the credential replacement under test"
+        );
+
+        // Replace credentials. The redacted definition's `credential_configured`
+        // stays `true` before and after, so without this fix nothing would
+        // notice the value actually changed.
+        let VaultRegistryState::Ready(current) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let edit_request = EditVaultRequest {
+            expected_registry_revision: current.revision(),
+            name: "Remote notes".to_string(),
+            source: VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: HttpsCredentialsPatch::Replace {
+                username: "git-user".to_string(),
+                token: "new-token".to_string(),
+            },
+            confirm_identity_change: false,
+        };
+        let response = edit_vault_handler(
+            State(state.clone()),
+            Path(vault_id.to_string()),
+            Ok(Json(edit_request)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(
+            state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "replacing credentials on an authentication-failed Vault must request an immediate retry"
+        );
+    }
+
+    /// Closes a Spec-review finding on issue #97's reopening finding 2:
+    /// `vault_runtime.rs`'s reconcile loop is the *only* path that pushes an
+    /// edited `poll_interval_secs` into the live `ManagedGitScheduler` — a
+    /// non-retained (definition-changed) `VaultControlBlock` calls
+    /// `managed_git.activate(vault_id, poll_interval)` regardless of Git
+    /// status. `managed_task.rs`'s own unit tests (e.g.
+    /// `two_vaults_with_different_poll_intervals_get_independent_schedules`,
+    /// `reactivating_with_a_changed_interval_updates_it_without_resetting_an_armed_backoff`)
+    /// exercise `ManagedGitScheduler::activate` directly, in isolation —
+    /// this test instead drives the real `edit_vault_handler` request path
+    /// (registry `edit()` + `reconcile_and_reconstruct`) end to end and
+    /// observes the *running* scheduler's stored per-Vault state through
+    /// its `#[cfg(test)]` accessors, proving: (1) an interval-only edit on
+    /// an already-active managed-Git Vault reaches the live scheduler with
+    /// no restart or manual reactivation, and (2) doing so leaves an
+    /// in-progress backoff untouched — interval update and backoff
+    /// preservation are two independent concerns, and this is where that
+    /// claim is actually load-bearing (the HTTP edit path), not just at the
+    /// scheduler-unit level.
+    ///
+    /// Also closes a second, independent Spec-review finding on the same
+    /// edit path: publishing the Vault's Git status to `Unavailable` (a
+    /// real retryable failure) before the edit, and asserting
+    /// `VaultWorkCoordinator::has_work` stays `false` afterward, proves the
+    /// edit does not *also* force an unwanted immediate real Git turn —
+    /// `activation_snapshot` used to reset every non-retained
+    /// reconstruction's Git status back to `Pending` unconditionally,
+    /// which the active loop treats as "needs an immediate first sync" and
+    /// requests a real turn for, silently bypassing whatever backoff
+    /// finding 1 had armed. See
+    /// `vault_runtime::tests::editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status`
+    /// for the same property proven directly at the `reconcile()` level.
+    #[tokio::test]
+    async fn editing_only_the_poll_interval_updates_the_live_scheduler_without_disturbing_backoff()
+    {
+        let (state, mut worker, _directory) = test_state();
+
+        let create_request = CreateVaultRequest {
+            expected_registry_revision: 0,
+            name: "Remote notes".to_string(),
+            enabled: true,
+            source: VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: None,
+        };
+        let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        // Arm an in-progress backoff by draining the initial creation-
+        // triggered Git turn as a retryable failure — the same technique
+        // the credential-replacement test above uses — so the interval-only
+        // edit below has something to prove it does *not* disturb. Also
+        // publish the Vault's actual Git status as `Unavailable` (exactly
+        // what a real turn's outcome-publication does, alongside
+        // `record_outcome`), so the edit below has a genuinely non-`Pending`
+        // status to prove it does not silently discard.
+        let transient = VaultWorkError::new("managed_git_remote_unreachable", "x", true);
+        let outcome = worker
+            .run_next(|_| {
+                let transient = transient.clone();
+                async move { Err::<(), _>(transient) }
+            })
+            .await
+            .expect("Vault activation's initial Git turn");
+        assert_eq!(outcome.request.vault_id(), vault_id);
+        state
+            .managed_git
+            .record_outcome(vault_id, &Err(transient.clone()));
+        state
+            .vaults
+            .runtime(vault_id)
+            .expect("active runtime")
+            .set_git_status(
+                VaultGitStatus::Unavailable,
+                Some(VaultRuntimeError {
+                    code: transient.code().to_string(),
+                    message: transient.message().to_string(),
+                    retryable: transient.retryable(),
+                }),
+            )
+            .expect("publish the real transient Git failure");
+        let armed_next_attempt = state
+            .managed_git
+            .next_attempt_for_test(vault_id)
+            .expect("Vault tracked by the scheduler after its first turn");
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            Some(std::time::Duration::from_secs(
+                DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
+            )),
+            "the scheduler must start out tracking the Vault's original interval"
+        );
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "the Vault must be quiescent (mid-backoff, no queued turn) before the edit under test"
+        );
+
+        // Edit only the poll interval: same source identity, same
+        // credentials, no confirmation needed.
+        let VaultRegistryState::Ready(current) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let new_interval_secs = DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS * 2;
+        let edit_request = EditVaultRequest {
+            expected_registry_revision: current.revision(),
+            name: "Remote notes".to_string(),
+            source: VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: new_interval_secs,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: HttpsCredentialsPatch::Keep,
+            confirm_identity_change: false,
+        };
+        let response = edit_vault_handler(
+            State(state.clone()),
+            Path(vault_id.to_string()),
+            Ok(Json(edit_request)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The edit itself took effect: the reloaded definition carries the
+        // new interval.
+        let VaultRegistryState::Ready(after_edit) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        assert_eq!(
+            after_edit
+                .definition(vault_id)
+                .and_then(|definition| definition.source().managed_git_poll_interval()),
+            Some(std::time::Duration::from_secs(new_interval_secs)),
+            "the edit must have actually persisted the new interval"
+        );
+
+        // The live scheduler's stored interval reflects the edit — reached
+        // purely through reconcile()'s non-retained-definition path, no
+        // restart or manual reactivation.
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            Some(std::time::Duration::from_secs(new_interval_secs)),
+            "an interval-only edit must reach the live ManagedGitScheduler"
+        );
+        // And the in-progress backoff armed above is untouched.
+        assert_eq!(
+            state.managed_git.next_attempt_for_test(vault_id),
+            Some(armed_next_attempt),
+            "an interval-only edit must not reset an in-progress backoff"
+        );
+        // And, the specific coordinator-level effect a forced `Pending`
+        // reset would have caused: no immediate real Git turn was queued.
+        assert!(
+            !state.vault_work.has_work(vault_id, VaultWorkKind::Git),
+            "a benign interval-only edit must not force an immediate real Git turn \
+             while the Vault is mid-backoff from a real transient failure"
+        );
     }
 }

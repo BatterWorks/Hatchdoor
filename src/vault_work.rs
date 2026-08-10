@@ -169,6 +169,22 @@ impl VaultWorkCoordinator {
         ScheduleResult::Queued
     }
 
+    /// Whether `kind` is currently active or already pending for `vault_id`.
+    ///
+    /// A read-only query over the same per-Vault state `request` itself
+    /// consults, so a caller that wants to avoid adding a redundant queued
+    /// turn (rather than relying on `request`'s own coalescing, which still
+    /// adds one guaranteed rerun for a Vault whose matching work is already
+    /// active) can check first without risking drift from a second,
+    /// independently tracked notion of "is this Vault busy."
+    pub fn has_work(&self, vault_id: VaultId, kind: VaultWorkKind) -> bool {
+        let state = self.shared.state.lock().expect("Vault work queue poisoned");
+        state
+            .vaults
+            .get(&vault_id)
+            .is_some_and(|vault| vault.active == Some(kind) || vault.pending_kinds.contains(&kind))
+    }
+
     /// Reopen a Vault after runtime activation or restart reconstruction.
     pub fn activate_vault(&self, vault_id: VaultId) {
         let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
@@ -369,6 +385,64 @@ mod tests {
 
     fn vault_id(value: &str) -> VaultId {
         value.parse().expect("valid test Vault ID")
+    }
+
+    #[tokio::test]
+    async fn has_work_reflects_pending_and_active_state_for_the_requested_kind_only() {
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        let other = vault_id("00000000-0000-4000-8000-000000000002");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+
+        assert!(!coordinator.has_work(vault, VaultWorkKind::Git));
+
+        coordinator.request(vault, VaultWorkKind::Git);
+        assert!(coordinator.has_work(vault, VaultWorkKind::Git));
+        assert!(
+            !coordinator.has_work(vault, VaultWorkKind::Index),
+            "a different kind for the same Vault must not be reported as having work"
+        );
+        assert!(
+            !coordinator.has_work(other, VaultWorkKind::Git),
+            "a different Vault must not be reported as having work"
+        );
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                worker
+                    .run_next(move |request| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            let _ = request;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await
+                    .expect("active turn");
+                worker
+            }
+        });
+        started.notified().await;
+        assert!(
+            coordinator.has_work(vault, VaultWorkKind::Git),
+            "an active (not just pending) turn must also report has_work"
+        );
+        release.notify_one();
+        let mut worker = running.await.expect("worker task");
+        assert!(!coordinator.has_work(vault, VaultWorkKind::Git));
+
+        // Drain the worker so it does not outlive the test.
+        let _ = tokio::time::timeout(
+            Duration::from_millis(1),
+            worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) }),
+        )
+        .await;
     }
 
     #[tokio::test]
