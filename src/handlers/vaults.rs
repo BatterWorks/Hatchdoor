@@ -579,7 +579,10 @@ pub async fn edit_vault_handler(
     // `true` before and after, so nothing downstream of the registry commit
     // can observe "credentials actually changed" from the definition alone;
     // this flag is the one place that genuinely knows a new value was
-    // written this request (issue #97's reopening finding 3).
+    // written this request (issue #97's reopening finding 3; also relied on
+    // below for issue #98's reopening finding, since the same blind spot
+    // means `reconcile()` never emits a collection-revision event for a
+    // credential-only change either).
     let credentials_replaced = matches!(
         request.https_credentials,
         HttpsCredentialsPatch::Replace { .. }
@@ -602,6 +605,13 @@ pub async fn edit_vault_handler(
             }
             if credentials_replaced {
                 request_git_retry_after_credential_replacement(&state, &snapshot, vault_id);
+                // Issue #98's reopening finding: `reconcile()` retained the
+                // same `VaultControlBlock` above (definition equality can't
+                // see a credential-only change), so it never bumped
+                // `collection_revision` or emitted an event for this Vault.
+                // Notify explicitly so SSE consumers can still invalidate
+                // its Git/capability state after a real secret rotation.
+                state.vaults.notify_definition_changed(vault_id);
             }
             mutation_response(&state, &snapshot, Some(vault_id))
         }
@@ -1155,6 +1165,81 @@ mod tests {
             state.vault_work.has_work(vault_id, VaultWorkKind::Git),
             "replacing credentials on an authentication-failed Vault must request an immediate retry"
         );
+    }
+
+    /// Closes issue #98's reopening finding: replacing an already-configured
+    /// credential must still publish a `Definition`-category collection-
+    /// revision event, even though `VaultDefinition` equality can't observe
+    /// the change and `reconcile()` retains the same `VaultControlBlock`
+    /// unchanged (the same blind spot #97's reopening finding 3 fixed for
+    /// Git retry scheduling — that fix never touched the revision/event
+    /// path SSE consumers rely on).
+    #[tokio::test]
+    async fn credential_replacement_notifies_definition_change_for_sse_consumers() {
+        let (state, _worker, _directory) = test_state();
+
+        let create_request = CreateVaultRequest {
+            expected_registry_revision: 0,
+            name: "Remote notes".to_string(),
+            enabled: true,
+            source: VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: Some(HttpsCredentialsInput {
+                username: "git-user".to_string(),
+                token: "old-token".to_string(),
+            }),
+        };
+        let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        let mut revisions = state.vaults.subscribe_revisions();
+        let before = revisions.borrow().collection_revision;
+
+        let edit_request = EditVaultRequest {
+            expected_registry_revision: snapshot.revision(),
+            name: "Remote notes".to_string(),
+            source: VaultSource::ManagedGit {
+                repository_url: "https://example.test/owner/notes.git".to_string(),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: HttpsCredentialsPatch::Replace {
+                username: "git-user".to_string(),
+                token: "new-token".to_string(),
+            },
+            confirm_identity_change: false,
+        };
+        let response = edit_vault_handler(
+            State(state.clone()),
+            Path(vault_id.to_string()),
+            Ok(Json(edit_request)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        assert!(
+            revisions.has_changed().expect("revisions channel open"),
+            "a credential-only replacement must still publish a collection-revision event"
+        );
+        let event = revisions.borrow_and_update().clone();
+        assert!(event.collection_revision > before);
+        assert_eq!(event.vault_ids, vec![vault_id]);
+        assert_eq!(event.category, VaultChangeCategory::Definition);
     }
 
     /// Closes a Spec-review finding on issue #97's reopening finding 2:
