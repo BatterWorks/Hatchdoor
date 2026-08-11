@@ -1621,7 +1621,12 @@ fn collection_capabilities(
 /// shared read model, so readers either retain its prior complete snapshot or
 /// observe the new complete snapshot. A failed scan or candidate build keeps a
 /// prior snapshot available but marks it stale; without a prior snapshot the
-/// Vault remains unavailable for search.
+/// Vault remains unavailable for search. A retained snapshot is also marked
+/// stale for the duration of the scan/build itself (not just after a
+/// failure): collection-shaped reads (`vault_read.rs`'s `collection` helper,
+/// `search/vault_scoped.rs`) derive participant freshness solely from this
+/// cache-published status, so without this the authoritative Markdown could
+/// already differ from a snapshot those reads keep reporting as fresh.
 pub(crate) async fn dispatch_vault_index_turn(
     collection: &VaultCollectionRuntime,
     cache: Arc<SqliteCache>,
@@ -1641,6 +1646,13 @@ pub(crate) async fn dispatch_vault_index_turn(
             .acquire_refresh()
             .await
             .map_err(vault_index_error)?;
+        if let Err(message) = cache.mark_vault_snapshot_stale(vault_id) {
+            error!(
+                %vault_id,
+                %message,
+                "failed to mark the retained Vault snapshot stale for an active rebuild"
+            );
+        }
         let indexing_control = control_block.clone();
         let indexing_cache = cache.clone();
         match tokio::task::spawn_blocking(move || {
