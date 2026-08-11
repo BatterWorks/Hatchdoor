@@ -696,6 +696,19 @@ impl VaultControlBlock {
         }
         Ok(())
     }
+
+    /// Publish a `Definition`-category revision bump for this Vault without
+    /// changing its runtime status snapshot. `reconcile()` retains this same
+    /// `VaultControlBlock` unchanged whenever `VaultDefinition` equality
+    /// can't see an edit — e.g. replacing an already-configured credential's
+    /// value, where `credential_configured` stays `true` before and after —
+    /// so it never bumps `collection_revision` or emits an event on its own
+    /// for that case. Callers that know such a change happened (issue #98's
+    /// reopening finding) use this to notify SSE subscribers explicitly.
+    pub(crate) fn notify_definition_changed(&self) {
+        self.revisions
+            .bump(self.definition.vault_id(), VaultChangeCategory::Definition);
+    }
 }
 
 #[derive(Clone)]
@@ -1296,6 +1309,14 @@ impl VaultCollectionRuntime {
         match state.vaults.get(&vault_id) {
             Some(VaultCollectionEntry::Active(runtime)) => Some(runtime.clone()),
             Some(VaultCollectionEntry::Disabled(_)) | None => None,
+        }
+    }
+
+    /// See `VaultControlBlock::notify_definition_changed`. No-op if
+    /// `vault_id` is not currently an active Vault in the collection.
+    pub fn notify_definition_changed(&self, vault_id: VaultId) {
+        if let Some(runtime) = self.runtime(vault_id) {
+            runtime.notify_definition_changed();
         }
     }
 
