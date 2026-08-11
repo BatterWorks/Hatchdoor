@@ -41,9 +41,9 @@ use crate::app_state::AppState;
 use crate::handlers::vault_content::vault_read_error_response;
 use crate::handlers::vaults::{VaultApiError, parse_vault_id};
 use crate::vault::{
-    AttachmentInfo, AttachmentOutcome, ExcludeMatcher, VaultIndex, WriteError, WriteOutcome,
-    archive_note, create_note, delete_note, import_attachment_bytes, move_or_rename_note,
-    update_note,
+    AttachmentInfo, AttachmentOutcome, ExcludeMatcher, LayerMap, VaultIndex, WriteError,
+    WriteOutcome, archive_note, create_note, delete_note, import_attachment_bytes,
+    move_or_rename_note, update_note,
 };
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
@@ -287,6 +287,33 @@ async fn authoritative_index(
     }
 }
 
+/// Builds this Vault's metadata-only catalog off the async runtime, like
+/// `authoritative_index` but skipping the content-reading wikilink-graph pass
+/// (`vault/links.rs`): `create_note` has no pre-write entry to fetch a slug
+/// from, so it needs this before the write to compute one, but never needs
+/// the link graph itself.
+async fn authoritative_catalog(
+    vault_id: VaultId,
+    control: &VaultControlBlock,
+) -> Result<VaultIndex, VaultReadError> {
+    let control = control.clone();
+    match tokio::task::spawn_blocking(move || {
+        control
+            .authoritative_catalog()
+            .map_err(|error| crate::vault_read::runtime_error(vault_id, error))
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_error) => Err(VaultReadError {
+            code: "vault_read_unavailable".to_string(),
+            message: format!("vault catalog build panicked: {join_error}"),
+            vault_id: Some(vault_id),
+            retryable: true,
+        }),
+    }
+}
+
 fn note_entry(
     vault_id: VaultId,
     index: &VaultIndex,
@@ -342,30 +369,27 @@ where
         })
 }
 
-fn write_outcome_response(
-    index: &VaultIndex,
-    outcome: WriteOutcome,
-) -> Result<WriteOutcomeFields, String> {
-    let slug = match (&outcome.slug, &outcome.relative_path) {
-        (Some(slug), _) => Some(slug.clone()),
-        (None, Some(relative_path)) => index
-            .ordered_entries()
-            .into_iter()
-            .find(|entry| entry.relative_path == *relative_path)
-            .map(|entry| entry.slug),
-        (None, None) => None,
+/// Every write op (`vault/write/notes.rs`) now sets `outcome.slug` itself
+/// from its own pre-write catalog/index, so this no longer looks anything up
+/// by re-walking the Vault: `layer` is derived straight from `layers`
+/// (already in memory from that same pre-write fetch) via the identical
+/// path-based `layer_for` a real index build uses, except a delete — which
+/// leaves no note behind, so it always reports `None` regardless of path.
+/// `trashed_path.is_some()` is currently only ever set by `delete_note`, so
+/// it stands in for "this is a delete"; a future write op that starts
+/// setting `trashed_path` for a non-delete reason would need to update this.
+fn write_outcome_response(layers: &LayerMap, outcome: WriteOutcome) -> WriteOutcomeFields {
+    let layer = if outcome.trashed_path.is_some() {
+        None
+    } else {
+        outcome
+            .relative_path
+            .as_deref()
+            .and_then(|relative_path| layers.layer_for(relative_path))
+            .map(str::to_string)
     };
-    if outcome.relative_path.is_some() && slug.is_none() {
-        return Err(
-            "note write completed but refreshed index did not contain the note".to_string(),
-        );
-    }
-    let layer = slug
-        .as_deref()
-        .and_then(|slug| index.find_by_slug(slug))
-        .and_then(|entry| entry.layer.clone());
-    Ok(WriteOutcomeFields {
-        slug,
+    WriteOutcomeFields {
+        slug: outcome.slug,
         relative_path: outcome.relative_path,
         content_hash: outcome.content_hash,
         quality_warnings: outcome.quality_warnings,
@@ -373,7 +397,7 @@ fn write_outcome_response(
         moved_assets: outcome.moved_assets,
         trashed_path: outcome.trashed_path,
         layer,
-    })
+    }
 }
 
 struct WriteOutcomeFields {
@@ -387,12 +411,16 @@ struct WriteOutcomeFields {
     layer: Option<String>,
 }
 
-/// Unlike the shared `json_rejection_response` (always `400`, used where
-/// callers don't distinguish rejection kinds), this preserves the
-/// rejection's real status — e.g. `413` for a body over the length limit,
-/// `422` for well-formed JSON missing a required field — matching the legacy
-/// write API's `write_payload`, which existed specifically so clients/proxies
-/// keying off status codes are not misled by a flattened `400`.
+/// Preserves the rejection's real status — e.g. `413` for a body over the
+/// length limit, `422` for well-formed JSON missing a required field — same
+/// as the shared `json_rejection_response` (`handlers/vaults.rs`), so
+/// clients/proxies keying off status codes are not misled by a flattened
+/// `400`. This returns a typed `Result` rather than a built `Response` so
+/// callers here can propagate it with `?`/`match ... => return respond(error)`,
+/// keeping every intermediate `Result` in this file small per the
+/// `clippy::result_large_err` note at the top of the file —
+/// `json_rejection_response` returns a built `Response` directly because its
+/// own callers (`vaults.rs`, `vault_content.rs`) don't share that convention.
 fn write_payload<T>(payload: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     match payload {
         Ok(Json(payload)) => Ok(payload),
@@ -440,9 +468,23 @@ pub async fn vault_scoped_create_note_handler(
         Ok(guard) => guard,
         Err(error) => return vault_read_error_response(error),
     };
+    // A metadata-only catalog, not the full index: create_note has no
+    // pre-write entry to read a slug from, so it needs this to compute one,
+    // but never touches the (expensive, content-reading) wikilink graph.
+    let catalog = match authoritative_catalog(vault_id, &control).await {
+        Ok(catalog) => catalog,
+        Err(error) => return vault_read_error_response(error),
+    };
+    let layers = catalog.layers.clone();
     let vault_path = control.vault_path().to_path_buf();
     let outcome = match run_write_op(move || {
-        create_note(&vault_path, &relative_path, &payload.content, false)
+        create_note(
+            &vault_path,
+            &relative_path,
+            &payload.content,
+            false,
+            &catalog,
+        )
     })
     .await
     {
@@ -450,10 +492,10 @@ pub async fn vault_scoped_create_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
-/// `PATCH /api/v1/vaults/{vault_id}/notes/{slug}`
+/// `PUT /api/v1/vaults/{vault_id}/notes/{slug}`
 pub async fn vault_scoped_update_note_handler(
     State(state): State<AppState>,
     Path((raw_vault_id, slug)): Path<(String, String)>,
@@ -496,7 +538,7 @@ pub async fn vault_scoped_update_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &index.layers, outcome)
 }
 
 /// `PATCH /api/v1/vaults/{vault_id}/notes/{slug}/rename`
@@ -550,6 +592,10 @@ pub async fn vault_scoped_rename_note_handler(
     if let Some(response) = reject_noise_write(vault_id, &control, &target_relative_path) {
         return response;
     }
+    // The write closure below moves `index` in (it must own it to cross onto
+    // the blocking pool), so its `LayerMap` — all the response needs — is
+    // cloned out first rather than paying for a second index build after.
+    let layers = index.layers.clone();
     let vault_path = control.vault_path().to_path_buf();
     let outcome = match run_write_op(move || {
         move_or_rename_note(
@@ -566,7 +612,7 @@ pub async fn vault_scoped_rename_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
 /// `PATCH /api/v1/vaults/{vault_id}/notes/{slug}/move`
@@ -617,6 +663,7 @@ pub async fn vault_scoped_move_note_handler(
     if let Some(response) = reject_noise_write(vault_id, &control, &target_relative_path) {
         return response;
     }
+    let layers = index.layers.clone();
     let vault_path = control.vault_path().to_path_buf();
     let expected_content_hash = payload.expected_content_hash;
     let outcome = match run_write_op(move || {
@@ -634,7 +681,7 @@ pub async fn vault_scoped_move_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
 /// `PATCH /api/v1/vaults/{vault_id}/notes/{slug}/move-rename`
@@ -682,6 +729,7 @@ pub async fn vault_scoped_move_rename_note_handler(
     if let Some(response) = reject_noise_write(vault_id, &control, &target_relative_path) {
         return response;
     }
+    let layers = index.layers.clone();
     let vault_path = control.vault_path().to_path_buf();
     let outcome = match run_write_op(move || {
         move_or_rename_note(
@@ -698,7 +746,7 @@ pub async fn vault_scoped_move_rename_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
 /// `PATCH /api/v1/vaults/{vault_id}/notes/{slug}/archive`
@@ -753,6 +801,7 @@ pub async fn vault_scoped_archive_note_handler(
     if let Some(response) = reject_noise_write(vault_id, &control, &target_relative_path) {
         return response;
     }
+    let layers = index.layers.clone();
     let vault_path = control.vault_path().to_path_buf();
     let outcome = match run_write_op(move || {
         archive_note(
@@ -769,7 +818,7 @@ pub async fn vault_scoped_archive_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
 /// `DELETE /api/v1/vaults/{vault_id}/notes/{slug}`
@@ -806,6 +855,7 @@ pub async fn vault_scoped_delete_note_handler(
         Ok(entry) => entry,
         Err(error) => return respond(error),
     };
+    let layers = index.layers.clone();
     let vault_path = control.vault_path().to_path_buf();
     let outcome = match run_write_op(move || {
         delete_note(&vault_path, &index, &entry, &payload.expected_content_hash)
@@ -816,24 +866,21 @@ pub async fn vault_scoped_delete_note_handler(
         Err(error) => return write_error_response(vault_id, error),
     };
 
-    finalize_note_write_response(vault_id, &control, outcome).await
+    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
-async fn finalize_note_write_response(
+/// Builds the mutation response straight from `layers` — the `LayerMap`
+/// already sitting in memory from the write's own pre-write index/catalog
+/// fetch — instead of rebuilding a fresh authoritative index after the write
+/// has already committed to disk (issue #101: a rescan here would delay an
+/// otherwise-completed mutation response, and could turn a rescan failure
+/// into an HTTP error after the write already succeeded).
+fn finalize_note_write_response(
     vault_id: VaultId,
-    control: &VaultControlBlock,
+    layers: &LayerMap,
     outcome: WriteOutcome,
 ) -> Response {
-    let refreshed_index = match authoritative_index(vault_id, control).await {
-        Ok(index) => index,
-        Err(error) => return vault_read_error_response(error),
-    };
-    let fields = match write_outcome_response(&refreshed_index, outcome) {
-        Ok(fields) => fields,
-        Err(message) => {
-            return crate::handlers::vaults::internal_error_response(message, Some(vault_id));
-        }
-    };
+    let fields = write_outcome_response(layers, outcome);
     (
         StatusCode::OK,
         Json(VaultWriteOutcomeResponse {
@@ -1073,5 +1120,49 @@ mod tests {
 
         let io = write_error_response(vault_id, WriteError::Io("disk full".to_string()));
         assert_eq!(io.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn write_outcome_response_derives_layer_from_the_layer_map_alone() {
+        // issue #101: `write_outcome_response` takes a `&LayerMap`, not a
+        // `&VaultIndex` — it structurally cannot rebuild a full authoritative
+        // index (there is no index for it to rebuild), so the second
+        // post-write rescan the issue flags is not just avoided but
+        // impossible to reintroduce here by accident.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sources")).expect("mkdir");
+        std::fs::write(root.join("sources/.hatchdoor-layer"), "name: sources\n").expect("marker");
+        let layers = LayerMap::collect(root).expect("collect layers");
+
+        let updated = WriteOutcome {
+            slug: Some("clip".to_string()),
+            relative_path: Some("sources/Clip".to_string()),
+            content_hash: Some("h".to_string()),
+            quality_warnings: Vec::new(),
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: None,
+            affected_paths: Vec::new(),
+        };
+        let fields = write_outcome_response(&layers, updated);
+        assert_eq!(fields.slug.as_deref(), Some("clip"));
+        assert_eq!(fields.layer.as_deref(), Some("sources"));
+
+        let deleted = WriteOutcome {
+            slug: Some("clip".to_string()),
+            relative_path: Some("sources/Clip".to_string()),
+            content_hash: None,
+            quality_warnings: Vec::new(),
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: Some(".hatchdoor-trash/sources/Clip".to_string()),
+            affected_paths: Vec::new(),
+        };
+        let fields = write_outcome_response(&layers, deleted);
+        assert_eq!(
+            fields.layer, None,
+            "a delete leaves no note behind, so layer stays null even though the path matches a named layer"
+        );
     }
 }

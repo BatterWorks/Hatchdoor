@@ -2332,6 +2332,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_scoped_resolve_batch_oversized_json_body_reports_413_not_400() {
+        // Finding 3 (#101): `vault_scoped_resolve_batch_handler` imports the
+        // shared `json_rejection_response` from `vaults.rs`, which used to
+        // flatten every JSON rejection to 400, losing a length-limit
+        // rejection's real 413.
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_id =
+            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
+        let big_targets: Vec<String> = std::iter::repeat_n("x".repeat(64), 60_000).collect();
+        let body = serde_json::json!({ "targets": big_targets }).to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/resolve-batch"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
     async fn web_token_guards_api_routes_but_not_health_or_spa() {
         let (app, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("secret-token")));
         let guarded_route = "/api/v1/vaults/00000000-0000-4000-8000-000000000000/notes/home";
@@ -3099,6 +3124,35 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v1/vaults/{vault_id}/notes"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn create_vault_oversized_json_body_reports_413_not_400() {
+        // Finding 3 (#101): `json_rejection_response` (vaults.rs), shared by
+        // create/edit-Vault and resolve-batch, used to flatten every JSON
+        // rejection to 400, losing a length-limit rejection's real 413 —
+        // unlike note-mutation routes' own `write_payload`, proven above.
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+        let big = "x".repeat(3 * 1024 * 1024);
+        let body = serde_json::json!({
+            "expected_registry_revision": 0,
+            "name": big,
+            "enabled": true,
+            "source": {"type": "local", "path": "/tmp/oversized-vault-body-test"},
+        })
+        .to_string();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
                     .method("POST")
                     .header("content-type", "application/json")
                     .body(Body::from(body))

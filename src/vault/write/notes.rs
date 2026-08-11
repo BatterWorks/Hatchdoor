@@ -1,8 +1,8 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cache::parse::content_hash;
-use crate::vault::paths::strip_md_extension;
+use crate::vault::paths::{slugify, strip_md_extension};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::asset_move_plan;
@@ -87,11 +87,89 @@ fn frontmatter_warnings(content: &str) -> Vec<String> {
     warnings
 }
 
+/// The priority order `VaultIndex::build_catalog_with_config` (`vault/index.rs`)
+/// implicitly assigns slugs in: `markdown_paths.sort()` then a stable
+/// `sort_by_cached_key(is_layered)` puts every default-surface note ahead of
+/// every layered one (preserving path order within each group), so on a
+/// title collision a default-surface note always claims the contested slug
+/// first. Comparing `(is_layered, Path)` tuples lexicographically reproduces
+/// that exact order: `false < true` puts default-surface first, and `Path`'s
+/// component-wise `Ord` matches how the real build sorts `PathBuf`s.
+///
+/// Crucially, `path` here must still carry the `.md` extension: `markdown_paths.sort()`
+/// runs on the raw `WalkDir` paths *before* any extension-stripping happens
+/// (that only happens per-entry, later, inside the loop), so the real sort
+/// compares e.g. `"Home.md"` against `"Home!!.md"`, not `"Home"` against
+/// `"Home!!"`. These two orderings are not equivalent — `.` (0x2E) sorts
+/// before common title punctuation like `!`, so stripping the extension
+/// before comparing can reverse the outcome. A plain string compare of the
+/// extension-free `relative_path` would be doubly wrong for the same reason
+/// (see the module's `move_or_rename_note_disambiguates_a_slug_collision_against_a_different_note`
+/// test in `write/tests.rs`, which exists specifically to pin this down).
+fn slug_priority(catalog: &VaultIndex, relative_path: &str, path: &Path) -> (bool, PathBuf) {
+    (
+        catalog.layers.layer_for(relative_path).is_some(),
+        path.to_path_buf(),
+    )
+}
+
+/// The slug a fresh `VaultIndex::build_with_config` would assign to a note
+/// whose extension-free relative path is `relative_path` (and whose real,
+/// extension-bearing on-disk path is `path`), computed from a catalog already
+/// fetched under this Vault's mutation lock instead of re-walking the Vault.
+///
+/// This is deliberately not a plain `unique_slug` occupancy check
+/// (`vault/paths.rs`): a real index build assigns slugs in priority order
+/// (`slug_priority` above), so an already-catalogued note only "blocks" a
+/// candidate slug for this note if it has *higher* priority — a
+/// lower-priority occupant would itself be bumped in a real rebuild once this
+/// note claims the slug first, and never gets to hold it against us. Checking
+/// literal `by_slug` occupancy while ignoring priority (as `unique_slug` does)
+/// is only correct for `index.rs`'s own build loop, which already visits
+/// entries in priority order, so nothing lower-priority has been inserted yet
+/// when a given entry is assigned.
+///
+/// `exclude_slug`, when set, is the note's own pre-existing slug: without it,
+/// recomputing a rename/move's slug would collide with the note's own
+/// still-present entry in `by_slug` whenever the new title slugifies back to
+/// the same value (e.g. renaming "Home" to "home").
+fn slug_for_relative_path(
+    catalog: &VaultIndex,
+    relative_path: &str,
+    path: &Path,
+    exclude_slug: Option<&str>,
+) -> String {
+    let stem = relative_path.rsplit('/').next().unwrap_or(relative_path);
+    let mut base = slugify(stem);
+    if base.is_empty() {
+        base = "untitled".to_string();
+    }
+    let priority = slug_priority(catalog, relative_path, path);
+
+    let mut idx = 1usize;
+    loop {
+        let candidate = if idx == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{idx}")
+        };
+        let blocked = catalog.by_slug.get(&candidate).is_some_and(|entry| {
+            Some(entry.slug.as_str()) != exclude_slug
+                && slug_priority(catalog, &entry.relative_path, &entry.path) < priority
+        });
+        if !blocked {
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
 pub fn create_note(
     vault_root: &Path,
     relative_path: &str,
     content: &str,
     overwrite: bool,
+    catalog: &VaultIndex,
 ) -> Result<WriteOutcome, WriteError> {
     let path = resolve_new_note_path(vault_root, relative_path)?;
     if path.exists() && !overwrite {
@@ -106,9 +184,11 @@ pub fn create_note(
     let prepared = prepare_note_content(content)?;
     atomic_write(&path, &prepared.content)?;
     let normalized = normalize_note_relative_path(relative_path)?;
+    let relative_without_ext = strip_md_extension(&normalized).to_string();
+    let slug = slug_for_relative_path(catalog, &relative_without_ext, &path, None);
     Ok(WriteOutcome {
-        slug: None,
-        relative_path: Some(strip_md_extension(&normalized).to_string()),
+        slug: Some(slug),
+        relative_path: Some(relative_without_ext),
         content_hash: Some(content_hash(&prepared.content)),
         quality_warnings: prepared.warnings,
         rewritten_notes: 0,
@@ -364,6 +444,7 @@ pub fn move_or_rename_note(
 
     let target_without_ext =
         strip_md_extension(&normalize_note_relative_path(target_relative_path)?).to_string();
+    let slug = slug_for_relative_path(index, &target_without_ext, &target_path, Some(&entry.slug));
     let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, Some(&target_without_ext))?;
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
@@ -399,7 +480,7 @@ pub fn move_or_rename_note(
     }
 
     Ok(WriteOutcome {
-        slug: None,
+        slug: Some(slug),
         relative_path: Some(target_without_ext),
         content_hash: Some(content_hash(&moved_content)),
         quality_warnings: Vec::new(),
