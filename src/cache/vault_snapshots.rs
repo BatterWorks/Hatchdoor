@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::cache::SqliteCache;
+use crate::cache::{BuildOptions, SqliteCache};
 use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, VaultIndex};
 use crate::vault_registry::VaultId;
@@ -67,7 +67,9 @@ pub(crate) struct VaultSnapshotChunk {
     pub(crate) heading_path: Option<String>,
     pub(crate) content: String,
     pub(crate) layer: Option<String>,
-    pub(crate) embedding: Vec<u8>,
+    /// Demoted chunks can intentionally remain keyword-only when the Index
+    /// turn bound `HATCHDOOR_EMBED_LAYERS=false`.
+    pub(crate) embedding: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +104,19 @@ impl SqliteCache {
         index: &VaultIndex,
         embedder: &dyn Embedder,
     ) -> Result<(), String> {
+        self.replace_vault_snapshot_with_embed_layers(vault_id, index, embedder, true)
+    }
+
+    /// Build and publish one Vault's candidate snapshot with its operation's
+    /// already-bound embedding-layer policy. The default publisher remains
+    /// all-layer embedding for callers outside runtime composition.
+    pub(crate) fn replace_vault_snapshot_with_embed_layers(
+        &self,
+        vault_id: VaultId,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        embed_layers: bool,
+    ) -> Result<(), String> {
         let _epoch = self
             .snapshot_model_epoch
             .lock()
@@ -115,7 +130,13 @@ impl SqliteCache {
         let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
         let result = (|| {
             let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
-            candidate.replace_from_index_with_embedder(index, embedder)?;
+            candidate.replace_with_options(
+                index,
+                embedder,
+                None,
+                embed_layers,
+                &BuildOptions::default(),
+            )?;
             self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity())
         })();
         if result.is_err() {

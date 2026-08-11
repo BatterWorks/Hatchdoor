@@ -119,7 +119,8 @@ that production inventory are still checked for stale paths and duplicates.
   `AppState::index_status` separately tracks setting-triggered rebuild drift,
   progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
-  reindex binds before it starts.
+  reindex binds before it starts, including `HATCHDOOR_EMBED_LAYERS` for the
+  per-Vault disposable candidate cache.
 - `AppConfig` is the environment-derived deployment contract and interprets the
   live values from the startup `RuntimeConfig` snapshot.
 - `StartupTracker` exposes startup/model/indexing readiness.
@@ -200,7 +201,8 @@ that production inventory are still checked for stale paths and duplicates.
   and trigger an unwanted immediate real Git turn, bypassing an armed
   backoff or any other real status.
 - `dispatch_vault_index_turn` is the `VaultWorkKind::Index` execution closure
-  the same worker loop calls. It acquires one Vault's refresh boundary, builds
+  the same worker loop calls. It acquires one Vault's refresh and foreground
+  mutation boundaries, builds
   an authoritative Markdown index and isolated candidate cache off the async
   runtime, atomically publishes only that Vault's shared snapshot, and
   publishes Ready, Stale, or Unavailable search state without changing another

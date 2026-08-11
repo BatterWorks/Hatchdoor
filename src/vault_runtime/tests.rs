@@ -4,6 +4,9 @@ use tempfile::tempdir;
 use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::{VaultSnapshotFreshness, VaultSnapshotStatus};
 use crate::embed::{Embedder, StubEmbedder};
+use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
+use crate::search::{LayerSelection, NoteFilters, SearchMode};
+use crate::vault_read::VaultScope;
 use crate::vault_registry::{
     DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, HttpsCredentialUpdate, NewVaultDefinition,
     VaultDefinitionEdit, VaultGitMode, VaultRegistrySnapshot, VaultRegistryStore,
@@ -14,6 +17,32 @@ struct BlockingEmbedder {
     inner: StubEmbedder,
     entered: Arc<std::sync::Barrier>,
     release: Arc<std::sync::Barrier>,
+}
+
+struct ProbeEmbedder {
+    inner: StubEmbedder,
+    entered: std::sync::mpsc::Sender<()>,
+}
+
+impl Embedder for ProbeEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.entered
+            .send(())
+            .expect("mutation-boundary test is waiting for the scan probe");
+        self.inner.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.inner.embedding_dim()
+    }
+
+    fn identity(&self) -> String {
+        self.inner.identity()
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.inner.token_count(text, add_special_tokens)
+    }
 }
 
 impl Embedder for BlockingEmbedder {
@@ -302,6 +331,215 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
             .snapshot()
             .search,
         VaultSearchStatus::Ready
+    );
+}
+
+/// The per-Vault Index dispatcher must carry the immutable embed-layer setting
+/// into its candidate cache.  A demoted layer remains in the keyword read
+/// model, while false explicitly suppresses its semantic vectors.
+#[tokio::test]
+async fn index_turn_with_embed_layers_disabled_keeps_demoted_notes_keyword_only() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(vault_path.join("sources")).expect("create Vault directory");
+    std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources")
+        .expect("write layer marker");
+    std::fs::write(
+        vault_path.join("sources/Clip.md"),
+        "# Clip\n\nmelatonin regulates the circadian rhythm",
+    )
+    .expect("write demoted note");
+
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let snapshot = add_local_vault(&registry, &empty, "Only", vault_path);
+    let vault_id = vault_id_named(&snapshot, "Only");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+        .await;
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+
+    let outcome = worker
+        .run_next({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            let embedder = embedder.clone();
+            move |request| async move {
+                dispatch_vault_index_turn_with_embed_layers(
+                    &collection,
+                    cache,
+                    embedder,
+                    false,
+                    request,
+                )
+                .await
+            }
+        })
+        .await
+        .expect("queued Index turn");
+    outcome.result.expect("Index publication succeeds");
+
+    let (layers, _) = LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+    let search = VaultSearchCore::new(&cache, &collection, embedder.as_ref());
+    let keyword = search
+        .search(VaultSearchRequest {
+            scope: VaultScope::One(vault_id),
+            query: "melatonin".to_string(),
+            mode: SearchMode::Keyword,
+            limit: 10,
+            per_note_cap: 1,
+            filters: NoteFilters::default(),
+            include_properties: Vec::new(),
+            layers: layers.clone(),
+        })
+        .expect("keyword search");
+    assert!(
+        keyword
+            .data
+            .results
+            .iter()
+            .any(|hit| hit.note_slug == "clip"),
+        "the demoted note remains keyword-searchable"
+    );
+    let semantic = search
+        .search(VaultSearchRequest {
+            scope: VaultScope::One(vault_id),
+            query: "melatonin circadian".to_string(),
+            mode: SearchMode::Semantic,
+            limit: 10,
+            per_note_cap: 1,
+            filters: NoteFilters::default(),
+            include_properties: Vec::new(),
+            layers,
+        })
+        .expect("semantic search");
+    assert!(
+        semantic.data.results.is_empty(),
+        "the disabled embed-layer setting must suppress demoted semantic vectors"
+    );
+}
+
+/// An Index turn shares the foreground HTTP/MCP mutation boundary. Holding the
+/// guard across a multi-file mutation must prevent the turn from scanning or
+/// publishing a mixed snapshot; once the mutation completes, it publishes the
+/// complete two-file state.
+#[tokio::test]
+async fn index_turn_waits_for_a_multifile_foreground_mutation_before_publishing() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    let first_path = vault_path.join("First.md");
+    let second_path = vault_path.join("Second.md");
+    std::fs::write(&first_path, "# First\n\nbefore first").expect("write first note");
+    std::fs::write(&second_path, "# Second\n\nbefore second").expect("write second note");
+
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let snapshot = add_local_vault(&registry, &empty, "Only", vault_path);
+    let vault_id = vault_id_named(&snapshot, "Only");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+        .await;
+    let control = collection.runtime(vault_id).expect("active Vault runtime");
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let (scan_entered, scan_probe) = std::sync::mpsc::channel();
+    let embedder: Arc<dyn Embedder> = Arc::new(ProbeEmbedder {
+        inner: StubEmbedder::new(384),
+        entered: scan_entered,
+    });
+
+    // This is the same control-block guard acquired by HTTP and MCP write
+    // adapters. Apply the two related file changes while it remains held.
+    let mutation_guard = control
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation acquires its Vault lock");
+    std::fs::write(&first_path, "# First\n\nafter first").expect("write first mutation");
+    coordinator.request(vault_id, VaultWorkKind::Index);
+
+    let mutation_probe = IndexMutationProbe::install(vault_id);
+    let dispatch = tokio::spawn({
+        let collection = collection.clone();
+        let cache = cache.clone();
+        let embedder = embedder.clone();
+        async move {
+            worker
+                .run_next(move |request| {
+                    let collection = collection.clone();
+                    let cache = cache.clone();
+                    let embedder = embedder.clone();
+                    async move {
+                        dispatch_vault_index_turn_with_embed_layers(
+                            &collection,
+                            cache,
+                            embedder,
+                            true,
+                            request,
+                        )
+                        .await
+                    }
+                })
+                .await
+        }
+    });
+    mutation_probe.lock_attempted().await;
+    assert!(
+        matches!(
+            scan_probe.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ),
+        "after Index reaches its mutation-lock attempt, it must remain blocked before scanning"
+    );
+    assert_eq!(
+        cache
+            .snapshot_status(vault_id)
+            .expect("read snapshot status"),
+        None,
+        "Index must not publish while the foreground mutation guard remains held"
+    );
+    assert_ne!(
+        control.snapshot().search,
+        VaultSearchStatus::Indexing,
+        "Index must not advance runtime status before it acquires the foreground mutation guard"
+    );
+
+    std::fs::write(&second_path, "# Second\n\nafter second").expect("write second mutation");
+    drop(mutation_guard);
+    let outcome = dispatch
+        .await
+        .expect("worker task")
+        .expect("Index turn ran");
+    outcome.result.expect("Index publication succeeds");
+    scan_probe
+        .try_recv()
+        .expect("scan begins after the foreground mutation releases");
+
+    assert_eq!(
+        cache
+            .snapshot_note_content(vault_id, "first")
+            .expect("read first snapshot")
+            .as_deref(),
+        Some("# First\n\nafter first")
+    );
+    assert_eq!(
+        cache
+            .snapshot_note_content(vault_id, "second")
+            .expect("read second snapshot")
+            .as_deref(),
+        Some("# Second\n\nafter second")
     );
 }
 
