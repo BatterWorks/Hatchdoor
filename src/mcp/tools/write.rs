@@ -15,7 +15,7 @@ use std::str::FromStr;
 use crate::app_state::AppState;
 use crate::vault::VaultIndex;
 use crate::vault::{
-    AttachmentOutcome, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
+    AttachmentOutcome, LayerMap, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
     create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
     list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
     replace_section, update_note,
@@ -94,9 +94,23 @@ pub(super) async fn create_note_tool(
     refuse_marker_write(&relative_path)?;
     refuse_noise_write(&vault.exclude()?, &relative_path)?;
     let overwrite = args.overwrite.unwrap_or(false);
-    let outcome = create_note(&vault_path(vault), &relative_path, &args.content, overwrite)
-        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    // A metadata-only catalog, not the full index: create_note has no
+    // pre-write entry to read a slug from, so it needs this to compute one,
+    // but never touches the (expensive, content-reading) wikilink graph.
+    let catalog = current_catalog(vault).await?;
+    let outcome = create_note(
+        &vault_path(vault),
+        &relative_path,
+        &args.content,
+        overwrite,
+        &catalog,
+    )
+    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
+    Ok(finalize_note_write(
+        vault.vault_id,
+        &catalog.layers,
+        outcome,
+    ))
 }
 
 pub(super) async fn update_note_tool(
@@ -111,7 +125,7 @@ pub(super) async fn update_note_tool(
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
         .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn append_to_note_tool(
@@ -127,7 +141,7 @@ pub(super) async fn append_to_note_tool(
     let entry = note_entry(&index, &args.slug)?;
     let outcome = append_note(&entry, &content, &args.expected_content_hash)
         .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn edit_note_tool(
@@ -148,7 +162,7 @@ pub(super) async fn edit_note_tool(
         args.replace_all.unwrap_or(false),
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn replace_section_tool(
@@ -180,7 +194,7 @@ pub(super) async fn replace_section_tool(
         &args.expected_content_hash,
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn rename_note_tool(
@@ -209,7 +223,7 @@ pub(super) async fn rename_note_tool(
         &args.expected_content_hash,
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn move_note_tool(
@@ -242,7 +256,7 @@ pub(super) async fn move_note_tool(
         &args.expected_content_hash,
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn move_rename_note_tool(
@@ -266,7 +280,7 @@ pub(super) async fn move_rename_note_tool(
         &args.expected_content_hash,
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn archive_note_tool(
@@ -298,7 +312,7 @@ pub(super) async fn archive_note_tool(
         &args.expected_content_hash,
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn delete_note_tool(
@@ -318,7 +332,7 @@ pub(super) async fn delete_note_tool(
         &args.expected_content_hash,
     )
     .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    finalize_note_write(vault, outcome).await
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
 
 pub(super) async fn import_attachment_tool(
@@ -480,6 +494,25 @@ async fn current_index(vault: &McpVault) -> Result<VaultIndex, JsonRpcFailure> {
     }
 }
 
+/// Build the vault's metadata-only catalog off the async runtime, like
+/// `current_index` but skipping the content-reading wikilink-graph pass:
+/// `create_note` has no pre-write entry to fetch a slug from, so it needs
+/// this before the write to compute one, but never needs the link graph
+/// itself.
+async fn current_catalog(vault: &McpVault) -> Result<VaultIndex, JsonRpcFailure> {
+    let control = vault.control.clone();
+    match tokio::task::spawn_blocking(move || control.authoritative_catalog()).await {
+        Ok(Ok(catalog)) => Ok(catalog),
+        Ok(Err(error)) => Err(vault_error(crate::vault_read::runtime_error(
+            vault.vault_id,
+            error,
+        ))),
+        Err(join_error) => Err(JsonRpcFailure::internal(format!(
+            "vault catalog build panicked: {join_error}"
+        ))),
+    }
+}
+
 fn vault_path(vault: &McpVault) -> std::path::PathBuf {
     vault.control.vault_path().to_path_buf()
 }
@@ -501,39 +534,31 @@ fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry,
     })
 }
 
-async fn finalize_note_write(
-    vault: &McpVault,
-    mut outcome: WriteOutcome,
-) -> Result<Value, JsonRpcFailure> {
-    let index = current_index(vault).await?;
-    if outcome.slug.is_none() && outcome.relative_path.is_some() && outcome.content_hash.is_some() {
-        let relative_path = outcome
+/// Builds the write tool's result value straight from `layers` — the
+/// `LayerMap` already sitting in memory from the write's own pre-write
+/// index/catalog fetch — instead of rebuilding a fresh authoritative index
+/// after the write has already committed to disk (issue #101: a rescan here
+/// would delay an otherwise-completed mutation response, and could turn a
+/// rescan failure into a JSON-RPC error after the write already succeeded).
+/// Every write op (`vault/write/notes.rs`) now sets `outcome.slug` itself, so
+/// there is no lookup left to do; `layer` reports the note's resulting layer
+/// (`None` = default surface) via the same path-based `layer_for` a real
+/// index build uses, except a delete, which leaves no note behind and always
+/// reports `None`. `trashed_path.is_some()` is currently only ever set by
+/// `delete_note`, so it stands in for "this is a delete"; a future write op
+/// that starts setting `trashed_path` for a non-delete reason would need to
+/// update this.
+fn finalize_note_write(vault_id: VaultId, layers: &LayerMap, outcome: WriteOutcome) -> Value {
+    let layer = if outcome.trashed_path.is_some() {
+        None
+    } else {
+        outcome
             .relative_path
             .as_deref()
-            .expect("relative_path checked above");
-        outcome.slug = slug_for_relative_path(&index, relative_path);
-        if outcome.slug.is_none() {
-            return Err(JsonRpcFailure::internal(
-                "note write completed but refreshed index did not contain the note",
-            ));
-        }
-    }
-    // Report the note's resulting layer (None = default surface) so a caller
-    // sees which surface a create/move/rename/archive landed on. Read from the
-    // just-refreshed cache; a delete leaves no note, so the layer is None.
-    let layer = match &outcome.slug {
-        Some(slug) => index.find_by_slug(slug).and_then(|note| note.layer.clone()),
-        None => None,
+            .and_then(|relative_path| layers.layer_for(relative_path))
+            .map(str::to_string)
     };
-    Ok(write_success(vault.vault_id, outcome, layer))
-}
-
-fn slug_for_relative_path(index: &VaultIndex, relative_path: &str) -> Option<String> {
-    index
-        .ordered_entries()
-        .into_iter()
-        .find(|entry| entry.relative_path == relative_path)
-        .map(|entry| entry.slug)
+    write_success(vault_id, outcome, layer)
 }
 
 /// Hard-refuse any write whose target basename is the layer marker file. A
@@ -1092,5 +1117,55 @@ mod record_tests {
         };
         assert_eq!(record.target, "Projects/New");
         assert_eq!(record.affected_paths.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod finalize_tests {
+    use super::*;
+
+    #[test]
+    fn finalize_note_write_derives_layer_from_the_layer_map_alone() {
+        // issue #101: `finalize_note_write` takes a `&LayerMap`, not a
+        // `&VaultIndex` — it structurally cannot rebuild a full authoritative
+        // index (there is no index for it to rebuild), so the second
+        // post-write rescan the issue flags is not just avoided but
+        // impossible to reintroduce here by accident.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sources")).expect("mkdir");
+        std::fs::write(root.join("sources/.hatchdoor-layer"), "name: sources\n").expect("marker");
+        let layers = LayerMap::collect(root).expect("collect layers");
+        let vault_id = VaultId::generate().expect("generate Vault id");
+
+        let updated = WriteOutcome {
+            slug: Some("clip".to_string()),
+            relative_path: Some("sources/Clip".to_string()),
+            content_hash: Some("h".to_string()),
+            quality_warnings: Vec::new(),
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: None,
+            affected_paths: Vec::new(),
+        };
+        let value = finalize_note_write(vault_id, &layers, updated);
+        assert_eq!(value["structuredContent"]["slug"], "clip");
+        assert_eq!(value["structuredContent"]["layer"], "sources");
+
+        let deleted = WriteOutcome {
+            slug: Some("clip".to_string()),
+            relative_path: Some("sources/Clip".to_string()),
+            content_hash: None,
+            quality_warnings: Vec::new(),
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: Some(".hatchdoor-trash/sources/Clip".to_string()),
+            affected_paths: Vec::new(),
+        };
+        let value = finalize_note_write(vault_id, &layers, deleted);
+        assert!(
+            value["structuredContent"]["layer"].is_null(),
+            "a delete leaves no note behind, so layer stays null even though the path matches a named layer"
+        );
     }
 }

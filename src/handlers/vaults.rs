@@ -247,9 +247,15 @@ pub(crate) fn parse_vault_id(raw: &str) -> Result<VaultId, VaultApiError> {
     })
 }
 
+/// Preserves the rejection's real status — e.g. `413` for a body over the
+/// length limit, `415` for the wrong content type, `422` for well-formed JSON
+/// missing a required field — rather than flattening every kind to `400`, so
+/// clients/proxies keying off status codes are not misled. Matches
+/// `vault_write.rs`'s `write_payload`, which exists for the same reason on
+/// note-mutation routes.
 pub(crate) fn json_rejection_response(error: JsonRejection) -> Response {
-    VaultApiError::new("invalid_request_body", error.body_text(), None, false)
-        .respond(StatusCode::BAD_REQUEST)
+    let status = error.status();
+    VaultApiError::new("invalid_request_body", error.body_text(), None, false).respond(status)
 }
 
 pub(crate) fn query_rejection_response(error: QueryRejection) -> Response {

@@ -5,10 +5,14 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cache::parse::content_hash;
-use crate::vault::types::VaultIndex;
+use crate::vault::types::{VaultIndex, VaultScanConfig};
 
 fn build(root: &Path) -> VaultIndex {
     VaultIndex::build(root).expect("build index")
+}
+
+fn build_catalog(root: &Path) -> VaultIndex {
+    VaultIndex::build_catalog_with_config(root, &VaultScanConfig::default()).expect("build catalog")
 }
 
 #[test]
@@ -52,14 +56,211 @@ fn list_note_attachments_reports_the_containing_folders_layer() {
 fn create_note_rejects_traversal_and_writes_markdown() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
+    let catalog = build(root);
     assert!(matches!(
-        create_note(root, "../Escape.md", "no", false),
+        create_note(root, "../Escape.md", "no", false, &catalog),
         Err(WriteError::InvalidInput(_))
     ));
-    create_note(root, "Projects/New", "# New", false).expect("create");
+    create_note(root, "Projects/New", "# New", false, &catalog).expect("create");
     assert_eq!(
         fs::read_to_string(root.join("Projects/New.md")).expect("read"),
         "# New\n"
+    );
+}
+
+#[test]
+fn create_note_computes_its_slug_from_a_metadata_only_catalog() {
+    // issue #101: the write API must fill in a create response's slug from
+    // the pre-write catalog it already fetched, not a second full index
+    // rescan after the write. A metadata-only catalog build never reads a
+    // note's *content* (no `build_link_graph` pass) — proving create_note's
+    // slug computation works from one anyway is proof it never needed the
+    // content-reading pass that made the old post-write rescan expensive.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Existing.md"), "# Existing\n[[Existing]]").expect("write");
+    let catalog = build_catalog(root);
+    assert!(
+        catalog.outgoing_by_slug.is_empty() && catalog.backlinks_by_slug.is_empty(),
+        "a catalog build must not populate the wikilink graph"
+    );
+
+    let outcome =
+        create_note(root, "Projects/New Note", "# New\n", false, &catalog).expect("create");
+    assert_eq!(outcome.slug.as_deref(), Some("new-note"));
+    assert_eq!(outcome.relative_path.as_deref(), Some("Projects/New Note"));
+}
+
+#[test]
+fn create_note_disambiguates_a_slug_collision_against_the_pre_write_catalog() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Home.md"), "# Home").expect("write");
+    let catalog = build_catalog(root);
+
+    let outcome =
+        create_note(root, "Other/Home", "# Other Home\n", false, &catalog).expect("create");
+    assert_eq!(outcome.slug.as_deref(), Some("home-2"));
+}
+
+#[test]
+fn move_or_rename_note_keeps_its_own_slug_when_the_new_title_slugifies_to_the_same_value() {
+    // A rename that only changes case ("Home" -> "home") slugifies to the
+    // same value as the note's own pre-existing slug. The note's own entry
+    // is still sitting in the pre-write catalog's `by_slug` under that slug;
+    // without excluding it from the collision check this would wrongly
+    // disambiguate to "home-2" against itself.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Home.md"), "# Home").expect("write");
+    let index = build(root);
+    let entry = index.find_by_slug("home").expect("home");
+
+    let outcome = move_or_rename_note(root, &index, entry, "home.md", &content_hash("# Home"))
+        .expect("rename");
+    assert_eq!(outcome.slug.as_deref(), Some("home"));
+}
+
+#[test]
+fn move_or_rename_note_disambiguates_a_slug_collision_against_a_different_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Home.md"), "# Home").expect("write");
+    fs::create_dir_all(root.join("Projects")).expect("mkdir");
+    fs::write(root.join("Projects/Other.md"), "# Other").expect("write");
+    let index = build(root);
+    let entry = index.find_by_slug("other").expect("other");
+
+    // "Home@" slugifies to "home", the same slug already held by the
+    // *different*, still-present "Home.md" note. "Home@.md" sorts *after*
+    // "Home.md" as an extension-bearing path (`@` 0x40 > `.` 0x2E — verified
+    // with `PathBuf::from("Home@.md").cmp(&PathBuf::from("Home.md"))` ==
+    // `Greater`), so in true build order "Home.md" is processed first and
+    // keeps "home": a genuine collision that must still disambiguate the
+    // moved note, unlike the self-collision case above.
+    let outcome = move_or_rename_note(root, &index, entry, "Home@.md", &content_hash("# Other"))
+        .expect("rename");
+    assert_eq!(outcome.slug.as_deref(), Some("home-2"));
+
+    // Ground truth: a real rebuild of the resulting vault state must agree,
+    // not just this function's own self-consistency.
+    let rebuilt = build(root);
+    assert_eq!(
+        rebuilt
+            .find_by_slug("home")
+            .map(|entry| entry.relative_path.as_str()),
+        Some("Home")
+    );
+    assert_eq!(
+        rebuilt
+            .find_by_slug("home-2")
+            .map(|entry| entry.relative_path.as_str()),
+        Some("Home@")
+    );
+}
+
+#[test]
+fn move_or_rename_note_wins_a_slug_collision_when_it_sorts_before_the_existing_note() {
+    // Regression test: a prior version of `slug_priority` compared
+    // extension-*stripped* paths ("Home!!" > "Home" as strings/paths) instead
+    // of the extension-*bearing* paths the real build's `markdown_paths.sort()`
+    // actually sorts ("Home!!.md" < "Home.md", since `!` 0x21 sorts before
+    // `.` 0x2E — verified with
+    // `PathBuf::from("Home!!.md").cmp(&PathBuf::from("Home.md"))` == `Less`).
+    // That reversed which note wins: the moved note must claim "home" here,
+    // not the pre-existing "Home.md".
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Home.md"), "# Home").expect("write");
+    fs::create_dir_all(root.join("Projects")).expect("mkdir");
+    fs::write(root.join("Projects/Other.md"), "# Other").expect("write");
+    let index = build(root);
+    let entry = index.find_by_slug("other").expect("other");
+
+    let outcome = move_or_rename_note(root, &index, entry, "Home!!.md", &content_hash("# Other"))
+        .expect("rename");
+    assert_eq!(
+        outcome.slug.as_deref(),
+        Some("home"),
+        "\"Home!!.md\" sorts before \"Home.md\" as an extension-bearing path, so it wins the slug"
+    );
+
+    // Ground truth: a real rebuild of the resulting vault state must agree —
+    // this is the assertion that would have failed against the old,
+    // extension-stripped comparison (which predicted the opposite winner).
+    let rebuilt = build(root);
+    assert_eq!(
+        rebuilt
+            .find_by_slug("home")
+            .map(|entry| entry.relative_path.as_str()),
+        Some("Home!!")
+    );
+    assert_eq!(
+        rebuilt
+            .find_by_slug("home-2")
+            .map(|entry| entry.relative_path.as_str()),
+        Some("Home")
+    );
+}
+
+#[test]
+fn create_note_claims_a_contested_slug_ahead_of_an_existing_layered_note() {
+    // A plain occupancy check against the pre-write catalog would see "home"
+    // as already taken by the layered note and bump the new note to
+    // "home-2". A true full rebuild processes default-surface notes before
+    // layered ones on a title collision (`vault/index.rs`'s
+    // `sort_by_cached_key(is_layered)`, "default-surface notes claim their
+    // slugs first"), so the new default-surface note must claim "home"
+    // outright, matching what a real rebuild would assign it.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("sources")).expect("mkdir");
+    fs::write(root.join("sources/.hatchdoor-layer"), "name: sources\n").expect("marker");
+    fs::write(root.join("sources/Home.md"), "# Home").expect("write");
+    let catalog = build_catalog(root);
+    assert_eq!(
+        catalog
+            .find_by_slug("home")
+            .map(|entry| entry.relative_path.as_str()),
+        Some("sources/Home"),
+        "the only existing note holds \"home\" uncontested before the write"
+    );
+
+    let outcome = create_note(root, "Home", "# Root Home\n", false, &catalog).expect("create");
+    assert_eq!(
+        outcome.slug.as_deref(),
+        Some("home"),
+        "a new default-surface note must claim the contested slug ahead of an existing layered one"
+    );
+}
+
+#[test]
+fn move_or_rename_note_claims_a_contested_slug_ahead_of_an_existing_layered_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("sources")).expect("mkdir");
+    fs::write(root.join("sources/.hatchdoor-layer"), "name: sources\n").expect("marker");
+    fs::write(root.join("sources/Home.md"), "# Home").expect("write");
+    fs::create_dir_all(root.join("Projects")).expect("mkdir");
+    fs::write(root.join("Projects/Other.md"), "# Other").expect("write");
+    let index = build(root);
+    let entry = index.find_by_slug("other").expect("other");
+    assert_eq!(
+        index
+            .find_by_slug("home")
+            .map(|entry| entry.relative_path.as_str()),
+        Some("sources/Home"),
+        "the only existing note holds \"home\" uncontested before the write"
+    );
+
+    // Moving "Other" to the vault root makes it a default-surface note
+    // contesting the layered note's "home" slug; the moved note must win.
+    let outcome = move_or_rename_note(root, &index, entry, "Home.md", &content_hash("# Other"))
+        .expect("rename");
+    assert_eq!(
+        outcome.slug.as_deref(),
+        Some("home"),
+        "a note moved onto the default surface must claim the contested slug ahead of an existing layered one"
     );
 }
 
@@ -82,7 +283,9 @@ fn update_note_requires_matching_hash() {
 fn write_quality_normalizes_safe_markdown_formatting() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
-    let outcome = create_note(root, "Quality", "# Quality\r\nBody", false).expect("create");
+    let catalog = build(root);
+    let outcome =
+        create_note(root, "Quality", "# Quality\r\nBody", false, &catalog).expect("create");
 
     assert_eq!(
         fs::read_to_string(root.join("Quality.md")).expect("read"),
@@ -105,11 +308,13 @@ fn write_quality_normalizes_safe_markdown_formatting() {
 fn write_quality_reports_frontmatter_warnings() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
+    let catalog = build(root);
     let outcome = create_note(
         root,
         "Quality",
         "---\ntags: [a]\ntags: [b]\n# Missing close\n",
         false,
+        &catalog,
     )
     .expect("create");
 
@@ -125,8 +330,9 @@ fn write_quality_reports_frontmatter_warnings() {
 #[test]
 fn write_quality_rejects_nul_bytes() {
     let tmp = TempDir::new().expect("tempdir");
+    let catalog = build(tmp.path());
     assert!(matches!(
-        create_note(tmp.path(), "Bad", "hello\0world", false),
+        create_note(tmp.path(), "Bad", "hello\0world", false, &catalog),
         Err(WriteError::InvalidInput(message)) if message.contains("NUL")
     ));
     assert!(!tmp.path().join("Bad.md").exists());

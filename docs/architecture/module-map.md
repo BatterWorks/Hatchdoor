@@ -1185,7 +1185,7 @@ from *every* usable participant is (`VaultSearchCore::search`'s own
 
 `vault_write.rs` owns exactly-one-Vault Markdown mutations, attachment
 upload, and write-capabilities discovery, retiring the entire legacy unscoped
-application API in the same change (#101): `POST .../notes`, `PATCH
+application API in the same change (#101): `POST .../notes`, `PUT
 .../notes/{slug}`, `PATCH .../notes/{slug}/rename|move|move-rename|archive`,
 `DELETE .../notes/{slug}`, `POST .../attachments` (mounted separately from the
 rest of this group so it can also accept a live MCP bearer token, mirroring
