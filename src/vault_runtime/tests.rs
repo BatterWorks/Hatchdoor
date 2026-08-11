@@ -10,6 +10,32 @@ use crate::vault_registry::{
     VaultSource as RegistryVaultSource,
 };
 
+struct BlockingEmbedder {
+    inner: StubEmbedder,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+impl Embedder for BlockingEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.entered.wait();
+        self.release.wait();
+        self.inner.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.inner.embedding_dim()
+    }
+
+    fn identity(&self) -> String {
+        self.inner.identity()
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        self.inner.token_count(text, add_special_tokens)
+    }
+}
+
 struct PanicEmbedder;
 
 impl Embedder for PanicEmbedder {
@@ -276,6 +302,158 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
             .snapshot()
             .search,
         VaultSearchStatus::Ready
+    );
+}
+
+/// Regression for #99's reopening: an Index turn set only the runtime search
+/// status to `Indexing`, but every collection-shaped read (`VaultReadCore`'s
+/// `collection` helper backing tree/stats/graph/recent, and
+/// `VaultSearchCore::search`) derives participant freshness solely from the
+/// cache-published `VaultSnapshotStatus`, which stayed `Fresh` throughout the
+/// authoritative scan/candidate build. This held the turn open mid-build with
+/// a blocking embedder and asserted a concurrent collection read observed the
+/// indexing lag explicitly instead of a silently fresh retained snapshot.
+#[tokio::test]
+async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_reads() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\noriginal").expect("write note");
+
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let snapshot = add_local_vault(&registry, &empty, "Only", vault_path.clone());
+    let vault_id = vault_id_named(&snapshot, "Only");
+
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+        .await;
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+
+    let published = worker
+        .run_next({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            let working = working.clone();
+            move |request| async move {
+                dispatch_vault_index_turn(&collection, cache, working, request).await
+            }
+        })
+        .await
+        .expect("initial Index turn");
+    published.result.expect("initial publication succeeds");
+    assert_eq!(
+        cache.snapshot_status(vault_id).expect("read status"),
+        Some(VaultSnapshotStatus {
+            participating: true,
+            freshness: VaultSnapshotFreshness::Fresh,
+        }),
+        "initial publish is fresh"
+    );
+
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\nupdated").expect("update note");
+    coordinator.request(vault_id, VaultWorkKind::Index);
+
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let blocking_embedder: Arc<dyn Embedder> = Arc::new(BlockingEmbedder {
+        inner: StubEmbedder::new(384),
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+
+    let active = tokio::spawn({
+        let collection = collection.clone();
+        let cache = cache.clone();
+        async move {
+            worker
+                .run_next(move |request| {
+                    let collection = collection.clone();
+                    let cache = cache.clone();
+                    async move {
+                        dispatch_vault_index_turn(&collection, cache, blocking_embedder, request)
+                            .await
+                    }
+                })
+                .await
+        }
+    });
+
+    tokio::task::spawn_blocking({
+        let entered = entered.clone();
+        move || entered.wait()
+    })
+    .await
+    .expect("wait for candidate build to begin");
+
+    // Assertions run while `BlockingEmbedder` still holds a blocking-pool
+    // thread parked on `release.wait()`. A bare panic here would unwind the
+    // `#[tokio::test]` runtime before that thread's barrier party ever
+    // arrives, and dropping a Tokio runtime blocks indefinitely for
+    // outstanding blocking tasks — so the test would hang instead of
+    // reporting the failure. Always release the barrier first, then resume
+    // any panic so the assertion failure still surfaces normally.
+    let mid_rebuild_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(
+            collection
+                .runtime(vault_id)
+                .expect("active runtime")
+                .snapshot()
+                .search,
+            VaultSearchStatus::Indexing,
+            "runtime status reflects the active turn"
+        );
+        assert_eq!(
+            cache.snapshot_status(vault_id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Stale,
+            }),
+            "the retained snapshot must not read as fresh while its replacement is being built"
+        );
+
+        let projection = crate::vault_read::VaultReadCore::new(&cache, &collection)
+            .trees(crate::vault_read::VaultScope::One(vault_id))
+            .expect("tree read during active rebuild");
+        assert!(
+            projection.partial,
+            "a collection read during an active rebuild must report partial"
+        );
+        assert_eq!(
+            projection.participants[0].state,
+            crate::vault_read::VaultParticipantState::Stale,
+            "indexing lag must be explicit to collection-shaped reads, not silently fresh"
+        );
+    }));
+
+    tokio::task::spawn_blocking({
+        let release = release.clone();
+        move || release.wait()
+    })
+    .await
+    .expect("release candidate build");
+
+    if let Err(panic) = mid_rebuild_result {
+        std::panic::resume_unwind(panic);
+    }
+
+    let outcome = active.await.expect("worker task").expect("Index turn ran");
+    outcome.result.expect("rebuild publishes successfully");
+
+    assert_eq!(
+        cache.snapshot_status(vault_id).expect("read status"),
+        Some(VaultSnapshotStatus {
+            participating: true,
+            freshness: VaultSnapshotFreshness::Fresh,
+        }),
+        "a successful rebuild republishes fresh"
     );
 }
 

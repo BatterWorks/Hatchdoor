@@ -124,8 +124,12 @@ impl SqliteCache {
         result
     }
 
-    /// Mark a retained Vault snapshot stale when rebuilding its authoritative
-    /// Markdown index fails before candidate-cache publication begins.
+    /// Mark a retained Vault snapshot stale: for the duration of an active
+    /// Index turn's scan/candidate-build, so concurrent reads do not report a
+    /// retained snapshot as fresh while it is known to be behind the
+    /// authoritative Markdown; and when rebuilding fails before
+    /// candidate-cache publication begins, so it stays stale afterward. A
+    /// no-op (no error) when the Vault has no existing snapshot row.
     pub(crate) fn mark_vault_snapshot_stale(&self, vault_id: VaultId) -> Result<(), String> {
         let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
         self.mark_vault_snapshot_stale_if_current(vault_id, attempt)
