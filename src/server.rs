@@ -128,6 +128,43 @@ pub fn check_demo_mode_posture(
     Ok(())
 }
 
+/// `check_demo_mode_posture` above only inspects the transitional
+/// `config.vault_source`; it cannot see the durable Vault registry, which is
+/// loaded afterward and then activated by
+/// `VaultCollectionRuntime::reconcile_and_reconstruct`. A registry Vault
+/// configured for two-way Git sync would otherwise pass startup and later
+/// have Git writeback scheduled for it while demo mode is enabled, missing
+/// the same fail-fast refusal (#109). Read-only acquisition/pull
+/// (`LocalHistory`/`PullOnly`) remains permitted, matching the accepted demo
+/// boundary.
+pub fn check_demo_mode_registry_posture(
+    demo_mode: bool,
+    snapshot: &crate::vault_registry::VaultRegistrySnapshot,
+) -> Result<(), String> {
+    if !demo_mode {
+        return Ok(());
+    }
+    for definition in snapshot.definitions() {
+        if !definition.enabled() {
+            continue;
+        }
+        let mode = match definition.source() {
+            crate::vault_registry::VaultSource::ExistingGit { mode, .. }
+            | crate::vault_registry::VaultSource::ManagedGit { mode, .. } => Some(*mode),
+            crate::vault_registry::VaultSource::Local { .. } => None,
+        };
+        if mode == Some(crate::vault_registry::VaultGitMode::TwoWay) {
+            return Err(format!(
+                "HATCHDOOR_DEMO_MODE=true is incompatible with Git writeback; Vault {} is \
+                 registered with two-way Git mode; disable demo mode or change the Vault to \
+                 pull-only/local-history for public demos.",
+                definition.vault_id()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn initial_model_for_startup(demo_mode: bool, selected: SelectedModel) -> SelectedModel {
     // A public, read-only demo has no person available to accept Gemma's terms.
     // It may use an already-selected model, otherwise use the no-terms Nomic
@@ -363,12 +400,19 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/v1/vaults/{vault_id}/search",
                 get(vault_scope_search_handler),
             );
+        // #109: demo mode publishes every enabled Vault's reads
+        // unauthenticated even when this instance also has
+        // `HATCHDOOR_WEB_BEARER_TOKEN` configured. Gating the whole group
+        // behind `require_web_token` here would intercept an unauthenticated
+        // demo request with a bare `401` before the mutation-specific
+        // `demo_guard` (`reject_demo_mutation`) already layered on individual
+        // routes above ever runs, which must be the one to answer mutations
+        // with the stable `403 demo_read_only` refusal.
         match web_bearer_token.clone() {
-            Some(token) => vaults_v1.layer(axum::middleware::from_fn_with_state(
-                WebToken(token),
-                require_web_token,
-            )),
-            None => vaults_v1,
+            Some(token) if !state.demo_mode => vaults_v1.layer(
+                axum::middleware::from_fn_with_state(WebToken(token), require_web_token),
+            ),
+            Some(_) | None => vaults_v1,
         }
     };
 
@@ -380,20 +424,27 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // hits the same endpoint. #109: mounted in demo mode too, like the rest of
     // this router, but gated by `reject_demo_mutation` since it is a content
     // mutation.
-    let vault_attachment = Router::new()
-        .route(
-            "/api/v1/vaults/{vault_id}/attachments",
-            post(vault_scoped_upload_attachment_handler)
-                .layer(DefaultBodyLimit::max(attachment_body_limit))
-                .layer(demo_guard.clone()),
-        )
-        .layer(axum::middleware::from_fn_with_state(
+    let vault_attachment = Router::new().route(
+        "/api/v1/vaults/{vault_id}/attachments",
+        post(vault_scoped_upload_attachment_handler)
+            .layer(DefaultBodyLimit::max(attachment_body_limit))
+            .layer(demo_guard.clone()),
+    );
+    // #109: same reasoning as `vaults_v1` above. This route is a content
+    // mutation, so demo mode must answer with `403 demo_read_only` from the
+    // route's own `demo_guard` layer rather than a bare `401` from the token
+    // gate that would otherwise wrap the whole subrouter first.
+    let vault_attachment = if state.demo_mode {
+        vault_attachment
+    } else {
+        vault_attachment.layer(axum::middleware::from_fn_with_state(
             WebOrLiveMcpToken {
                 web: web_bearer_token.clone(),
                 runtime_config: state.runtime_config.clone(),
             },
             require_web_or_live_mcp_token,
-        ));
+        ))
+    };
 
     Router::new()
         .route("/health", get(health_handler))
@@ -892,6 +943,13 @@ pub async fn run_server() {
         }
     };
 
+    if let VaultRegistryState::Ready(snapshot) = &registry_state
+        && let Err(message) = check_demo_mode_registry_posture(config.demo_mode, snapshot)
+    {
+        error!("{message}");
+        std::process::exit(1);
+    }
+
     let sqlite = Arc::new(
         SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
             error!(
@@ -1307,6 +1365,147 @@ mod tests {
 
         let git_error = check_demo_mode_posture(true, false, true).expect_err("git rejected");
         assert!(git_error.contains("HATCHDOOR_GIT_SYNC_ENABLED"));
+    }
+
+    #[test]
+    fn demo_mode_registry_posture_rejects_an_enabled_two_way_vault() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Two-Way Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::ManagedGit {
+                        repository_url: "https://example.com/vault.git".to_string(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_registry::VaultGitMode::TwoWay,
+                        poll_interval_secs: 3600,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add two-way Vault");
+
+        // Outside demo mode, a two-way registry Vault is unremarkable.
+        assert!(check_demo_mode_registry_posture(false, &snapshot).is_ok());
+
+        let error = check_demo_mode_registry_posture(true, &snapshot)
+            .expect_err("enabled registry TwoWay Vault rejected in demo mode");
+        assert!(error.contains("two-way Git mode"));
+    }
+
+    #[test]
+    fn demo_mode_registry_posture_rejects_an_enabled_existing_git_two_way_vault() {
+        // `ExistingGit` and `ManagedGit` share one match arm in
+        // `check_demo_mode_registry_posture`; cover `ExistingGit` separately
+        // so a future divergence between the two arms is caught. Unlike
+        // `ManagedGit`, the registry requires `repository_path` to already be
+        // a real Git working checkout (see
+        // `vault_scoped_pull_only_vault_disables_mutation` for the same
+        // fixture pattern).
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let repository_path = directory.path().join("existing-two-way-repo");
+        std::fs::create_dir_all(&repository_path).expect("create repo directory");
+        git2::Repository::init(&repository_path).expect("init git repo");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Existing Git Two-Way Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::ExistingGit {
+                        repository_path,
+                        repository_url: Some(
+                            "https://example.com/existing-two-way.git".to_string(),
+                        ),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_registry::VaultGitMode::TwoWay,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add existing-git two-way Vault");
+
+        let error = check_demo_mode_registry_posture(true, &snapshot)
+            .expect_err("enabled registry ExistingGit TwoWay Vault rejected in demo mode");
+        assert!(error.contains("two-way Git mode"));
+    }
+
+    #[test]
+    fn demo_mode_registry_posture_allows_pull_only_local_history_and_disabled_two_way() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        // `ManagedGit` requires `pull_only` or `two_way` mode (a purely local
+        // history makes no sense for a Vault whose only source is a remote);
+        // `LocalHistory` is only reachable through `ExistingGit`, which needs
+        // a real Git working checkout to pass registry validation.
+        let local_history_repository_path = directory.path().join("local-history-repo");
+        std::fs::create_dir_all(&local_history_repository_path)
+            .expect("create local-history repo directory");
+        git2::Repository::init(&local_history_repository_path).expect("init git repo");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Pull-Only Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::ManagedGit {
+                        repository_url: "https://example.com/pull-only.git".to_string(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_registry::VaultGitMode::PullOnly,
+                        poll_interval_secs: 3600,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add pull-only Vault");
+        let snapshot = registry
+            .add(
+                snapshot.revision(),
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Local History Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::ExistingGit {
+                        repository_path: local_history_repository_path,
+                        repository_url: None,
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_registry::VaultGitMode::LocalHistory,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add local-history Vault");
+        let snapshot = registry
+            .add(
+                snapshot.revision(),
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Disabled Two-Way Vault".to_string(),
+                    enabled: false,
+                    source: crate::vault_registry::VaultSource::ManagedGit {
+                        repository_url: "https://example.com/disabled-two-way.git".to_string(),
+                        branch: None,
+                        vault_subdirectory: None,
+                        mode: crate::vault_registry::VaultGitMode::TwoWay,
+                        poll_interval_secs: 3600,
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add disabled two-way Vault");
+
+        assert!(check_demo_mode_registry_posture(true, &snapshot).is_ok());
     }
 
     #[test]
@@ -3961,6 +4160,144 @@ mod tests {
         let on_disk = std::fs::read_to_string(vault_path.join("Home.md")).expect("read note");
         assert!(on_disk.contains("demo content"));
         assert!(!on_disk.contains("tampered"));
+    }
+
+    #[tokio::test]
+    async fn demo_mode_with_web_token_configured_reads_stay_open_and_mutations_stay_403_not_401() {
+        // #109 finding 2: a `HATCHDOOR_WEB_BEARER_TOKEN` configured alongside
+        // demo mode must not turn public demo reads into `401`, and must not
+        // let the token gate intercept a mutation before
+        // `reject_demo_mutation` can answer with the required `403
+        // demo_read_only` — regardless of whether a request presents no
+        // token, the wrong token, or the configured one.
+        let (app, tmp, state) =
+            app_for_tests_with_web_auth_and_demo_mode(Some(Arc::from("secret")), true);
+        let vault_path = tmp.path().join("demo-vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault directory");
+        std::fs::write(vault_path.join("Home.md"), "# Home\n\ndemo content\n").expect("write note");
+
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Demo Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_path.clone(),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add vault to registry");
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+        let vault_id = snapshot.vault_ids().next().expect("one vault id");
+
+        // Reads: discovery, one-or-all, and exact content, all reachable with
+        // no token presented at all.
+        for uri in [
+            "/api/v1/vaults".to_string(),
+            "/api/v1/vaults/all/tree".to_string(),
+            format!("/api/v1/vaults/{vault_id}/notes/home"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri.clone())
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+
+        // Content mutations: unauthenticated, wrong-token, and
+        // correctly-authenticated requests must all still get the stable
+        // `403 demo_read_only` refusal, never a `401` from the token gate
+        // running ahead of it.
+        for token in [None, Some("wrong-token"), Some("secret")] {
+            let mut builder = Request::builder()
+                .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
+                .method("PUT")
+                .header("content-type", "application/json");
+            if let Some(token) = token {
+                builder = builder.header("authorization", format!("Bearer {token}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    builder
+                        .body(Body::from(
+                            serde_json::json!({
+                                "content": "# Home\n\ntampered\n",
+                                "expected_content_hash": "does-not-matter",
+                            })
+                            .to_string(),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "token={token:?}");
+            let body = json_body(response).await;
+            assert_eq!(body["code"], "demo_read_only", "token={token:?}");
+        }
+
+        // The Vault-control collection mutation (unrelated to any one Vault)
+        // must refuse the same way.
+        let collection_mutation = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(create_vault_request_body(
+                        "Second",
+                        &tmp.path().join("second"),
+                        snapshot.revision(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(collection_mutation.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            json_body(collection_mutation).await["code"],
+            "demo_read_only"
+        );
+
+        // The attachment upload route follows the same rule as the other
+        // content mutations above, including when it presents a wrong token.
+        let vault_id = vault_id.to_string();
+        for token in [None, Some("wrong-token"), Some("secret")] {
+            let response = app
+                .clone()
+                .oneshot(attachment_upload_request(
+                    &vault_id,
+                    "Attachments/demo.png",
+                    token,
+                ))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "token={token:?}");
+            assert_eq!(
+                json_body(response).await["code"],
+                "demo_read_only",
+                "token={token:?}"
+            );
+        }
     }
 
     #[tokio::test]

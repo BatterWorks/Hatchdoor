@@ -103,7 +103,7 @@ Copy this for a new record:
 - **Context:** A self-hosted app is easy to misconfigure into exposing a private vault (binding `0.0.0.0` without auth; enabling a public demo alongside write surfaces).
 - **Decision:** Refuse to start in unsafe configurations rather than warn: no non-loopback bind without `HATCHDOOR_WEB_BEARER_TOKEN`; demo mode is incompatible with MCP or git sync and refuses to boot together.
 - **Consequences:** Misconfiguration fails loudly at startup instead of silently exposing data; operators must set a token before going public.
-- **Evidence:** `server.rs` (`check_web_auth_posture`, `check_demo_mode_posture`); CHANGELOG F-01.
+- **Evidence:** `server.rs` (`check_web_auth_posture`, `check_demo_mode_posture`, `check_demo_mode_registry_posture`); CHANGELOG F-01.
 
 ## ADR-08 — Bearer-token auth with a query-param fallback
 
