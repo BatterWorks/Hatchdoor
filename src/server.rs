@@ -43,21 +43,78 @@ use crate::handlers::{
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
-use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
+use crate::runtime_config::{
+    ConfigSnapshot, RuntimeConfig, live_settings_defaults, settings_file_path,
+};
 use crate::startup::StartupTracker;
 use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
 use crate::vault_runtime::{
     VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
-    dispatch_vault_index_turn,
+    dispatch_vault_index_turn_with_embed_layers,
 };
 use crate::vault_watcher::spawn_vault_watcher;
-use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
 
 /// Hosts that only accept connections from the local machine. Binding to any
 /// other address exposes the port to the network.
 fn is_loopback_host(host: &str) -> bool {
     matches!(host.trim(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
+}
+
+/// Dependencies captured once for one worker turn. The runtime snapshot is
+/// deliberately part of this value so an admitted operation observes one
+/// immutable configuration view even if settings change later.
+#[derive(Clone)]
+struct VaultWorkDispatchContext {
+    vaults: VaultCollectionRuntime,
+    registry: VaultRegistryStore,
+    work: VaultWorkCoordinator,
+    managed_git: Arc<crate::git::ManagedGitScheduler>,
+    cache: Arc<SqliteCache>,
+    embedder: Arc<dyn Embedder>,
+    runtime_snapshot: Arc<ConfigSnapshot>,
+    author_name: String,
+    author_email: String,
+}
+
+impl VaultWorkDispatchContext {
+    async fn dispatch(self, request: VaultWorkRequest) -> Result<(), VaultWorkError> {
+        match request.kind() {
+            VaultWorkKind::Git => {
+                dispatch_managed_git_turn(
+                    &self.vaults,
+                    &self.registry,
+                    &self.work,
+                    &self.managed_git,
+                    &self.author_name,
+                    &self.author_email,
+                    request,
+                )
+                .await
+            }
+            VaultWorkKind::Index => {
+                let embed_layers = self
+                    .runtime_snapshot
+                    .setting("HATCHDOOR_EMBED_LAYERS")
+                    .map(|setting| crate::runtime_config::is_truthy(&setting.value))
+                    .unwrap_or(true);
+                dispatch_vault_index_turn_with_embed_layers(
+                    &self.vaults,
+                    self.cache,
+                    self.embedder,
+                    embed_layers,
+                    request,
+                )
+                .await
+            }
+            VaultWorkKind::Repair => Err(VaultWorkError::new(
+                "vault_work_kind_not_yet_implemented",
+                format!("{:?} dispatch is not implemented yet", request.kind()),
+                false,
+            )),
+        }
+    }
 }
 
 async fn shutdown_signal() {
@@ -1091,6 +1148,7 @@ pub async fn run_server() {
         let dispatch_managed_git = managed_git.clone();
         let dispatch_cache = state.startup_sqlite.clone();
         let dispatch_embedder = state.embedder.clone();
+        let dispatch_runtime_config = state.runtime_config.clone();
         async move {
             while let Some(outcome) = vault_worker
                 .run_next(|request| {
@@ -1100,32 +1158,21 @@ pub async fn run_server() {
                     let managed_git = dispatch_managed_git.clone();
                     let cache = dispatch_cache.clone();
                     let embedder = dispatch_embedder.clone();
+                    let runtime_snapshot = dispatch_runtime_config.snapshot();
                     let author_name = git_author_name.clone();
                     let author_email = git_author_email.clone();
-                    async move {
-                        match request.kind() {
-                            VaultWorkKind::Git => {
-                                dispatch_managed_git_turn(
-                                    &vaults,
-                                    &registry,
-                                    &work,
-                                    &managed_git,
-                                    &author_name,
-                                    &author_email,
-                                    request,
-                                )
-                                .await
-                            }
-                            VaultWorkKind::Index => {
-                                dispatch_vault_index_turn(&vaults, cache, embedder, request).await
-                            }
-                            VaultWorkKind::Repair => Err(VaultWorkError::new(
-                                "vault_work_kind_not_yet_implemented",
-                                format!("{:?} dispatch is not implemented yet", request.kind()),
-                                false,
-                            )),
-                        }
+                    VaultWorkDispatchContext {
+                        vaults,
+                        registry,
+                        work,
+                        managed_git,
+                        cache,
+                        embedder,
+                        runtime_snapshot,
+                        author_name,
+                        author_email,
                     }
+                    .dispatch(request)
                 })
                 .await
             {
@@ -1533,7 +1580,11 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::app_state::build_cache;
+    use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
+    use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
+    use crate::search::{LayerSelection, NoteFilters, SearchMode};
+    use crate::vault_read::VaultScope;
 
     fn app_for_tests() -> (Router, TempDir) {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -1602,6 +1653,121 @@ mod tests {
 
     fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         app_for_tests_with_web_auth(None)
+    }
+
+    #[tokio::test]
+    async fn queued_index_turn_uses_the_runtime_snapshot_captured_by_server_dispatch() {
+        let directory = TempDir::new_in("/tmp").expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(vault_path.join("sources")).expect("create Vault directory");
+        std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(
+            vault_path.join("sources/Clip.md"),
+            "# Clip\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("write demoted note");
+
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Only".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                },
+            )
+            .expect("add Vault");
+        let vault_id = snapshot
+            .definitions()
+            .next()
+            .expect("Vault definition")
+            .vault_id();
+        let vaults = VaultCollectionRuntime::new();
+        let (work, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(work.clone()));
+        vaults
+            .reconcile_and_reconstruct(&registry, &snapshot, &work, &managed_git)
+            .await;
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let runtime_config = RuntimeConfig::for_tests();
+        runtime_config
+            .save([("HATCHDOOR_EMBED_LAYERS".to_string(), "false".to_string())])
+            .expect("save disabled setting");
+        let captured = runtime_config.snapshot();
+        runtime_config
+            .save([("HATCHDOOR_EMBED_LAYERS".to_string(), "true".to_string())])
+            .expect("save later setting");
+
+        let outcome = worker
+            .run_next({
+                let vaults = vaults.clone();
+                let registry = registry.clone();
+                let work = work.clone();
+                let cache = cache.clone();
+                let embedder = embedder.clone();
+                move |request| {
+                    VaultWorkDispatchContext {
+                        vaults,
+                        registry,
+                        work,
+                        managed_git,
+                        cache,
+                        embedder,
+                        runtime_snapshot: captured,
+                        author_name: "Hatchdoor".to_string(),
+                        author_email: "hatchdoor@example.test".to_string(),
+                    }
+                    .dispatch(request)
+                }
+            })
+            .await
+            .expect("queued Index turn");
+        outcome.result.expect("Index publication succeeds");
+
+        let (layers, _) = LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
+        let search = VaultSearchCore::new(&cache, &vaults, embedder.as_ref());
+        let keyword = search
+            .search(VaultSearchRequest {
+                scope: VaultScope::One(vault_id),
+                query: "melatonin".to_string(),
+                mode: SearchMode::Keyword,
+                limit: 10,
+                per_note_cap: 1,
+                filters: NoteFilters::default(),
+                include_properties: Vec::new(),
+                layers: layers.clone(),
+            })
+            .expect("keyword search");
+        assert!(
+            keyword
+                .data
+                .results
+                .iter()
+                .any(|hit| hit.note_slug == "clip")
+        );
+        assert!(
+            search
+                .search(VaultSearchRequest {
+                    scope: VaultScope::One(vault_id),
+                    query: "melatonin circadian".to_string(),
+                    mode: SearchMode::Semantic,
+                    limit: 10,
+                    per_note_cap: 1,
+                    filters: NoteFilters::default(),
+                    include_properties: Vec::new(),
+                    layers,
+                })
+                .expect("semantic search")
+                .data
+                .results
+                .is_empty(),
+            "the turn must retain the false setting captured before the later save"
+        );
     }
 
     fn app_for_tests_with_web_and_mcp_auth(

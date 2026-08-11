@@ -24,6 +24,63 @@ use crate::vault_registry::{
 use crate::vault_watcher::{VaultWatcherHandle, spawn_vault_change_watcher};
 use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
 
+#[cfg(test)]
+static INDEX_MUTATION_PROBE: Mutex<Option<(VaultId, Arc<tokio::sync::Notify>)>> = Mutex::new(None);
+
+/// Test-only rendezvous for proving an Index turn has reached its foreground
+/// mutation-lock attempt without relying on scheduler timing.
+#[cfg(test)]
+pub(crate) struct IndexMutationProbe {
+    vault_id: VaultId,
+    lock_attempted: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+impl IndexMutationProbe {
+    pub(crate) fn install(vault_id: VaultId) -> Self {
+        let lock_attempted = Arc::new(tokio::sync::Notify::new());
+        *INDEX_MUTATION_PROBE
+            .lock()
+            .expect("Index mutation probe poisoned") = Some((vault_id, lock_attempted.clone()));
+        Self {
+            vault_id,
+            lock_attempted,
+        }
+    }
+
+    pub(crate) async fn lock_attempted(&self) {
+        self.lock_attempted.notified().await;
+    }
+}
+
+#[cfg(test)]
+impl Drop for IndexMutationProbe {
+    fn drop(&mut self) {
+        let mut installed = INDEX_MUTATION_PROBE
+            .lock()
+            .expect("Index mutation probe poisoned");
+        if installed
+            .as_ref()
+            .is_some_and(|(vault_id, _)| *vault_id == self.vault_id)
+        {
+            *installed = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn notify_index_mutation_lock_attempt(vault_id: VaultId) {
+    let probe = INDEX_MUTATION_PROBE
+        .lock()
+        .expect("Index mutation probe poisoned")
+        .as_ref()
+        .filter(|(probed_vault_id, _)| *probed_vault_id == vault_id)
+        .map(|(_, lock_attempted)| lock_attempted.clone());
+    if let Some(lock_attempted) = probe {
+        lock_attempted.notify_one();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultSource {
     Local { vault_path: PathBuf },
@@ -1627,10 +1684,23 @@ fn collection_capabilities(
 /// `search/vault_scoped.rs`) derive participant freshness solely from this
 /// cache-published status, so without this the authoritative Markdown could
 /// already differ from a snapshot those reads keep reporting as fresh.
+#[cfg(test)]
 pub(crate) async fn dispatch_vault_index_turn(
     collection: &VaultCollectionRuntime,
     cache: Arc<SqliteCache>,
     embedder: Arc<dyn Embedder>,
+    request: VaultWorkRequest,
+) -> Result<(), VaultWorkError> {
+    dispatch_vault_index_turn_with_embed_layers(collection, cache, embedder, true, request).await
+}
+
+/// Execute one Index turn using the immutable embed-layer setting bound by
+/// runtime composition at the turn's start.
+pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
+    collection: &VaultCollectionRuntime,
+    cache: Arc<SqliteCache>,
+    embedder: Arc<dyn Embedder>,
+    embed_layers: bool,
     request: VaultWorkRequest,
 ) -> Result<(), VaultWorkError> {
     let vault_id = request.vault_id();
@@ -1638,6 +1708,16 @@ pub(crate) async fn dispatch_vault_index_turn(
         return Ok(());
     };
 
+    // HTTP and MCP Markdown mutations hold this exact per-Vault guard across
+    // their filesystem transaction. Hold it through the authoritative scan
+    // and atomic disposable-cache publication too, so an Index turn cannot
+    // observe or publish a mixed multi-file foreground mutation.
+    #[cfg(test)]
+    notify_index_mutation_lock_attempt(vault_id);
+    let _mutation = control_block
+        .acquire_mutation()
+        .await
+        .map_err(vault_index_error)?;
     control_block
         .set_search_status(VaultSearchStatus::Indexing, None)
         .map_err(vault_index_error)?;
@@ -1660,7 +1740,12 @@ pub(crate) async fn dispatch_vault_index_turn(
                 .authoritative_index()
                 .map_err(|error| (vault_index_error(error), true))?;
             indexing_cache
-                .replace_vault_snapshot(vault_id, &index, embedder.as_ref())
+                .replace_vault_snapshot_with_embed_layers(
+                    vault_id,
+                    &index,
+                    embedder.as_ref(),
+                    embed_layers,
+                )
                 .map_err(|message| {
                     (
                         VaultWorkError::new("vault_index_failed", message, true),

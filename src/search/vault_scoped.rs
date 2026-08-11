@@ -276,7 +276,10 @@ fn semantic_hits(
             if !request.filters.matches(&note) {
                 continue;
             }
-            let distance = euclidean_distance(&vector, &chunk.embedding)
+            let Some(embedding) = &chunk.embedding else {
+                continue;
+            };
+            let distance = euclidean_distance(&vector, embedding)
                 .map_err(|message| error(Some(*vault_id), "search_unavailable", &message, true))?;
             hits.push(result_for(
                 *vault_id,
