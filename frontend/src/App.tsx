@@ -91,6 +91,8 @@ export function VaultApp() {
     loadingTree,
     treeError,
     modifiedNotes,
+    modifiedNotesPartial,
+    modifiedNotesMissingVaults,
     vaultRevision,
     folderPaths,
     noteCandidates,
@@ -118,6 +120,8 @@ export function VaultApp() {
     searchIncludeContent,
     setSearchIncludeContent,
     searchResults,
+    searchPartial,
+    searchMissingVaultNames,
     searchLoading,
     searchError,
     searchInputRef,
@@ -483,6 +487,8 @@ export function VaultApp() {
           locationPathname={location.pathname}
           recentNotes={recentNotes}
           modifiedNotes={modifiedNotes}
+          modifiedNotesPartial={modifiedNotesPartial}
+          modifiedNotesMissingVaults={modifiedNotesMissingVaults}
           loadingTree={loadingTree}
           treeError={treeError}
           tree={tree}
@@ -601,6 +607,8 @@ export function VaultApp() {
           loading={searchLoading}
           error={searchError}
           results={searchResults}
+          partial={searchPartial}
+          missingVaultNames={searchMissingVaultNames}
           vaults={vaults}
           scope={scope}
           inputRef={searchInputRef}

@@ -9,7 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ExplorerPane } from "./ExplorerPane";
-import { THREE_VAULTS } from "../test/fixtures/vaults";
+import { EIGHT_VAULTS, THREE_VAULTS } from "../test/fixtures/vaults";
 import type { ExplorerFolder, ModifiedNote, RecentNote } from "../types";
 
 const VAULT_ID = "vault-1";
@@ -59,6 +59,8 @@ function renderPane(
     locationPathname: `/v/${VAULT_ID}/n/home`,
     recentNotes: RECENT,
     modifiedNotes: MODIFIED,
+    modifiedNotesPartial: false,
+    modifiedNotesMissingVaults: [],
     loadingTree: false,
     treeError: null,
     tree: TREE,
@@ -393,5 +395,96 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
 
     const panel = screen.getByRole("region", { name: "Recently changed notes" });
     expect(within(panel).queryByText("Gamma")).not.toBeInTheDocument();
+  });
+});
+
+describe("Changed on disk tells the truth about a partial read (#141)", () => {
+  afterEach(cleanup);
+
+  function openChanges() {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Recently changed notes" }),
+    );
+  }
+
+  it("names only the missing Vaults in a trailing warn-ink line, at three Vaults, without changing ranking", () => {
+    const missing = [THREE_VAULTS[2].name];
+    renderPane({
+      vaults: THREE_VAULTS,
+      modifiedNotes: MODIFIED,
+      modifiedNotesPartial: true,
+      modifiedNotesMissingVaults: missing,
+    });
+    openChanges();
+
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
+    expect(
+      within(panel).getByText(`${missing[0]} did not answer.`),
+    ).toHaveClass("explorer-changes-partial");
+    // The note row itself is still there, in the API's own order.
+    expect(
+      within(panel).getByRole("link", { name: /Finance/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("names every missing Vault in a trailing line, at eight Vaults", () => {
+    const missing = EIGHT_VAULTS.slice(6).map((vault) => vault.name);
+    renderPane({
+      vaults: EIGHT_VAULTS,
+      modifiedNotes: MODIFIED,
+      modifiedNotesPartial: true,
+      modifiedNotesMissingVaults: missing,
+    });
+    openChanges();
+
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
+    expect(
+      within(panel).getByText(
+        `${missing[0]} and ${missing[1]} did not answer.`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("replaces the empty state with the documented error block when nothing is usable", () => {
+    const missing = [THREE_VAULTS[0].name, THREE_VAULTS[1].name];
+    renderPane({
+      vaults: THREE_VAULTS,
+      modifiedNotes: [],
+      modifiedNotesPartial: true,
+      modifiedNotesMissingVaults: missing,
+    });
+    openChanges();
+
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
+    expect(
+      within(panel).queryByText("Nothing has changed on disk yet."),
+    ).not.toBeInTheDocument();
+    expect(document.querySelector(".state-block.error")).not.toBeNull();
+    expect(
+      within(panel).getByText(
+        `${missing[0]} and ${missing[1]} did not answer.`,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the plain empty state, not the error block, when the read is not partial", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      modifiedNotes: [],
+      modifiedNotesPartial: false,
+      modifiedNotesMissingVaults: [],
+    });
+    openChanges();
+
+    expect(document.querySelector(".state-block.error")).toBeNull();
+    expect(
+      screen.getByText("Nothing has changed on disk yet."),
+    ).toBeInTheDocument();
   });
 });

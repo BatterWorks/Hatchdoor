@@ -1,7 +1,8 @@
 import { NavLink } from "react-router-dom";
 
+import { describeMissingVaults } from "../lib/vaultParticipants";
 import { SideHead } from "./Explorer";
-import { VaultPrefix } from "./ui";
+import { StateBlock, VaultPrefix } from "./ui";
 import type { ModifiedNote, VaultScope, VaultSummary } from "../types";
 
 /** Matches the cap in the design: newest first, the rest behind a count. */
@@ -26,11 +27,18 @@ export function ChangesPanel({
   onNavigate,
   vaults,
   scope,
+  partial,
+  missingVaultNames,
 }: {
   notes: ModifiedNote[];
   onNavigate: () => void;
   vaults: VaultSummary[];
   scope: VaultScope;
+  /** Whether at least one Vault this read asked did not answer fresh
+   * (#141). Never a banner: results still render in the API's own ranking,
+   * and only the empty case changes shape. */
+  partial: boolean;
+  missingVaultNames: string[];
 }) {
   const visible = notes.slice(0, VISIBLE_LIMIT);
   const overflow = notes.length - visible.length;
@@ -47,9 +55,20 @@ export function ChangesPanel({
           notes appearing above Recently viewed reads as part of it. */}
       <SideHead label="Changed on disk" count={notes.length} />
       {notes.length === 0 ? (
-        <p className="explorer-changes-empty">
-          Nothing has changed on disk yet.
-        </p>
+        partial ? (
+          // Nothing usable: the documented error block replaces the empty
+          // shell entirely rather than sitting under it. "Nothing has
+          // changed" would be a lie when some Vaults never answered.
+          <StateBlock
+            tone="error"
+            title="Nothing Found"
+            description={describeMissingVaults(missingVaultNames)}
+          />
+        ) : (
+          <p className="explorer-changes-empty">
+            Nothing has changed on disk yet.
+          </p>
+        )
       ) : (
         <>
           <ul className="tree root-tree">
@@ -81,6 +100,13 @@ export function ChangesPanel({
           </ul>
           {overflow > 0 ? (
             <p className="explorer-changes-more">and {overflow} more</p>
+          ) : null}
+          {/* Ranking is unchanged by partiality; this trailing line is the
+              only thing that changes (#141). */}
+          {partial ? (
+            <p className="explorer-changes-partial">
+              {describeMissingVaults(missingVaultNames)}
+            </p>
           ) : null}
         </>
       )}
