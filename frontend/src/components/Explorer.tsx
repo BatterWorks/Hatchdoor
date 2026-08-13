@@ -1,5 +1,5 @@
 import { NavLink } from "react-router-dom";
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 
 import type {
   ExplorerFolder,
@@ -10,46 +10,62 @@ import type {
 } from "../types";
 import { AddIcon } from "./icons";
 import { UiPanel, VaultPrefix } from "./ui";
+import { pathToNoteIdentity, type NoteIdentity } from "../lib/notePath";
 
-/** Section header: `01 · RECENT · ──── · 04`, per §05 of the design system. */
+/** Section header: `01 · RECENT · ──── · 04`, per §05 of the design system.
+ * `slot`, when given, replaces the plain mono `count` with arbitrary
+ * trailing content (the count-or-condition slot, #142); `disabled` marks a
+ * collapsible head `aria-disabled` and inert without removing it from the
+ * tab order (#116's precedent, same as the rail's Settings slot). */
 export function SideHead({
   label,
   count,
+  slot,
   collapsible,
   open,
   controls,
   onToggle,
+  disabled,
+  className,
 }: {
   label: string;
   count?: number;
+  slot?: ReactNode;
   collapsible?: boolean;
   open?: boolean;
   controls?: string;
   onToggle?: () => void;
+  disabled?: boolean;
+  className?: string;
 }) {
   const inner = (
     <>
       {collapsible ? <span className="side-caret" aria-hidden="true" /> : null}
       <span className="side-label">{label}</span>
       <span className="side-rule" />
-      {count === undefined ? null : (
-        <span className="side-count">{String(count).padStart(2, "0")}</span>
-      )}
+      {slot !== undefined
+        ? slot
+        : count === undefined
+          ? null
+          : <span className="side-count">{String(count).padStart(2, "0")}</span>}
     </>
   );
 
+  const classes = className ? `side-head ${className}` : "side-head";
+
   if (!collapsible) {
-    return <div className="side-head">{inner}</div>;
+    return <div className={classes}>{inner}</div>;
   }
 
   return (
     <button
       type="button"
-      className="side-head"
+      className={classes}
       data-open={open}
-      aria-expanded={open}
+      aria-expanded={disabled ? undefined : open}
+      aria-disabled={disabled || undefined}
       aria-controls={controls}
-      onClick={onToggle}
+      onClick={disabled ? undefined : onToggle}
     >
       {inner}
     </button>
@@ -281,20 +297,6 @@ function NoteNode({
       </NavLink>
     </li>
   );
-}
-
-type NoteIdentity = { vaultId: string; slug: string };
-
-function pathToNoteIdentity(pathname: string): NoteIdentity | null {
-  const match = pathname.match(/^\/v\/([^/]+)\/n\/([^/]+)$/);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    vaultId: decodeURIComponent(match[1]),
-    slug: decodeURIComponent(match[2]),
-  };
 }
 
 function collectAncestorFolderPaths(

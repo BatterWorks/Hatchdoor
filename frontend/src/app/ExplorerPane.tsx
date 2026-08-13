@@ -1,4 +1,10 @@
-import { useState, type RefObject } from "react";
+import {
+  Fragment,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { NavLink } from "react-router-dom";
 
 import { ChangesPanel } from "../components/ChangesPanel";
@@ -12,6 +18,15 @@ import {
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
 import { deriveVaultAggregate } from "./vaultSlotLogic";
+import {
+  expandedFoldersForVault,
+  getStoredUnfoldedVault,
+  isVaultUnfoldable,
+  resolveInitialUnfoldedVault,
+  resolveLandingVaultId,
+  setStoredUnfoldedVault,
+  withVaultFolderChange,
+} from "./vaultAccordion";
 import type {
   ExplorerFolder,
   ModifiedNote,
@@ -19,6 +34,7 @@ import type {
   VaultId,
   VaultScope,
   VaultSummary,
+  VaultTree,
 } from "../types";
 
 function countNotes(folder: ExplorerFolder): number {
@@ -135,6 +151,92 @@ function ScopeZone({
 }
 
 /**
+ * The explorer tree under `all` with more than one enabled Vault (#142): an
+ * accordion of per-Vault sections, exactly one unfolded at a time. Every
+ * Vault keeps a permanent one-line head in Vault-management order; only the
+ * unfolded Vault's own tree (from `vaultTrees`, never the merged `tree`) is
+ * shown, so height stays one tree plus N one-line heads whatever N is.
+ * Unfolding only calls `onUnfold` — it never touches scope.
+ */
+function VaultAccordion({
+  vaults,
+  vaultTrees,
+  unfoldedVaultId,
+  onUnfold,
+  noteCounts,
+  currentPath,
+  expandedFolders,
+  onExpandedFoldersChange,
+  writeEnabled,
+  onCreateNoteInFolder,
+}: {
+  vaults: VaultSummary[];
+  vaultTrees: VaultTree[];
+  unfoldedVaultId: VaultId | undefined;
+  onUnfold: (vaultId: VaultId) => void;
+  noteCounts: Record<VaultId, number | undefined>;
+  currentPath: string;
+  expandedFolders: Record<string, boolean>;
+  onExpandedFoldersChange: (next: Record<string, boolean>) => void;
+  writeEnabled: boolean;
+  onCreateNoteInFolder: (folderPath: string) => void;
+}) {
+  const treesByVault = new Map(
+    vaultTrees.map((entry) => [entry.vault_id, entry.tree]),
+  );
+
+  return (
+    <>
+      {vaults.map((vault) => {
+        const isOpen = vault.vault_id === unfoldedVaultId;
+        const unfoldable = isVaultUnfoldable(vault);
+        const vaultTree = treesByVault.get(vault.vault_id);
+
+        return (
+          <Fragment key={vault.vault_id}>
+            <SideHead
+              label={vault.name}
+              slot={
+                <VaultSlot
+                  vault={vault}
+                  noteCount={noteCounts[vault.vault_id]}
+                />
+              }
+              collapsible
+              open={isOpen}
+              disabled={!unfoldable}
+              className="vault-accordion-head"
+              onToggle={() => onUnfold(vault.vault_id)}
+            />
+            {isOpen && vaultTree ? (
+              <FolderTree
+                root={vaultTree}
+                currentPath={currentPath}
+                expandedFolders={expandedFoldersForVault(
+                  expandedFolders,
+                  vault.vault_id,
+                )}
+                onExpandedFoldersChange={(next) =>
+                  onExpandedFoldersChange(
+                    withVaultFolderChange(
+                      expandedFolders,
+                      vault.vault_id,
+                      next,
+                    ),
+                  )
+                }
+                writeEnabled={writeEnabled}
+                onCreateNoteInFolder={onCreateNoteInFolder}
+              />
+            ) : null}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
+/**
  * Whole-vault destinations plus the changes panel. Lives inside the sidebar
  * rather than the topbar on purpose: the topbar's four mobile slots are the
  * hard constraint, and the rail sits inside the drawer, outside that budget.
@@ -213,6 +315,7 @@ type ExplorerPaneProps = {
   loadingTree: boolean;
   treeError: string | null;
   tree: ExplorerFolder | null;
+  vaultTrees: VaultTree[];
   expandedFolders: Record<string, boolean>;
   recentCollapsed: boolean;
   onRecentCollapsedChange: (next: boolean) => void;
@@ -244,6 +347,7 @@ export function ExplorerPane({
   loadingTree,
   treeError,
   tree,
+  vaultTrees,
   expandedFolders,
   recentCollapsed,
   onRecentCollapsedChange,
@@ -263,6 +367,55 @@ export function ExplorerPane({
   // module map is explicit that this is a coordination seam rather than an
   // invitation to move feature state into it.
   const [changesOpen, setChangesOpen] = useState(false);
+
+  // The accordion's unfolded Vault (#142). Narrowing scope always sets it to
+  // the Vault just left, so widening restores that Vault — resolved eagerly
+  // off `scope` alone, no need to wait for anything else. The landing
+  // default (note's own Vault, else the last persisted, else nothing) is
+  // resolved once, off the URL and storage directly rather than `viewingVaultId`
+  // (which depends on the open note's own content fetch and would race
+  // App.tsx's last-note redirect).
+  const [unfoldedVaultId, setUnfoldedVaultId] = useState<VaultId | undefined>(
+    undefined,
+  );
+  const initializedUnfoldRef = useRef(false);
+
+  useEffect(() => {
+    if (scope !== "all") {
+      initializedUnfoldRef.current = true;
+      setUnfoldedVaultId(scope);
+      setStoredUnfoldedVault(scope);
+      return;
+    }
+    if (initializedUnfoldRef.current || vaults.length === 0) {
+      return;
+    }
+    initializedUnfoldRef.current = true;
+    const landingVaultId = resolveLandingVaultId(locationPathname);
+    const initial = resolveInitialUnfoldedVault(
+      landingVaultId,
+      getStoredUnfoldedVault(),
+      vaults,
+    );
+    setUnfoldedVaultId(initial);
+    if (initial) {
+      setStoredUnfoldedVault(initial);
+    }
+  }, [scope, vaults, locationPathname]);
+
+  const handleUnfoldVault = (vaultId: VaultId) => {
+    if (vaultId === unfoldedVaultId) {
+      return;
+    }
+    setUnfoldedVaultId(vaultId);
+    setStoredUnfoldedVault(vaultId);
+  };
+
+  const showAccordion = scope === "all" && vaults.length > 1;
+  const narrowedVault =
+    scope !== "all"
+      ? vaults.find((vault) => vault.vault_id === scope)
+      : undefined;
 
   return (
     <aside className="explorer-pane" data-open={drawerOpen}>
@@ -322,17 +475,47 @@ export function ExplorerPane({
             onAction={onRefreshTree}
           />
         ) : null}
-        {tree ? <SideHead label="Notes" count={countNotes(tree)} /> : null}
-        {tree ? (
-          <FolderTree
-            root={tree}
+        {showAccordion ? (
+          <VaultAccordion
+            vaults={vaults}
+            vaultTrees={vaultTrees}
+            unfoldedVaultId={unfoldedVaultId}
+            onUnfold={handleUnfoldVault}
+            noteCounts={vaultNoteCounts}
             currentPath={locationPathname}
             expandedFolders={expandedFolders}
             onExpandedFoldersChange={onExpandedFoldersChange}
             writeEnabled={writeEnabled}
             onCreateNoteInFolder={onCreateNoteInFolder}
           />
-        ) : null}
+        ) : (
+          <>
+            {tree ? (
+              <SideHead
+                label="Notes"
+                count={narrowedVault ? undefined : countNotes(tree)}
+                slot={
+                  narrowedVault ? (
+                    <VaultSlot
+                      vault={narrowedVault}
+                      noteCount={vaultNoteCounts[narrowedVault.vault_id]}
+                    />
+                  ) : undefined
+                }
+              />
+            ) : null}
+            {tree ? (
+              <FolderTree
+                root={tree}
+                currentPath={locationPathname}
+                expandedFolders={expandedFolders}
+                onExpandedFoldersChange={onExpandedFoldersChange}
+                writeEnabled={writeEnabled}
+                onCreateNoteInFolder={onCreateNoteInFolder}
+              />
+            ) : null}
+          </>
+        )}
       </div>
 
       {/* One action only. A footer with three things in it becomes the next

@@ -2709,6 +2709,71 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       </div>
     </section>
 
+    <!-- ───────── VAULT ACCORDION ───────── -->
+    <section class="doc-section" id="vault-accordion">
+      <div class="doc-section-num">§29</div>
+      <h2>Vault accordion</h2>
+      <p class="blurb">Under <span class="key">all</span> scope the explorer is an accordion of
+      per-Vault sections with <b>exactly one Vault unfolded at a time</b>. Every Vault keeps a
+      permanent one-line head; only the unfolded one shows a tree, so the explorer stays one tree
+      plus N one-line heads whatever N is &mdash; bounded height is the whole argument. The head is
+      the documented section head (§05) with the Vault name in the label slot and §27's own
+      count-or-condition slot trailing; unfolded takes the active treatment, folded is plain. It is
+      one click target with one job &mdash; unfold this Vault. <b>It does not narrow scope.</b></p>
+
+      <div class="stage" style="padding:0; max-width: 300px;">
+        <div style="padding: 1rem 1rem 1.2rem; background: var(--bg);">
+          <button class="side-head vault-accordion-head" data-open="true"><span class="side-caret"></span><span class="side-label">Work</span><span class="side-rule"></span><span class="side-count">126</span></button>
+          <div class="folder-item" data-open="true">
+            <a class="folder-row" href="#"><span class="caret"></span>10-journal</a>
+            <div class="children">
+              <a class="note-link is-active" href="#"><span class="idx">001</span>Field notes from the orchard</a>
+              <a class="note-link" href="#"><span class="idx">002</span>On pruning</a>
+            </div>
+          </div>
+          <div class="folder-item"><a class="folder-row" href="#"><span class="caret"></span>20-reading</a></div>
+          <button class="side-head vault-accordion-head"><span class="side-caret"></span><span class="side-label">Personal</span><span class="side-rule"></span><span class="vault-slot-condition vault-tier-warn">stale</span></button>
+          <button class="side-head vault-accordion-head"><span class="side-caret"></span><span class="side-label">Notebook</span><span class="side-rule"></span><span class="side-count">84</span></button>
+          <button class="side-head vault-accordion-head" aria-disabled="true"><span class="side-caret"></span><span class="side-label">Archive</span><span class="side-rule"></span><span class="vault-slot-condition vault-tier-error">unavailable</span></button>
+        </div>
+      </div>
+
+      <p class="blurb">A Vault that cannot answer keeps its head, carries the same <code>unavailable</code>
+      condition word §27 already defines, and does not unfold &mdash; <code>aria-disabled</code>
+      rather than <code>disabled</code>, the same precedent the rail's Settings slot (§05) set: a
+      keyboard user can still reach it and hear why it does nothing, since a dimmed control with no
+      explanation reads as a bug. <b>Ordering is fixed and never re-sorts</b> &mdash; the order Vault
+      management holds them in, the same order the Scope zone (§27) lists them in. Not by status, not
+      by count, not by recency: a condition changes the slot, never the position. The Scope zone and
+      the accordion are visibly the same list twice, doing two different jobs &mdash; one changes what
+      you are browsing, the other opens a Vault's files without leaving <span class="key">all</span>.</p>
+
+      <p class="blurb"><b>Defaults and memory.</b> Landing with a note open unfolds the Vault holding
+      that note. Landing with none unfolds the last one, persisted per browser. Neither, and nothing
+      is unfolded &mdash; a plain list of Vault names is the honest picture of an instance with no
+      history. The landing Vault is read directly off the URL (a direct link to a note) or the stored
+      last-note entry (landing at the root), rather than waited for from the open note's own content
+      fetch, so the accordion's first paint never races that fetch or App.tsx's own last-note
+      redirect. Folder open state is remembered per Vault, namespaced under the shared
+      <code>expandedFolders</code> record so two Vaults' identically-named folders (two
+      <code>Journal</code>s) never share open/closed state; narrowed-scope browsing keeps today's
+      unnamespaced keys untouched.</p>
+
+      <p class="blurb"><b>Narrowing to one Vault deletes the accordion entirely</b>: the heads
+      disappear and the single <span class="key">Notes</span> head (§05) returns with §27's
+      count-or-condition slot in place of its plain count, so a narrowed view &mdash; and a
+      single-Vault instance, which never sees the accordion at all &mdash; is byte-identical to a
+      single-Vault Hatchdoor. Widening restores the accordion with the Vault just left unfolded: the
+      narrowed scope and the accordion's own memory are the same value, so leaving a Vault and
+      returning to <span class="key">all</span> reopens exactly where you were.</p>
+
+      <div class="tag-row">
+        <span class="key">app/vaultAccordion.ts</span><span class="key">app/ExplorerPane.tsx</span><span class="key">lib/notePath.ts</span>
+        <span class="key">.vault-accordion-head</span><span class="key">.vault-accordion-head[data-open]</span><span class="key">.vault-accordion-head[aria-disabled]</span>
+        <span class="key">SideHead <i>slot</i> / <i>disabled</i></span>
+      </div>
+    </section>
+
   </main>
 </div>
 

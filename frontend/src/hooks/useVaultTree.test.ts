@@ -16,13 +16,13 @@ function jsonResponse(body: unknown): Response {
   });
 }
 
-function mockFetch(recentEnvelope: unknown) {
+function mockFetch(recentEnvelope: unknown, treeData: unknown[] = []) {
   return vi
     .spyOn(globalThis, "fetch")
     .mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/tree")) {
-        return jsonResponse(collectionEnvelope("all", [], []));
+        return jsonResponse(collectionEnvelope("all", treeData, []));
       }
       if (url.includes("/recent")) {
         return jsonResponse(recentEnvelope);
@@ -84,5 +84,21 @@ describe("useVaultTree — Changed on disk partiality (#141)", () => {
       EIGHT_VAULTS[6].name,
       EIGHT_VAULTS[7].name,
     ]);
+  });
+});
+
+describe("useVaultTree — per-Vault trees (#142)", () => {
+  it("exposes each participating Vault's own tree, ungrouped", async () => {
+    const treeData = THREE_VAULTS.map((vault) => ({
+      vault_id: vault.vault_id,
+      vault_name: vault.name,
+      tree: { name: vault.name, folders: [], notes: [] },
+    }));
+    mockFetch(collectionEnvelope("all", [], []), treeData);
+
+    const { result } = renderHook(() => useVaultTree("all"));
+
+    await waitFor(() => expect(result.current.loadingTree).toBe(false));
+    expect(result.current.vaultTrees).toEqual(treeData);
   });
 });

@@ -27,7 +27,7 @@ import {
   clampSidebarWidth,
   getStoredNumber,
   getStoredRecentNotes,
-  getStoredString,
+  getStoredLastNote,
   getStoredExpandedFolders,
   isEditableTarget,
 } from "./lib/storage";
@@ -88,6 +88,7 @@ export function VaultApp() {
 
   const {
     tree,
+    vaultTrees,
     loadingTree,
     treeError,
     modifiedNotes,
@@ -304,22 +305,16 @@ export function VaultApp() {
       return;
     }
     restoredLastNoteRef.current = true;
-    const raw = getStoredString(LAST_NOTE_KEY);
-    if (!raw) {
+    // Malformed or pre-#137 slug-only stored state resolves to null and is
+    // ignored, same as before.
+    const last = getStoredLastNote();
+    if (!last) {
       return;
     }
-    try {
-      const last = JSON.parse(raw) as { vaultId?: unknown; slug?: unknown };
-      if (typeof last.vaultId !== "string" || typeof last.slug !== "string") {
-        return;
-      }
-      navigate(
-        `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
-        { replace: true },
-      );
-    } catch {
-      // Ignore malformed stored state (a pre-#137 slug-only value included).
-    }
+    navigate(
+      `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
+      { replace: true },
+    );
   }, [location.pathname, navigate]);
 
   useEffect(() => {
@@ -494,6 +489,7 @@ export function VaultApp() {
           loadingTree={loadingTree}
           treeError={treeError}
           tree={tree}
+          vaultTrees={vaultTrees}
           expandedFolders={expandedFolders}
           recentCollapsed={recentCollapsed}
           onRecentCollapsedChange={(next) => {
