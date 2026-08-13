@@ -11,12 +11,10 @@ import type {
 } from "../types";
 
 /**
- * The selected Vault scope: state and storage only (#137) — no Scope zone or
- * other chrome reads or writes this yet. Persists per browser across
- * navigation and reloads via `lib/storage`'s `getStoredScope`/`setStoredScope`.
- * `setScope` exists for the Scope zone (#114) to call; nothing in this ticket
- * calls it yet, since narrowing scope is a deliberate act taken in chrome that
- * does not exist here.
+ * The selected Vault scope: state and storage only. Persists per browser
+ * across navigation and reloads via `lib/storage`'s
+ * `getStoredScope`/`setStoredScope`. `setScope` is called by the sidebar
+ * Scope zone (#138), the only chrome that narrows scope.
  */
 export function useVaultScope(): [VaultScope, (next: VaultScope) => void] {
   const [scope, setScopeState] = useState<VaultScope>(() => getStoredScope());

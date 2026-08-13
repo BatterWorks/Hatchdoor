@@ -1412,11 +1412,12 @@ boundaries are currently documentation-enforced.
 
 **Contract and responsibility:** bootstraps React/router/PWA, composes feature
 hooks and routes, owns responsive shell state, navigation, persistent shell
-preferences, topbar actions, and explorer placement. `useVaultScope.ts` (#137)
-owns the selected Vault scope (state/storage only — no chrome yet), Vault
-discovery (`useVaultDiscovery`), and the Vault-less-action default
-(`resolvePrimaryVaultId`), consumed by every collection-read and
-Vault-picking call site until #114's Scope zone exists.
+preferences, topbar actions, and explorer placement. `useVaultScope.ts` owns
+the selected Vault scope (state/storage, per #137), Vault discovery
+(`useVaultDiscovery`), and the Vault-less-action default
+(`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) is the
+only chrome that calls `setScope`, on the desktop only; every other
+collection-read and Vault-picking call site only reads the selected scope.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -1495,7 +1496,10 @@ frontend checks.
 **Public contract:** `useVaultTree`, explorer tree/list components, derived
 folder paths, and flattened note candidates. The sidebar is three zones — a
 fixed rail, a scrolling nav, a fixed footer — and `.explorer-nav` is the scroll
-container the shell restores scroll position against, not the pane itself.
+container the shell restores scroll position against, not the pane itself. On
+desktop with more than one enabled Vault, the shell-owned Scope zone (#138,
+`app/ExplorerPane.tsx`) pins a fourth zone above the rail; it shares this
+file's CSS but is not part of this capability's owned React contract.
 `ChangesPanel` lists notes changed on disk; it deliberately carries no unread
 count, because distinguishing external changes from the user's own edits needs
 backend data that does not exist yet.

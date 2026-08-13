@@ -9,7 +9,7 @@ import {
   MoreHorizIcon,
   SearchIcon,
 } from "../components/icons";
-import type { ActiveNoteMeta } from "../types";
+import type { ActiveNoteMeta, VaultScope, VaultSummary } from "../types";
 import type { Theme } from "../hooks/useTheme";
 
 // One icon per theme state, mirroring the three-way cycle. The icon shows the
@@ -32,6 +32,8 @@ const THEME_LABEL: Record<Theme, string> = {
 
 type TopbarProps = {
   activeNote: ActiveNoteMeta | null;
+  vaults: VaultSummary[];
+  scope: VaultScope;
   writeEnabled: boolean;
   isMobile: boolean;
   isOnline: boolean;
@@ -57,6 +59,8 @@ type TopbarProps = {
 
 export function AppTopbar({
   activeNote,
+  vaults,
+  scope,
   writeEnabled,
   isMobile,
   isOnline,
@@ -83,6 +87,19 @@ export function AppTopbar({
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
+  // Read-only: no scope control lives in the topbar (#138). Echoes the open
+  // note's own Vault where one is open, else the selected scope — same
+  // precedence the sidebar's collapsed Scope zone head uses. Absent at one
+  // enabled Vault, where scope has nothing to say.
+  const scopeEcho =
+    vaults.length > 1
+      ? (vaults.find((vault) => vault.vault_id === activeNote?.vaultId)
+          ?.name ??
+        (scope === "all"
+          ? "All Vaults"
+          : (vaults.find((vault) => vault.vault_id === scope)?.name ??
+            "All Vaults")))
+      : null;
   // The menu's three groups are mutate / utility / destructive, so Archive and
   // Delete land last where a reader expects them. Both dividers sit next to a
   // group that only renders with a note and write mode, so without one they
@@ -154,6 +171,14 @@ export function AppTopbar({
 
         {/* Col 2 — Breadcrumb */}
         <div className="topbar-crumb">
+          {scopeEcho ? (
+            <>
+              <span className="topbar-crumb-scope">{scopeEcho}</span>
+              <span className="topbar-crumb-sep" aria-hidden="true">
+                /
+              </span>
+            </>
+          ) : null}
           <span className="topbar-crumb-here">{crumbText}</span>
           {!isOnline && (
             <span style={{ marginLeft: "0.5rem" }}>
