@@ -15,14 +15,10 @@ import type {
 } from "../types";
 
 /** Merges every participating Vault's tree into the one `ExplorerFolder`
- * shape the explorer already renders. With exactly one participant (a
- * single-enabled-Vault instance, or any narrowed scope) this is the
- * participant's own tree, unchanged — byte-identical to today. With more
- * than one, top-level folders and notes are concatenated without deep
- * merging same-named folders across Vaults: each note still carries its own
- * `vault_id`, so links and edits target the correct Vault, but the visual
- * grouping an accordion would give is a later slice (#117) this ticket
- * explicitly excludes. */
+ * shape narrowed-scope (and single-Vault-instance) explorer rendering uses,
+ * unchanged — byte-identical to today. The per-Vault accordion under `all`
+ * (#142) renders each Vault's own tree from `vaultTrees` instead, so this
+ * merge is never asked to stand in for that grouping. */
 function mergeVaultTrees(vaultTrees: VaultTree[]): ExplorerFolder | null {
   if (vaultTrees.length === 0) {
     return null;
@@ -45,6 +41,7 @@ function mergeVaultTrees(vaultTrees: VaultTree[]): ExplorerFolder | null {
  */
 export function useVaultTree(scope: VaultScope) {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
+  const [vaultTrees, setVaultTrees] = useState<VaultTree[]>([]);
   const [loadingTree, setLoadingTree] = useState(true);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [treePartial, setTreePartial] = useState(false);
@@ -68,6 +65,7 @@ export function useVaultTree(scope: VaultScope) {
       setTree((prev) =>
         isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
       );
+      setVaultTrees(projection.data);
       setTreePartial(projection.partial);
     } catch (err) {
       setTreeError(
@@ -157,6 +155,7 @@ export function useVaultTree(scope: VaultScope) {
 
   return {
     tree,
+    vaultTrees,
     loadingTree,
     treeError,
     treePartial,

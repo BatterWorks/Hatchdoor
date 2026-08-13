@@ -355,6 +355,32 @@ button.side-head[data-open="true"] .side-caret {
   border-left-color: var(--hot);
 }
 
+/* Vault accordion head (#142) — the explorer under `all` with more than one
+   enabled Vault. Reuses the documented section head (`.side-head`); unfolded
+   takes the same active treatment `.scope-row.is-selected` and
+   `.note-link.active-note` use, folded stays plain. An unavailable Vault's
+   head takes the same disabled-but-focusable precedent as
+   `.explorer-rail-item.is-disabled` — dimmed, not removed. */
+.vault-accordion-head[data-open="true"] {
+  background: var(--hot-soft);
+  box-shadow: inset 3px 0 0 var(--hot);
+}
+
+.vault-accordion-head[data-open="true"] .side-label {
+  color: var(--hot);
+}
+
+.vault-accordion-head[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (hover: hover) {
+  .vault-accordion-head[aria-disabled="true"]:hover {
+    background: transparent;
+  }
+}
+
 /* Mono index on note rows. Folders carry the caret, notes carry this. */
 .idx {
   font-family: var(--font-mono);

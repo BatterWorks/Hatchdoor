@@ -1,5 +1,6 @@
 import {
   EXPANDED_FOLDERS_KEY,
+  LAST_NOTE_KEY,
   RECENT_NOTES_KEY,
   VAULT_SCOPE_KEY,
 } from "../app/constants";
@@ -81,6 +82,26 @@ export function getStoredExpandedFolders(): Record<string, boolean> {
     return result;
   } catch {
     return {};
+  }
+}
+
+/** The last note viewed, if any is stored and its shape still checks out.
+ * Shared by App.tsx's landing redirect and the explorer accordion's landing
+ * default (#142), which both need the same Vault without waiting on each
+ * other's effects. */
+export function getStoredLastNote(): { vaultId: string; slug: string } | null {
+  const raw = getStoredString(LAST_NOTE_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const last = JSON.parse(raw) as { vaultId?: unknown; slug?: unknown };
+    if (typeof last.vaultId !== "string" || typeof last.slug !== "string") {
+      return null;
+    }
+    return { vaultId: last.vaultId, slug: last.slug };
+  } catch {
+    return null;
   }
 }
 

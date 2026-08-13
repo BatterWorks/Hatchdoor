@@ -12,3 +12,6 @@ export const THEME_KEY = "hatchdoor.theme";
 // Selected Vault scope (one Vault ID, or "all"): state/URL/storage only per
 // #137 — no Scope zone or other chrome reads or writes this yet.
 export const VAULT_SCOPE_KEY = "hatchdoor.vaultScope";
+// The explorer accordion's last-unfolded Vault under `all` (#142), persisted
+// per browser the same way VAULT_SCOPE_KEY is.
+export const LAST_UNFOLDED_VAULT_KEY = "hatchdoor.lastUnfoldedVault";

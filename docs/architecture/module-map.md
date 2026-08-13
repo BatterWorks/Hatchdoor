@@ -1406,6 +1406,7 @@ boundaries are currently documentation-enforced.
 - `frontend/src/app/ExplorerPane.tsx`
 - `frontend/src/app/vaultSlot.tsx`
 - `frontend/src/app/vaultSlotLogic.ts`
+- `frontend/src/app/vaultAccordion.ts`
 - `frontend/src/app/constants.ts`
 - `frontend/src/hooks/useIsMobile.ts`
 - `frontend/src/hooks/useTheme.ts`
@@ -1436,6 +1437,13 @@ gated on more than one enabled Vault and refetched on the same
 SSE subscription. The topbar's `Tree Stale` badge is deleted (#139) with
 nothing replacing it; `Offline` is the only condition left there, because it
 is about the workspace and not about any one Vault.
+`app/vaultAccordion.ts` (#142) is `app/ExplorerPane.tsx`'s per-Vault
+accordion under `all`: pure derivation for the landing default (the open
+note's own Vault, else the last persisted, else nothing), the unavailable-
+Vault unfold gate, the `LAST_UNFOLDED_VAULT_KEY` persistence pair, and the
+per-Vault namespacing of the shared `expandedFolders` record the accordion's
+folder-open memory needs. Unfolding a Vault never calls `setScope`, same
+invariant as the Scope zone's own narrow-scope call being the only one.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -1510,6 +1518,7 @@ frontend checks.
 - `frontend/src/hooks/useVaultTree.ts`
 - `frontend/src/lib/folderPaths.ts`
 - `frontend/src/lib/noteCandidates.ts`
+- `frontend/src/lib/notePath.ts`
 - `frontend/src/styles/layout-explorer.css`
 
 **Public contract:** `useVaultTree`, explorer tree/list components, derived
@@ -1532,6 +1541,18 @@ replaces the empty state outright when nothing is usable. The tree read's own
 `partial` (`treePartial`) is deliberately left untouched: #116 rules grouped
 surfaces (tree, graph, statistics) show a missing Vault as a visible missing
 group, which belongs to #142/#143, not this flattened-list rule.
+`useVaultTree` additionally exposes `vaultTrees` (#142): every participating
+Vault's own tree, grouped rather than merged, straight off the `/tree`
+read's own per-Vault array. The existing merged `tree` (via `mergeVaultTrees`)
+is unchanged and still what narrowed-scope and single-Vault-instance
+rendering use; `vaultTrees` exists only to feed the shell's per-Vault
+accordion under `all` (`app/vaultAccordion.ts`, `app/ExplorerPane.tsx`).
+`lib/notePath.ts`'s `pathToNoteIdentity` (moved out of `Explorer.tsx` to
+resolve a lint rule against non-component exports from a component file) is
+consumed the same way by both: `Explorer.tsx`'s own active-path folder
+highlighting, and the shell's landing-Vault resolution, which needs it
+synchronously off the URL rather than waiting on `activeNote`'s own content
+fetch.
 
 **Consumed dependencies:** shared API/error utilities, shared wire types,
 shared UI components (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`),
