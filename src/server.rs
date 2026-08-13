@@ -4106,6 +4106,7 @@ mod tests {
         assert_eq!(body["collection_revision"], 0);
         assert_eq!(body["vaults"], serde_json::json!([]));
         assert!(body.get("recovery").is_none());
+        assert_eq!(body["demo_mode"], false);
     }
 
     #[tokio::test]
@@ -4172,6 +4173,7 @@ mod tests {
         assert_eq!(discovery.status(), StatusCode::OK);
         let body = json_body(discovery).await;
         assert_eq!(body["vaults"], serde_json::json!([]));
+        assert_eq!(body["demo_mode"], true);
 
         let events = app
             .oneshot(
@@ -4301,6 +4303,7 @@ mod tests {
         let vaults = discovery_body["vaults"].as_array().expect("vaults array");
         assert_eq!(vaults.len(), 1);
         assert_eq!(vaults[0]["vault_id"], vault_id.to_string());
+        assert_eq!(discovery_body["demo_mode"], true);
 
         let note = app
             .clone()
@@ -4563,6 +4566,7 @@ mod tests {
         let vaults = discovery_body["vaults"].as_array().expect("vaults array");
         assert_eq!(vaults.len(), 1);
         assert_eq!(vaults[0]["vault_id"], vault_id);
+        assert_eq!(discovery_body["demo_mode"], false);
     }
 
     #[tokio::test]
@@ -5145,6 +5149,93 @@ mod tests {
         assert_eq!(body["vaults"], serde_json::json!([]));
         assert_eq!(body["recovery"]["code"], "vault_registry_recovery_required");
         assert_eq!(body["recovery"]["kind"], "corrupt");
+        assert_eq!(body["demo_mode"], false);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_discovery_reports_registry_recovery_and_demo_mode_together() {
+        // #133: #122's registry-recovery screens are reached on a demo too,
+        // so the recovery arm must carry the demo posture rather than
+        // sending the browser back to guessing at exactly the moment it has
+        // least to go on.
+        let (app, _tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        std::fs::create_dir_all(state.vault_registry.path().parent().unwrap())
+            .expect("registry directory");
+        std::fs::write(state.vault_registry.path(), b"not valid json").expect("corrupt registry");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["recovery"]["code"], "vault_registry_recovery_required");
+        assert_eq!(body["demo_mode"], true);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_discovery_reports_demo_mode_posture_at_many_enabled_vaults() {
+        // #133: the demo indicator is instance-wide and constant regardless
+        // of how many Vaults the collection holds, on both an ordinary
+        // instance and a demo one.
+        for demo_mode in [false, true] {
+            let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, demo_mode);
+            let mut expected_revision = 0;
+            for name in ["Alpha", "Beta"] {
+                let vault_path = tmp.path().join(name);
+                std::fs::create_dir_all(&vault_path).expect("create vault directory");
+                let snapshot = state
+                    .vault_registry
+                    .add(
+                        expected_revision,
+                        crate::vault_registry::NewVaultDefinition {
+                            name: name.to_string(),
+                            enabled: true,
+                            source: crate::vault_registry::VaultSource::Local {
+                                path: vault_path.clone(),
+                            },
+                            exclude_patterns: Vec::new(),
+                            https_credentials: None,
+                            archive_folder: None,
+                            commit_identity: None,
+                        },
+                    )
+                    .expect("add vault to registry");
+                expected_revision = snapshot.revision();
+                state
+                    .vaults
+                    .reconcile_and_reconstruct(
+                        &state.vault_registry,
+                        &snapshot,
+                        &state.vault_work,
+                        &state.managed_git,
+                    )
+                    .await;
+            }
+
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/vaults")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(
+                body["vaults"].as_array().expect("vaults array").len(),
+                2,
+                "demo_mode={demo_mode}"
+            );
+            assert_eq!(body["demo_mode"], demo_mode, "demo_mode={demo_mode}");
+        }
     }
 
     #[tokio::test]
