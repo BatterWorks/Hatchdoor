@@ -208,6 +208,8 @@ type ExplorerPaneProps = {
   locationPathname: string;
   recentNotes: RecentNote[];
   modifiedNotes: ModifiedNote[];
+  modifiedNotesPartial: boolean;
+  modifiedNotesMissingVaults: string[];
   loadingTree: boolean;
   treeError: string | null;
   tree: ExplorerFolder | null;
@@ -237,6 +239,8 @@ export function ExplorerPane({
   locationPathname,
   recentNotes,
   modifiedNotes,
+  modifiedNotesPartial,
+  modifiedNotesMissingVaults,
   loadingTree,
   treeError,
   tree,
@@ -295,6 +299,8 @@ export function ExplorerPane({
             onNavigate={onCloseDrawer}
             vaults={vaults}
             scope={scope}
+            partial={modifiedNotesPartial}
+            missingVaultNames={modifiedNotesMissingVaults}
           />
         ) : null}
 

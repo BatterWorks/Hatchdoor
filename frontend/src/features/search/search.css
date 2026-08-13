@@ -175,6 +175,15 @@
   outline-offset: 2px;
 }
 
+/* Tells the truth about a partial read (#141): never a banner, just this
+   trailing line below the last row, in warn ink. */
+.search-partial {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  color: var(--warn-fg);
+}
+
 /* ── Card anatomy ───────────────────────────────────────── */
 
 .result-title {

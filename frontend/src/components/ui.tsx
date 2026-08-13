@@ -68,14 +68,20 @@ export function StateBlock({
   description,
   actionLabel,
   onAction,
+  tone,
 }: {
   title: string;
   description: string;
   actionLabel?: string;
   onAction?: () => void;
+  /** The documented §23 error variant (red heading) — a genuine failure,
+   * never the plain empty shell used for "nothing here yet". */
+  tone?: "error";
 }) {
   return (
-    <UiPanel className="state-block ui-empty-state">
+    <UiPanel
+      className={`state-block ui-empty-state${tone === "error" ? " error" : ""}`}
+    >
       <h2>{title}</h2>
       <p>{description}</p>
       {actionLabel && onAction ? (

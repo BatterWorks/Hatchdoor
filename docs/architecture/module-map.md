@@ -1420,9 +1420,14 @@ the selected Vault scope (state/storage, per #137), Vault discovery
 (`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) is the
 only chrome that calls `setScope`, on the desktop only; every other
 collection-read and Vault-picking call site only reads the selected scope.
-`vaultSlot.tsx` (#139) derives each Vault's trailing count-or-condition slot
-and the shared All-Vaults/collapsed-head aggregate from `VaultSummary`'s
-status fields alone — no new endpoint. `useVaultScope.ts`'s
+`vaultSlot.tsx`/`vaultSlotLogic.ts` (#139) derive each Vault's trailing
+count-or-condition slot and the shared All-Vaults/collapsed-head aggregate
+from `VaultSummary`'s status fields alone — no new endpoint.
+`vaultSlotLogic.ts`'s `deriveVaultSlot` is also imported by Note reading's
+`NotePage.tsx` (#141) to detect a write-blocking Git condition on the open
+note's own Vault; this is a deliberate cross-capability import of one pure
+function rather than a duplicated copy of the condition vocabulary.
+`useVaultScope.ts`'s
 `useVaultNoteCounts` is the one exception to "state/storage only": it fetches
 the lean collection-scope `GET /api/v1/vaults/all/stats` (always at `"all"`,
 independent of the browsing scope) to feed the slot's healthy-count reading,
@@ -1519,18 +1524,28 @@ count, because distinguishing external changes from the user's own edits needs
 backend data that does not exist yet. Recently viewed and Changed on disk both
 carry the shared `VaultPrefix` provenance marker (#140) on each row when scope
 is `all` and more than one Vault is enabled; a single-Vault instance renders
-unchanged.
+unchanged. `useVaultTree` also exposes `modifiedNotesPartial` and
+`modifiedNotesMissingVaults` from the `/recent` read's own envelope (#141);
+`ChangesPanel` never banners a partial read — a trailing warn-ink line below
+the last row names only the missing Vaults, and `StateBlock tone="error"`
+replaces the empty state outright when nothing is usable. The tree read's own
+`partial` (`treePartial`) is deliberately left untouched: #116 rules grouped
+surfaces (tree, graph, statistics) show a missing Vault as a visible missing
+group, which belongs to #142/#143, not this flattened-list rule.
 
 **Consumed dependencies:** shared API/error utilities, shared wire types,
-shared UI components (`components/ui.tsx`'s `VaultPrefix`), and router links.
+shared UI components (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`),
+`lib/vaultParticipants.ts`, and router links.
 
 **Coordination paths:** `App.tsx`, `app/ExplorerPane.tsx`, `types.ts`,
-`lib/stateCompare.ts`, responsive CSS, and backend tree/recent/event endpoints.
+`lib/stateCompare.ts`, `lib/vaultParticipants.ts`, responsive CSS, and backend
+tree/recent/event endpoints.
 
 **Validation:** folder/note-candidate/state comparison tests and affected App
 navigation tests; `app/ExplorerPane.test.tsx` covers the tree and list
-components in composition, including the single-active-highlight invariant. The
-hook still needs focused coverage.
+components in composition, including the single-active-highlight invariant.
+`hooks/useVaultTree.test.ts` covers the `/recent` read's partiality at three
+and eight Vaults; the rest of the hook still needs focused coverage.
 
 ### Search dialog
 
@@ -1557,10 +1572,16 @@ is integrated separately through the `App.css` stylesheet aggregation seam.
 provenance marker (#140) on a result's path line under the same all-scope,
 multi-Vault condition Vault Explorer's lists use; the path itself elides
 head-first (`.result-path-text`) so the never-eliding prefix always reads.
+`useSearch` also exposes `searchPartial`/`searchMissingVaultNames` from the
+search envelope (#141), rendered with the same never-a-banner rule
+`ChangesPanel` uses: a trailing warn-ink line naming only the missing Vaults
+below the last result, or `StateBlock tone="error"` replacing "No matching
+notes" outright when nothing is usable. Ranking is unchanged either way.
 
 **Consumed dependencies:** shared API/error utilities, shared UI components
-(`components/ui.tsx`'s `VaultPrefix`), router navigation supplied by the
-shell, and backend Search.
+(`components/ui.tsx`'s `VaultPrefix` and `StateBlock`),
+`lib/vaultParticipants.ts`, router navigation supplied by the shell, and
+backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, backend search HTTP contract, and
 responsive CSS.
@@ -1608,13 +1629,26 @@ source line per rendered line for the two unit types addressed per line.
 (#140): a synthetic, non-editable leading `Vault` row, shown whenever more than
 one Vault is enabled regardless of scope — an exact read is never ambiguous
 about its own Vault — including when the note carries no frontmatter at all,
-which is the one case the grid renders with zero real properties.
+which is the one case the grid renders with zero real properties. A note that
+fails to load renders `StateBlock tone="error"` (#141) — the documented red
+heading, not the plain empty shell "Note Unavailable" used to share with
+"Not Found". `NotePage` also imports `deriveVaultSlot` from the
+shell-owned `app/vaultSlotLogic.ts` (#141) to detect the open note's own
+Vault being git-`unavailable` with a `dirty_working_copy`/`git_content_conflict`
+condition: escalation is triggered by the write attempt, not by the
+condition alone, so a stopped or conflicted Vault shows `SaveState`'s
+`Not saving` and a full-bleed `.write-notice` before a save is ever
+attempted (autosave's own `enabled` flag is gated on the same check), while
+every other non-healthy condition — or trouble in a Vault that is not the
+open note's — raises nothing here.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
-libraries, shared types/UI, and note editing.
+libraries, shared types/UI, note editing, and `app/vaultSlotLogic.ts`'s
+`deriveVaultSlot` (Application shell and navigation).
 
-**Coordination paths:** `App.tsx`, `types.ts`, note/link/resolve/download
-handlers, `NoteEditor.tsx`, Search query navigation, shared and responsive CSS.
+**Coordination paths:** `App.tsx`, `types.ts`, `app/vaultSlotLogic.ts`,
+note/link/resolve/download handlers, `NoteEditor.tsx`, Search query
+navigation, shared and responsive CSS.
 
 **Invariants:** vault Markdown remains the rendered source; vault content is
 data rather than trusted executable instructions; asset URLs retain auth and
@@ -1628,7 +1662,8 @@ interior line is dropped while splitting and why a list item whose rendered line
 count disagrees with the span it claims is addressed whole rather than written to
 a guessed line.
 
-**Validation:** note-page unit tests, Markdown/heading/search/state tests,
+**Validation:** note-page unit tests, `NotePage.test.tsx` (write/read
+escalation), Markdown/heading/search/state tests,
 `App.content-rendering.test.tsx`, `App.enhancements.test.tsx`,
 `App.links-download.test.tsx`, and full frontend checks.
 
@@ -1800,7 +1835,10 @@ color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `VaultPrefix` (#140) is
 the one marked-path-root primitive every flattened, scope-spanning surface
 uses for Vault provenance — hot ink, a middot instead of a folder `/`, and
 never eliding; consumers give the adjacent title or path the shrinking room
-instead.
+instead. `StateBlock` (`ui.tsx`) takes an optional `tone="error"` (#141) for
+the documented §23 red-heading variant — a genuine failure, never the plain
+empty shell — consumed wherever a partial collection read has nothing usable
+and wherever an exact read fails outright.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected
@@ -1818,10 +1856,15 @@ review when layout changes, and full frontend checks.
 
 - `frontend/src/lib/clipboard.ts`
 - `frontend/src/lib/stateCompare.ts`
+- `frontend/src/lib/vaultParticipants.ts`
 
 **Consumers:** shell copy actions and rendered code-block controls consume
 clipboard behavior. Vault Explorer consumes tree comparison, while Note reading
-consumes note and link comparison.
+consumes note and link comparison. `vaultParticipants.ts` (#141) — a
+`VaultReadProjection`'s `participants` down to the Vaults that did not answer
+fresh, and the shared "X did not answer." sentence — is consumed by Vault
+Explorer (`ChangesPanel`) and Search (`SearchDialog`), the two flattened
+collection surfaces a `partial` read can span.
 
 **Coordination rule:** keep these utilities behavior-only. Feature-specific
 copy labels, workflows, or state ownership stay with their feature.

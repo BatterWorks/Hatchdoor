@@ -3,7 +3,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SearchDialog, type SearchResult } from ".";
-import { THREE_VAULTS } from "../../test/fixtures/vaults";
+import { EIGHT_VAULTS, THREE_VAULTS } from "../../test/fixtures/vaults";
 
 function renderDialog(
   overrides?: Partial<ComponentProps<typeof SearchDialog>>,
@@ -19,6 +19,8 @@ function renderDialog(
     loading: false,
     error: null,
     results: [],
+    partial: false,
+    missingVaultNames: [],
     vaults: [],
     scope: "all",
     inputRef,
@@ -165,5 +167,61 @@ describe("SearchDialog Vault provenance (#140)", () => {
     expect(pathText).toBeInTheDocument();
     expect(pathText?.textContent).toBe("Projects/Plan.md");
     expect(pathText?.closest(".vault-prefix")).toBeNull();
+  });
+});
+
+describe("SearchDialog tells the truth about a partial read (#141)", () => {
+  afterEach(cleanup);
+
+  it("names only the missing Vaults in a trailing warn-ink line, at three Vaults, without changing ranking", () => {
+    const missing = [THREE_VAULTS[2].name];
+    const { container } = renderDialog({
+      results: [resultFor(THREE_VAULTS[0].vault_id)],
+      vaults: THREE_VAULTS,
+      partial: true,
+      missingVaultNames: missing,
+    });
+
+    const line = screen.getByText(`${missing[0]} did not answer.`);
+    expect(line).toHaveClass("search-partial");
+    // The result itself is still there, in the API's own ranking.
+    expect(container.querySelector(".search-result--primary")).not.toBeNull();
+  });
+
+  it("names every missing Vault in a trailing line, at eight Vaults", () => {
+    const missing = EIGHT_VAULTS.slice(6).map((vault) => vault.name);
+    renderDialog({
+      results: [resultFor(EIGHT_VAULTS[0].vault_id)],
+      vaults: EIGHT_VAULTS,
+      partial: true,
+      missingVaultNames: missing,
+    });
+
+    expect(
+      screen.getByText(`${missing[0]} and ${missing[1]} did not answer.`),
+    ).toBeInTheDocument();
+  });
+
+  it("replaces 'No matching notes' with the documented error block when nothing is usable", () => {
+    const missing = [THREE_VAULTS[0].name, THREE_VAULTS[1].name];
+    const { container } = renderDialog({
+      results: [],
+      partial: true,
+      missingVaultNames: missing,
+    });
+
+    expect(screen.queryByText("No matching notes.")).not.toBeInTheDocument();
+    expect(container.querySelector(".state-block.error")).not.toBeNull();
+    expect(screen.getByText("Nothing Found")).toBeInTheDocument();
+    expect(
+      screen.getByText(`${missing[0]} and ${missing[1]} did not answer.`),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the plain 'No matching notes' state, not the error block, when the read is not partial", () => {
+    const { container } = renderDialog({ results: [], partial: false });
+
+    expect(container.querySelector(".state-block.error")).toBeNull();
+    expect(screen.getByText("No matching notes.")).toBeInTheDocument();
   });
 });

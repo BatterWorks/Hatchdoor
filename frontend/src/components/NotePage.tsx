@@ -15,6 +15,7 @@ import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 
+import { deriveVaultSlot } from "../app/vaultSlotLogic";
 import {
   parseFrontmatter,
   stripBlockIds,
@@ -127,10 +128,29 @@ export function NotePage({
   // (#140) — unlike collection surfaces, independent of the browsing scope:
   // a note's own Vault is never ambiguous just because scope is narrowed
   // elsewhere.
+  const activeVault = vaults.find((vault) => vault.vault_id === vaultId);
   const vaultName =
-    vaults.length > 1
-      ? (vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId)
-      : undefined;
+    vaults.length > 1 ? (activeVault?.name ?? vaultId) : undefined;
+  // Escalation is triggered by the action (writing here), not by the
+  // condition alone (#141): a stopped or conflicted Vault blocks a save
+  // before it is ever attempted, rather than waiting for a doomed round
+  // trip to fail first. Every other non-healthy condition (stale, sync
+  // failed, or trouble in a Vault that is not this one) raises nothing here
+  // — it stays quiet in the sidebar slot until it blocks something actually
+  // attempted.
+  const writeBlockReason = (() => {
+    if (!activeVault) {
+      return null;
+    }
+    const slot = deriveVaultSlot(activeVault, undefined);
+    if (
+      slot.kind === "condition" &&
+      (slot.word === "sync stopped" || slot.word === "conflict")
+    ) {
+      return slot.sentence;
+    }
+    return null;
+  })();
   const [note, setNote] = useState<Note | null>(null);
   const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
   const [loading, setLoading] = useState(true);
@@ -484,7 +504,11 @@ export function NotePage({
 
   const autosave = useNoteAutosave({
     baseHash: note?.content_hash ?? "",
-    enabled: inlineEditingEnabled,
+    // A stopped or conflicted Vault already tells us the write would fail,
+    // so autosave never attempts it — the drafts safety net still keeps the
+    // edit (#141). Editing itself stays on: escalation blocks the save, not
+    // the attempt.
+    enabled: inlineEditingEnabled && !writeBlockReason,
     save: async (nextContent, expectedHash) =>
       updateNote(vaultId, slug, nextContent, expectedHash),
     onSaved: (result) => {
@@ -722,6 +746,7 @@ export function NotePage({
   if (error && !note) {
     return (
       <StateBlock
+        tone="error"
         title="Note Unavailable"
         description={error}
         actionLabel="Retry"
@@ -922,7 +947,10 @@ export function NotePage({
           <h2 className="note-page-title">{note.title}</h2>
           {writeEnabled && !isEditing ? (
             <div className="note-inline-actions">
-              <SaveState status={autosave.status} savedAt={autosave.savedAt} />
+              <SaveState
+                status={writeBlockReason ? "error" : autosave.status}
+                savedAt={autosave.savedAt}
+              />
               <UiButton
                 className="close-note note-edit-button"
                 onClick={startEditing}
@@ -933,7 +961,13 @@ export function NotePage({
           ) : null}
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
-        {autosave.status === "conflict" || autosave.status === "error" ? (
+        {writeBlockReason ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              Edits aren&rsquo;t saving. {writeBlockReason}
+            </div>
+          </div>
+        ) : autosave.status === "conflict" || autosave.status === "error" ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               {autosave.status === "conflict"

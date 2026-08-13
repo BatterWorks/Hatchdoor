@@ -1,6 +1,7 @@
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { UiButton, UiPanel, VaultPrefix } from "../../components/ui";
+import { StateBlock, UiButton, UiPanel, VaultPrefix } from "../../components/ui";
+import { describeMissingVaults } from "../../lib/vaultParticipants";
 import type { VaultScope, VaultSummary } from "../../types";
 import type { SearchResult, SearchSelection } from "./types";
 
@@ -68,6 +69,8 @@ export function SearchDialog({
   loading,
   error,
   results,
+  partial,
+  missingVaultNames,
   vaults,
   scope,
   inputRef,
@@ -81,6 +84,10 @@ export function SearchDialog({
   loading: boolean;
   error: string | null;
   results: SearchResult[];
+  /** Whether at least one Vault this search asked did not answer fresh
+   * (#141). Never a banner, never a change to ranking. */
+  partial: boolean;
+  missingVaultNames: string[];
   vaults: VaultSummary[];
   scope: VaultScope;
   inputRef: RefObject<HTMLInputElement | null>;
@@ -199,11 +206,19 @@ export function SearchDialog({
 
         {loading ? <p>Searching…</p> : null}
         {error ? <p className="error">{error}</p> : null}
-        {!loading &&
-        !error &&
-        trimmedQuery.length >= 2 &&
-        results.length === 0 ? (
-          <p>No matching notes.</p>
+        {!loading && !error && trimmedQuery.length >= 2 && results.length === 0 ? (
+          partial ? (
+            // Nothing usable: the documented error block replaces the empty
+            // state entirely. "No matching notes" would be a lie when some
+            // Vaults never answered (#141).
+            <StateBlock
+              tone="error"
+              title="Nothing Found"
+              description={describeMissingVaults(missingVaultNames)}
+            />
+          ) : (
+            <p>No matching notes.</p>
+          )
         ) : null}
 
         <ul
@@ -323,6 +338,13 @@ export function SearchDialog({
             );
           })}
         </ul>
+        {/* Ranking is unchanged by partiality; this trailing line below the
+            last row is the only thing that changes (#141). */}
+        {partial && results.length > 0 ? (
+          <p className="search-partial">
+            {describeMissingVaults(missingVaultNames)}
+          </p>
+        ) : null}
       </UiPanel>
     </div>
   );

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
+import { missingVaultNames } from "../../lib/vaultParticipants";
 import type { VaultReadProjection, VaultScope } from "../../types";
 import type { SearchResponse, SearchResult } from "./types";
 
@@ -17,6 +18,10 @@ export function useSearch(scope: VaultScope) {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchPartial, setSearchPartial] = useState(false);
+  const [searchMissingVaultNames, setSearchMissingVaultNames] = useState<
+    string[]
+  >([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -51,6 +56,8 @@ export function useSearch(scope: VaultScope) {
     const query = searchQuery.trim();
     if (query.length < 2) {
       setSearchResults([]);
+      setSearchPartial(false);
+      setSearchMissingVaultNames([]);
       setSearchLoading(false);
       setSearchError(null);
       return;
@@ -77,10 +84,16 @@ export function useSearch(scope: VaultScope) {
             (await res.json()) as VaultReadProjection<SearchResponse>;
           if (!cancelled) {
             setSearchResults(projection.data.results);
+            setSearchPartial(projection.partial);
+            setSearchMissingVaultNames(
+              missingVaultNames(projection.participants),
+            );
           }
         } catch (error) {
           if (!cancelled) {
             setSearchResults([]);
+            setSearchPartial(false);
+            setSearchMissingVaultNames([]);
             setSearchError(
               error instanceof Error ? error.message : "Unknown search error",
             );
@@ -107,6 +120,8 @@ export function useSearch(scope: VaultScope) {
     searchIncludeContent,
     setSearchIncludeContent,
     searchResults,
+    searchPartial,
+    searchMissingVaultNames,
     searchLoading,
     searchError,
     searchInputRef,

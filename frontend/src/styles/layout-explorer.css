@@ -285,6 +285,15 @@
   color: var(--muted);
 }
 
+/* Tells the truth about a partial read (#141): never a banner, just this
+   trailing line below the last row, in warn ink. */
+.explorer-changes-partial {
+  margin: 0.35rem 0 0 0.45rem;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  color: var(--warn-fg);
+}
+
 /* Section head — `RECENT · ──── · 04`, per §05. */
 .side-head {
   display: flex;
