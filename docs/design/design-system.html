@@ -1356,6 +1356,17 @@
   }
   @keyframes shimmer { 0% { background-position: 0 0; } 100% { background-position: 200% 0; } }
 
+  /* Vault count-or-condition slot (#116, amended by #117). One trailing
+     reading per Vault, never a count and a condition together. */
+  .vslot-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 0; }
+  .vslot-name { flex: 1 1 auto; font-family: var(--font-display); font-size: 0.86rem; color: var(--ink-soft); }
+  .vault-slot-indexing { display: inline-flex; align-items: center; }
+  .vault-slot-indexing-bar { width: 1.6rem; height: 0.6rem; background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+  .vault-slot-condition, .vault-slot-shortfall { font-family: var(--font-mono); font-size: 0.62rem; white-space: nowrap; }
+  .vault-tier-warn { color: var(--warn-fg); }
+  .vault-tier-error { color: var(--err-fg); }
+  .vault-slot-condition.vault-tier-error, .vault-slot-shortfall.vault-tier-error { background: var(--err-bg); border: 1px solid var(--err-border); font-weight: 600; padding: 0.05rem 0.4rem; border-radius: var(--radius-pill); }
+
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Buttons
      ════════════════════════════════════════════════════════════════ */
@@ -2481,6 +2492,64 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </tbody>
       </table>
       <div class="tag-row"><span class="key">components/icons.tsx</span><span class="key">.icon-button</span><span class="key">.explorer-rail-item</span></div>
+    </section>
+
+    <!-- ───────── VAULT COUNT-OR-CONDITION SLOT ───────── -->
+    <section class="doc-section" id="vault-slot">
+      <div class="doc-section-num">§27</div>
+      <h2>Vault count-or-condition slot</h2>
+      <p class="blurb">Each Vault's row in the sidebar Scope zone (§05, extended by #138) ends in one
+      trailing slot: its note count when healthy, or exactly one condition otherwise &mdash; never
+      both. Meaning comes from the word, severity from ink and form, progress from the sweep. Because
+      <code>--warn-fg</code> and <code>--err-fg</code> are not reliably tellable apart at this size,
+      the red tier takes a bordered ground and medium weight; the amber tier stays plain ink. Nothing
+      is carried by colour alone (#116, amended by #117).</p>
+
+      <div class="stage">
+        <div class="vslot-row"><span class="vslot-name">Alpha</span><span class="side-count">126</span></div>
+        <div class="vslot-row"><span class="vslot-name">Beta</span><span class="vault-slot-indexing" role="status" aria-label="Indexing"><span class="vault-slot-indexing-bar"></span></span></div>
+        <div class="vslot-row"><span class="vslot-name">Gamma</span><span class="vault-slot-condition vault-tier-warn">stale</span></div>
+        <div class="vslot-row"><span class="vslot-name">Delta</span><span class="vault-slot-condition vault-tier-warn">sync failed</span></div>
+        <div class="vslot-row"><span class="vslot-name">Echo</span><span class="vault-slot-condition vault-tier-error">sync stopped</span></div>
+        <div class="vslot-row"><span class="vslot-name">Foxtrot</span><span class="vault-slot-condition vault-tier-error">conflict</span></div>
+        <div class="vslot-row"><span class="vslot-name">Golf</span><span class="vault-slot-condition vault-tier-error">unavailable</span></div>
+      </div>
+
+      <table class="token-table">
+        <thead><tr><th>slot reads</th><th>ink</th><th>condition</th></tr></thead>
+        <tbody>
+          <tr><td class="name">126</td><td class="val">muted, mono</td><td class="val">healthy &mdash; the note count</td></tr>
+          <tr><td class="name">shimmer</td><td class="val">muted, moving</td><td class="val">indexing &mdash; search still answers from the previous snapshot. Also covers a first index that has never published one: <code>activation</code> stays <code>active</code> the moment a Vault's directory stats fine, so a never-indexed Vault is distinguishable from one whose directory vanished (only the latter turns <code>activation</code> <code>unavailable</code> too)</td></tr>
+          <tr><td class="name">stale</td><td class="val">warn, plain ink</td><td class="val">indexing failed &mdash; the snapshot is frozen behind the Markdown</td></tr>
+          <tr><td class="name">sync failed</td><td class="val">warn, plain ink</td><td class="val">the last Git sync did not succeed &mdash; backoff retry is running</td></tr>
+          <tr><td class="name">sync stopped</td><td class="val">error, bordered ground</td><td class="val"><code>dirty_working_copy</code> &mdash; local edits halted integration</td></tr>
+          <tr><td class="name">conflict</td><td class="val">error, bordered ground</td><td class="val">content conflict &mdash; every local commit retained, remote untouched</td></tr>
+          <tr><td class="name">unavailable</td><td class="val">error, bordered ground</td><td class="val">should be answering and is not</td></tr>
+        </tbody>
+      </table>
+
+      <p class="blurb">The <code>All Vaults</code> row and the collapsed Scope head share one aggregate:
+      the enabled-Vault count when every Vault is healthy or indexing (both count as participating),
+      or the shortfall against the worst tier present when some do not &mdash; <code>7 of 8</code>, in
+      that worst ink. The collapsed head's scope name takes the same worst ink, coloured only, without
+      the trailing reading's bordered ground, so naming the Vault it names never itself reads as an
+      alarm: <code>&#9656; SCOPE &#9472;&#9472;&#9472;&#9472; All Vaults&nbsp;&nbsp;7 of 8</code>.
+      Hover text and the accessible name carry the full plain-language sentence for each condition
+      (the Vault's own runtime error message where one exists); the word on screen stays the API's
+      own, terse.</p>
+
+      <p class="blurb">The prototype's coloured status dot is deleted: it is chrome the design system
+      does not have, and a mark carrying its meaning only in colour tells a colourblind person nothing
+      and everyone else nothing specific. A read-only Vault shows its note count &mdash; the slot
+      carries conditions, never configuration. <code>Tree Stale</code> is deleted from the topbar with
+      nothing replacing it; the topbar keeps only <code>Offline</code> (§03), which is about the
+      workspace and not about any one Vault.</p>
+
+      <div class="tag-row">
+        <span class="key">app/vaultSlot.tsx</span><span class="key">app/vaultSlotLogic.ts</span><span class="key">.vault-slot-condition</span><span class="key">.vault-slot-shortfall</span>
+        <span class="key">.vault-tier-warn</span><span class="key">.vault-tier-error</span>
+        <span class="key">.vault-slot-indexing</span><span class="key">.vault-slot-indexing-bar</span><span class="key">.side-count</span>
+      </div>
     </section>
 
   </main>

@@ -6,7 +6,9 @@ import { getStoredScope, setStoredScope } from "../lib/storage";
 import type {
   VaultDiscoveryResponse,
   VaultId,
+  VaultReadProjection,
   VaultScope,
+  VaultStatistics,
   VaultSummary,
 } from "../types";
 
@@ -80,4 +82,56 @@ export function resolvePrimaryVaultId(
   vaults: VaultSummary[],
 ): VaultId | undefined {
   return activeNoteVaultId ?? vaults[0]?.vault_id;
+}
+
+/**
+ * Every enabled Vault's note count, for the sidebar Scope zone's healthy-slot
+ * reading (#139). Always fetched at `"all"` scope regardless of the browsing
+ * scope selected elsewhere — the Scope zone lists every enabled Vault
+ * whatever is currently selected, so its counts can't depend on that
+ * selection. `enabled` gates the fetch on whether the zone can even render
+ * (more than one enabled Vault); `vaultRevision` (the same SSE-driven counter
+ * `useVaultTree` already tracks) triggers a refetch on change rather than
+ * opening a second subscription to the same event stream. A fetch failure
+ * leaves prior counts in place; the slot falls back to treating a missing
+ * entry as unknown.
+ */
+export function useVaultNoteCounts(
+  enabled: boolean,
+  vaultRevision: number,
+): Record<VaultId, number> {
+  const [counts, setCounts] = useState<Record<VaultId, number>>({});
+
+  useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await apiFetch("/api/v1/vaults/all/stats");
+        if (!res.ok) {
+          return;
+        }
+        const projection = (await res.json()) as VaultReadProjection<
+          VaultStatistics[]
+        >;
+        if (cancelled) {
+          return;
+        }
+        const next: Record<VaultId, number> = {};
+        for (const entry of projection.data) {
+          next[entry.vault_id] = entry.note_count;
+        }
+        setCounts(next);
+      } catch {
+        // Leave prior counts in place.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, vaultRevision]);
+
+  return counts;
 }

@@ -37,7 +37,6 @@ type TopbarProps = {
   writeEnabled: boolean;
   isMobile: boolean;
   isOnline: boolean;
-  treeIsStale: boolean;
   actionsMenuOpen: boolean;
   topbarRef?: Ref<HTMLElement>;
   theme: Theme;
@@ -64,7 +63,6 @@ export function AppTopbar({
   writeEnabled,
   isMobile,
   isOnline,
-  treeIsStale,
   actionsMenuOpen,
   topbarRef,
   theme,
@@ -183,11 +181,6 @@ export function AppTopbar({
           {!isOnline && (
             <span style={{ marginLeft: "0.5rem" }}>
               <StatusBadge tone="error" text="Offline" />
-            </span>
-          )}
-          {treeIsStale && (
-            <span style={{ marginLeft: "0.5rem" }}>
-              <StatusBadge tone="warn" text="Tree Stale" />
             </span>
           )}
         </div>

@@ -77,7 +77,6 @@
 .scope-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.55rem;
   width: 100%;
   padding: 0.3rem 0.45rem;
@@ -117,6 +116,7 @@
 }
 
 .scope-row-label {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -135,6 +135,64 @@
   border: 1px solid var(--rule-strong);
   padding: 0.05rem 0.4rem;
   border-radius: var(--radius-pill);
+}
+
+/* Per-Vault count-or-condition slot (#116, amended by #117): one trailing
+   reading, never a count and a condition together. `.side-count` (§05)
+   carries the healthy note count and the All-Vaults/collapsed-head
+   aggregate as-is. Severity is carried by shape as well as hue, since
+   --warn-fg and --err-fg are not reliably tellable apart at this size: the
+   amber tier stays plain ink, the red tier takes a bordered ground and
+   medium weight. */
+.vault-slot-condition,
+.vault-slot-shortfall {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+.vault-tier-warn {
+  color: var(--warn-fg);
+}
+
+.vault-tier-error {
+  color: var(--err-fg);
+}
+
+/* The red tier's bordered ground and medium weight belong to the slot's own
+   word or aggregate reading. The collapsed head's scope name sits beside
+   that reading and takes the worst ink present (#117) — colour only, no
+   ground, so the Vault name it names does not itself read as an alarm. */
+.vault-slot-condition.vault-tier-error,
+.vault-slot-shortfall.vault-tier-error {
+  background: var(--err-bg);
+  border: 1px solid var(--err-border);
+  font-weight: 600;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+}
+
+/* Indexing: moving, not stuck — a muted shimmer, no word, no warning. Search
+   keeps answering from the previous snapshot throughout (#116). Also stands
+   in for a first index that has never published a snapshot. */
+.vault-slot-indexing {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.vault-slot-indexing-bar {
+  width: 1.6rem;
+  height: 0.6rem;
+  background: linear-gradient(
+    90deg,
+    var(--paper-2),
+    var(--paper),
+    var(--paper-2)
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
 }
 
 /* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */
