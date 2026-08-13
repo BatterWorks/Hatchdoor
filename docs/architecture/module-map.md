@@ -183,10 +183,12 @@ that production inventory are still checked for stale paths and duplicates.
   across working-tree-mutating phases; splitting `synchronize_managed_checkout`
   into independently lockable phases to match that finer discipline was
   judged a materially larger change than issue #96's reopening warranted.
-  `reconcile_and_reconstruct` activates or deactivates a managed-Git Vault's
-  scheduler entry (and, on deactivation, releases any held checkout lease)
-  alongside its coordinator admission; `ExistingGit` Vaults are never
-  registered with `ManagedGitScheduler` regardless of mode.
+  `reconcile_and_reconstruct` activates or deactivates a scheduler-tracked
+  Vault's `ManagedGitScheduler` entry (and, on deactivation, releases any held
+  checkout lease) alongside its coordinator admission — `ManagedGit`, and an
+  `ExistingGit` Vault in `PullOnly`/`TwoWay` mode (issue #132), both driven by
+  the same `VaultSource::managed_git_poll_interval` accessor; an `ExistingGit`
+  Vault in `LocalHistory` mode has no remote and is never registered.
   `set_local_content_status` (mirroring
   `set_search_status`/`set_git_status`) republishes authoritative
   local-content availability after a Git turn, since `activation_snapshot`
@@ -355,11 +357,14 @@ types, redacted `VaultDefinition` projections, tagged `VaultSource` values for
 local, existing-Git, and managed-Git Vaults, `VaultGitMode`, credential write
 inputs/updates, validated `add`/`edit`/`enable`/`disable`/`disconnect`
 operations, store-owned `vault_path` resolution for runtime consumers,
-a managed-Git source's own `poll_interval_secs` (issue #97's reopening
+a remote-backed source's own `poll_interval_secs` (issue #97's reopening
 finding 2: per-Vault, not scheduler-wide; `#[serde(default)]`s to 24h so a
 registry record written before this field existed keeps loading under the
-same `REGISTRY_SCHEMA_VERSION`, and `add`/`edit` reject a value below 1h,
-mirroring `git::managed_task::BACKOFF_MAX`) and `VaultSource::managed_git_poll_interval`,
+same `REGISTRY_SCHEMA_VERSION`, and `add`/`edit` reject a value below 60s,
+mirroring `git::managed_task::BACKOFF_MAX`). Issue #132 gives `ExistingGit`
+the same field (also `#[serde(default)]`, also floor-checked in
+`PullOnly`/`TwoWay` — unchecked and unused in `LocalHistory`, which has no
+remote), alongside `ManagedGit`'s. `VaultSource::managed_git_poll_interval`,
 the read accessor `ManagedGitScheduler`/`handlers/vaults.rs` use to consume it,
 the crate-private `is_safe_https_repository_url` validator shared with the
 managed-checkout boundary, the crate-private `https_credentials` accessor
@@ -1013,8 +1018,13 @@ falls back to whatever branch is currently checked out at `repository_path`,
 extending `validate_local_repo`'s Local-history "follows whatever branch the
 operator has checked out" policy to the remote-sync target. It classifies
 every `ManagedSyncError` through the same `classify_sync_error` table
-`run_managed_git_turn` uses. Like Local-history, an `ExistingGit` Vault in
-this mode is never registered with `ManagedGitScheduler`.
+`run_managed_git_turn` uses, now also carrying `DirtyWorkingCopy`/`Conflict`'s
+affected paths and `LocalCommits`' count outward as structured
+`VaultWorkErrorDetail` (issue #132), bounded and published as
+`vault_runtime::VaultRuntimeErrorDetail` on `VaultRuntimeError`. Unlike
+Local-history, an `ExistingGit` Vault in `PullOnly`/`TwoWay` mode *is*
+registered with `ManagedGitScheduler` (issue #132) — it has a remote to poll
+on a schedule, unlike Local-history's commit-only-on-local-drift turn.
 
 **Consumed dependencies:** local Git repository through `git2`, the live
 configuration snapshot for startup parsing, and the registry's shared
@@ -1145,11 +1155,13 @@ whose `https_credentials` was `Replace` (issue #97's reopening finding 3):
 `credential_configured: bool`, never the credential value, by design — so a
 replaced-but-still-configured credential leaves `reconcile()` retaining the
 existing `VaultControlBlock` and never re-evaluating a prior authentication
-failure. The trigger is per-source-kind: `ManagedGitScheduler::retry_now` for
-`ManagedGit` (tracked, coalesces with any pending turn), a direct
-`VaultWorkCoordinator::request(Git)` for `ExistingGit` (never scheduler-
-tracked). `edit_vault_handler` is the sole call site of
-`VaultRegistryStore::edit`/`VaultDefinitionEdit` — including its MCP
+failure. The trigger is source-agnostic (issue #132): any source with a
+`VaultSource::managed_git_poll_interval` — `ManagedGit`, and an `ExistingGit`
+Vault in `PullOnly`/`TwoWay` mode — retries through
+`ManagedGitScheduler::retry_now` (tracked, self-registering, coalesces with
+any pending turn); `Local` and an `ExistingGit` Vault in `LocalHistory` mode
+carry no interval and are skipped. `edit_vault_handler` is the sole call site
+of `VaultRegistryStore::edit`/`VaultDefinitionEdit` — including its MCP
 `edit_vault` proxy, which calls this same handler — so this handler-level
 trigger covers every path that can write `https_credentials`.
 

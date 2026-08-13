@@ -10,8 +10,9 @@ use crate::config::parse_exclude_patterns;
 use crate::git::config::{GitMode, non_empty_setting, parse_mode};
 use crate::runtime_config::{RuntimeConfig, SettingSource};
 use crate::vault_registry::{
-    HttpsCredentials, NewVaultDefinition, VaultGitMode, VaultId, VaultRegistryError,
-    VaultRegistrySnapshot, VaultRegistryState, VaultRegistryStore, VaultSource,
+    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, HttpsCredentials, NewVaultDefinition, VaultGitMode,
+    VaultId, VaultRegistryError, VaultRegistrySnapshot, VaultRegistryState, VaultRegistryStore,
+    VaultSource,
 };
 
 const LEGACY_STORED_KEYS: [&str; 9] = [
@@ -261,6 +262,7 @@ fn legacy_source(
                     branch: non_empty_setting(snapshot, "HATCHDOOR_GIT_BRANCH"),
                     vault_subdirectory: None,
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 None,
             ))
@@ -292,6 +294,7 @@ fn legacy_source(
                     branch: non_empty_setting(snapshot, "HATCHDOOR_GIT_BRANCH"),
                     vault_subdirectory: None,
                     mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 https_credentials,
             ))
@@ -480,7 +483,9 @@ mod tests {
         start_with_no_vaults,
     };
     use crate::runtime_config::{Environment, RuntimeConfig, live_settings_defaults};
-    use crate::vault_registry::{VaultRegistryState, VaultRegistryStore, VaultSource};
+    use crate::vault_registry::{
+        DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, VaultRegistryState, VaultRegistryStore, VaultSource,
+    };
 
     fn write_recognized_legacy_cache(path: &std::path::Path) {
         std::fs::create_dir_all(path.parent().expect("cache parent")).expect("cache directory");
@@ -915,6 +920,7 @@ mod tests {
                 branch: Some("main".to_string()),
                 vault_subdirectory: None,
                 mode: crate::vault_registry::VaultGitMode::LocalHistory,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
             }
         );
         let reopened = git2::Repository::open(&vault_path).expect("repository retained");
@@ -1109,6 +1115,7 @@ mod tests {
                 branch: Some("main".to_string()),
                 vault_subdirectory: None,
                 mode: crate::vault_registry::VaultGitMode::TwoWay,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
             }
         );
         assert!(definition.credential_configured());

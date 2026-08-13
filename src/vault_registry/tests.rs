@@ -344,6 +344,7 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
                     branch: None,
                     vault_subdirectory: Some(PathBuf::from("notes")),
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -363,6 +364,7 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
             branch: None,
             vault_subdirectory: Some(PathBuf::from("notes")),
             mode: VaultGitMode::LocalHistory,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
         }
     );
 
@@ -380,6 +382,7 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
                     branch: None,
                     vault_subdirectory: None,
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -413,6 +416,7 @@ fn existing_git_retains_remote_identity_while_git_mode_changes_normally() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -435,6 +439,7 @@ fn existing_git_retains_remote_identity_while_git_mode_changes_normally() {
                     branch: Some("main".to_string()),
                     vault_subdirectory: None,
                     mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: HttpsCredentialUpdate::Keep,
@@ -453,6 +458,85 @@ fn existing_git_retains_remote_identity_while_git_mode_changes_normally() {
             ..
         } if url == "https://example.test/notes.git"
     ));
+}
+
+/// Mirrors `handlers/vaults.rs`'s
+/// `editing_only_the_poll_interval_updates_the_live_scheduler_without_disturbing_backoff`,
+/// which proves this property for `ManagedGit` end to end through the live
+/// scheduler: `poll_interval_secs` must stay outside `same_source_identity`
+/// for `ExistingGit` too (issue #132), so editing only the schedule on an
+/// enabled, remote-backed `ExistingGit` Vault succeeds without
+/// `confirm_identity_change` or requiring the Vault be disabled first — the
+/// registry-level half of that property, at the `same_source_identity`
+/// comparison itself rather than the scheduler it feeds.
+#[test]
+fn existing_git_poll_interval_stays_outside_identity_while_enabled() {
+    let directory = tempdir().expect("temporary directory");
+    let repository_path = directory.path().join("repository");
+    git2::Repository::init(&repository_path).expect("initialize repository");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let repository_url = "https://example.test/notes.git".to_string();
+    let added = store
+        .add(
+            0,
+            NewVaultDefinition {
+                name: "Remote checkout".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path: repository_path.clone(),
+                    repository_url: Some(repository_url.clone()),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add remote-backed existing checkout");
+    let vault_id = added.definitions().next().expect("definition").vault_id();
+
+    let edited = store
+        .edit(
+            1,
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Remote checkout".to_string(),
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: Some(repository_url),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS * 2,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect(
+            "an interval-only edit on an enabled ExistingGit Vault must not be treated as an \
+             identity change",
+        );
+
+    assert_eq!(
+        edited
+            .definitions()
+            .next()
+            .expect("definition")
+            .source()
+            .managed_git_poll_interval(),
+        Some(std::time::Duration::from_secs(
+            DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS * 2
+        )),
+        "the edit must have actually persisted the new interval"
+    );
 }
 
 #[cfg(unix)]
@@ -479,6 +563,7 @@ fn existing_git_symlink_subdirectory_cannot_bypass_canonical_overlap_validation(
                     branch: None,
                     vault_subdirectory: Some(PathBuf::from("alias")),
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -525,6 +610,7 @@ fn existing_git_source_rejects_the_repository_metadata_directory_as_its_location
                     branch: None,
                     vault_subdirectory: None,
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -619,6 +705,94 @@ fn a_poll_interval_below_the_minimum_saves_nothing() {
     assert!(!path.exists());
 }
 
+/// Issue #132: the same floor applies to a remote-backed `ExistingGit`
+/// source (`PullOnly`/`TwoWay`) — it is scheduled by `ManagedGitScheduler`
+/// exactly like `ManagedGit`, so it shares the same reasoning
+/// `a_poll_interval_below_the_minimum_saves_nothing` documents.
+/// `LocalHistory` has no remote to schedule, so it is exempt (see
+/// `existing_git_local_history_poll_interval_is_not_floor_checked`).
+#[test]
+fn an_existing_git_poll_interval_below_the_minimum_saves_nothing() {
+    let directory = tempdir().expect("temporary directory");
+    let repository_path = directory.path().join("repository");
+    git2::Repository::init(&repository_path).expect("initialize repository");
+    let path = directory.path().join("vaults.json");
+    let store = VaultRegistryStore::new(&path);
+
+    let error = store
+        .add(
+            0,
+            NewVaultDefinition {
+                name: "Too-frequent checkout".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: Some("https://example.test/notes.git".to_string()),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: 1,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect_err("below-minimum poll interval accepted");
+
+    assert!(matches!(
+        error,
+        VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+    ));
+    assert!(!path.exists());
+}
+
+/// `LocalHistory` has no remote and is never scheduled (see
+/// `VaultSource::managed_git_poll_interval`), so its `poll_interval_secs` —
+/// always present on the struct, never meaningful for this mode — is not
+/// floor-checked.
+#[test]
+fn existing_git_local_history_poll_interval_is_not_floor_checked() {
+    let directory = tempdir().expect("temporary directory");
+    let repository_path = directory.path().join("repository");
+    git2::Repository::init(&repository_path).expect("initialize repository");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    let committed = store
+        .add(
+            0,
+            NewVaultDefinition {
+                name: "Local history checkout".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: None,
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: 1,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("a LocalHistory Vault's unused poll interval is not floor-checked");
+
+    assert_eq!(
+        committed
+            .definitions()
+            .next()
+            .expect("definition")
+            .source()
+            .managed_git_poll_interval(),
+        None,
+        "LocalHistory never schedules, regardless of the stored interval"
+    );
+}
+
 /// Issue #97's reopening finding 2: adding `poll_interval_secs` to
 /// `VaultSource::ManagedGit` must not require a `REGISTRY_SCHEMA_VERSION`
 /// bump — a registry record written before this field existed (same schema
@@ -638,6 +812,53 @@ fn a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_wi
                 "enabled": true,
                 "source": {
                     "type": "managed_git",
+                    "repository_url": "https://example.test/owner/notes.git",
+                    "branch": null,
+                    "vault_subdirectory": null,
+                    "mode": "pull_only"
+                },
+                "exclude_patterns": []
+            }
+        }
+    }"#;
+    std::fs::write(&path, original).expect("write pre-interval registry");
+    let store = VaultRegistryStore::new(&path);
+
+    let VaultRegistryState::Ready(snapshot) = store.load().expect("load registry") else {
+        panic!("a schema-compatible pre-interval record entered recovery");
+    };
+
+    let definition = snapshot.definitions().next().expect("one definition");
+    assert_eq!(
+        definition.source().managed_git_poll_interval(),
+        Some(std::time::Duration::from_secs(
+            DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
+        ))
+    );
+}
+
+/// Issue #132: mirrors
+/// `a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_with_the_default`
+/// for `ExistingGit` — adding `poll_interval_secs` to that variant must not
+/// require a `REGISTRY_SCHEMA_VERSION` bump either. `load()` validates a
+/// stored source through `stored_source_is_valid`/`normalize_structural_source`
+/// only (no `fs::canonicalize` or `git2::Repository::open`), so this needs no
+/// real checkout on disk — only an already-absolute, already-normalized
+/// `repository_path` string.
+#[test]
+fn an_existing_git_record_written_before_poll_interval_secs_existed_still_loads_with_the_default() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("vaults.json");
+    let original = br#"{
+        "schema_version": 1,
+        "revision": 1,
+        "vaults": {
+            "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {
+                "name": "Pre-interval existing checkout",
+                "enabled": true,
+                "source": {
+                    "type": "existing_git",
+                    "repository_path": "/tmp/hatchdoor-test-existing-git-repo",
                     "repository_url": "https://example.test/owner/notes.git",
                     "branch": null,
                     "vault_subdirectory": null,

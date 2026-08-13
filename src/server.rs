@@ -1477,6 +1477,8 @@ mod tests {
                         branch: None,
                         vault_subdirectory: None,
                         mode: crate::vault_registry::VaultGitMode::TwoWay,
+                        poll_interval_secs:
+                            crate::vault_registry::DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
@@ -1535,6 +1537,8 @@ mod tests {
                         branch: None,
                         vault_subdirectory: None,
                         mode: crate::vault_registry::VaultGitMode::LocalHistory,
+                        poll_interval_secs:
+                            crate::vault_registry::DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
@@ -4962,6 +4966,7 @@ mod tests {
                     code: "vault_read_unavailable".to_string(),
                     message: "Vault directory became unavailable".to_string(),
                     retryable: true,
+                    detail: None,
                 }),
             )
             .expect("publish unavailable local content");
