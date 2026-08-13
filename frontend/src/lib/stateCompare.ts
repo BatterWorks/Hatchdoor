@@ -74,7 +74,11 @@ function isExplorerNotesEqual(
   }
 
   for (let i = 0; i < left.length; i += 1) {
-    if (left[i].slug !== right[i].slug || left[i].title !== right[i].title) {
+    if (
+      left[i].slug !== right[i].slug ||
+      left[i].title !== right[i].title ||
+      left[i].vault_id !== right[i].vault_id
+    ) {
       return false;
     }
   }

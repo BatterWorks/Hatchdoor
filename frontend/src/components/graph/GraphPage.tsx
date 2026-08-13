@@ -4,16 +4,38 @@ import { type Simulation } from "d3-force";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
-import type { GraphData, GraphNode } from "../../types";
+import { useVaultScope } from "../../hooks/useVaultScope";
+import type {
+  GraphData,
+  GraphNode,
+  VaultGraph,
+  VaultReadProjection,
+} from "../../types";
 import { StateBlock } from "../ui";
 import {
   buildSimulationGraph,
   createGraphSimulation,
   hitTest as hitTestNodes,
+  nodeKey,
   nodeRadius,
   type SimLink,
   type SimNode,
 } from "./graphSimulation";
+
+/** Merges every participating Vault's graph component into the one
+ * `GraphData` shape the simulation already renders. With exactly one
+ * participant (a single-enabled-Vault instance, or any narrowed scope) this
+ * is that participant's own graph, unchanged — byte-identical to today. With
+ * more than one, nodes and edges are concatenated: edges never cross Vaults
+ * (the API guarantees this), and every node/edge carries its own `vault_id`,
+ * so the per-Vault island layout an accordion-equivalent treatment would give
+ * is a later slice (#118) this ticket explicitly excludes. */
+function mergeVaultGraphs(vaultGraphs: VaultGraph[]): GraphData {
+  return {
+    nodes: vaultGraphs.flatMap((vaultGraph) => vaultGraph.nodes),
+    edges: vaultGraphs.flatMap((vaultGraph) => vaultGraph.edges),
+  };
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -64,6 +86,7 @@ function readThemeColors(): ThemeColors {
 
 export function GraphPage() {
   const navigate = useNavigate();
+  const [scope] = useVaultScope();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -82,7 +105,7 @@ export function GraphPage() {
   const hoveredRef = useRef<SimNode | null>(null);
   const selectedRef = useRef<SimNode | null>(null);
   const activeTagsRef = useRef<Set<string>>(new Set());
-  const lastClickSlugRef = useRef<string | null>(null);
+  const lastClickKeyRef = useRef<string | null>(null);
   const rafRef = useRef<number>(0);
   const runningRef = useRef(false);
   const themeColorsRef = useRef<ThemeColors | null>(null);
@@ -122,10 +145,15 @@ export function GraphPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await apiFetch("/api/graph");
+        const res = await apiFetch(
+          `/api/v1/vaults/${encodeURIComponent(scope)}/graph`,
+        );
         if (!res.ok)
           throw new Error(await readErrorMessage(res, "Graph fetch failed"));
-        const data = (await res.json()) as GraphData;
+        const projection = (await res.json()) as VaultReadProjection<
+          VaultGraph[]
+        >;
+        const data = mergeVaultGraphs(projection.data);
         if (cancelled) return;
 
         setGraphData(data);
@@ -150,7 +178,7 @@ export function GraphPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [scope]);
 
   // ── hit test ────────────────────────────────────────────────────────────────
 
@@ -260,15 +288,16 @@ export function GraphPage() {
       return node.primary_tag !== null && activeTags.has(node.primary_tag);
     };
 
-    // connected slugs for selection highlight
-    const connectedSlugs = new Set<string>();
+    // connected node keys for selection highlight (vault_id:slug — a slug is
+    // only unique within its own Vault, and edges never cross Vaults)
+    const connectedKeys = new Set<string>();
     if (selected) {
-      connectedSlugs.add(selected.slug);
+      connectedKeys.add(nodeKey(selected));
       for (const link of links) {
-        if (link.source.slug === selected.slug)
-          connectedSlugs.add(link.target.slug);
-        if (link.target.slug === selected.slug)
-          connectedSlugs.add(link.source.slug);
+        if (nodeKey(link.source) === nodeKey(selected))
+          connectedKeys.add(nodeKey(link.target));
+        if (nodeKey(link.target) === nodeKey(selected))
+          connectedKeys.add(nodeKey(link.source));
       }
     }
 
@@ -283,14 +312,17 @@ export function GraphPage() {
       let color = mutedColor;
 
       if (selected) {
-        const srcConn = connectedSlugs.has(src.slug);
-        const tgtConn = connectedSlugs.has(tgt.slug);
+        const srcConn = connectedKeys.has(nodeKey(src));
+        const tgtConn = connectedKeys.has(nodeKey(tgt));
         if (srcConn && tgtConn) {
           alpha = 0.55;
           color = hotColor;
         } else alpha = 0.04;
       } else if (hovered) {
-        if (src.slug === hovered.slug || tgt.slug === hovered.slug) {
+        if (
+          nodeKey(src) === nodeKey(hovered) ||
+          nodeKey(tgt) === nodeKey(hovered)
+        ) {
           alpha = 0.6;
           color = hotColor;
         } else {
@@ -306,7 +338,9 @@ export function GraphPage() {
       ctx.strokeStyle = color;
       ctx.globalAlpha = alpha;
       ctx.lineWidth =
-        selected && connectedSlugs.has(src.slug) && connectedSlugs.has(tgt.slug)
+        selected &&
+        connectedKeys.has(nodeKey(src)) &&
+        connectedKeys.has(nodeKey(tgt))
           ? 1.5 / k
           : 1 / k;
       ctx.stroke();
@@ -317,9 +351,9 @@ export function GraphPage() {
     for (const node of nodes) {
       const r = nodeRadius(node.backlink_count);
       const vis = isVisible(node);
-      const isHovered = hovered?.slug === node.slug;
-      const isSelected = selected?.slug === node.slug;
-      const isConnected = selected ? connectedSlugs.has(node.slug) : false;
+      const isHovered = hovered ? nodeKey(hovered) === nodeKey(node) : false;
+      const isSelected = selected ? nodeKey(selected) === nodeKey(node) : false;
+      const isConnected = selected ? connectedKeys.has(nodeKey(node)) : false;
 
       let alpha = vis ? 1 : 0.15;
       if (selected && !isConnected) alpha = vis ? 0.2 : 0.06;
@@ -375,10 +409,11 @@ export function GraphPage() {
     const guaranteed = new Set<string>();
     const labelCandidates: SimNode[] = [];
     const pushLabel = (n: SimNode, force = false) => {
-      if (!seen.has(n.slug)) {
-        seen.add(n.slug);
+      const key = nodeKey(n);
+      if (!seen.has(key)) {
+        seen.add(key);
         labelCandidates.push(n);
-        if (force) guaranteed.add(n.slug);
+        if (force) guaranteed.add(key);
       }
     };
 
@@ -389,8 +424,8 @@ export function GraphPage() {
       .filter(
         (n) =>
           isVisible(n) &&
-          n.slug !== hovered?.slug &&
-          n.slug !== selected?.slug &&
+          (!hovered || nodeKey(n) !== nodeKey(hovered)) &&
+          (!selected || nodeKey(n) !== nodeKey(selected)) &&
           (n.backlink_count >= hubMinBacklinks ||
             nodeRadius(n.backlink_count) * k >= labelThreshold),
       )
@@ -399,14 +434,15 @@ export function GraphPage() {
 
     // Deconfliction: track occupied regions in screen space.
     // Pre-seed with every visible node circle so labels can't overlap nodes.
-    // Each entry carries the owning slug so a node's own label can self-exclude.
+    // Each entry carries the owning node key so a node's own label can
+    // self-exclude.
     const NODE_MARGIN = 4; // extra px around each circle
     const placed: Array<{
       sx: number;
       sy: number;
       sw: number;
       sh: number;
-      slug?: string;
+      key?: string;
     }> = nodes.filter(isVisible).map((n) => {
       const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
       return {
@@ -414,7 +450,7 @@ export function GraphPage() {
         sy: n.y * k + y - rScr,
         sw: rScr * 2,
         sh: rScr * 2,
-        slug: n.slug,
+        key: nodeKey(n),
       };
     });
 
@@ -426,11 +462,11 @@ export function GraphPage() {
       sy: number,
       sw: number,
       sh: number,
-      ownSlug: string,
+      ownKey: string,
     ) =>
       placed.some(
         (p) =>
-          p.slug !== ownSlug &&
+          p.key !== ownKey &&
           sx < p.sx + p.sw &&
           sx + sw > p.sx &&
           sy < p.sy + p.sh &&
@@ -439,9 +475,9 @@ export function GraphPage() {
 
     for (const node of labelCandidates) {
       const r = nodeRadius(node.backlink_count);
-      const isHov = node.slug === hovered?.slug;
-      const isSel = node.slug === selected?.slug;
-      const isGuaranteed = guaranteed.has(node.slug);
+      const isHov = hovered ? nodeKey(node) === nodeKey(hovered) : false;
+      const isSel = selected ? nodeKey(node) === nodeKey(selected) : false;
+      const isGuaranteed = guaranteed.has(nodeKey(node));
 
       ctx.save();
       ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -473,7 +509,7 @@ export function GraphPage() {
         const sy = pos.by * k + y;
         const sw = bw * k;
         const sh = bh * k;
-        if (!collidesWithPlaced(sx, sy, sw, sh, node.slug)) {
+        if (!collidesWithPlaced(sx, sy, sw, sh, nodeKey(node))) {
           chosen = pos;
           break;
         }
@@ -485,7 +521,7 @@ export function GraphPage() {
         const sy = by * k + y;
         const sw = bw * k;
         const sh = bh * k;
-        placed.push({ sx, sy, sw, sh, slug: node.slug });
+        placed.push({ sx, sy, sw, sh, key: nodeKey(node) });
 
         ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
         ctx.fillStyle = paperColor;
@@ -714,16 +750,21 @@ export function GraphPage() {
 
         if (!moved) {
           const node = dragRef.current.node;
-          if (lastClickSlugRef.current === node.slug) {
-            void navigate(`/n/${node.slug}`);
-            lastClickSlugRef.current = null;
+          const key = nodeKey(node);
+          if (lastClickKeyRef.current === key) {
+            void navigate(
+              `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`,
+            );
+            lastClickKeyRef.current = null;
           } else {
             selectedRef.current =
-              selectedRef.current?.slug === node.slug ? null : node;
-            lastClickSlugRef.current = node.slug;
+              selectedRef.current && nodeKey(selectedRef.current) === key
+                ? null
+                : node;
+            lastClickKeyRef.current = key;
             setTimeout(() => {
-              if (lastClickSlugRef.current === node.slug) {
-                lastClickSlugRef.current = null;
+              if (lastClickKeyRef.current === key) {
+                lastClickKeyRef.current = null;
               }
             }, 500);
           }
@@ -738,7 +779,7 @@ export function GraphPage() {
         const movedY = Math.abs(cy - panRef.current.startY);
         if (movedX < 4 && movedY < 4) {
           selectedRef.current = null;
-          lastClickSlugRef.current = null;
+          lastClickKeyRef.current = null;
         }
         panRef.current = null;
       }
@@ -886,16 +927,21 @@ export function GraphPage() {
 
         if (!moved) {
           const node = dragRef.current.node;
-          if (lastClickSlugRef.current === node.slug) {
-            void navigate(`/n/${node.slug}`);
-            lastClickSlugRef.current = null;
+          const key = nodeKey(node);
+          if (lastClickKeyRef.current === key) {
+            void navigate(
+              `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`,
+            );
+            lastClickKeyRef.current = null;
           } else {
             selectedRef.current =
-              selectedRef.current?.slug === node.slug ? null : node;
-            lastClickSlugRef.current = node.slug;
+              selectedRef.current && nodeKey(selectedRef.current) === key
+                ? null
+                : node;
+            lastClickKeyRef.current = key;
             setTimeout(() => {
-              if (lastClickSlugRef.current === node.slug)
-                lastClickSlugRef.current = null;
+              if (lastClickKeyRef.current === key)
+                lastClickKeyRef.current = null;
             }, 500);
           }
         }
@@ -910,7 +956,7 @@ export function GraphPage() {
           Math.abs(cy - panRef.current.startY) > 8;
         if (!moved) {
           selectedRef.current = null;
-          lastClickSlugRef.current = null;
+          lastClickKeyRef.current = null;
         }
         panRef.current = null;
       }

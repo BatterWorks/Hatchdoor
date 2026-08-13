@@ -15,6 +15,7 @@ describe("stateCompare", () => {
       relative_path: "Notes/Atlas",
       content: "# Atlas",
       content_hash: "hash-left",
+      layer: null,
     };
     const right: Note = {
       title: "Atlas",
@@ -22,6 +23,7 @@ describe("stateCompare", () => {
       relative_path: "Notes/Atlas",
       content: "# Atlas",
       content_hash: "hash-right",
+      layer: null,
     };
 
     expect(isNoteEqual(left, right)).toBe(true);
@@ -34,6 +36,7 @@ describe("stateCompare", () => {
       relative_path: "Notes/Atlas",
       content: "# Atlas",
       content_hash: "hash-left",
+      layer: null,
     };
     const right: Note = {
       ...left,
@@ -50,10 +53,10 @@ describe("stateCompare", () => {
         {
           name: "Notes",
           folders: [],
-          notes: [{ title: "Atlas", slug: "atlas" }],
+          notes: [{ title: "Atlas", slug: "atlas", vault_id: "vault-1" }],
         },
       ],
-      notes: [{ title: "Home", slug: "home" }],
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-1" }],
     };
     const right: ExplorerFolder = {
       name: "Vault",
@@ -61,10 +64,10 @@ describe("stateCompare", () => {
         {
           name: "Notes",
           folders: [],
-          notes: [{ title: "Atlas", slug: "atlas" }],
+          notes: [{ title: "Atlas", slug: "atlas", vault_id: "vault-1" }],
         },
       ],
-      notes: [{ title: "Home", slug: "home" }],
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-1" }],
     };
 
     expect(isExplorerTreeEqual(left, right)).toBe(true);
@@ -77,10 +80,10 @@ describe("stateCompare", () => {
         {
           name: "Notes",
           folders: [],
-          notes: [{ title: "Atlas", slug: "atlas" }],
+          notes: [{ title: "Atlas", slug: "atlas", vault_id: "vault-1" }],
         },
       ],
-      notes: [{ title: "Home", slug: "home" }],
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-1" }],
     };
     const right: ExplorerFolder = {
       name: "Vault",
@@ -88,10 +91,25 @@ describe("stateCompare", () => {
         {
           name: "Notes",
           folders: [],
-          notes: [{ title: "Runbook", slug: "runbook" }],
+          notes: [{ title: "Runbook", slug: "runbook", vault_id: "vault-1" }],
         },
       ],
-      notes: [{ title: "Home", slug: "home" }],
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-1" }],
+    };
+
+    expect(isExplorerTreeEqual(left, right)).toBe(false);
+  });
+
+  it("isExplorerTreeEqual detects a note with a matching slug but a different vault_id", () => {
+    const left: ExplorerFolder = {
+      name: "Vault",
+      folders: [],
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-1" }],
+    };
+    const right: ExplorerFolder = {
+      name: "Vault",
+      folders: [],
+      notes: [{ title: "Home", slug: "home", vault_id: "vault-2" }],
     };
 
     expect(isExplorerTreeEqual(left, right)).toBe(false);
@@ -99,12 +117,20 @@ describe("stateCompare", () => {
 
   it("isNoteLinksEqual matches identical link payloads", () => {
     const left: NoteLinks = {
-      outgoing: [{ title: "Plan", slug: "plan", relative_path: "Plan" }],
-      backlinks: [{ title: "Home", slug: "home", relative_path: "Home" }],
+      outgoing: [
+        { title: "Plan", slug: "plan", relative_path: "Plan", layer: null },
+      ],
+      backlinks: [
+        { title: "Home", slug: "home", relative_path: "Home", layer: null },
+      ],
     };
     const right: NoteLinks = {
-      outgoing: [{ title: "Plan", slug: "plan", relative_path: "Plan" }],
-      backlinks: [{ title: "Home", slug: "home", relative_path: "Home" }],
+      outgoing: [
+        { title: "Plan", slug: "plan", relative_path: "Plan", layer: null },
+      ],
+      backlinks: [
+        { title: "Home", slug: "home", relative_path: "Home", layer: null },
+      ],
     };
 
     expect(isNoteLinksEqual(left, right)).toBe(true);
@@ -113,11 +139,15 @@ describe("stateCompare", () => {
   it("isNoteLinksEqual detects changed backlinks", () => {
     const left: NoteLinks = {
       outgoing: [],
-      backlinks: [{ title: "Home", slug: "home", relative_path: "Home" }],
+      backlinks: [
+        { title: "Home", slug: "home", relative_path: "Home", layer: null },
+      ],
     };
     const right: NoteLinks = {
       outgoing: [],
-      backlinks: [{ title: "Atlas", slug: "atlas", relative_path: "Atlas" }],
+      backlinks: [
+        { title: "Atlas", slug: "atlas", relative_path: "Atlas", layer: null },
+      ],
     };
 
     expect(isNoteLinksEqual(left, right)).toBe(false);

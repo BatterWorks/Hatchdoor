@@ -2,9 +2,10 @@ import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import type { NoteActionDialogKind } from "../components/NoteActionsDialog";
-import type { ActiveNoteMeta } from "../types";
+import type { ActiveNoteMeta, VaultSummary } from "../types";
 import { clearCreateDraft } from "../lib/writeDrafts";
 import { validateNotePath } from "../lib/writePaths";
+import { resolvePrimaryVaultId } from "./useVaultScope";
 import {
   archiveNote,
   createNote,
@@ -16,6 +17,7 @@ import {
 
 interface UseNoteActionsParams {
   activeNote: ActiveNoteMeta | null;
+  vaults: VaultSummary[];
   refreshVault: () => Promise<void>;
   setWriteNotice: (notice: string | null) => void;
 }
@@ -23,11 +25,14 @@ interface UseNoteActionsParams {
 /**
  * Owns the note-action dialog (create/rename/move/archive/delete) and the
  * handlers that perform each write, refresh the vault, and navigate to the
- * result. Depends on the current note, the vault refresher, and the write-notice
- * setter, which are threaded in from the shell.
+ * result. Depends on the current note, the enabled-Vault list (to resolve a
+ * target Vault for a brand-new note with none open — see
+ * `resolvePrimaryVaultId`), the vault refresher, and the write-notice setter,
+ * which are threaded in from the shell.
  */
 export function useNoteActions({
   activeNote,
+  vaults,
   refreshVault,
   setWriteNotice,
 }: UseNoteActionsParams) {
@@ -58,7 +63,11 @@ export function useNoteActions({
     if (!activeNote?.slug || !activeNote.contentHash) {
       throw new Error("Current note is not ready for write actions");
     }
-    return { slug: activeNote.slug, contentHash: activeNote.contentHash };
+    return {
+      vaultId: activeNote.vaultId,
+      slug: activeNote.slug,
+      contentHash: activeNote.contentHash,
+    };
   }, [activeNote]);
 
   const handleCreateNote = useCallback(
@@ -69,14 +78,21 @@ export function useNoteActions({
         setNoteActionError(pathError);
         return;
       }
+      const targetVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
+      if (!targetVaultId) {
+        setNoteActionError("No Vault is available to create a note in.");
+        return;
+      }
       try {
-        const outcome = await createNote(relativePath, content);
+        const outcome = await createNote(targetVaultId, relativePath, content);
         clearCreateDraft();
         setNoteActionDialog(null);
         setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();
         if (outcome.slug) {
-          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+          navigate(
+            `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+          );
         }
       } catch (error) {
         setNoteActionError(
@@ -84,7 +100,7 @@ export function useNoteActions({
         );
       }
     },
-    [navigate, refreshVault, setWriteNotice],
+    [activeNote, navigate, refreshVault, setWriteNotice, vaults],
   );
 
   const handleRenameNote = useCallback(
@@ -96,13 +112,15 @@ export function useNoteActions({
         return;
       }
       try {
-        const { slug, contentHash } = requireActiveNoteHash();
-        const outcome = await renameNote(slug, trimmed, contentHash);
+        const { vaultId, slug, contentHash } = requireActiveNoteHash();
+        const outcome = await renameNote(vaultId, slug, trimmed, contentHash);
         setNoteActionDialog(null);
         setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();
         if (outcome.slug) {
-          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+          navigate(
+            `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+          );
         }
       } catch (error) {
         setNoteActionError(
@@ -125,13 +143,20 @@ export function useNoteActions({
         return;
       }
       try {
-        const { slug, contentHash } = requireActiveNoteHash();
-        const outcome = await moveNote(slug, targetFolder, contentHash);
+        const { vaultId, slug, contentHash } = requireActiveNoteHash();
+        const outcome = await moveNote(
+          vaultId,
+          slug,
+          targetFolder,
+          contentHash,
+        );
         setNoteActionDialog(null);
         setWriteNotice(describeWriteOutcome(outcome));
         await refreshVault();
         if (outcome.slug) {
-          navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+          navigate(
+            `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+          );
         }
       } catch (error) {
         setNoteActionError(
@@ -145,13 +170,15 @@ export function useNoteActions({
   const handleArchiveNote = useCallback(async () => {
     setNoteActionError(null);
     try {
-      const { slug, contentHash } = requireActiveNoteHash();
-      const outcome = await archiveNote(slug, contentHash);
+      const { vaultId, slug, contentHash } = requireActiveNoteHash();
+      const outcome = await archiveNote(vaultId, slug, contentHash);
       setNoteActionDialog(null);
       setWriteNotice(describeWriteOutcome(outcome));
       await refreshVault();
       if (outcome.slug) {
-        navigate(`/n/${encodeURIComponent(outcome.slug)}`);
+        navigate(
+          `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+        );
       }
     } catch (error) {
       setNoteActionError(
@@ -163,8 +190,8 @@ export function useNoteActions({
   const handleDeleteNote = useCallback(async () => {
     setNoteActionError(null);
     try {
-      const { slug, contentHash } = requireActiveNoteHash();
-      const outcome = await deleteNote(slug, contentHash);
+      const { vaultId, slug, contentHash } = requireActiveNoteHash();
+      const outcome = await deleteNote(vaultId, slug, contentHash);
       setNoteActionDialog(null);
       setWriteNotice(describeWriteOutcome(outcome));
       await refreshVault();

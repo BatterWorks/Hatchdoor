@@ -13,19 +13,26 @@ describe("useSearch", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
         JSON.stringify({
-          mode: "keyword",
-          results: [
-            {
-              chunk_id: 7,
-              note_slug: "plan",
-              note_title: "Plan",
-              note_path: "Projects/Plan",
-              heading_path: "Next",
-              content: "Plan the next milestone",
-              score: 1,
-              outbound_links: [],
-            },
-          ],
+          scope: "all",
+          collection_revision: 1,
+          partial: false,
+          participants: [],
+          data: {
+            mode: "keyword",
+            results: [
+              {
+                vault_id: "vault-1",
+                chunk_id: 7,
+                note_slug: "plan",
+                note_title: "Plan",
+                note_path: "Projects/Plan",
+                heading_path: "Next",
+                content: "Plan the next milestone",
+                score: 1,
+                outbound_links: [],
+              },
+            ],
+          },
         }),
         {
           status: 200,
@@ -33,7 +40,7 @@ describe("useSearch", () => {
         },
       ),
     );
-    const { result } = renderHook(() => useSearch());
+    const { result } = renderHook(() => useSearch("all"));
 
     act(() => {
       result.current.setSearchQuery("plan");
@@ -43,7 +50,7 @@ describe("useSearch", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/search?q=plan&mode=keyword&limit=30&per_note_cap=2",
+        "/api/v1/vaults/all/search?q=plan&mode=keyword&limit=30&per_note_cap=2",
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
     });

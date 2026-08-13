@@ -10,6 +10,7 @@ import { extractMarkdownHeadings } from "../../lib/noteHeadings";
 import { NoteProperties } from "./sections";
 import { createNoteMarkdownComponents } from "./renderers";
 import { useResolvedWikilinks } from "./wikilinks";
+import type { VaultId } from "../../types";
 
 const PREVIEW_REHYPE_PLUGINS = [rehypeKatex];
 const PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkMath];
@@ -21,14 +22,17 @@ const PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkMath];
  * while editing.
  */
 export function NotePreview({
+  vaultId,
   content,
   relativePath,
 }: {
+  vaultId: VaultId;
   content: string;
   relativePath: string;
 }) {
   const parsed = useMemo(() => parseFrontmatter(content), [content]);
   const { resolved: markdown } = useResolvedWikilinks(
+    vaultId,
     stripBlockIds(parsed.body),
     relativePath,
   );
@@ -43,8 +47,13 @@ export function NotePreview({
     [parsed.body],
   );
   const components = useMemo(
-    () => createNoteMarkdownComponents(relativePath, headingIdsBySourceLine),
-    [relativePath, headingIdsBySourceLine],
+    () =>
+      createNoteMarkdownComponents(
+        vaultId,
+        relativePath,
+        headingIdsBySourceLine,
+      ),
+    [vaultId, relativePath, headingIdsBySourceLine],
   );
 
   return (

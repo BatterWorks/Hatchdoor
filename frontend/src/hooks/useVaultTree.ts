@@ -8,55 +8,89 @@ import { isExplorerTreeEqual } from "../lib/stateCompare";
 import type {
   ExplorerFolder,
   ModifiedNote,
-  RecentlyModifiedResponse,
+  VaultReadProjection,
+  VaultScope,
+  VaultTree,
 } from "../types";
 
+/** Merges every participating Vault's tree into the one `ExplorerFolder`
+ * shape the explorer already renders. With exactly one participant (a
+ * single-enabled-Vault instance, or any narrowed scope) this is the
+ * participant's own tree, unchanged — byte-identical to today. With more
+ * than one, top-level folders and notes are concatenated without deep
+ * merging same-named folders across Vaults: each note still carries its own
+ * `vault_id`, so links and edits target the correct Vault, but the visual
+ * grouping an accordion would give is a later slice (#117) this ticket
+ * explicitly excludes. */
+function mergeVaultTrees(vaultTrees: VaultTree[]): ExplorerFolder | null {
+  if (vaultTrees.length === 0) {
+    return null;
+  }
+  if (vaultTrees.length === 1) {
+    return vaultTrees[0].tree;
+  }
+  return {
+    name: "Vaults",
+    folders: vaultTrees.flatMap((vaultTree) => vaultTree.tree.folders),
+    notes: vaultTrees.flatMap((vaultTree) => vaultTree.tree.notes),
+  };
+}
+
 /**
- * Owns the vault explorer tree and its live-refresh machinery: initial load,
- * the SSE `vault-revision` subscription that bumps `vaultRevision`, and reload
- * on revision change. Also derives the folder-path and note-candidate lists the
- * shell and dialogs consume.
+ * Owns the vault explorer tree and its live-refresh machinery for the given
+ * scope: initial load, the SSE `vault-collection-revision` subscription that
+ * bumps `vaultRevision`, and reload on revision change. Also derives the
+ * folder-path and note-candidate lists the shell and dialogs consume.
  */
-export function useVaultTree() {
+export function useVaultTree(scope: VaultScope) {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
   const [loadingTree, setLoadingTree] = useState(true);
   const [treeError, setTreeError] = useState<string | null>(null);
+  const [treePartial, setTreePartial] = useState(false);
   const [modifiedNotes, setModifiedNotes] = useState<ModifiedNote[]>([]);
   const [vaultRevision, setVaultRevision] = useState(0);
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
     try {
-      const res = await apiFetch("/api/tree");
+      const res = await apiFetch(
+        `/api/v1/vaults/${encodeURIComponent(scope)}/tree`,
+      );
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, "Failed loading tree"));
       }
-      const nextTree = (await res.json()) as ExplorerFolder;
+      const projection = (await res.json()) as VaultReadProjection<VaultTree[]>;
+      const nextTree = mergeVaultTrees(projection.data);
       setTree((prev) =>
         isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
       );
+      setTreePartial(projection.partial);
     } catch (err) {
       setTreeError(
         err instanceof Error ? err.message : "Unknown tree loading error",
       );
     }
-  }, []);
+  }, [scope]);
 
   const loadModifiedNotes = useCallback(async () => {
     try {
       const params = new URLSearchParams({ limit: "5" });
-      const res = await apiFetch(`/api/recently-modified?${params.toString()}`);
+      const res = await apiFetch(
+        `/api/v1/vaults/${encodeURIComponent(scope)}/recent?${params.toString()}`,
+      );
       if (!res.ok) {
         throw new Error(
           await readErrorMessage(res, "Failed loading modified notes"),
         );
       }
-      const json = (await res.json()) as RecentlyModifiedResponse;
-      setModifiedNotes(json.notes.slice(0, 5));
+      const projection = (await res.json()) as VaultReadProjection<
+        ModifiedNote[]
+      >;
+      setModifiedNotes(projection.data.slice(0, 5));
     } catch {
       setModifiedNotes([]);
     }
-  }, []);
+  }, [scope]);
 
   useEffect(() => {
     void (async () => {
@@ -72,12 +106,14 @@ export function useVaultTree() {
       return;
     }
 
-    const events = new EventSource(withAccessToken("/api/vault-events"));
-    const onVaultRevision = (event: MessageEvent<string>) => {
+    const events = new EventSource(withAccessToken("/api/v1/vaults/events"));
+    const onCollectionRevision = (event: MessageEvent<string>) => {
       try {
-        const payload = JSON.parse(event.data) as { revision?: unknown };
-        if (typeof payload.revision === "number") {
-          const revision = payload.revision;
+        const payload = JSON.parse(event.data) as {
+          collection_revision?: unknown;
+        };
+        if (typeof payload.collection_revision === "number") {
+          const revision = payload.collection_revision;
           setVaultRevision((current) =>
             revision > current ? revision : current,
           );
@@ -86,10 +122,13 @@ export function useVaultTree() {
         // Ignore malformed event payloads; the next valid revision will resync.
       }
     };
-    events.addEventListener("vault-revision", onVaultRevision);
+    events.addEventListener("vault-collection-revision", onCollectionRevision);
 
     return () => {
-      events.removeEventListener("vault-revision", onVaultRevision);
+      events.removeEventListener(
+        "vault-collection-revision",
+        onCollectionRevision,
+      );
       events.close();
     };
   }, []);
@@ -103,17 +142,6 @@ export function useVaultTree() {
     void loadModifiedNotes();
   }, [loadModifiedNotes, loadTree, vaultRevision]);
 
-  const refreshVault = useCallback(async () => {
-    try {
-      await apiFetch("/api/refresh", { method: "POST" });
-    } catch {
-      // Fall back to tree refresh even if force refresh endpoint fails.
-    }
-    await loadTree();
-    await loadModifiedNotes();
-  }, [loadModifiedNotes, loadTree]);
-
-  const treeIsStale = Boolean(tree && treeError);
   const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
   const noteCandidates = useMemo(() => flattenNoteCandidates(tree), [tree]);
 
@@ -121,13 +149,12 @@ export function useVaultTree() {
     tree,
     loadingTree,
     treeError,
-    treeIsStale,
+    treePartial,
     modifiedNotes,
     vaultRevision,
     folderPaths,
     noteCandidates,
     loadTree,
     loadModifiedNotes,
-    refreshVault,
   };
 }

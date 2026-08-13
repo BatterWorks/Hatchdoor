@@ -4,6 +4,7 @@ import { UiButton, UiPanel } from "../../components/ui";
 import type { SearchResult, SearchSelection } from "./types";
 
 type NoteGroup = {
+  vault_id: string;
   note_slug: string;
   note_title: string;
   note_path: string;
@@ -12,18 +13,27 @@ type NoteGroup = {
 
 const EMPTY_EXPANDED_SLUGS = new Set<string>();
 
+/** Groups by `(vault_id, note_slug)` — a slug is only unique within its own
+ * Vault, and duplicate slugs across Vaults must stay distinct groups (#137;
+ * full provenance display is #115). */
+function groupKey(result: SearchResult): string {
+  return `${result.vault_id}:${result.note_slug}`;
+}
+
 function groupResults(results: SearchResult[]): NoteGroup[] {
   const map = new Map<string, NoteGroup>();
   for (const r of results) {
-    if (!map.has(r.note_slug)) {
-      map.set(r.note_slug, {
+    const key = groupKey(r);
+    if (!map.has(key)) {
+      map.set(key, {
+        vault_id: r.vault_id,
         note_slug: r.note_slug,
         note_title: r.note_title,
         note_path: r.note_path,
         chunks: [],
       });
     }
-    map.get(r.note_slug)!.chunks.push(r);
+    map.get(key)!.chunks.push(r);
   }
   return Array.from(map.values());
 }
@@ -78,7 +88,7 @@ export function SearchDialog({
   const resultsListRef = useRef<HTMLUListElement | null>(null);
   const resultsKey = [
     trimmedQuery,
-    ...results.map((result) => `${result.note_slug}:${result.chunk_id}`),
+    ...results.map((result) => `${groupKey(result)}:${result.chunk_id}`),
   ].join("|");
   const [expandedState, setExpandedState] = useState<{
     resultsKey: string;
@@ -214,16 +224,18 @@ export function SearchDialog({
         >
           {groups.map((group) => {
             const [first, ...rest] = group.chunks;
-            const isExpanded = expandedSlugs.has(group.note_slug);
+            const key = groupKey(first);
+            const isExpanded = expandedSlugs.has(key);
             const hiddenCount = rest.length;
 
             return (
-              <li key={group.note_slug} className="search-group">
+              <li key={key} className="search-group">
                 <button
                   type="button"
                   className="search-result search-result--primary"
                   onClick={() =>
                     onSelect({
+                      vaultId: first.vault_id,
                       slug: first.note_slug,
                       query: trimmedQuery,
                       matchKind: first.heading_path ?? "",
@@ -257,6 +269,7 @@ export function SearchDialog({
                         className="search-result search-result--chunk"
                         onClick={() =>
                           onSelect({
+                            vaultId: chunk.vault_id,
                             slug: chunk.note_slug,
                             query: trimmedQuery,
                             matchKind: chunk.heading_path ?? "",
@@ -282,7 +295,7 @@ export function SearchDialog({
                   <button
                     type="button"
                     className="search-group-toggle"
-                    onClick={() => toggleExpanded(group.note_slug)}
+                    onClick={() => toggleExpanded(key)}
                   >
                     {isExpanded
                       ? "Show less"

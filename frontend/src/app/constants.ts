@@ -8,3 +8,6 @@ export const LAST_NOTE_KEY = "hatchdoor.lastNote";
 export const NOTE_PROPERTIES_COLLAPSED_KEY =
   "hatchdoor.notePropertiesCollapsed";
 export const THEME_KEY = "hatchdoor.theme";
+// Selected Vault scope (one Vault ID, or "all"): state/URL/storage only per
+// #137 — no Scope zone or other chrome reads or writes this yet.
+export const VAULT_SCOPE_KEY = "hatchdoor.vaultScope";

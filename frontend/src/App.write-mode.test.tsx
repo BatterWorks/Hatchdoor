@@ -13,6 +13,28 @@ import { EditorView } from "@codemirror/view";
 
 import { VaultApp as App } from "./App";
 import { noteDraftKey } from "./lib/writeDrafts";
+import { discoveryResponse, healthyVault } from "./test/fixtures/vaults";
+
+const VAULT = healthyVault("Vault");
+const VAULT_ID = VAULT.vault_id;
+const NOTE_URL = `/api/v1/vaults/${VAULT_ID}/notes/home`;
+const NOTES_URL = `/api/v1/vaults/${VAULT_ID}/notes`;
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
+}
+
+function collectionEnvelope(data: unknown): Response {
+  return jsonResponse({
+    scope: "all",
+    collection_revision: 1,
+    partial: false,
+    participants: [
+      { vault_id: VAULT_ID, vault_name: VAULT.name, state: "fresh" },
+    ],
+    data,
+  });
+}
 
 afterEach(() => {
   cleanup();
@@ -28,135 +50,135 @@ function mockReadAndWriteApi() {
         const url = String(input);
         const method = init?.method ?? "GET";
 
-        if (url.includes("/api/write-capabilities")) {
-          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
-            status: 200,
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
           });
         }
 
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
         }
 
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/refresh")) {
-          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
         }
 
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
+        if (url.endsWith(NOTES_URL) && method === "POST") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            slug: "projects-new-note",
+            relative_path: "Projects/New Note",
+            content_hash: "hash-new",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
         }
 
-        if (url.endsWith("/api/note") && method === "POST") {
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              slug: "projects-new-note",
-              relative_path: "Projects/New Note",
-              content_hash: "hash-new",
-              git_sync_warning: null,
-              rewritten_notes: 0,
-              moved_assets: 0,
-              trashed_path: null,
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/notes/home/rename") && method === "PATCH") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            slug: "renamed-note",
+            relative_path: "Renamed Note",
+            content_hash: "hash-renamed",
+            quality_warnings: [],
+            rewritten_notes: 1,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
         }
 
-        if (url.includes("/api/note/home/rename") && method === "PATCH") {
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              slug: "renamed-note",
-              relative_path: "Renamed Note",
-              content_hash: "hash-renamed",
-              git_sync_warning: null,
-              rewritten_notes: 1,
-              moved_assets: 0,
-              trashed_path: null,
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/notes/home/move") && method === "PATCH") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            slug: "archive-home",
+            relative_path: "Archive/Home",
+            content_hash: "hash-moved",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
         }
 
-        if (url.includes("/api/note/home/move") && method === "PATCH") {
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              slug: "archive-home",
-              relative_path: "Archive/Home",
-              content_hash: "hash-moved",
-              git_sync_warning: null,
-              rewritten_notes: 0,
-              moved_assets: 0,
-              trashed_path: null,
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/notes/home/archive") && method === "PATCH") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            slug: "archive-home",
+            relative_path: "90-archive/Home",
+            content_hash: "hash-archived",
+            quality_warnings: [],
+            rewritten_notes: 1,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
         }
 
-        if (url.includes("/api/note/home/archive") && method === "PATCH") {
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              slug: "archive-home",
-              relative_path: "90-archive/Home",
-              content_hash: "hash-archived",
-              git_sync_warning: null,
-              rewritten_notes: 1,
-              moved_assets: 0,
-              trashed_path: null,
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/notes/home") && method === "DELETE") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            slug: "home",
+            relative_path: "Home",
+            content_hash: "hash-1",
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: "90-archive/Home.md",
+            layer: null,
+          });
         }
 
-        if (url.includes("/api/note/home") && method === "DELETE") {
-          return new Response(
-            JSON.stringify({
-              ok: true,
+        if (url.includes("/notes/home") && method === "GET") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
               slug: "home",
               relative_path: "Home",
+              content: "# Home\nOriginal",
               content_hash: "hash-1",
-              git_sync_warning: null,
-              rewritten_notes: 0,
-              moved_assets: 0,
-              trashed_path: "90-archive/Home.md",
-            }),
-            { status: 200 },
-          );
+              layer: null,
+            },
+          });
         }
 
-        if (url.includes("/api/note/home") && method === "GET") {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home\nOriginal",
-                content_hash: "hash-1",
-              },
-            }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
 
         return new Response("not found", { status: 404 });
@@ -173,72 +195,77 @@ describe("App write mode", () => {
         async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = String(input);
 
-          if (url.includes("/api/write-capabilities")) {
-            return new Response(
-              JSON.stringify({ enabled: true, warnings: [] }),
-              { status: 200 },
-            );
+          if (url.endsWith("/api/v1/vaults")) {
+            return jsonResponse(discoveryResponse([VAULT]));
           }
 
-          if (url.includes("/api/tree")) {
-            return new Response(
-              JSON.stringify({
-                name: "Vault",
-                folders: [],
-                notes: [{ title: "Home", slug: "home" }],
-              }),
-              { status: 200 },
-            );
+          if (url.includes("/write-capabilities")) {
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              enabled: true,
+              warnings: [],
+            });
           }
 
-          if (url.includes("/api/recently-modified")) {
-            return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+          if (url.includes("/tree")) {
+            return collectionEnvelope([
+              {
+                vault_id: VAULT_ID,
+                vault_name: VAULT.name,
+                tree: {
+                  name: "Vault",
+                  folders: [],
+                  notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+                },
+              },
+            ]);
           }
 
-          if (url.includes("/api/note/home/links")) {
-            return new Response(
-              JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-              { status: 200 },
-            );
+          if (url.includes("/recent")) {
+            return collectionEnvelope([]);
           }
 
-          if (url.endsWith("/api/note/home") && init?.method === "PUT") {
-            return new Response(
-              JSON.stringify({
-                ok: true,
+          if (url.includes("/notes/home/links")) {
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              outgoing: [],
+              backlinks: [],
+            });
+          }
+
+          if (url.endsWith("/notes/home") && init?.method === "PUT") {
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              ok: true,
+              slug: "home",
+              relative_path: "Home",
+              content_hash: "hash-2",
+              quality_warnings: [],
+              rewritten_notes: 0,
+              moved_assets: 0,
+              trashed_path: null,
+              layer: null,
+            });
+          }
+
+          if (url.includes("/notes/home")) {
+            noteCalls += 1;
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              note: {
+                title: "Home",
                 slug: "home",
                 relative_path: "Home",
-                content_hash: "hash-2",
-                git_sync_warning: null,
-                rewritten_notes: 0,
-                moved_assets: 0,
-                trashed_path: null,
-              }),
-              { status: 200 },
-            );
-          }
-
-          if (url.includes("/api/note/home")) {
-            noteCalls += 1;
-            return new Response(
-              JSON.stringify({
-                note: {
-                  title: "Home",
-                  slug: "home",
-                  relative_path: "Home",
-                  content:
-                    noteCalls === 1 ? "# Home\nOriginal" : "# Home\nUpdated",
-                  content_hash: noteCalls === 1 ? "hash-1" : "hash-2",
-                },
-              }),
-              { status: 200 },
-            );
-          }
-
-          if (url.includes("/api/resolve-batch")) {
-            return new Response(JSON.stringify({ results: [] }), {
-              status: 200,
+                content:
+                  noteCalls === 1 ? "# Home\nOriginal" : "# Home\nUpdated",
+                content_hash: noteCalls === 1 ? "hash-1" : "hash-2",
+                layer: null,
+              },
             });
+          }
+
+          if (url.includes("/resolve-batch")) {
+            return jsonResponse({ vault_id: VAULT_ID, results: [] });
           }
 
           return new Response("not found", { status: 404 });
@@ -246,7 +273,7 @@ describe("App write mode", () => {
       );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -266,7 +293,7 @@ describe("App write mode", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/note/home",
+        NOTE_URL,
         expect.objectContaining({
           method: "PUT",
           body: JSON.stringify({
@@ -289,7 +316,7 @@ describe("App write mode", () => {
     const fetchMock = mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -315,7 +342,7 @@ describe("App write mode", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/note",
+        NOTES_URL,
         expect.objectContaining({
           method: "POST",
           body: JSON.stringify({
@@ -331,7 +358,7 @@ describe("App write mode", () => {
     mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -348,7 +375,7 @@ describe("App write mode", () => {
     const fetchMock = mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -362,7 +389,7 @@ describe("App write mode", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/note/home/archive",
+        `${NOTE_URL}/archive`,
         expect.objectContaining({
           method: "PATCH",
           body: JSON.stringify({ expected_content_hash: "hash-1" }),
@@ -379,73 +406,78 @@ describe("App write mode", () => {
         async (input: RequestInfo | URL, init?: RequestInit) => {
           const url = String(input);
 
-          if (url.includes("/api/write-capabilities")) {
-            return new Response(
-              JSON.stringify({ enabled: true, warnings: [] }),
-              { status: 200 },
-            );
+          if (url.endsWith("/api/v1/vaults")) {
+            return jsonResponse(discoveryResponse([VAULT]));
           }
-          if (url.includes("/api/tree")) {
-            return new Response(
-              JSON.stringify({
-                name: "Vault",
-                folders: [],
-                notes: [{ title: "Home", slug: "home" }],
-              }),
-              { status: 200 },
-            );
+
+          if (url.includes("/write-capabilities")) {
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              enabled: true,
+              warnings: [],
+            });
           }
-          if (url.includes("/api/recently-modified")) {
-            return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+          if (url.includes("/tree")) {
+            return collectionEnvelope([
+              {
+                vault_id: VAULT_ID,
+                vault_name: VAULT.name,
+                tree: {
+                  name: "Vault",
+                  folders: [],
+                  notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+                },
+              },
+            ]);
           }
-          if (url.includes("/api/note/home/links")) {
-            return new Response(
-              JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-              { status: 200 },
-            );
+          if (url.includes("/recent")) {
+            return collectionEnvelope([]);
           }
-          if (url.endsWith("/api/note/home") && init?.method === "PUT") {
-            return new Response(
-              JSON.stringify({
-                ok: true,
-                slug: "home",
-                relative_path: "Home",
-                content_hash: "hash-3",
-                git_sync_warning: null,
-                rewritten_notes: 0,
-                moved_assets: 0,
-                trashed_path: null,
-              }),
-              { status: 200 },
-            );
+          if (url.includes("/notes/home/links")) {
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              outgoing: [],
+              backlinks: [],
+            });
           }
-          if (url.includes("/api/note/home")) {
+          if (url.endsWith("/notes/home") && init?.method === "PUT") {
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              ok: true,
+              slug: "home",
+              relative_path: "Home",
+              content_hash: "hash-3",
+              quality_warnings: [],
+              rewritten_notes: 0,
+              moved_assets: 0,
+              trashed_path: null,
+              layer: null,
+            });
+          }
+          if (url.includes("/notes/home")) {
             noteCalls += 1;
             // A later disk version exists, but the editor must not pick it up.
-            return new Response(
-              JSON.stringify({
-                note: {
-                  title: "Home",
-                  slug: "home",
-                  relative_path: "Home",
-                  content: "# Home\nOriginal",
-                  content_hash: noteCalls === 1 ? "hash-1" : "hash-2",
-                },
-              }),
-              { status: 200 },
-            );
-          }
-          if (url.includes("/api/resolve-batch")) {
-            return new Response(JSON.stringify({ results: [] }), {
-              status: 200,
+            return jsonResponse({
+              vault_id: VAULT_ID,
+              note: {
+                title: "Home",
+                slug: "home",
+                relative_path: "Home",
+                content: "# Home\nOriginal",
+                content_hash: noteCalls === 1 ? "hash-1" : "hash-2",
+                layer: null,
+              },
             });
+          }
+          if (url.includes("/resolve-batch")) {
+            return jsonResponse({ vault_id: VAULT_ID, results: [] });
           }
           return new Response("not found", { status: 404 });
         },
       );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -462,8 +494,8 @@ describe("App write mode", () => {
     // A vault revision arrives while the editor is open.
     act(() => {
       window.__hatchdoorEventSources[0].emit(
-        "vault-revision",
-        JSON.stringify({ revision: 1 }),
+        "vault-collection-revision",
+        JSON.stringify({ collection_revision: 1, vault_ids: [VAULT_ID] }),
       );
     });
 
@@ -480,7 +512,7 @@ describe("App write mode", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/note/home",
+        NOTE_URL,
         expect.objectContaining({
           method: "PUT",
           body: JSON.stringify({
@@ -494,8 +526,9 @@ describe("App write mode", () => {
 
   it("warns and offers reload for a stale recovered draft", async () => {
     window.localStorage.setItem(
-      noteDraftKey("home"),
+      noteDraftKey(VAULT_ID, "home"),
       JSON.stringify({
+        vaultId: VAULT_ID,
         slug: "home",
         content: "# Home\nStale draft",
         baseContentHash: "old-hash",
@@ -505,7 +538,7 @@ describe("App write mode", () => {
     mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -532,60 +565,69 @@ describe("App write mode", () => {
         const url = String(input);
         const method = init?.method ?? "GET";
 
-        if (url.includes("/api/write-capabilities")) {
-          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
-            status: 200,
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
           });
         }
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
-        }
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-        if (url.endsWith("/api/note/home") && method === "PUT") {
-          return new Response(JSON.stringify({ error: "conflict" }), {
-            status: 409,
-          });
-        }
-        if (url.includes("/api/note/home")) {
-          noteCalls += 1;
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content:
-                  noteCalls === 1 ? "# Home\nOriginal" : "# Home\nDisk edit",
-                content_hash: noteCalls === 1 ? "hash-1" : "hash-2",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.endsWith("/notes/home") && method === "PUT") {
+          return jsonResponse(
+            { code: "write_conflict", message: "Conflict", retryable: true },
+            409,
           );
         }
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/home")) {
+          noteCalls += 1;
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content:
+                noteCalls === 1 ? "# Home\nOriginal" : "# Home\nDisk edit",
+              content_hash: noteCalls === 1 ? "hash-1" : "hash-2",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
         return new Response("not found", { status: 404 });
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -619,7 +661,7 @@ describe("App write mode", () => {
     const fetchMock = mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -645,7 +687,7 @@ describe("App write mode", () => {
       await screen.findByText(/must not contain "\.\."/),
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalledWith(
-      "/api/note",
+      NOTES_URL,
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -654,62 +696,74 @@ describe("App write mode", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/write-capabilities")) {
-          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
-            status: 200,
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
           });
         }
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [
-                { title: "Home", slug: "home" },
-                { title: "Project Plan", slug: "project-plan" },
-              ],
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
-        }
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home\nOriginal",
-                content_hash: "hash-1",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [
+                  { vault_id: VAULT_ID, title: "Home", slug: "home" },
+                  {
+                    vault_id: VAULT_ID,
+                    title: "Project Plan",
+                    slug: "project-plan",
+                  },
+                ],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home\nOriginal",
+              content_hash: "hash-1",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
         return new Response("not found", { status: 404 });
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
 
     const textarea = (await screen.findByRole("textbox", {
       name: "Markdown content",
@@ -728,13 +782,13 @@ describe("App write mode", () => {
     mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
 
     await screen.findByRole("heading", { level: 2, name: "Home" });
-    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
 
     const textarea = await screen.findByRole("textbox", {
       name: "Markdown content",
@@ -755,53 +809,61 @@ describe("App write mode", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/write-capabilities")) {
-          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
-            status: 200,
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
           });
         }
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [{ name: "Projects", folders: [], notes: [] }],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
-        }
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home\nOriginal",
-                content_hash: "hash-1",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [{ name: "Projects", folders: [], notes: [] }],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home\nOriginal",
+              content_hash: "hash-1",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
         return new Response("not found", { status: 404 });
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -818,7 +880,7 @@ describe("App write mode", () => {
     mockReadAndWriteApi();
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -866,7 +928,7 @@ describe("touch editing hint", () => {
     mockPointer(true);
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -879,7 +941,7 @@ describe("touch editing hint", () => {
     mockPointer(false);
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -894,7 +956,7 @@ describe("touch editing hint", () => {
     window.localStorage.setItem("hatchdoor.touchEditHintSeen", "1");
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -910,7 +972,7 @@ describe("touch editing hint", () => {
     mockPointer(true);
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -948,7 +1010,7 @@ describe("touch editing hint", () => {
     mockPointer(true);
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -976,86 +1038,102 @@ describe("touch editing hint", () => {
         const url = String(input);
         const method = init?.method ?? "GET";
 
-        if (url.includes("/api/write-capabilities")) {
-          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
-            status: 200,
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
           });
         }
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
         }
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
         }
-        if (url.includes("/api/attachment") && method === "POST") {
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              attachment: { relative_path: "Attachments/report.pdf" },
-              git_sync_warning: null,
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/attachments") && method === "POST") {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            attachment: {
+              relative_path: "Attachments/report.pdf",
+              size_bytes: 4,
+              content_hash: "hash-att",
+              layer: null,
+            },
+            rewritten_notes: 0,
+            trashed_path: null,
+            cleanup_warning: null,
+          });
         }
-        if (url.endsWith("/api/note/home") && method === "PUT") {
+        if (url.endsWith("/notes/home") && method === "PUT") {
           writes.push(JSON.parse(String(init?.body)).content as string);
-          return new Response(
-            JSON.stringify({
-              ok: true,
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            ok: true,
+            slug: "home",
+            relative_path: "Home",
+            content_hash: `hash-${writes.length + 1}`,
+            quality_warnings: [],
+            rewritten_notes: 0,
+            moved_assets: 0,
+            trashed_path: null,
+            layer: null,
+          });
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
               slug: "home",
               relative_path: "Home",
-              content_hash: `hash-${writes.length + 1}`,
-              git_sync_warning: null,
-              rewritten_notes: 0,
-              moved_assets: 0,
-              trashed_path: null,
-            }),
-            { status: 200 },
-          );
+              content: "# Home\nOriginal",
+              content_hash: "hash-1",
+              layer: null,
+            },
+          });
         }
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home\nOriginal",
-                content_hash: "hash-1",
-              },
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
         return new Response("not found", { status: 404 });
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
 
     // Open the paragraph and type into it without leaving the block, so the
-    // edit is still uncommitted when the file lands.
-    const block = await screen.findByText("Original");
+    // edit is still uncommitted when the file lands. Waiting for the "Edit"
+    // button first ensures write mode (which now depends on a Vault
+    // discovery round trip before write-capabilities can even be requested)
+    // has actually turned on before the block is clicked.
+    await screen.findByRole("button", { name: "Edit" });
+    const block = screen.getByText("Original");
     fireEvent.click(block);
     const input = await screen.findByRole("textbox");
     const view = EditorView.findFromDOM(input as HTMLElement)!;

@@ -9,9 +9,29 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { VaultApp as App } from "./App";
+import { discoveryResponse, healthyVault } from "./test/fixtures/vaults";
 
 const originalOnLine = navigator.onLine;
 const originalClipboard = navigator.clipboard;
+
+const VAULT = healthyVault("Vault");
+const VAULT_ID = VAULT.vault_id;
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
+}
+
+function collectionEnvelope(data: unknown): Response {
+  return jsonResponse({
+    scope: "all",
+    collection_revision: 1,
+    partial: false,
+    participants: [
+      { vault_id: VAULT_ID, vault_name: VAULT.name, state: "fresh" },
+    ],
+    data,
+  });
+}
 
 afterEach(() => {
   cleanup();
@@ -71,15 +91,26 @@ describe("App mobile and topbar actions", () => {
         } as DOMRect;
       },
     );
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          name: "Vault",
-          folders: [],
-          notes: [],
-        }),
-        { status: 200 },
-      ),
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: { name: "Vault", folders: [], notes: [] },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
     );
 
     render(
@@ -124,41 +155,53 @@ describe("App mobile and topbar actions", () => {
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
-
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), {
-            status: 200,
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes(`/notes/home/links`)) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.includes(`/notes/home`)) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: false,
+            warnings: [],
           });
         }
 
@@ -166,7 +209,7 @@ describe("App mobile and topbar actions", () => {
       });
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -206,38 +249,53 @@ describe("App mobile and topbar actions", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), {
-            status: 200,
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes(`/notes/home/links`)) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.includes(`/notes/home`)) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: false,
+            warnings: [],
           });
         }
         return new Response("not found", { status: 404 });
@@ -245,7 +303,7 @@ describe("App mobile and topbar actions", () => {
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );

@@ -5,8 +5,10 @@ import {
   getStoredExpandedFolders,
   getStoredNumber,
   getStoredRecentNotes,
+  getStoredScope,
   getStoredString,
   isEditableTarget,
+  setStoredScope,
 } from "./storage";
 
 afterEach(() => {
@@ -26,16 +28,33 @@ describe("storage helpers", () => {
     window.localStorage.setItem(
       "hatchdoor.recentNotes",
       JSON.stringify([
-        { slug: "home", title: "Home", relativePath: "Home", viewedAt: 1 },
+        {
+          vaultId: "v1",
+          slug: "home",
+          title: "Home",
+          relativePath: "Home",
+          viewedAt: 1,
+        },
         { slug: "bad", title: "Bad", relativePath: "Bad" },
       ]),
     );
     const parsed = getStoredRecentNotes();
     expect(parsed).toHaveLength(1);
     expect(parsed[0].slug).toBe("home");
+    expect(parsed[0].vaultId).toBe("v1");
 
     window.localStorage.setItem("hatchdoor.recentNotes", "{");
     expect(getStoredRecentNotes()).toEqual([]);
+  });
+
+  it("getStoredScope defaults to all and round-trips a selected Vault", () => {
+    expect(getStoredScope()).toBe("all");
+
+    setStoredScope("vault-123");
+    expect(getStoredScope()).toBe("vault-123");
+
+    setStoredScope("all");
+    expect(getStoredScope()).toBe("all");
   });
 
   it("getStoredExpandedFolders keeps only boolean map entries", () => {

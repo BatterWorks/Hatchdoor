@@ -17,6 +17,7 @@ import {
 import type { GraphData } from "../../types";
 
 export interface SimNode extends SimulationNodeDatum {
+  vault_id: string;
   slug: string;
   title: string;
   primary_tag: string | null;
@@ -28,6 +29,12 @@ export interface SimNode extends SimulationNodeDatum {
 export interface SimLink extends SimulationLinkDatum<SimNode> {
   source: SimNode;
   target: SimNode;
+}
+
+/** A slug is only unique within its own Vault (#137), and graph edges never
+ * cross Vaults, so nodes are identified and linked by `(vault_id, slug)`. */
+export function nodeKey(node: Pick<SimNode, "vault_id" | "slug">): string {
+  return `${node.vault_id}:${node.slug}`;
 }
 
 export interface Transform {
@@ -66,12 +73,12 @@ export function buildSimulationGraph(
     y: (random() - 0.5) * spread,
   })) as SimNode[];
 
-  const nodeBySlug = new Map<string, SimNode>(nodes.map((n) => [n.slug, n]));
+  const nodeByKey = new Map<string, SimNode>(nodes.map((n) => [nodeKey(n), n]));
 
   const links: SimLink[] = data.edges
     .map((e) => {
-      const source = nodeBySlug.get(e.source);
-      const target = nodeBySlug.get(e.target);
+      const source = nodeByKey.get(`${e.vault_id}:${e.source_slug}`);
+      const target = nodeByKey.get(`${e.vault_id}:${e.target_slug}`);
       if (!source || !target) return null;
       return { source, target } as SimLink;
     })
@@ -89,7 +96,7 @@ export function createGraphSimulation(
     .force(
       "link",
       forceLink<SimNode, SimLink>(links)
-        .id((d) => d.slug)
+        .id((d) => nodeKey(d))
         .distance(60)
         .strength(0.4),
     )

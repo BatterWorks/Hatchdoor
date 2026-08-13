@@ -40,7 +40,8 @@ import type {
   ExplorerNote,
   Note,
   NoteLinks,
-  NoteLinksResponse,
+  VaultQualifiedLinks,
+  VaultQualifiedNote,
 } from "../types";
 import {
   describeWriteOutcome,
@@ -86,6 +87,16 @@ function isCoarsePointer(): boolean {
   return window.matchMedia?.("(pointer: coarse)").matches ?? false;
 }
 
+/** Flattens the wire response's per-link `vault_id` (always the note's own —
+ * cross-Vault backlinks are ruled out by #62) into the simpler local shape
+ * the rest of this page and `stateCompare` already work with. */
+function unwrapLinks(wire: VaultQualifiedLinks): NoteLinks {
+  return {
+    outgoing: wire.outgoing.map((entry) => entry.link),
+    backlinks: wire.backlinks.map((entry) => entry.link),
+  };
+}
+
 export function NotePage({
   onActiveNoteChange,
   onTagSelect,
@@ -105,8 +116,9 @@ export function NotePage({
   onWriteNotice?: (message: string | null) => void;
   noteCandidates?: ExplorerNote[];
 }) {
-  const params = useParams<{ slug: string }>();
+  const params = useParams<{ vaultId: string; slug: string }>();
   const location = useLocation();
+  const vaultId = params.vaultId ?? "";
   const slug = params.slug ?? "";
   const [note, setNote] = useState<Note | null>(null);
   const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
@@ -141,13 +153,16 @@ export function NotePage({
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
   const searchHitsRef = useRef<HTMLSpanElement[]>([]);
-  const currentSlugRef = useRef(slug);
+  const noteKey = `${vaultId}:${slug}`;
+  const currentNoteKeyRef = useRef(noteKey);
   const lastEditRequestIdRef = useRef(editRequestId);
   const lastHandledRevisionRef = useRef(0);
   const autosaveStatusRef = useRef<string>("idle");
   const activeUnitRef = useRef<string | null>(null);
   const latestContentRef = useRef("");
-  currentSlugRef.current = slug;
+  currentNoteKeyRef.current = noteKey;
+
+  const notePath = `/api/v1/vaults/${encodeURIComponent(vaultId)}/notes/${encodeURIComponent(slug)}`;
 
   const loadNote = useCallback(
     async (hardReload: boolean) => {
@@ -157,41 +172,40 @@ export function NotePage({
       }
 
       try {
-        const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
+        const res = await apiFetch(notePath);
         if (!res.ok) {
           throw new Error(await readErrorMessage(res, "Failed loading note"));
         }
-        const json = (await res.json()) as { note: Note };
-        if (slug !== currentSlugRef.current) return;
+        const json = (await res.json()) as VaultQualifiedNote;
+        if (noteKey !== currentNoteKeyRef.current) return;
         setNote((prev) => (isNoteEqual(prev, json.note) ? prev : json.note));
       } catch (err) {
-        if (slug !== currentSlugRef.current) return;
+        if (noteKey !== currentNoteKeyRef.current) return;
         setError(
           err instanceof Error ? err.message : "Unknown note loading error",
         );
       }
     },
-    [slug],
+    [noteKey, notePath],
   );
 
   const loadNoteLinks = useCallback(async () => {
     try {
-      const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}/links`);
+      const res = await apiFetch(`${notePath}/links`);
       if (!res.ok) {
         throw new Error(
           await readErrorMessage(res, "Failed loading note links"),
         );
       }
-      const json = (await res.json()) as NoteLinksResponse;
-      if (slug !== currentSlugRef.current) return;
-      setNoteLinks((prev) =>
-        isNoteLinksEqual(prev, json.links) ? prev : json.links,
-      );
+      const json = (await res.json()) as VaultQualifiedLinks;
+      const links = unwrapLinks(json);
+      if (noteKey !== currentNoteKeyRef.current) return;
+      setNoteLinks((prev) => (isNoteLinksEqual(prev, links) ? prev : links));
     } catch {
-      if (slug !== currentSlugRef.current) return;
+      if (noteKey !== currentNoteKeyRef.current) return;
       setNoteLinks(null);
     }
-  }, [slug]);
+  }, [noteKey, notePath]);
 
   useEffect(() => {
     let cancelled = false;
@@ -221,7 +235,7 @@ export function NotePage({
     setEditorError(null);
     setSaving(false);
     setInlineDirty(false);
-  }, [slug]);
+  }, [noteKey]);
 
   useEffect(() => {
     if (
@@ -272,7 +286,7 @@ export function NotePage({
       return;
     }
 
-    const storedDraft = loadNoteDraft(note.slug);
+    const storedDraft = loadNoteDraft(vaultId, note.slug);
     if (storedDraft && storedDraft.content !== note.content) {
       const stale = storedDraft.baseContentHash !== note.content_hash;
       setDraftContent(storedDraft.content);
@@ -297,7 +311,7 @@ export function NotePage({
     setEditorError(null);
     setSaving(false);
     setIsEditing(true);
-  }, [isEditing, note, writeEnabled]);
+  }, [isEditing, note, vaultId, writeEnabled]);
 
   useEffect(() => {
     if (editRequestId === lastEditRequestIdRef.current) {
@@ -313,13 +327,14 @@ export function NotePage({
       return;
     }
 
-    saveNoteDraft(note.slug, {
+    saveNoteDraft(vaultId, note.slug, {
+      vaultId,
       slug: note.slug,
       content: draftContent,
       baseContentHash: editBaseHash || note.content_hash,
       savedAt: Date.now(),
     });
-  }, [draftContent, editBaseHash, isEditing, note]);
+  }, [draftContent, editBaseHash, isEditing, note, vaultId]);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
 
@@ -330,16 +345,18 @@ export function NotePage({
     }
 
     onActiveNoteChange({
+      vaultId,
       title: note.title,
       slug: note.slug,
       relativePath: note.relative_path,
       exportContent: stripVaultNoteLinks(parsed.body),
       contentHash: note.content_hash,
     });
-  }, [note, onActiveNoteChange, parsed.body]);
+  }, [note, onActiveNoteChange, parsed.body, vaultId]);
 
   const renderInput = stripBlockIds(parsed.body);
   const { resolved: markdown, resolvedFor } = useResolvedWikilinks(
+    vaultId,
     renderInput,
     note?.relative_path ?? "",
   );
@@ -401,18 +418,24 @@ export function NotePage({
   const markdownComponents = useMemo(
     () =>
       createNoteMarkdownComponents(
+        vaultId,
         note?.relative_path ?? "",
         headingIdsBySourceLine,
         { editable: inlineEditingEnabled },
       ),
-    [note?.relative_path, headingIdsBySourceLine, inlineEditingEnabled],
+    [
+      vaultId,
+      note?.relative_path,
+      headingIdsBySourceLine,
+      inlineEditingEnabled,
+    ],
   );
 
   const autosaveRef = useRef<ReturnType<typeof useNoteAutosave> | null>(null);
   // Stable per note: a ref an effect depends on cannot be reassigned, and the
   // history object mutates internally rather than being swapped out.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const history = useMemo(() => createEditHistory(""), [slug]);
+  const history = useMemo(() => createEditHistory(""), [noteKey]);
 
   const dismissTouchEditHint = useCallback(() => {
     setTouchEditHintSeen((seen) => {
@@ -451,13 +474,8 @@ export function NotePage({
   const autosave = useNoteAutosave({
     baseHash: note?.content_hash ?? "",
     enabled: inlineEditingEnabled,
-    save: async (nextContent, expectedHash) => {
-      const outcome = await updateNote(slug, nextContent, expectedHash);
-      if (outcome.git_sync_warning) {
-        onWriteNotice?.(`Git sync warning: ${outcome.git_sync_warning}`);
-      }
-      return outcome;
-    },
+    save: async (nextContent, expectedHash) =>
+      updateNote(vaultId, slug, nextContent, expectedHash),
     onSaved: (result) => {
       setNote((prev) =>
         prev && result.content_hash
@@ -477,11 +495,11 @@ export function NotePage({
   // the empty string the history was constructed with and blank the note.
   const seededSlugRef = useRef<string | null>(null);
   useEffect(() => {
-    if (note && seededSlugRef.current !== slug) {
-      seededSlugRef.current = slug;
+    if (note && seededSlugRef.current !== noteKey) {
+      seededSlugRef.current = noteKey;
       history.reset(note.content);
     }
-  }, [note, slug, history]);
+  }, [note, noteKey, history]);
 
   useEffect(() => {
     latestContentRef.current = note?.content ?? "";
@@ -599,11 +617,9 @@ export function NotePage({
       const result = await uploadNoteAttachment(
         file,
         note.relative_path,
-        uploadAttachment,
+        (uploadFile, targetRelativePath) =>
+          uploadAttachment(vaultId, uploadFile, targetRelativePath),
       );
-      if (result.gitSyncWarning) {
-        onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
-      }
       // Not note.content: that is the document this render closed over, and a
       // block committed above has already moved past it.
       handleInlineChange(
@@ -625,9 +641,9 @@ export function NotePage({
     setIsEditing(true);
     void (async () => {
       try {
-        const res = await apiFetch(`/api/note/${encodeURIComponent(slug)}`);
+        const res = await apiFetch(notePath);
         if (res.ok) {
-          const json = (await res.json()) as { note: Note };
+          const json = (await res.json()) as VaultQualifiedNote;
           setConflictNote(json.note);
         }
       } catch {
@@ -717,7 +733,7 @@ export function NotePage({
       return;
     }
 
-    clearNoteDraft(note.slug);
+    clearNoteDraft(vaultId, note.slug);
     setDraftContent(note.content);
     setEditorError(null);
     setDraftNotice(null);
@@ -744,14 +760,15 @@ export function NotePage({
     setSaving(true);
     setEditorError(null);
     try {
-      const res = await apiFetch(`/api/note/${encodeURIComponent(note.slug)}`);
+      const res = await apiFetch(notePath);
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, "Failed loading note"));
       }
-      const json = (await res.json()) as { note: Note };
+      const json = (await res.json()) as VaultQualifiedNote;
       setNote(json.note);
       setEditBaseHash(json.note.content_hash);
-      saveNoteDraft(json.note.slug, {
+      saveNoteDraft(vaultId, json.note.slug, {
+        vaultId,
         slug: json.note.slug,
         content: draftContent,
         baseContentHash: json.note.content_hash,
@@ -778,8 +795,13 @@ export function NotePage({
     setEditorError(null);
 
     try {
-      const outcome = await updateNote(note.slug, draftContent, editBaseHash);
-      clearNoteDraft(note.slug);
+      const outcome = await updateNote(
+        vaultId,
+        note.slug,
+        draftContent,
+        editBaseHash,
+      );
+      clearNoteDraft(vaultId, note.slug);
       setConflict(false);
       setConflictNote(null);
       setNoteChangedOnDisk(false);
@@ -805,11 +827,9 @@ export function NotePage({
       if (saveError instanceof Error && saveError.name === "ConflictError") {
         setConflict(true);
         try {
-          const res = await apiFetch(
-            `/api/note/${encodeURIComponent(note.slug)}`,
-          );
+          const res = await apiFetch(notePath);
           if (res.ok) {
-            const json = (await res.json()) as { note: Note };
+            const json = (await res.json()) as VaultQualifiedNote;
             setConflictNote(json.note);
           }
         } catch {
@@ -836,7 +856,8 @@ export function NotePage({
     setNote(conflictNote);
     setDraftContent(conflictNote.content);
     setEditBaseHash(conflictNote.content_hash);
-    saveNoteDraft(conflictNote.slug, {
+    saveNoteDraft(vaultId, conflictNote.slug, {
+      vaultId,
       slug: conflictNote.slug,
       content: conflictNote.content,
       baseContentHash: conflictNote.content_hash,
@@ -856,7 +877,8 @@ export function NotePage({
     }
     setNote(conflictNote);
     setEditBaseHash(conflictNote.content_hash);
-    saveNoteDraft(conflictNote.slug, {
+    saveNoteDraft(vaultId, conflictNote.slug, {
+      vaultId,
       slug: conflictNote.slug,
       content: draftContent,
       baseContentHash: conflictNote.content_hash,
@@ -876,11 +898,9 @@ export function NotePage({
     const result = await uploadNoteAttachment(
       file,
       note.relative_path,
-      uploadAttachment,
+      (uploadFile, targetRelativePath) =>
+        uploadAttachment(vaultId, uploadFile, targetRelativePath),
     );
-    if (result.gitSyncWarning) {
-      onWriteNotice?.(`Git sync warning: ${result.gitSyncWarning}`);
-    }
     return result.embedPath;
   };
 
@@ -962,7 +982,7 @@ export function NotePage({
           onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
           onTagSelect={onTagSelect}
         />
-        <NoteLinksPanel links={noteLinks} />
+        <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
         <NoteTocMobile headings={tocHeadings} />
         {isEditing ? (
           <NoteEditor
@@ -992,7 +1012,11 @@ export function NotePage({
             onCancel={handleCancelEditing}
             onUploadAttachment={handleUploadAttachment}
             renderPreview={(value) => (
-              <NotePreview content={value} relativePath={note.relative_path} />
+              <NotePreview
+                vaultId={vaultId}
+                content={value}
+                relativePath={note.relative_path}
+              />
             )}
           />
         ) : (
