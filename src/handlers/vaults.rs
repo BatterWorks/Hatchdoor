@@ -38,8 +38,8 @@ use tracing::error;
 
 use crate::app_state::AppState;
 use crate::vault_registry::{
-    HttpsCredentials, NewVaultDefinition, VaultDefinition, VaultDefinitionEdit,
-    VaultDefinitionError, VaultId, VaultRegistryError, VaultRegistryRecovery,
+    HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
+    VaultDefinitionEdit, VaultDefinitionError, VaultId, VaultRegistryError, VaultRegistryRecovery,
     VaultRegistryRecoveryKind, VaultRegistrySnapshot, VaultRegistryState, VaultSource,
 };
 use crate::vault_runtime::{
@@ -61,6 +61,10 @@ pub struct VaultSummary {
     pub source: VaultSource,
     pub exclude_patterns: Vec<String>,
     pub credential_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_folder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_identity: Option<VaultCommitIdentity>,
     pub activation: VaultActivationStatus,
     pub local_content: LocalContentStatus,
     pub search: VaultSearchStatus,
@@ -152,16 +156,21 @@ impl VaultApiError {
     }
 }
 
+/// `username` is optional: a caller may supply a token alone, and the
+/// registry substitutes a documented fixed placeholder
+/// (`vault_registry::HTTPS_CREDENTIALS_USERNAME_PLACEHOLDER`) rather than
+/// requiring one (#130).
 #[derive(Debug, Deserialize)]
 pub struct HttpsCredentialsInput {
-    pub username: String,
+    #[serde(default)]
+    pub username: Option<String>,
     pub token: String,
 }
 
 impl From<HttpsCredentialsInput> for HttpsCredentials {
     fn from(value: HttpsCredentialsInput) -> Self {
         Self {
-            username: value.username,
+            username: value.username.unwrap_or_default(),
             token: value.token,
         }
     }
@@ -176,7 +185,11 @@ impl From<HttpsCredentialsInput> for HttpsCredentials {
 pub enum HttpsCredentialsPatch {
     Keep,
     Remove,
-    Replace { username: String, token: String },
+    Replace {
+        #[serde(default)]
+        username: Option<String>,
+        token: String,
+    },
 }
 
 impl From<HttpsCredentialsPatch> for crate::vault_registry::HttpsCredentialUpdate {
@@ -184,9 +197,10 @@ impl From<HttpsCredentialsPatch> for crate::vault_registry::HttpsCredentialUpdat
         match value {
             HttpsCredentialsPatch::Keep => Self::Keep,
             HttpsCredentialsPatch::Remove => Self::Remove,
-            HttpsCredentialsPatch::Replace { username, token } => {
-                Self::Replace(HttpsCredentials { username, token })
-            }
+            HttpsCredentialsPatch::Replace { username, token } => Self::Replace(HttpsCredentials {
+                username: username.unwrap_or_default(),
+                token,
+            }),
         }
     }
 }
@@ -211,6 +225,12 @@ pub struct CreateVaultRequest {
     pub exclude_patterns: Vec<String>,
     #[serde(default)]
     pub https_credentials: Option<HttpsCredentialsInput>,
+    /// Absent means the server-wide `HATCHDOOR_ARCHIVE_PREFIX` applies.
+    #[serde(default)]
+    pub archive_folder: Option<String>,
+    /// Absent means the server-wide author identity applies.
+    #[serde(default)]
+    pub commit_identity: Option<VaultCommitIdentity>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +245,12 @@ pub struct EditVaultRequest {
     pub https_credentials: HttpsCredentialsPatch,
     #[serde(default)]
     pub confirm_identity_change: bool,
+    /// Absent means the server-wide `HATCHDOOR_ARCHIVE_PREFIX` applies.
+    #[serde(default)]
+    pub archive_folder: Option<String>,
+    /// Absent means the server-wide author identity applies.
+    #[serde(default)]
+    pub commit_identity: Option<VaultCommitIdentity>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +345,8 @@ fn definition_error_response(error: VaultDefinitionError, vault_id: Option<Vault
         ),
         VaultDefinitionError::InvalidName
         | VaultDefinitionError::InvalidExclusionPattern
+        | VaultDefinitionError::InvalidArchiveFolder
+        | VaultDefinitionError::InvalidCommitIdentity
         | VaultDefinitionError::InvalidSource(_) => {
             ("invalid_vault_definition", StatusCode::BAD_REQUEST)
         }
@@ -393,6 +421,8 @@ fn vault_summary(definition: &VaultDefinition, snapshot: &CollectionVaultSnapsho
         source: definition.source().clone(),
         exclude_patterns: definition.exclude_patterns().to_vec(),
         credential_configured: definition.credential_configured(),
+        archive_folder: definition.archive_folder().map(str::to_string),
+        commit_identity: definition.commit_identity().cloned(),
         activation: snapshot.activation,
         local_content: snapshot.local_content,
         search: snapshot.search,
@@ -536,6 +566,8 @@ pub async fn create_vault_handler(
         source: request.source,
         exclude_patterns: request.exclude_patterns,
         https_credentials: request.https_credentials.map(Into::into),
+        archive_folder: request.archive_folder,
+        commit_identity: request.commit_identity,
     };
     match state
         .vault_registry
@@ -594,6 +626,8 @@ pub async fn edit_vault_handler(
         exclude_patterns: request.exclude_patterns,
         https_credentials: request.https_credentials.into(),
         confirm_identity_change: request.confirm_identity_change,
+        archive_folder: request.archive_folder,
+        commit_identity: request.commit_identity,
     };
     match state
         .vault_registry
@@ -1024,6 +1058,8 @@ mod tests {
                     source: VaultSource::Local { path },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add vault");
@@ -1075,9 +1111,11 @@ mod tests {
             },
             exclude_patterns: Vec::new(),
             https_credentials: Some(HttpsCredentialsInput {
-                username: "git-user".to_string(),
+                username: Some("git-user".to_string()),
                 token: "old-token".to_string(),
             }),
+            archive_folder: None,
+            commit_identity: None,
         };
         let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -1148,10 +1186,12 @@ mod tests {
             },
             exclude_patterns: Vec::new(),
             https_credentials: HttpsCredentialsPatch::Replace {
-                username: "git-user".to_string(),
+                username: Some("git-user".to_string()),
                 token: "new-token".to_string(),
             },
             confirm_identity_change: false,
+            archive_folder: None,
+            commit_identity: None,
         };
         let response = edit_vault_handler(
             State(state.clone()),
@@ -1191,9 +1231,11 @@ mod tests {
             },
             exclude_patterns: Vec::new(),
             https_credentials: Some(HttpsCredentialsInput {
-                username: "git-user".to_string(),
+                username: Some("git-user".to_string()),
                 token: "old-token".to_string(),
             }),
+            archive_folder: None,
+            commit_identity: None,
         };
         let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -1219,10 +1261,12 @@ mod tests {
             },
             exclude_patterns: Vec::new(),
             https_credentials: HttpsCredentialsPatch::Replace {
-                username: "git-user".to_string(),
+                username: Some("git-user".to_string()),
                 token: "new-token".to_string(),
             },
             confirm_identity_change: false,
+            archive_folder: None,
+            commit_identity: None,
         };
         let response = edit_vault_handler(
             State(state.clone()),
@@ -1292,6 +1336,8 @@ mod tests {
             },
             exclude_patterns: Vec::new(),
             https_credentials: None,
+            archive_folder: None,
+            commit_identity: None,
         };
         let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
         assert_eq!(response.status(), StatusCode::CREATED);
@@ -1372,6 +1418,8 @@ mod tests {
             exclude_patterns: Vec::new(),
             https_credentials: HttpsCredentialsPatch::Keep,
             confirm_identity_change: false,
+            archive_folder: None,
+            commit_identity: None,
         };
         let response = edit_vault_handler(
             State(state.clone()),

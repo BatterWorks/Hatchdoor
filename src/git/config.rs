@@ -103,6 +103,22 @@ impl GitConfig {
     }
 }
 
+/// Resolve the commit author identity for one Vault's Git operation: its own
+/// configured identity if set (`vault_registry::VaultDefinition::commit_identity`),
+/// else the instance-wide `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL`
+/// defaults (#120's decision to keep those server-wide with an optional
+/// per-Vault override).
+pub fn resolve_commit_identity(
+    vault_identity: Option<&crate::vault_registry::VaultCommitIdentity>,
+    default_name: &str,
+    default_email: &str,
+) -> (String, String) {
+    match vault_identity {
+        Some(identity) => (identity.name.clone(), identity.email.clone()),
+        None => (default_name.to_string(), default_email.to_string()),
+    }
+}
+
 pub(crate) fn non_empty_setting(
     snapshot: &crate::runtime_config::ConfigSnapshot,
     key: &str,
@@ -194,5 +210,27 @@ mod tests {
             .expect("legacy true parses")
             .expect("legacy true enabled");
         assert_eq!(legacy.mode, GitMode::Remote);
+    }
+
+    #[test]
+    fn resolve_commit_identity_prefers_the_vaults_own_identity_when_set() {
+        let vault_identity = crate::vault_registry::VaultCommitIdentity {
+            name: "Work Bot".to_string(),
+            email: "work-bot@example.test".to_string(),
+        };
+
+        let (name, email) =
+            resolve_commit_identity(Some(&vault_identity), "Hatchdoor", "hatchdoor@localhost");
+
+        assert_eq!(name, "Work Bot");
+        assert_eq!(email, "work-bot@example.test");
+    }
+
+    #[test]
+    fn resolve_commit_identity_falls_back_to_the_instance_default_when_absent() {
+        let (name, email) = resolve_commit_identity(None, "Hatchdoor", "hatchdoor@localhost");
+
+        assert_eq!(name, "Hatchdoor");
+        assert_eq!(email, "hatchdoor@localhost");
     }
 }

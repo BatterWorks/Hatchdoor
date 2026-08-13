@@ -276,7 +276,11 @@ pub async fn vault_scoped_resolve_batch_handler(
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
     let snapshot = state.runtime_snapshot();
-    let archive_prefix = match AppState::runtime_archive_prefix(&snapshot) {
+    let control = vaults.runtime(vault_id);
+    let archive_prefix = match AppState::vault_archive_prefix(
+        control.as_ref().map(|control| control.definition()),
+        &snapshot,
+    ) {
         Ok(prefix) => prefix,
         Err(error) => return internal_error_response(error, Some(vault_id)),
     };

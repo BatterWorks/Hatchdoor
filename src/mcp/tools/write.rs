@@ -40,6 +40,10 @@ impl McpVault {
         crate::vault::ExcludeMatcher::new(self.control.definition().exclude_patterns())
             .map_err(JsonRpcFailure::internal)
     }
+
+    fn definition(&self) -> &crate::vault_registry::VaultDefinition {
+        self.control.definition()
+    }
 }
 
 pub(super) fn scoped_vault(
@@ -294,8 +298,8 @@ pub(super) async fn archive_note_tool(
     let index = current_index(vault).await?;
     let entry = note_entry(&index, &args.slug)?;
     let snapshot = state.runtime_snapshot();
-    let archive_prefix =
-        AppState::runtime_archive_prefix(&snapshot).map_err(JsonRpcFailure::internal)?;
+    let archive_prefix = AppState::vault_archive_prefix(Some(vault.definition()), &snapshot)
+        .map_err(JsonRpcFailure::internal)?;
     let archive_folder = archive_prefix.trim().trim_matches('/');
     let file_name = entry
         .relative_path

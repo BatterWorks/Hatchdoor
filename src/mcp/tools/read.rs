@@ -107,6 +107,10 @@ struct EditVaultArgs {
     https_credentials: Option<crate::handlers::vaults::HttpsCredentialsPatch>,
     #[serde(default)]
     confirm_identity_change: bool,
+    #[serde(default)]
+    archive_folder: Option<String>,
+    #[serde(default)]
+    commit_identity: Option<crate::vault_registry::VaultCommitIdentity>,
 }
 
 pub(super) async fn list_vaults_tool(
@@ -263,6 +267,8 @@ pub(super) async fn edit_vault_tool(
             .https_credentials
             .unwrap_or(vaults::HttpsCredentialsPatch::Keep),
         confirm_identity_change: args.confirm_identity_change,
+        archive_folder: args.archive_folder,
+        commit_identity: args.commit_identity,
     };
     handler_payload(
         vaults::edit_vault_handler(State(state), Path(args.vault_id), Ok(axum::Json(request)))
@@ -389,8 +395,8 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         })
     };
     vec![
-        json!({"name":"create_vault","description":"Create a Vault definition with the shared revisioned collection contract. The registry assigns its immutable Vault ID after a successful create; use list_vaults to discover it.","inputSchema":{"type":"object","properties":{"expected_registry_revision":{"type":"integer","minimum":0},"name":{"type":"string","minLength":1},"enabled":{"type":"boolean","default":true},"source":{"type":"object","description":"A shared VaultSource object: local, existing_git, or managed_git."},"exclude_patterns":{"type":"array","items":{"type":"string"},"default":[]},"https_credentials":{"type":"object","description":"Optional HTTPS username/token input. It is redacted from every response."}},"required":["expected_registry_revision","name","source"],"additionalProperties":false},"annotations":super::write_tool_annotations(true, false)}),
-        json!({"name":"edit_vault","description":"Edit exactly one Vault definition with optimistic registry revision control.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"expected_registry_revision":{"type":"integer","minimum":0},"name":{"type":"string","minLength":1},"source":{"type":"object","description":"A shared VaultSource object: local, existing_git, or managed_git."},"exclude_patterns":{"type":"array","items":{"type":"string"},"default":[]},"https_credentials":{"type":"object","description":"A shared credentials patch: {action: keep|remove|replace}; replacement input is never echoed."},"confirm_identity_change":{"type":"boolean","default":false}},"required":["vault_id","expected_registry_revision","name","source"],"additionalProperties":false},"annotations":super::write_tool_annotations(true, false)}),
+        json!({"name":"create_vault","description":"Create a Vault definition with the shared revisioned collection contract. The registry assigns its immutable Vault ID after a successful create; use list_vaults to discover it.","inputSchema":{"type":"object","properties":{"expected_registry_revision":{"type":"integer","minimum":0},"name":{"type":"string","minLength":1},"enabled":{"type":"boolean","default":true},"source":{"type":"object","description":"A shared VaultSource object: local, existing_git, or managed_git."},"exclude_patterns":{"type":"array","items":{"type":"string"},"default":[]},"https_credentials":{"type":"object","description":"Optional HTTPS token input. username is optional; a documented fixed placeholder is used when omitted. It is redacted from every response."},"archive_folder":{"type":"string","description":"Optional per-Vault archive folder. Absent means the instance-wide default applies."},"commit_identity":{"type":"object","description":"Optional per-Vault commit author identity: {name, email}. Absent means the instance-wide default applies.","properties":{"name":{"type":"string","minLength":1},"email":{"type":"string","minLength":1}},"required":["name","email"],"additionalProperties":false}},"required":["expected_registry_revision","name","source"],"additionalProperties":false},"annotations":super::write_tool_annotations(true, false)}),
+        json!({"name":"edit_vault","description":"Edit exactly one Vault definition with optimistic registry revision control.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"expected_registry_revision":{"type":"integer","minimum":0},"name":{"type":"string","minLength":1},"source":{"type":"object","description":"A shared VaultSource object: local, existing_git, or managed_git."},"exclude_patterns":{"type":"array","items":{"type":"string"},"default":[]},"https_credentials":{"type":"object","description":"A shared credentials patch: {action: keep|remove|replace}; replace's username is optional (a documented fixed placeholder is used when omitted); replacement input is never echoed."},"confirm_identity_change":{"type":"boolean","default":false},"archive_folder":{"type":"string","description":"Optional per-Vault archive folder. Absent means the instance-wide default applies."},"commit_identity":{"type":"object","description":"Optional per-Vault commit author identity: {name, email}. Absent means the instance-wide default applies.","properties":{"name":{"type":"string","minLength":1},"email":{"type":"string","minLength":1}},"required":["name","email"],"additionalProperties":false}},"required":["vault_id","expected_registry_revision","name","source"],"additionalProperties":false},"annotations":super::write_tool_annotations(true, false)}),
         vault_control("enable_vault", "Enable exactly one Vault definition."),
         vault_control(
             "disable_vault",

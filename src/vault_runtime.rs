@@ -1830,6 +1830,10 @@ fn managed_git_mutation_error(error: VaultRuntimeError) -> VaultWorkError {
 /// runtime is gone) or is not managed-Git (defensive: the coordinator only
 /// receives `Git` requests for managed-Git Vaults, but this seam does not
 /// assume that holds forever).
+///
+/// `author_name`/`author_email` are the instance-wide default commit
+/// identity; the Vault's own configured identity, if any, overrides them
+/// (see [`crate::git::config::resolve_commit_identity`]).
 pub async fn dispatch_managed_git_turn(
     collection: &VaultCollectionRuntime,
     registry: &VaultRegistryStore,
@@ -1882,6 +1886,15 @@ where
         managed_git.deactivate(vault_id);
         return Ok(());
     };
+    // The Vault's own configured commit identity, if any, overrides the
+    // server-wide defaults for every branch below (#130).
+    let (author_name, author_email) = crate::git::config::resolve_commit_identity(
+        control_block.definition().commit_identity(),
+        author_name,
+        author_email,
+    );
+    let author_name = author_name.as_str();
+    let author_email = author_email.as_str();
     let (repository_url, branch, vault_subdirectory, mode) =
         match control_block.definition().source() {
             RegistryVaultSource::ManagedGit {

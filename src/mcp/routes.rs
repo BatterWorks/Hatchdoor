@@ -376,6 +376,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("register test Vault");
