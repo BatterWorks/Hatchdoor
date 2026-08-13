@@ -1,9 +1,15 @@
 import { NavLink } from "react-router-dom";
 import { useMemo } from "react";
 
-import type { ExplorerFolder, ExplorerNote, RecentNote } from "../types";
+import type {
+  ExplorerFolder,
+  ExplorerNote,
+  RecentNote,
+  VaultScope,
+  VaultSummary,
+} from "../types";
 import { AddIcon } from "./icons";
-import { UiPanel } from "./ui";
+import { UiPanel, VaultPrefix } from "./ui";
 
 /** Section header: `01 · RECENT · ──── · 04`, per §05 of the design system. */
 export function SideHead({
@@ -55,16 +61,22 @@ export function RecentNotesList({
   onNavigate,
   collapsed,
   onToggleCollapsed,
+  vaults,
+  scope,
 }: {
   notes: RecentNote[];
   onNavigate: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  vaults: VaultSummary[];
+  scope: VaultScope;
 }) {
   if (notes.length === 0) {
     return null;
   }
   const recent = notes.slice(0, 5);
+  // Provenance only where the list can actually span Vaults (#140).
+  const showVaultPrefix = scope === "all" && vaults.length > 1;
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
@@ -92,6 +104,14 @@ export function RecentNotesList({
                 <span className="idx" aria-hidden="true">
                   {String(index + 1).padStart(3, "0")}
                 </span>
+                {showVaultPrefix ? (
+                  <VaultPrefix
+                    name={
+                      vaults.find((vault) => vault.vault_id === note.vaultId)
+                        ?.name ?? note.vaultId
+                    }
+                  />
+                ) : null}
                 <span className="note-label">{note.title}</span>
               </NavLink>
             </li>

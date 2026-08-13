@@ -3,6 +3,7 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SearchDialog, type SearchResult } from ".";
+import { THREE_VAULTS } from "../../test/fixtures/vaults";
 
 function renderDialog(
   overrides?: Partial<ComponentProps<typeof SearchDialog>>,
@@ -18,6 +19,8 @@ function renderDialog(
     loading: false,
     error: null,
     results: [],
+    vaults: [],
+    scope: "all",
     inputRef,
     onClose,
     onQueryChange,
@@ -83,5 +86,84 @@ describe("SearchDialog", () => {
 
     fireEvent.click(getByRole("checkbox"));
     expect(props.onIncludeContentChange).toHaveBeenCalledWith(true);
+  });
+});
+
+function resultFor(
+  vaultId: string,
+  overrides: Partial<SearchResult> = {},
+): SearchResult {
+  return {
+    vault_id: vaultId,
+    chunk_id: 1,
+    note_slug: "plan",
+    note_title: "Plan",
+    note_path: "Projects/Plan",
+    heading_path: null,
+    content: "Plan body text",
+    score: 0.9,
+    layer: null,
+    outbound_links: [],
+    ...overrides,
+  };
+}
+
+describe("SearchDialog Vault provenance (#140)", () => {
+  afterEach(cleanup);
+
+  it("shows the Vault prefix when scope is all and more than one Vault is enabled", () => {
+    renderDialog({
+      results: [resultFor(THREE_VAULTS[1].vault_id)],
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    expect(screen.getByText("Beta")).toBeInTheDocument();
+  });
+
+  it("hides the Vault prefix once scope is narrowed to one Vault", () => {
+    renderDialog({
+      results: [resultFor(THREE_VAULTS[1].vault_id)],
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+    });
+
+    expect(screen.queryByText("Beta")).not.toBeInTheDocument();
+  });
+
+  it("hides the Vault prefix at one enabled Vault", () => {
+    renderDialog({
+      results: [resultFor(THREE_VAULTS[0].vault_id)],
+      vaults: [THREE_VAULTS[0]],
+      scope: "all",
+    });
+
+    expect(screen.queryByText("Alpha")).not.toBeInTheDocument();
+  });
+
+  it("renders the prefix as inert markup, not a nested click target", () => {
+    renderDialog({
+      results: [resultFor(THREE_VAULTS[1].vault_id)],
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const prefix = screen.getByText("Beta").closest(".vault-prefix");
+    expect(prefix?.tagName).toBe("SPAN");
+    expect(prefix?.closest("button")).not.toBeNull();
+    expect(prefix?.querySelector("button, a")).toBeNull();
+  });
+
+  it("keeps the path in its own eliding span, separate from the prefix", () => {
+    const { container } = renderDialog({
+      results: [resultFor(THREE_VAULTS[1].vault_id)],
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const pathText = container.querySelector(".result-path-text");
+    expect(pathText).toBeInTheDocument();
+    expect(pathText?.textContent).toBe("Projects/Plan.md");
+    expect(pathText?.closest(".vault-prefix")).toBeNull();
   });
 });

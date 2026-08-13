@@ -159,3 +159,21 @@
   background: var(--overlay-bg);
   z-index: 20;
 }
+
+/* Vault provenance prefix (#140) — a marked path root, never eliding.
+   Sized and weighted from the surrounding row; only color and the middot
+   separator are its own. */
+.vault-prefix {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: baseline;
+  color: var(--hot);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 500;
+}
+
+.vault-prefix-dot {
+  margin-left: 0.3rem;
+  color: var(--hot);
+}

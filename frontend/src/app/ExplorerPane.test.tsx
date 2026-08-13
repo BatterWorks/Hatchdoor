@@ -268,3 +268,86 @@ describe("ExplorerPane Scope zone", () => {
     expect(screen.queryByText(/^Viewing:/)).not.toBeInTheDocument();
   });
 });
+
+describe("Vault provenance on Recently viewed and Changed on disk (#140)", () => {
+  afterEach(cleanup);
+
+  const recentAcrossVaults: RecentNote[] = [
+    {
+      vaultId: THREE_VAULTS[1].vault_id,
+      title: "Beta note",
+      slug: "beta-note",
+      relativePath: "Beta note",
+      viewedAt: 1,
+    },
+  ];
+
+  const modifiedAcrossVaults: ModifiedNote[] = [
+    {
+      vault_id: THREE_VAULTS[2].vault_id,
+      title: "Gamma note",
+      slug: "gamma-note",
+      relative_path: "Gamma note",
+      mtime_ns: 1,
+    },
+  ];
+
+  function openChanges() {
+    fireEvent.click(
+      screen.getByRole("button", { name: "Recently changed notes" }),
+    );
+  }
+
+  it("shows the Vault prefix on Recently viewed when scope is all and multiple Vaults are enabled", () => {
+    renderPane({ vaults: THREE_VAULTS, scope: "all", recentNotes: recentAcrossVaults });
+
+    const recent = screen.getByTestId("recent-notes");
+    expect(within(recent).getByText("Beta")).toBeInTheDocument();
+  });
+
+  it("hides the Vault prefix on Recently viewed once scope is narrowed", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      recentNotes: recentAcrossVaults,
+    });
+
+    const recent = screen.getByTestId("recent-notes");
+    expect(within(recent).queryByText("Beta")).not.toBeInTheDocument();
+  });
+
+  it("hides the Vault prefix on Recently viewed at one enabled Vault", () => {
+    renderPane({
+      vaults: [THREE_VAULTS[1]],
+      scope: "all",
+      recentNotes: recentAcrossVaults,
+    });
+
+    const recent = screen.getByTestId("recent-notes");
+    expect(within(recent).queryByText("Beta")).not.toBeInTheDocument();
+  });
+
+  it("shows the Vault prefix on Changed on disk when scope is all and multiple Vaults are enabled", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      modifiedNotes: modifiedAcrossVaults,
+    });
+    openChanges();
+
+    const panel = screen.getByRole("region", { name: "Recently changed notes" });
+    expect(within(panel).getByText("Gamma")).toBeInTheDocument();
+  });
+
+  it("hides the Vault prefix on Changed on disk once scope is narrowed", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[2].vault_id,
+      modifiedNotes: modifiedAcrossVaults,
+    });
+    openChanges();
+
+    const panel = screen.getByRole("region", { name: "Recently changed notes" });
+    expect(within(panel).queryByText("Gamma")).not.toBeInTheDocument();
+  });
+});

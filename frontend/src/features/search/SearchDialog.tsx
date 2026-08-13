@@ -1,6 +1,7 @@
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 
-import { UiButton, UiPanel } from "../../components/ui";
+import { UiButton, UiPanel, VaultPrefix } from "../../components/ui";
+import type { VaultScope, VaultSummary } from "../../types";
 import type { SearchResult, SearchSelection } from "./types";
 
 type NoteGroup = {
@@ -67,6 +68,8 @@ export function SearchDialog({
   loading,
   error,
   results,
+  vaults,
+  scope,
   inputRef,
   onClose,
   onQueryChange,
@@ -78,6 +81,8 @@ export function SearchDialog({
   loading: boolean;
   error: string | null;
   results: SearchResult[];
+  vaults: VaultSummary[];
+  scope: VaultScope;
   inputRef: RefObject<HTMLInputElement | null>;
   onClose: () => void;
   onQueryChange: (value: string) => void;
@@ -85,6 +90,10 @@ export function SearchDialog({
   onSelect: (selection: SearchSelection) => void;
 }) {
   const trimmedQuery = query.trim();
+  // Provenance only where results can actually span Vaults (#140).
+  const showVaultPrefix = scope === "all" && vaults.length > 1;
+  const vaultName = (vaultId: string) =>
+    vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId;
   const resultsListRef = useRef<HTMLUListElement | null>(null);
   const resultsKey = [
     trimmedQuery,
@@ -246,7 +255,15 @@ export function SearchDialog({
                     {highlightMatches(group.note_title, trimmedQuery)}
                   </div>
                   <div className="result-path">
-                    {highlightMatches(`${group.note_path}.md`, trimmedQuery)}
+                    {showVaultPrefix ? (
+                      <VaultPrefix name={vaultName(group.vault_id)} />
+                    ) : null}
+                    <span className="result-path-text">
+                      {highlightMatches(
+                        `${group.note_path}.md`,
+                        trimmedQuery,
+                      )}
+                    </span>
                   </div>
                   {first.heading_path ? (
                     <div className="result-breadcrumb">

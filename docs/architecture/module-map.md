@@ -1502,10 +1502,13 @@ desktop with more than one enabled Vault, the shell-owned Scope zone (#138,
 file's CSS but is not part of this capability's owned React contract.
 `ChangesPanel` lists notes changed on disk; it deliberately carries no unread
 count, because distinguishing external changes from the user's own edits needs
-backend data that does not exist yet.
+backend data that does not exist yet. Recently viewed and Changed on disk both
+carry the shared `VaultPrefix` provenance marker (#140) on each row when scope
+is `all` and more than one Vault is enabled; a single-Vault instance renders
+unchanged.
 
 **Consumed dependencies:** shared API/error utilities, shared wire types,
-router links, and shared UI components.
+shared UI components (`components/ui.tsx`'s `VaultPrefix`), and router links.
 
 **Coordination paths:** `App.tsx`, `app/ExplorerPane.tsx`, `types.ts`,
 `lib/stateCompare.ts`, responsive CSS, and backend tree/recent/event endpoints.
@@ -1536,9 +1539,14 @@ Feature tests:
 TS/TSX entry point. It exposes `useSearch`, `SearchDialog`, Search wire and
 selection types, and the `/api/search` payload consumed by the hook. Search CSS
 is integrated separately through the `App.css` stylesheet aggregation seam.
+`SearchDialog` takes `vaults`/`scope` and shows the shared `VaultPrefix`
+provenance marker (#140) on a result's path line under the same all-scope,
+multi-Vault condition Vault Explorer's lists use; the path itself elides
+head-first (`.result-path-text`) so the never-eliding prefix always reads.
 
-**Consumed dependencies:** shared API/error utilities, shared UI components,
-router navigation supplied by the shell, and backend Search.
+**Consumed dependencies:** shared API/error utilities, shared UI components
+(`components/ui.tsx`'s `VaultPrefix`), router navigation supplied by the
+shell, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, backend search HTTP contract, and
 responsive CSS.
@@ -1582,6 +1590,11 @@ note navigation/rendering behavior, the editable-block component map produced by
 `createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one
 source line per rendered line for the two unit types addressed per line.
+`NoteProperties` (`note-page/sections.tsx`) takes an optional `vaultName`
+(#140): a synthetic, non-editable leading `Vault` row, shown whenever more than
+one Vault is enabled regardless of scope — an exact read is never ambiguous
+about its own Vault — including when the note carries no frontmatter at all,
+which is the one case the grid renders with zero real properties.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, and note editing.
@@ -1769,7 +1782,11 @@ typecheck, then full frontend checks.
 style aggregation, topbar/shell styles, and cross-feature responsive overrides.
 `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
 and paint with `currentColor`, so callers control them through font-size and
-color. Attribution lives in `THIRD_PARTY_NOTICES.md`.
+color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `VaultPrefix` (#140) is
+the one marked-path-root primitive every flattened, scope-spanning surface
+uses for Vault provenance — hot ink, a middot instead of a folder `/`, and
+never eliding; consumers give the adjacent title or path the shrinking room
+instead.
 
 **Coordination rule:** a feature work packet should prefer its owned stylesheet.
 Changes to shared selectors, tokens, or responsive rules must name affected

@@ -577,6 +577,7 @@ export function VaultApp() {
                   editRequestId={editRequestId}
                   onWriteNotice={setWriteNotice}
                   noteCandidates={noteCandidates}
+                  vaults={vaults}
                 />
               }
             />
@@ -599,6 +600,8 @@ export function VaultApp() {
           loading={searchLoading}
           error={searchError}
           results={searchResults}
+          vaults={vaults}
+          scope={scope}
           inputRef={searchInputRef}
           onClose={() => setSearchOpen(false)}
           onQueryChange={setSearchQuery}

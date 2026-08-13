@@ -272,7 +272,12 @@ export function ExplorerPane({
         }}
       >
         {changesOpen ? (
-          <ChangesPanel notes={modifiedNotes} onNavigate={onCloseDrawer} />
+          <ChangesPanel
+            notes={modifiedNotes}
+            onNavigate={onCloseDrawer}
+            vaults={vaults}
+            scope={scope}
+          />
         ) : null}
 
         <RecentNotesList
@@ -280,6 +285,8 @@ export function ExplorerPane({
           onNavigate={onCloseDrawer}
           collapsed={recentCollapsed}
           onToggleCollapsed={() => onRecentCollapsedChange(!recentCollapsed)}
+          vaults={vaults}
+          scope={scope}
         />
 
         {loadingTree ? <ExplorerSkeleton /> : null}
