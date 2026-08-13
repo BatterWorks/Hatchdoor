@@ -31,6 +31,112 @@
   padding: 1.25rem 1rem 1.5rem;
 }
 
+/* Scope zone — Vault scope, readable and changeable in exactly one place on
+   the desktop (#138). Pinned above the rail, never scrolling with the notes.
+   Absent entirely at one enabled Vault: the "imposes nothing" requirement. */
+.scope-zone {
+  flex: 0 0 auto;
+  padding: 0.6rem 0.75rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.scope-zone-head {
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+.scope-zone-head[data-open="true"] {
+  margin-bottom: 0.5rem;
+}
+
+/* Collapsed head names the current scope in place of the usual mono count. */
+.scope-zone-current {
+  flex: 0 0 auto;
+  max-width: 9rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+.scope-zone-viewing-line {
+  margin: -0.25rem 0 0.5rem 1.05rem;
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.scope-zone-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.scope-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  width: 100%;
+  padding: 0.3rem 0.45rem;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 400;
+  font-size: 0.86rem;
+  color: var(--ink-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .scope-row:hover {
+    color: var(--ink);
+    background: var(--paper-2);
+  }
+}
+
+.scope-row:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+/* The current scope's documented active treatment — the same hot rail,
+   hot-soft background, and bolding `.note-link.active-note` uses. */
+.scope-row.is-selected {
+  color: var(--ink);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 600;
+  background: var(--hot-soft);
+  box-shadow: inset 3px 0 0 var(--hot);
+}
+
+.scope-row-label {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Marks the open note's own Vault row, separately from the selected scope. */
+.scope-row-viewing {
+  flex: 0 0 auto;
+  font-family: var(--font-sans);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--rule-strong);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+}
+
 /* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */
 .explorer-rail {
   display: flex;

@@ -19,6 +19,7 @@ import {
   LAST_NOTE_KEY,
   NOTE_PROPERTIES_COLLAPSED_KEY,
   RECENT_NOTES_KEY,
+  SCOPE_ZONE_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
 } from "./app/constants";
 import { ExplorerPane } from "./app/ExplorerPane";
@@ -80,7 +81,7 @@ export function VaultApp() {
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
-  const [scope] = useVaultScope();
+  const [scope, setScope] = useVaultScope();
   const { vaults, demoMode } = useVaultDiscovery();
   const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
 
@@ -144,6 +145,11 @@ export function VaultApp() {
   // explicit that leaving it closed is a fine way to use the sidebar.
   const [recentCollapsed, setRecentCollapsed] = useState<boolean>(
     () => window.localStorage.getItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
+  );
+  // The Scope zone remembers whether it is folded away, same as Recently
+  // viewed; default expanded per the design spec.
+  const [scopeZoneCollapsed, setScopeZoneCollapsed] = useState<boolean>(
+    () => window.localStorage.getItem(SCOPE_ZONE_COLLAPSED_KEY) === "1",
   );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
@@ -419,6 +425,8 @@ export function VaultApp() {
     >
       <AppTopbar
         activeNote={activeNote}
+        vaults={vaults}
+        scope={scope}
         writeEnabled={writeEnabled}
         isMobile={isMobile}
         isOnline={isOnline}
@@ -468,6 +476,7 @@ export function VaultApp() {
         <ExplorerPane
           explorerScrollRef={explorerScrollRef}
           drawerOpen={drawerOpen}
+          isMobile={isMobile}
           writeEnabled={writeEnabled}
           settingsEnabled={settingsEnabled}
           onCreateNoteInFolder={openCreateDialog}
@@ -483,6 +492,18 @@ export function VaultApp() {
             setRecentCollapsed(next);
             window.localStorage.setItem(
               RECENT_NOTES_COLLAPSED_KEY,
+              next ? "1" : "0",
+            );
+          }}
+          vaults={vaults}
+          scope={scope}
+          onScopeChange={setScope}
+          viewingVaultId={activeNote?.vaultId}
+          scopeZoneCollapsed={scopeZoneCollapsed}
+          onScopeZoneCollapsedChange={(next) => {
+            setScopeZoneCollapsed(next);
+            window.localStorage.setItem(
+              SCOPE_ZONE_COLLAPSED_KEY,
               next ? "1" : "0",
             );
           }}

@@ -10,12 +10,112 @@ import {
   SettingsIcon,
 } from "../components/icons";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
-import type { ExplorerFolder, ModifiedNote, RecentNote } from "../types";
+import type {
+  ExplorerFolder,
+  ModifiedNote,
+  RecentNote,
+  VaultId,
+  VaultScope,
+  VaultSummary,
+} from "../types";
 
 function countNotes(folder: ExplorerFolder): number {
   return (
     folder.notes.length +
     folder.folders.reduce((sum, f) => sum + countNotes(f), 0)
+  );
+}
+
+function scopeName(scope: VaultScope, vaults: VaultSummary[]): string {
+  if (scope === "all") {
+    return "All Vaults";
+  }
+  return vaults.find((vault) => vault.vault_id === scope)?.name ?? "All Vaults";
+}
+
+/**
+ * Vault scope, readable and changeable in exactly one place on the desktop
+ * (#138): a collapsible zone pinned above the rail, never scrolling with the
+ * notes. Absent at one enabled Vault or on mobile — narrowing scope has
+ * nothing to offer there (mobile scope chrome is #145's ticket).
+ */
+function ScopeZone({
+  vaults,
+  scope,
+  onScopeChange,
+  viewingVaultId,
+  collapsed,
+  onToggleCollapsed,
+}: {
+  vaults: VaultSummary[];
+  scope: VaultScope;
+  onScopeChange: (next: VaultScope) => void;
+  viewingVaultId: VaultId | undefined;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
+}) {
+  if (vaults.length <= 1) {
+    return null;
+  }
+
+  const viewingVault = vaults.find((vault) => vault.vault_id === viewingVaultId);
+
+  return (
+    <div className="scope-zone">
+      <button
+        type="button"
+        className="side-head scope-zone-head"
+        data-open={!collapsed}
+        aria-expanded={!collapsed}
+        aria-controls="scope-zone-list"
+        onClick={onToggleCollapsed}
+      >
+        <span className="side-caret" aria-hidden="true" />
+        <span className="side-label">Scope</span>
+        <span className="side-rule" />
+        {collapsed ? (
+          <span className="scope-zone-current">
+            {scopeName(scope, vaults)}
+          </span>
+        ) : (
+          <span className="side-count">
+            {String(vaults.length).padStart(2, "0")}
+          </span>
+        )}
+      </button>
+
+      {collapsed && viewingVault ? (
+        <p className="scope-zone-viewing-line">Viewing: {viewingVault.name}</p>
+      ) : null}
+
+      {collapsed ? null : (
+        <ul id="scope-zone-list" className="scope-zone-list">
+          <li>
+            <button
+              type="button"
+              className={`scope-row${scope === "all" ? " is-selected" : ""}`}
+              onClick={() => onScopeChange("all")}
+            >
+              <span className="scope-row-label">All Vaults</span>
+            </button>
+          </li>
+          {vaults.map((vault) => (
+            <li key={vault.vault_id}>
+              <button
+                type="button"
+                className={`scope-row${scope === vault.vault_id ? " is-selected" : ""}`}
+                onClick={() => onScopeChange(vault.vault_id)}
+              >
+                <span className="scope-row-label">{vault.name}</span>
+                {viewingVaultId === vault.vault_id ? (
+                  <span className="scope-row-viewing">Viewing</span>
+                ) : null}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -86,6 +186,7 @@ function ExplorerRail({
 type ExplorerPaneProps = {
   explorerScrollRef: RefObject<HTMLElement | null>;
   drawerOpen: boolean;
+  isMobile: boolean;
   writeEnabled: boolean;
   settingsEnabled?: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
@@ -102,11 +203,18 @@ type ExplorerPaneProps = {
   onCloseDrawer: () => void;
   onRefreshTree: () => void;
   onScrollTopChange: (top: number) => void;
+  vaults: VaultSummary[];
+  scope: VaultScope;
+  onScopeChange: (next: VaultScope) => void;
+  viewingVaultId: VaultId | undefined;
+  scopeZoneCollapsed: boolean;
+  onScopeZoneCollapsedChange: (next: boolean) => void;
 };
 
 export function ExplorerPane({
   explorerScrollRef,
   drawerOpen,
+  isMobile,
   writeEnabled,
   settingsEnabled,
   onCreateNoteInFolder,
@@ -123,6 +231,12 @@ export function ExplorerPane({
   onCloseDrawer,
   onRefreshTree,
   onScrollTopChange,
+  vaults,
+  scope,
+  onScopeChange,
+  viewingVaultId,
+  scopeZoneCollapsed,
+  onScopeZoneCollapsedChange,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
@@ -131,6 +245,18 @@ export function ExplorerPane({
 
   return (
     <aside className="explorer-pane" data-open={drawerOpen}>
+      {isMobile ? null : (
+        <ScopeZone
+          vaults={vaults}
+          scope={scope}
+          onScopeChange={onScopeChange}
+          viewingVaultId={viewingVaultId}
+          collapsed={scopeZoneCollapsed}
+          onToggleCollapsed={() =>
+            onScopeZoneCollapsedChange(!scopeZoneCollapsed)
+          }
+        />
+      )}
       <ExplorerRail
         changesOpen={changesOpen}
         onToggleChanges={() => setChangesOpen((prev) => !prev)}

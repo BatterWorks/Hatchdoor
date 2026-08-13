@@ -80,6 +80,17 @@
   margin: 0 0.35rem;
 }
 
+/* Read-only echo of the open note's Vault or the selected scope (#138). No
+   scope control lives here — that is the sidebar Scope zone's job alone. */
+.topbar-crumb-scope {
+  flex: 0 0 auto;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 10rem;
+}
+
 .topbar-crumb-here {
   color: var(--ink);
   font-variation-settings:

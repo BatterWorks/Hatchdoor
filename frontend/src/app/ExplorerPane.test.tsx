@@ -9,6 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ExplorerPane } from "./ExplorerPane";
+import { THREE_VAULTS } from "../test/fixtures/vaults";
 import type { ExplorerFolder, ModifiedNote, RecentNote } from "../types";
 
 const VAULT_ID = "vault-1";
@@ -51,6 +52,7 @@ function renderPane(
   const props = {
     explorerScrollRef: { current: null },
     drawerOpen: false,
+    isMobile: false,
     writeEnabled: true,
     settingsEnabled: true,
     onCreateNoteInFolder: vi.fn(),
@@ -67,6 +69,12 @@ function renderPane(
     onCloseDrawer: vi.fn(),
     onRefreshTree: vi.fn(),
     onScrollTopChange: vi.fn(),
+    vaults: [],
+    scope: "all" as const,
+    onScopeChange: vi.fn(),
+    viewingVaultId: undefined,
+    scopeZoneCollapsed: false,
+    onScopeZoneCollapsedChange: vi.fn(),
     ...overrides,
   };
 
@@ -143,5 +151,120 @@ describe("ExplorerPane", () => {
     expect(
       within(panel).getByRole("link", { name: "Finance" }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ExplorerPane Scope zone", () => {
+  afterEach(cleanup);
+
+  it("is absent at one enabled Vault", () => {
+    renderPane({ vaults: [THREE_VAULTS[0]] });
+
+    expect(screen.queryByText("Scope")).not.toBeInTheDocument();
+  });
+
+  it("is absent on mobile", () => {
+    renderPane({ vaults: THREE_VAULTS, isMobile: true });
+
+    expect(screen.queryByText("Scope")).not.toBeInTheDocument();
+  });
+
+  it("lists All Vaults plus every enabled Vault in Vault-management order", () => {
+    renderPane({ vaults: THREE_VAULTS });
+
+    const rows = screen
+      .getAllByRole("button")
+      .filter((button) => button.className.includes("scope-row"));
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "All Vaults",
+      "Alpha",
+      "Beta",
+      "Gamma",
+    ]);
+  });
+
+  it("gives the current scope the active treatment", () => {
+    renderPane({ vaults: THREE_VAULTS, scope: THREE_VAULTS[1].vault_id });
+
+    const selected = screen.getByRole("button", { name: "Beta" });
+    expect(selected).toHaveClass("is-selected");
+    expect(
+      screen.getByRole("button", { name: "All Vaults" }),
+    ).not.toHaveClass("is-selected");
+  });
+
+  it("picking a row changes scope and nothing else", () => {
+    const onScopeChange = vi.fn();
+    renderPane({ vaults: THREE_VAULTS, onScopeChange });
+
+    fireEvent.click(screen.getByRole("button", { name: "Beta" }));
+
+    expect(onScopeChange).toHaveBeenCalledExactlyOnceWith(
+      THREE_VAULTS[1].vault_id,
+    );
+  });
+
+  it("folds and unfolds, calling back with the next collapsed state", () => {
+    const onScopeZoneCollapsedChange = vi.fn();
+    renderPane({ vaults: THREE_VAULTS, onScopeZoneCollapsedChange });
+
+    fireEvent.click(screen.getByRole("button", { name: /Scope/ }));
+
+    expect(onScopeZoneCollapsedChange).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it("defaults to expanded", () => {
+    renderPane({ vaults: THREE_VAULTS });
+
+    expect(
+      screen.getByRole("button", { name: /Scope/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "All Vaults" })).toBeVisible();
+  });
+
+  it("collapsed head names the current scope in place of the count", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      scopeZoneCollapsed: true,
+    });
+
+    const head = screen.getByRole("button", { name: /Scope/ });
+    expect(head).toHaveTextContent("Beta");
+    expect(
+      screen.queryByRole("button", { name: "All Vaults" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks the open note's Vault with the viewing marker when expanded", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      viewingVaultId: THREE_VAULTS[2].vault_id,
+    });
+
+    const row = screen.getByRole("button", { name: /Gamma/ });
+    expect(within(row).getByText("Viewing")).toBeInTheDocument();
+  });
+
+  it("names the viewed Vault on a second line when collapsed, even when it is also the selected scope", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[2].vault_id,
+      viewingVaultId: THREE_VAULTS[2].vault_id,
+      scopeZoneCollapsed: true,
+    });
+
+    expect(screen.getByText("Viewing: Gamma")).toBeInTheDocument();
+  });
+
+  it("does not show a viewing line when no note is open", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      scopeZoneCollapsed: true,
+      viewingVaultId: undefined,
+    });
+
+    expect(screen.queryByText(/^Viewing:/)).not.toBeInTheDocument();
   });
 });
