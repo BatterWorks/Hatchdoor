@@ -50,6 +50,7 @@ pub struct VaultWorkError {
     code: String,
     message: String,
     retryable: bool,
+    detail: Option<VaultWorkErrorDetail>,
 }
 
 impl VaultWorkError {
@@ -58,7 +59,18 @@ impl VaultWorkError {
             code: code.into(),
             message: message.into(),
             retryable,
+            detail: None,
         }
+    }
+
+    /// Attach structured detail alongside `code`/`message`/`retryable` — see
+    /// [`VaultWorkErrorDetail`]. Currently only `classify_sync_error`
+    /// (`git::managed_task`) populates this, for the handful of managed-Git
+    /// sync failure codes a caller genuinely cannot act on from `message`
+    /// alone.
+    pub fn with_detail(mut self, detail: VaultWorkErrorDetail) -> Self {
+        self.detail = Some(detail);
+        self
     }
 
     pub fn code(&self) -> &str {
@@ -72,6 +84,22 @@ impl VaultWorkError {
     pub fn retryable(&self) -> bool {
         self.retryable
     }
+
+    pub fn detail(&self) -> Option<&VaultWorkErrorDetail> {
+        self.detail.as_ref()
+    }
+}
+
+/// Structured data behind select [`VaultWorkError`] codes, carried
+/// unbounded — `vault_runtime::VaultRuntimeError` is what bounds and
+/// publishes it externally (over HTTP and MCP).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VaultWorkErrorDetail {
+    /// Affected repository-relative paths, e.g. for
+    /// `managed_git_dirty_working_copy` or `managed_git_conflict`.
+    AffectedPaths(Vec<String>),
+    /// The count behind `managed_git_pull_only_local_commits`.
+    LocalCommitsAhead(usize),
 }
 
 /// Whether a request added a required turn or joined existing pending work.

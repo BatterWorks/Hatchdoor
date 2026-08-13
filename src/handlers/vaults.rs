@@ -406,6 +406,7 @@ fn unreconciled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapsho
                       collection yet; retry shortly."
                 .to_string(),
             retryable: true,
+            detail: None,
         }),
         search_error: None,
         git_error: None,
@@ -668,12 +669,14 @@ pub async fn edit_vault_handler(
 /// trigger, run once per successful edit after `reconcile_after_commit`
 /// completes, covers every path that can write `https_credentials`.
 ///
-/// Per-source-kind because only `ManagedGit` is tracked by
-/// `ManagedGitScheduler`: an `ExistingGit` `PullOnly`/`TwoWay` Vault gets
-/// only the one-shot `coordinator.request` its Pending-status activation
-/// already uses (mirrored here), never scheduler-tracked polling. `Local`
-/// never accepts credentials (rejected earlier at commit time), so it never
-/// reaches here with `credentials_replaced` true.
+/// Source-agnostic: both `ManagedGit` and a remote-backed `ExistingGit`
+/// (`PullOnly`/`TwoWay`) Vault are tracked by `ManagedGitScheduler` and
+/// carry a `managed_git_poll_interval`, so both retry through
+/// `state.managed_git.retry_now`, which self-registers the Vault if it was
+/// not already tracked. `Local` and an `ExistingGit` `LocalHistory` Vault
+/// carry no interval and are skipped — `Local` never accepts credentials
+/// (rejected earlier at commit time) and so never reaches here with
+/// `credentials_replaced` true, and `LocalHistory` has no remote to retry.
 fn request_git_retry_after_credential_replacement(
     state: &AppState,
     snapshot: &VaultRegistrySnapshot,
@@ -682,16 +685,8 @@ fn request_git_retry_after_credential_replacement(
     let Some(definition) = snapshot.definition(vault_id) else {
         return;
     };
-    match definition.source() {
-        VaultSource::ManagedGit { .. } => {
-            if let Some(poll_interval) = definition.source().managed_git_poll_interval() {
-                state.managed_git.retry_now(vault_id, poll_interval);
-            }
-        }
-        VaultSource::ExistingGit { .. } => {
-            state.vault_work.request(vault_id, VaultWorkKind::Git);
-        }
-        VaultSource::Local { .. } => {}
+    if let Some(poll_interval) = definition.source().managed_git_poll_interval() {
+        state.managed_git.retry_now(vault_id, poll_interval);
     }
 }
 
@@ -806,7 +801,7 @@ async fn managed_git_control_handler(state: AppState, vault_id: VaultId, retry: 
     let Some(poll_interval) = definition.source().managed_git_poll_interval() else {
         return VaultApiError::new(
             "capability_unavailable",
-            "Manual Git sync is only available for managed-Git Vaults",
+            "Manual Git sync is only available for a Vault with a configured remote",
             Some(vault_id),
             false,
         )
@@ -1158,6 +1153,7 @@ mod tests {
                     code: auth_failure.code().to_string(),
                     message: auth_failure.message().to_string(),
                     retryable: auth_failure.retryable(),
+                    detail: None,
                 }),
             )
             .expect("publish authentication-failure status");
@@ -1378,6 +1374,7 @@ mod tests {
                     code: transient.code().to_string(),
                     message: transient.message().to_string(),
                     retryable: transient.retryable(),
+                    detail: None,
                 }),
             )
             .expect("publish the real transient Git failure");
@@ -1464,6 +1461,77 @@ mod tests {
             !state.vault_work.has_work(vault_id, VaultWorkKind::Git),
             "a benign interval-only edit must not force an immediate real Git turn \
              while the Vault is mid-backoff from a real transient failure"
+        );
+    }
+
+    /// Issue #132: `POST /sync` and `POST /retry` used to refuse every
+    /// `ExistingGit` Vault outright — `managed_git_control_handler` checked
+    /// `managed_git_poll_interval()`, which returned `None` for every
+    /// `ExistingGit` mode. A remote-backed `ExistingGit` Vault (`PullOnly`/
+    /// `TwoWay`) is now scheduler-tracked exactly like `ManagedGit`, so both
+    /// endpoints must admit it — this is the acceptance criterion
+    /// "`An ExistingGit Vault in PullOnly or TwoWay ... accepts POST /sync
+    /// and POST /retry`" exercised end to end through the real handlers,
+    /// mirroring `vaults_v1_sync_and_retry_require_a_managed_git_source`'s
+    /// coverage of the still-refused `Local` case (`src/server.rs`) but for
+    /// the newly-admitted source kind.
+    #[tokio::test]
+    async fn sync_and_retry_admit_an_existing_git_pull_only_vault_and_track_its_schedule() {
+        let (state, _worker, directory) = test_state();
+        let repository_path = directory.path().join("existing-pull-only-repo");
+        std::fs::create_dir_all(&repository_path).expect("create repo directory");
+        git2::Repository::init(&repository_path).expect("init git repo");
+
+        let create_request = CreateVaultRequest {
+            expected_registry_revision: 0,
+            name: "Existing checkout".to_string(),
+            enabled: true,
+            source: VaultSource::ExistingGit {
+                repository_path,
+                repository_url: Some("https://example.test/owner/notes.git".to_string()),
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::PullOnly,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: None,
+            archive_folder: None,
+            commit_identity: None,
+        };
+        let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        // Activation alone must already have registered the schedule —
+        // `reconcile_and_reconstruct`'s activation loop calls
+        // `managed_git.activate` for any source with a
+        // `managed_git_poll_interval`, generically across source kinds.
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            Some(std::time::Duration::from_secs(
+                DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
+            )),
+            "an ExistingGit PullOnly Vault must be tracked by the scheduler on activation"
+        );
+
+        let sync = sync_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(
+            sync.status(),
+            StatusCode::ACCEPTED,
+            "manual sync must no longer be refused for an ExistingGit PullOnly Vault"
+        );
+
+        let retry = retry_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(
+            retry.status(),
+            StatusCode::ACCEPTED,
+            "manual retry must no longer be refused for an ExistingGit PullOnly Vault"
         );
     }
 }

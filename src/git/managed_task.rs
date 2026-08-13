@@ -15,7 +15,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::vault_registry::{HttpsCredentials, VaultGitMode, VaultId};
-use crate::vault_work::{ScheduleResult, VaultWorkCoordinator, VaultWorkError, VaultWorkKind};
+use crate::vault_work::{
+    ScheduleResult, VaultWorkCoordinator, VaultWorkError, VaultWorkErrorDetail, VaultWorkKind,
+};
 
 use super::managed_checkout::{
     ManagedCheckoutError, ManagedCheckoutLease, ManagedCheckoutRequest, ManagedHttpsCredentials,
@@ -36,11 +38,13 @@ use super::managed_sync::{
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Backoff bounds for re-attempting a turn that failed for a retryable
-/// (transient) reason, mirroring the legacy single-Vault task's bounds
-/// (`git/task.rs::RETRY_BASE`/`RETRY_MAX`) at a coarser scale appropriate for
-/// a shared, fair, instance-wide worker.
+/// (transient) reason, loosely mirroring the legacy single-Vault task's
+/// bounds (`git/task.rs::RETRY_BASE`/`RETRY_MAX`) but capped by
+/// `vault_registry::MIN_MANAGED_GIT_POLL_INTERVAL_SECS`: a "normal" schedule
+/// shorter than this bound would make it meaningless (see that constant's
+/// doc), so the two move together. `BACKOFF_MAX` must equal that floor.
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
-const BACKOFF_MAX: Duration = Duration::from_secs(60 * 60);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// How often [`spawn_scheduler_tick`] checks for due Vaults in production.
 /// Well below `BACKOFF_BASE`, so a transient failure's backoff resolves with
@@ -290,23 +294,45 @@ pub(crate) fn classify_checkout_error(error: ManagedCheckoutError) -> VaultWorkE
 
 /// Classify a synchronization failure. See [`classify_checkout_error`] for
 /// the retryable/non-retryable split rationale.
+///
+/// `message` is computed from `error` before the match below moves its
+/// `DirtyWorkingCopy`/`Conflict`/`LocalCommits` fields out into structured
+/// `detail` — `Display` renders the same text either way, so `message` is
+/// unaffected by carrying the same data a second time as `detail`.
 fn classify_sync_error(error: ManagedSyncError) -> VaultWorkError {
     use ManagedSyncError::*;
-    let (code, retryable) = match error {
-        Validation => ("managed_git_validation_failed", false),
-        DirtyWorkingCopy { .. } => ("managed_git_dirty_working_copy", false),
-        LocalCommits { .. } => ("managed_git_pull_only_local_commits", false),
-        Conflict { .. } => ("managed_git_conflict", false),
+    let message = error.to_string();
+    let (code, retryable, detail) = match error {
+        Validation => ("managed_git_validation_failed", false, None),
+        DirtyWorkingCopy { files } => (
+            "managed_git_dirty_working_copy",
+            false,
+            Some(VaultWorkErrorDetail::AffectedPaths(files)),
+        ),
+        LocalCommits { ahead } => (
+            "managed_git_pull_only_local_commits",
+            false,
+            Some(VaultWorkErrorDetail::LocalCommitsAhead(ahead)),
+        ),
+        Conflict { files } => (
+            "managed_git_conflict",
+            false,
+            Some(VaultWorkErrorDetail::AffectedPaths(files)),
+        ),
         // The bounded fetch-integrate-push replay inside
         // `synchronize_managed_checkout` already absorbed a couple of
         // immediate retries; reaching here means the race is still live,
         // which is exactly the kind of transient condition backoff exists
         // for.
-        PushRace => ("managed_git_push_race_exhausted", true),
-        Authentication => ("managed_git_authentication_failed", false),
-        Remote => ("managed_git_remote_unreachable", true),
+        PushRace => ("managed_git_push_race_exhausted", true, None),
+        Authentication => ("managed_git_authentication_failed", false, None),
+        Remote => ("managed_git_remote_unreachable", true, None),
     };
-    VaultWorkError::new(code, error.to_string(), retryable)
+    let work_error = VaultWorkError::new(code, message, retryable);
+    match detail {
+        Some(detail) => work_error.with_detail(detail),
+        None => work_error,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -831,6 +857,55 @@ mod tests {
             classify_sync_error(ManagedSyncError::Authentication).code(),
             "managed_git_authentication_failed"
         );
+    }
+
+    /// Issue #132: `DirtyWorkingCopy`/`Conflict`/`LocalCommits` carry their
+    /// affected-paths/count outward as structured `detail`, and `message`
+    /// stays exactly what `Display` produces for those variants — the
+    /// detail is additive, not a substitute.
+    #[test]
+    fn sync_error_classification_carries_structured_detail_for_select_codes() {
+        let dirty = ManagedSyncError::DirtyWorkingCopy {
+            files: vec!["a.md".to_string(), "b.md".to_string()],
+        };
+        let classified = classify_sync_error(dirty.clone());
+        assert_eq!(classified.message(), dirty.to_string());
+        assert_eq!(
+            classified.detail(),
+            Some(&VaultWorkErrorDetail::AffectedPaths(vec![
+                "a.md".to_string(),
+                "b.md".to_string()
+            ]))
+        );
+
+        let conflict = ManagedSyncError::Conflict {
+            files: vec!["c.md".to_string()],
+        };
+        assert_eq!(
+            classify_sync_error(conflict).detail(),
+            Some(&VaultWorkErrorDetail::AffectedPaths(vec![
+                "c.md".to_string()
+            ]))
+        );
+
+        let local_commits = ManagedSyncError::LocalCommits { ahead: 3 };
+        assert_eq!(
+            classify_sync_error(local_commits).detail(),
+            Some(&VaultWorkErrorDetail::LocalCommitsAhead(3))
+        );
+
+        for error in [
+            ManagedSyncError::Validation,
+            ManagedSyncError::PushRace,
+            ManagedSyncError::Authentication,
+            ManagedSyncError::Remote,
+        ] {
+            assert_eq!(
+                classify_sync_error(error.clone()).detail(),
+                None,
+                "{error:?} should carry no structured detail"
+            );
+        }
     }
 
     /// A test-only stand-in for a Vault's configured poll interval. Shorter

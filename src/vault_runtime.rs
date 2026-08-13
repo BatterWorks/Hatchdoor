@@ -22,7 +22,9 @@ use crate::vault_registry::{
     VaultSource as RegistryVaultSource,
 };
 use crate::vault_watcher::{VaultWatcherHandle, spawn_vault_change_watcher};
-use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
+use crate::vault_work::{
+    VaultWorkCoordinator, VaultWorkError, VaultWorkErrorDetail, VaultWorkKind, VaultWorkRequest,
+};
 
 #[cfg(test)]
 static INDEX_MUTATION_PROBE: Mutex<Option<(VaultId, Arc<tokio::sync::Notify>)>> = Mutex::new(None);
@@ -209,6 +211,48 @@ pub struct VaultRuntimeError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    /// Structured detail for the handful of codes a caller genuinely cannot
+    /// act on from `message` alone (see [`VaultRuntimeErrorDetail`]).
+    /// `message` is unchanged by this addition and stays the authoritative
+    /// human-readable text for every code. Omitted from serialized output
+    /// rather than sent empty/null for every other code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<VaultRuntimeErrorDetail>,
+}
+
+/// The largest number of affected paths [`VaultRuntimeError::detail`] reports
+/// by name. `total` always carries the true count, so a caller that hits the
+/// cap can render "and N more" instead of an unbounded — or silently
+/// truncated-looking — list.
+const MAX_REPORTED_SYNC_ERROR_PATHS: usize = 50;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VaultRuntimeErrorDetail {
+    /// Affected repository-relative paths for `managed_git_dirty_working_copy`
+    /// or `managed_git_conflict`, capped at
+    /// [`MAX_REPORTED_SYNC_ERROR_PATHS`] with `total` carrying the true count.
+    AffectedPaths { paths: Vec<String>, total: usize },
+    /// The local-commit count behind `managed_git_pull_only_local_commits`.
+    LocalCommitsAhead { ahead: usize },
+}
+
+impl From<&VaultWorkErrorDetail> for VaultRuntimeErrorDetail {
+    fn from(detail: &VaultWorkErrorDetail) -> Self {
+        match detail {
+            VaultWorkErrorDetail::AffectedPaths(paths) => Self::AffectedPaths {
+                total: paths.len(),
+                paths: paths
+                    .iter()
+                    .take(MAX_REPORTED_SYNC_ERROR_PATHS)
+                    .cloned()
+                    .collect(),
+            },
+            VaultWorkErrorDetail::LocalCommitsAhead(ahead) => {
+                Self::LocalCommitsAhead { ahead: *ahead }
+            }
+        }
+    }
 }
 
 impl VaultRuntimeSnapshot {
@@ -324,6 +368,7 @@ impl VaultRuntime {
             code: code.into(),
             message: message.into(),
             retryable: false,
+            detail: None,
         });
     }
 
@@ -485,6 +530,7 @@ impl VaultControlBlock {
                             code: "vault_watcher_unavailable".to_string(),
                             message: error,
                             retryable: true,
+                            detail: None,
                         });
                         return None;
                     }
@@ -506,6 +552,7 @@ impl VaultControlBlock {
                             code: "vault_watcher_unavailable".to_string(),
                             message: error,
                             retryable: true,
+                            detail: None,
                         });
                         None
                     }
@@ -547,6 +594,7 @@ impl VaultControlBlock {
                 code: "vault_scan_config_invalid".to_string(),
                 message,
                 retryable: false,
+                detail: None,
             })?;
         crate::vault::VaultIndex::build_with_config(
             self.vault_path(),
@@ -560,6 +608,7 @@ impl VaultControlBlock {
                 self.vault_path().display()
             ),
             retryable: true,
+            detail: None,
         })
     }
 
@@ -575,6 +624,7 @@ impl VaultControlBlock {
                 code: "vault_scan_config_invalid".to_string(),
                 message,
                 retryable: false,
+                detail: None,
             })?;
         crate::vault::VaultIndex::build_catalog_with_config(
             self.vault_path(),
@@ -588,6 +638,7 @@ impl VaultControlBlock {
                 self.vault_path().display()
             ),
             retryable: true,
+            detail: None,
         })
     }
 
@@ -642,6 +693,7 @@ impl VaultControlBlock {
                 self.definition.vault_id()
             ),
             retryable: false,
+            detail: None,
         })
     }
 
@@ -1536,6 +1588,7 @@ fn stat_local_content(vault_path: &Path) -> (LocalContentStatus, Option<VaultRun
                 code: "vault_path_not_directory".to_string(),
                 message: format!("Vault path '{}' is not a directory", vault_path.display()),
                 retryable: false,
+                detail: None,
             }),
         ),
         Err(error) => (
@@ -1547,6 +1600,7 @@ fn stat_local_content(vault_path: &Path) -> (LocalContentStatus, Option<VaultRun
                     vault_path.display()
                 ),
                 retryable: true,
+                detail: None,
             }),
         ),
     }
@@ -1563,6 +1617,7 @@ fn directory_content_status(
             vault_path.display()
         ),
         retryable: true,
+        detail: None,
     })?;
     if directory_is_writable(vault_path, metadata)? {
         Ok(LocalContentStatus::ReadWrite)
@@ -1583,6 +1638,7 @@ fn directory_is_writable(
         code: "vault_path_unavailable".to_string(),
         message: format!("Vault path '{}' contains a null byte", vault_path.display()),
         retryable: false,
+        detail: None,
     })?;
     // SAFETY: `path` is a live, null-terminated C string and `faccessat` does
     // not retain the pointer. AT_EACCESS checks the server's effective identity.
@@ -1602,6 +1658,7 @@ fn directory_is_writable(
                 vault_path.display()
             ),
             retryable: true,
+            detail: None,
         })
     }
 }
@@ -1794,6 +1851,7 @@ pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
                     code: error.code().to_string(),
                     message,
                     retryable: error.retryable(),
+                    detail: None,
                 }),
             );
         }
@@ -2194,6 +2252,7 @@ fn publish_managed_git_turn_outcome(
                     code: error.code().to_string(),
                     message: error.message().to_string(),
                     retryable: error.retryable(),
+                    detail: error.detail().map(VaultRuntimeErrorDetail::from),
                 }),
             );
         }

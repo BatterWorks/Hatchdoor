@@ -85,6 +85,51 @@ impl Embedder for PanicEmbedder {
     }
 }
 
+/// Issue #132: a large affected-paths list must be capped, with `total`
+/// carrying the true count — never an unbounded list, and never a
+/// truncated-looking one with no way to tell how much was cut.
+#[test]
+fn runtime_error_detail_bounds_affected_paths_and_carries_the_true_total() {
+    let paths = (0..(MAX_REPORTED_SYNC_ERROR_PATHS + 7))
+        .map(|index| format!("note-{index}.md"))
+        .collect::<Vec<_>>();
+    let detail = VaultRuntimeErrorDetail::from(&VaultWorkErrorDetail::AffectedPaths(paths.clone()));
+    match detail {
+        VaultRuntimeErrorDetail::AffectedPaths {
+            paths: reported,
+            total,
+        } => {
+            assert_eq!(reported.len(), MAX_REPORTED_SYNC_ERROR_PATHS);
+            assert_eq!(reported, &paths[..MAX_REPORTED_SYNC_ERROR_PATHS]);
+            assert_eq!(total, paths.len());
+        }
+        other => panic!("expected AffectedPaths, got {other:?}"),
+    }
+}
+
+/// A path count at or under the cap is carried through unchanged.
+#[test]
+fn runtime_error_detail_does_not_truncate_at_or_under_the_cap() {
+    let paths = vec!["a.md".to_string(), "b.md".to_string()];
+    let detail = VaultRuntimeErrorDetail::from(&VaultWorkErrorDetail::AffectedPaths(paths.clone()));
+    assert_eq!(
+        detail,
+        VaultRuntimeErrorDetail::AffectedPaths {
+            total: paths.len(),
+            paths,
+        }
+    );
+}
+
+#[test]
+fn runtime_error_detail_carries_the_local_commits_ahead_count_through_unbounded() {
+    let detail = VaultRuntimeErrorDetail::from(&VaultWorkErrorDetail::LocalCommitsAhead(5));
+    assert_eq!(
+        detail,
+        VaultRuntimeErrorDetail::LocalCommitsAhead { ahead: 5 }
+    );
+}
+
 fn managed(mode: ManagedGitMode) -> VaultSource {
     VaultSource::ManagedGit(ManagedGitSource {
         repository_url: "https://example.test/vault.git".to_string(),
@@ -138,6 +183,7 @@ fn local_history_ready_state_never_exposes_remote_capabilities() {
                     branch: None,
                     vault_subdirectory: Some(PathBuf::from("notes")),
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -831,6 +877,7 @@ fn read_only_and_stale_statuses_keep_usable_local_markdown_honest() {
                 code: "git_temporarily_unavailable".to_string(),
                 message: "Git is temporarily unavailable".to_string(),
                 retryable: true,
+                detail: None,
             }),
         )
         .expect("publish unavailable Git status");
@@ -922,6 +969,7 @@ fn set_local_content_status_makes_a_managed_vault_browsable_after_first_acquisit
                 code: "vault_path_unavailable".to_string(),
                 message: "checkout directory disappeared".to_string(),
                 retryable: true,
+                detail: None,
             }),
         )
         .expect("publish lost local content");
@@ -990,6 +1038,7 @@ fn editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status() {
         code: "managed_git_remote_unreachable".to_string(),
         message: "temporary DNS failure".to_string(),
         retryable: true,
+        detail: None,
     };
     runtime
         .set_git_status(VaultGitStatus::Unavailable, Some(transient_error.clone()))
@@ -1086,6 +1135,7 @@ fn disabling_and_reenabling_a_managed_git_vault_forces_a_fresh_pending_sync() {
                 code: "managed_git_remote_unreachable".to_string(),
                 message: "x".to_string(),
                 retryable: true,
+                detail: None,
             }),
         )
         .expect("publish a real Git failure before disabling");
@@ -1549,6 +1599,7 @@ async fn dispatch_managed_git_turn_commits_existing_git_local_history_drift_thro
                     branch: None,
                     vault_subdirectory: Some(PathBuf::from("notes")),
                     mode: VaultGitMode::LocalHistory,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
@@ -1736,6 +1787,7 @@ fn existing_git_control_block(
                     branch: None,
                     vault_subdirectory: Some(PathBuf::from("vault")),
                     mode,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
