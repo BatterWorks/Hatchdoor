@@ -1379,6 +1379,15 @@
   .vault-tier-error { color: var(--err-fg); }
   .vault-slot-condition.vault-tier-error, .vault-slot-shortfall.vault-tier-error { background: var(--err-bg); border: 1px solid var(--err-border); font-weight: 600; padding: 0.05rem 0.4rem; border-radius: var(--radius-pill); }
 
+  /* Island caption + enclosure (#143). Canvas furniture — no DOM class backs
+     these in the app; this demo approximates the canvas draw with inline SVG. */
+  .island-demo { display: flex; align-items: flex-end; justify-content: center; gap: 3rem; flex-wrap: wrap; }
+  .island-demo-item { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+  .island-demo-name { font-family: var(--font-display); font-variation-settings: "wdth" 85, "wght" 700; font-size: 1rem; color: var(--ink); }
+  .island-demo-count { font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); }
+  .island-demo-count.vault-tier-warn { color: var(--warn-fg); }
+  .island-demo-count.vault-tier-error { color: var(--err-fg); }
+
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Buttons
      ════════════════════════════════════════════════════════════════ */
@@ -1564,6 +1573,9 @@
     <h3>Primitives</h3>
     <a href="#buttons">Buttons</a>
     <a href="#icons">Icons</a>
+
+    <h3>Canvas</h3>
+    <a href="#graph-islands">Island caption / enclosure</a>
 
     <div class="doc-theme">
       <button data-set="light">Light</button>
@@ -2624,6 +2636,76 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">app/vaultSlot.tsx</span><span class="key">app/vaultSlotLogic.ts</span><span class="key">.vault-slot-condition</span><span class="key">.vault-slot-shortfall</span>
         <span class="key">.vault-tier-warn</span><span class="key">.vault-tier-error</span>
         <span class="key">.vault-slot-indexing</span><span class="key">.vault-slot-indexing-bar</span><span class="key">.side-count</span>
+      </div>
+    </section>
+
+    <!-- ───────── GRAPH ISLANDS ───────── -->
+    <section class="doc-section" id="graph-islands">
+      <div class="doc-section-num">§28</div>
+      <h2>Island caption / enclosure</h2>
+      <p class="blurb">Under <code>all</code> scope with more than one participating Vault, the
+      knowledge graph (§27's slot vocabulary reused, not a new one) becomes one field: every Vault's
+      component is laid out on its own and placed as a labelled island in a single shared canvas, with
+      one zoom and one pan across all of them (#118, implemented by #143). Both primitives here are
+      canvas furniture &mdash; drawn with the graph's own <code>&lt;canvas&gt;</code> 2D context, not a
+      DOM element &mdash; so this demo approximates the draw with inline SVG rather than reusing a real
+      component class. The shape never changes with Vault count: at eight Vaults the answer is to zoom,
+      not for the page to become something else. Narrowing to one Vault removes every caption and
+      enclosure and restores today's single-Vault graph unchanged.</p>
+
+      <div class="stage island-demo">
+        <div class="island-demo-item">
+          <div class="island-demo-name">Alpha Vault</div>
+          <div class="island-demo-count">42</div>
+          <svg width="150" height="150" viewBox="0 0 150 150" aria-hidden="true">
+            <circle cx="75" cy="75" r="58" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+            <line x1="55" y1="70" x2="92" y2="55" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <line x1="92" y1="55" x2="97" y2="97" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <line x1="55" y1="70" x2="97" y2="97" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <circle cx="55" cy="70" r="5" fill="var(--hot)"/>
+            <circle cx="92" cy="55" r="7" fill="var(--hot)"/>
+            <circle cx="97" cy="97" r="4" fill="var(--hot)"/>
+          </svg>
+        </div>
+        <div class="island-demo-item">
+          <div class="island-demo-name">Field Station</div>
+          <div class="island-demo-count vault-tier-warn">stale</div>
+          <svg width="120" height="120" viewBox="0 0 120 120" aria-hidden="true">
+            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+            <line x1="48" y1="58" x2="72" y2="66" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <circle cx="48" cy="58" r="5" fill="var(--muted)"/>
+            <circle cx="72" cy="66" r="4" fill="var(--muted)"/>
+          </svg>
+        </div>
+        <div class="island-demo-item">
+          <div class="island-demo-name">Archive</div>
+          <div class="island-demo-count vault-tier-error">conflict</div>
+          <svg width="110" height="110" viewBox="0 0 110 110" aria-hidden="true">
+            <circle cx="55" cy="55" r="40" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+            <circle cx="55" cy="55" r="4" fill="var(--muted)"/>
+          </svg>
+        </div>
+      </div>
+
+      <table class="token-table">
+        <thead><tr><th>primitive</th><th>drawn</th><th>reads</th></tr></thead>
+        <tbody>
+          <tr><td class="name">Island caption</td><td class="val">canvas space, scaled with zoom (not screen-constant like a node label)</td><td class="val">Vault name in display ink, over a mono count line &mdash; the note count when healthy, or the §27 condition word and ink when not. Inert: it neither narrows scope nor zooms to fit</td></tr>
+          <tr><td class="name">Island enclosure</td><td class="val">dashed circle, token rule colour</td><td class="val">the component's settled layout radius plus a margin &mdash; marks where one Vault ends without implying a container the data model doesn't have</td></tr>
+          <tr><td class="name">Not-drawn line</td><td class="val">DOM, one line under the header</td><td class="val">names every Vault that contributed no island (it could not answer), always in warn ink regardless of that Vault's own condition tier: <code>Field Station could not be drawn.</code></td></tr>
+        </tbody>
+      </table>
+
+      <p class="blurb">Islands are placed in Vault-management order, packed on a grid &mdash; never
+      sorted by size, note count, or condition, the same rule the sidebar Scope zone and the explorer
+      already follow. A Vault gets no per-Vault colour: colour already means tag, and giving it a second
+      job would break the one legend the page has. The meta strip totals across the participating
+      Vaults, and the eyebrow reads <code>ALL VAULTS &middot; KNOWLEDGE GRAPH</code>.</p>
+
+      <div class="tag-row">
+        <span class="key">components/graph/GraphPage.tsx</span><span class="key">components/graph/graphSimulation.ts</span>
+        <span class="key">computeIslandCenters</span><span class="key">buildIslandGraphs</span><span class="key">createIslandSimulation</span>
+        <span class="key">lib/vaultParticipants.ts</span><span class="key">describeVaultsNotDrawn</span><span class="key">.graph-not-drawn</span>
       </div>
     </section>
 

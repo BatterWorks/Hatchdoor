@@ -9,12 +9,14 @@ import {
   forceLink,
   forceManyBody,
   forceSimulation,
+  forceX,
+  forceY,
   type Simulation,
   type SimulationLinkDatum,
   type SimulationNodeDatum,
 } from "d3-force";
 
-import type { GraphData } from "../../types";
+import type { GraphData, VaultGraph, VaultId } from "../../types";
 
 export interface SimNode extends SimulationNodeDatum {
   vault_id: string;
@@ -24,6 +26,11 @@ export interface SimNode extends SimulationNodeDatum {
   backlink_count: number;
   x: number;
   y: number;
+  /** Target island center in world space (#143). Undefined on the
+   * single-component path, where `createGraphSimulation`'s global
+   * `forceCenter` applies instead. */
+  islandCx?: number;
+  islandCy?: number;
 }
 
 export interface SimLink extends SimulationLinkDatum<SimNode> {
@@ -102,6 +109,132 @@ export function createGraphSimulation(
     )
     .force("charge", forceManyBody<SimNode>().strength(-180).distanceMax(400))
     .force("center", forceCenter<SimNode>(0, 0))
+    .force(
+      "collide",
+      forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4),
+    )
+    .alphaDecay(0.02);
+}
+
+// ── all-Vault islands (#143) ────────────────────────────────────────────────
+
+const ISLAND_MIN_SPACING = 260;
+const ISLAND_SPACING_PER_NODE = 18;
+
+/**
+ * Deterministic grid centers for N islands, in the given order (Vault-
+ * management order — #118's resolution: never sorted by size, note count, or
+ * condition). Cell spacing grows with the largest per-island node count so
+ * a big component doesn't spill into its neighbours' cells; the grid itself
+ * never reorders. The whole grid is centred on the origin so the existing
+ * "transform centres world (0,0) on the canvas" initial view still frames it.
+ */
+export function computeIslandCenters(
+  nodeCounts: number[],
+): { cx: number; cy: number }[] {
+  const n = nodeCounts.length;
+  if (n === 0) return [];
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const maxCount = Math.max(...nodeCounts, 1);
+  const spacing =
+    ISLAND_MIN_SPACING + ISLAND_SPACING_PER_NODE * Math.sqrt(maxCount);
+  const centers: { cx: number; cy: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    centers.push({
+      cx: (col - (cols - 1) / 2) * spacing,
+      cy: (row - (rows - 1) / 2) * spacing,
+    });
+  }
+  return centers;
+}
+
+export interface GraphIsland {
+  vaultId: VaultId;
+  vaultName: string;
+  /** Same count the API returns nodes for — every note in the Vault under
+   * the active layer selection, not just linked ones (#143's caption count
+   * line). */
+  nodeCount: number;
+  cx: number;
+  cy: number;
+  nodes: SimNode[];
+  links: SimLink[];
+}
+
+/**
+ * Lay out every participating Vault's component on its own (via
+ * `buildSimulationGraph`, unchanged) and place it at a grid-packed island
+ * center. Nodes carry their island's center as `islandCx`/`islandCy` so one
+ * shared simulation (`createIslandSimulation`) can pull each cluster toward
+ * its own spot instead of the single shared origin the byte-identical
+ * single-component path still uses.
+ */
+export function buildIslandGraphs(
+  vaultGraphs: VaultGraph[],
+  { random = Math.random }: { random?: () => number } = {},
+): { islands: GraphIsland[]; nodes: SimNode[]; links: SimLink[] } {
+  const centers = computeIslandCenters(
+    vaultGraphs.map((vaultGraph) => vaultGraph.nodes.length),
+  );
+  const islands: GraphIsland[] = vaultGraphs.map((vaultGraph, i) => {
+    const spread = Math.max(120, 40 * Math.sqrt(vaultGraph.nodes.length || 1));
+    const { nodes, links } = buildSimulationGraph(
+      { nodes: vaultGraph.nodes, edges: vaultGraph.edges },
+      { spread, random },
+    );
+    const { cx, cy } = centers[i];
+    for (const node of nodes) {
+      node.x += cx;
+      node.y += cy;
+      node.islandCx = cx;
+      node.islandCy = cy;
+    }
+    return {
+      vaultId: vaultGraph.vault_id,
+      vaultName: vaultGraph.vault_name,
+      nodeCount: vaultGraph.nodes.length,
+      cx,
+      cy,
+      nodes,
+      links,
+    };
+  });
+  return {
+    islands,
+    nodes: islands.flatMap((island) => island.nodes),
+    links: islands.flatMap((island) => island.links),
+  };
+}
+
+/** Same forces as `createGraphSimulation`, except each node is pulled toward
+ * its own island center (`islandCx`/`islandCy`) via `forceX`/`forceY`
+ * instead of every node sharing one `forceCenter`. Edges never cross Vaults
+ * (the API guarantees this), so `forceLink` never pulls two islands
+ * together. */
+export function createIslandSimulation(
+  nodes: SimNode[],
+  links: SimLink[],
+): Simulation<SimNode, SimLink> {
+  return forceSimulation<SimNode>(nodes)
+    .force(
+      "link",
+      forceLink<SimNode, SimLink>(links)
+        .id((d) => nodeKey(d))
+        .distance(60)
+        .strength(0.4),
+    )
+    .force("charge", forceManyBody<SimNode>().strength(-180).distanceMax(400))
+    .force(
+      "x",
+      forceX<SimNode>((d) => d.islandCx ?? 0).strength(0.08),
+    )
+    .force(
+      "y",
+      forceY<SimNode>((d) => d.islandCy ?? 0).strength(0.08),
+    )
     .force(
       "collide",
       forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4),
