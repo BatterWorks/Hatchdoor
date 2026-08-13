@@ -42,6 +42,7 @@ import type {
   NoteLinks,
   VaultQualifiedLinks,
   VaultQualifiedNote,
+  VaultSummary,
 } from "../types";
 import {
   describeWriteOutcome,
@@ -106,6 +107,7 @@ export function NotePage({
   editRequestId,
   onWriteNotice,
   noteCandidates = [],
+  vaults,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
   onTagSelect: (tag: string) => void;
@@ -115,11 +117,20 @@ export function NotePage({
   editRequestId: number;
   onWriteNotice?: (message: string | null) => void;
   noteCandidates?: ExplorerNote[];
+  vaults: VaultSummary[];
 }) {
   const params = useParams<{ vaultId: string; slug: string }>();
   const location = useLocation();
   const vaultId = params.vaultId ?? "";
   const slug = params.slug ?? "";
+  // Exact reads show provenance whenever more than one Vault is enabled
+  // (#140) — unlike collection surfaces, independent of the browsing scope:
+  // a note's own Vault is never ambiguous just because scope is narrowed
+  // elsewhere.
+  const vaultName =
+    vaults.length > 1
+      ? (vaults.find((vault) => vault.vault_id === vaultId)?.name ?? vaultId)
+      : undefined;
   const [note, setNote] = useState<Note | null>(null);
   const [noteLinks, setNoteLinks] = useState<NoteLinks | null>(null);
   const [loading, setLoading] = useState(true);
@@ -975,6 +986,7 @@ export function NotePage({
         ) : null}
         <NoteProperties
           properties={parsed.properties}
+          vaultName={vaultName}
           content={note.content}
           editable={inlineEditingEnabled}
           onChange={handleInlineChange}
@@ -1014,6 +1026,7 @@ export function NotePage({
             renderPreview={(value) => (
               <NotePreview
                 vaultId={vaultId}
+                vaultName={vaultName}
                 content={value}
                 relativePath={note.relative_path}
               />

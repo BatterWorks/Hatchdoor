@@ -705,7 +705,9 @@ describe("App navigation/search", () => {
 
     expect(
       await screen.findByText(
-        (_value, element) => element?.textContent === "Projects/Plan.md",
+        (_value, element) =>
+          element?.classList.contains("result-path-text") === true &&
+          element.textContent === "Projects/Plan.md",
       ),
     ).toBeInTheDocument();
     expect(

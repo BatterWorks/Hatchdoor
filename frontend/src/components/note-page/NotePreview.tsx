@@ -23,10 +23,12 @@ const PREVIEW_REMARK_PLUGINS = [remarkGfm, remarkMath];
  */
 export function NotePreview({
   vaultId,
+  vaultName,
   content,
   relativePath,
 }: {
   vaultId: VaultId;
+  vaultName?: string;
   content: string;
   relativePath: string;
 }) {
@@ -60,6 +62,7 @@ export function NotePreview({
     <div className="note-editor-preview note-body">
       <NoteProperties
         properties={parsed.properties}
+        vaultName={vaultName}
         collapsed={false}
         onToggleCollapsed={() => {}}
         onTagSelect={() => {}}

@@ -215,6 +215,65 @@ const x = 1
     );
   });
 
+  it("shows a Vault property row when more than one Vault is enabled, even with no frontmatter (#140)", async () => {
+    const otherVault = healthyVault("Second Vault");
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT, otherVault]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Just a note\n\nNo frontmatter on this one.",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const grid = document.querySelector(".note-properties-grid");
+      expect(grid).not.toBeNull();
+      const row = grid!.querySelector(".note-property-row");
+      expect(row?.querySelector("dt")).toHaveTextContent("Vault");
+      expect(row?.querySelector("dd")).toHaveTextContent(VAULT.name);
+    });
+  });
+
   it("keeps table-of-contents targets stable after the note re-renders", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {

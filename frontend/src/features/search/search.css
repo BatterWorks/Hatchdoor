@@ -187,13 +187,26 @@
 }
 
 .result-path {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
   margin-top: 0.1rem;
+  min-width: 0;
   font-family: var(--font-sans);
   font-size: 0.72rem;
   color: var(--muted);
+}
+
+/* Provenance (#140) leads this line and never elides; the path takes the
+   loss instead, head-first — the tail (the file itself) is what a reader
+   scanning results needs kept. */
+.result-path-text {
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
 }
 
 .result-breadcrumb {

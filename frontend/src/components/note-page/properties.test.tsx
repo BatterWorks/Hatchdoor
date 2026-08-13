@@ -96,3 +96,54 @@ describe("editable frontmatter properties", () => {
     expect(screen.queryByRole("textbox")).toBeNull();
   });
 });
+
+describe("Vault provenance row (#140)", () => {
+  it("renders nothing when there is no frontmatter and no vaultName", () => {
+    const { container } = render(
+      <NoteProperties
+        properties={{}}
+        collapsed={false}
+        onToggleCollapsed={() => {}}
+        onTagSelect={() => {}}
+      />,
+    );
+
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("renders a leading, non-editable Vault row on its own, with no frontmatter", () => {
+    render(
+      <NoteProperties
+        properties={{}}
+        vaultName="Alpha"
+        collapsed={false}
+        onToggleCollapsed={() => {}}
+        onTagSelect={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("Vault")).toBeInTheDocument();
+    expect(screen.getByText("Alpha")).toBeInTheDocument();
+
+    // Not editable like a real frontmatter value: clicking it opens no input.
+    fireEvent.click(screen.getByText("Alpha"));
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+
+  it("leads the frontmatter properties rather than following them", () => {
+    const { container } = render(
+      <NoteProperties
+        properties={{ title: "Home" }}
+        vaultName="Alpha"
+        collapsed={false}
+        onToggleCollapsed={() => {}}
+        onTagSelect={() => {}}
+      />,
+    );
+
+    const labels = Array.from(container.querySelectorAll("dt")).map(
+      (dt) => dt.textContent,
+    );
+    expect(labels).toEqual(["Vault", "title"]);
+  });
+});

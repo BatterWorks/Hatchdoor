@@ -36,6 +36,23 @@ export function UiToolbar({
   );
 }
 
+/**
+ * A Vault declaring itself as a marked path root (#140): the Vault name in
+ * hot ink followed by a middot, never a `/`, so it reads as visibly not a
+ * folder segment. Inert — a plain span, never a click target — and never
+ * elides; callers give the adjacent title or path the shrinking room instead.
+ */
+export function VaultPrefix({ name }: { name: string }) {
+  return (
+    <span className="vault-prefix">
+      {name}
+      <span className="vault-prefix-dot" aria-hidden="true">
+        ·
+      </span>
+    </span>
+  );
+}
+
 export function StatusBadge({
   tone,
   text,

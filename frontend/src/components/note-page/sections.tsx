@@ -15,6 +15,7 @@ import {
 
 export function NoteProperties({
   properties,
+  vaultName,
   content,
   editable = false,
   collapsed,
@@ -23,6 +24,10 @@ export function NoteProperties({
   onChange,
 }: {
   properties: Record<string, FrontmatterValue>;
+  /** The open note's own Vault, shown as a leading synthetic row (#140).
+   * Passed only when more than one Vault is enabled; absent otherwise, so a
+   * single-Vault instance keeps today's grid unchanged. */
+  vaultName?: string;
   /** The whole note, needed to rewrite the frontmatter in place. */
   content?: string;
   editable?: boolean;
@@ -58,7 +63,7 @@ export function NoteProperties({
 
   const canEdit = editable && !!content && !!onChange;
   const entries = Object.entries(properties);
-  if (entries.length === 0) {
+  if (entries.length === 0 && !vaultName) {
     return null;
   }
 
@@ -94,6 +99,12 @@ export function NoteProperties({
         className="note-properties-grid"
         hidden={collapsed}
       >
+        {vaultName ? (
+          <div className="note-property-row">
+            <dt>Vault</dt>
+            <dd>{vaultName}</dd>
+          </div>
+        ) : null}
         {entries.map(([key, value]) => (
           <div key={key} className="note-property-row">
             <dt>{key}</dt>

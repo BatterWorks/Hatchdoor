@@ -1,7 +1,8 @@
 import { NavLink } from "react-router-dom";
 
 import { SideHead } from "./Explorer";
-import type { ModifiedNote } from "../types";
+import { VaultPrefix } from "./ui";
+import type { ModifiedNote, VaultScope, VaultSummary } from "../types";
 
 /** Matches the cap in the design: newest first, the rest behind a count. */
 const VISIBLE_LIMIT = 15;
@@ -23,12 +24,18 @@ const VISIBLE_LIMIT = 15;
 export function ChangesPanel({
   notes,
   onNavigate,
+  vaults,
+  scope,
 }: {
   notes: ModifiedNote[];
   onNavigate: () => void;
+  vaults: VaultSummary[];
+  scope: VaultScope;
 }) {
   const visible = notes.slice(0, VISIBLE_LIMIT);
   const overflow = notes.length - visible.length;
+  // Provenance only where the list can actually span Vaults (#140).
+  const showVaultPrefix = scope === "all" && vaults.length > 1;
 
   return (
     <section
@@ -59,6 +66,14 @@ export function ChangesPanel({
                   <span className="idx" aria-hidden="true">
                     {String(index + 1).padStart(3, "0")}
                   </span>
+                  {showVaultPrefix ? (
+                    <VaultPrefix
+                      name={
+                        vaults.find((vault) => vault.vault_id === note.vault_id)
+                          ?.name ?? note.vault_id
+                      }
+                    />
+                  ) : null}
                   <span className="note-label">{note.title}</span>
                 </NavLink>
               </li>
