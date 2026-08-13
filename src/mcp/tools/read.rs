@@ -498,4 +498,69 @@ mod tests {
             "the shared registry assigns IDs only after a successful create"
         );
     }
+
+    /// Issue #132's last acceptance criterion, `edit_vault` half: `source`'s
+    /// `inputSchema` carries no nested `additionalProperties: false` (only
+    /// the outer args object does — see `management_tools_list`'s literal
+    /// JSON above), and `EditVaultArgs.source` deserializes straight into
+    /// the real `vault_registry::VaultSource`, which already accepts
+    /// `poll_interval_secs` on an `existing_git` source. This proves the
+    /// Rust-level parse actually succeeds, not just that the schema doesn't
+    /// forbid it.
+    #[test]
+    fn edit_vault_args_accept_the_schedule_on_an_existing_git_source() {
+        let value = json!({
+            "vault_id": "018f47a0-7768-4d0c-8da3-5aa28d1c31c7",
+            "expected_registry_revision": 0,
+            "name": "Existing checkout",
+            "source": {
+                "type": "existing_git",
+                "repository_path": "/tmp/hatchdoor-mcp-test-repo",
+                "repository_url": "https://example.test/notes.git",
+                "branch": null,
+                "vault_subdirectory": null,
+                "mode": "pull_only",
+                "poll_interval_secs": 60
+            },
+            "exclude_patterns": []
+        });
+        let args: EditVaultArgs = serde_json::from_value(value)
+            .expect("edit_vault must accept poll_interval_secs on an existing_git source");
+        assert!(matches!(
+            args.source,
+            crate::vault_registry::VaultSource::ExistingGit {
+                poll_interval_secs: 60,
+                ..
+            }
+        ));
+    }
+
+    /// Same acceptance criterion, `create_vault` half: `create_vault_tool`
+    /// parses straight into `vaults::CreateVaultRequest`, which embeds the
+    /// same `VaultSource`.
+    #[test]
+    fn create_vault_request_accepts_the_schedule_on_an_existing_git_source() {
+        let value = json!({
+            "expected_registry_revision": 0,
+            "name": "Existing checkout",
+            "source": {
+                "type": "existing_git",
+                "repository_path": "/tmp/hatchdoor-mcp-test-repo",
+                "repository_url": "https://example.test/notes.git",
+                "branch": null,
+                "vault_subdirectory": null,
+                "mode": "pull_only",
+                "poll_interval_secs": 60
+            }
+        });
+        let request: vaults::CreateVaultRequest = serde_json::from_value(value)
+            .expect("create_vault must accept poll_interval_secs on an existing_git source");
+        assert!(matches!(
+            request.source,
+            crate::vault_registry::VaultSource::ExistingGit {
+                poll_interval_secs: 60,
+                ..
+            }
+        ));
+    }
 }

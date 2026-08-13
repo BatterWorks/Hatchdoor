@@ -130,6 +130,55 @@ fn runtime_error_detail_carries_the_local_commits_ahead_count_through_unbounded(
     );
 }
 
+/// Issue #132's last acceptance criterion: "a dirty working copy and a
+/// conflict both report their affected paths as data" — the actual wire
+/// shape a caller receives (this is what `VaultSummary.git_error` and MCP
+/// `list_vaults` both serialize verbatim, per `vault_summary`'s
+/// `git_error: snapshot.git_error.clone()`). `detail` must be a tagged
+/// object when present, and omitted — not serialized as `null` — for every
+/// other code.
+#[test]
+fn runtime_error_detail_serializes_as_tagged_json_and_is_omitted_when_absent() {
+    let with_paths = VaultRuntimeError {
+        code: "managed_git_dirty_working_copy".to_string(),
+        message: "x".to_string(),
+        retryable: false,
+        detail: Some(VaultRuntimeErrorDetail::AffectedPaths {
+            paths: vec!["a.md".to_string()],
+            total: 1,
+        }),
+    };
+    let json = serde_json::to_value(&with_paths).expect("serialize");
+    assert_eq!(
+        json["detail"],
+        serde_json::json!({"kind": "affected_paths", "paths": ["a.md"], "total": 1})
+    );
+
+    let with_count = VaultRuntimeError {
+        code: "managed_git_pull_only_local_commits".to_string(),
+        message: "x".to_string(),
+        retryable: false,
+        detail: Some(VaultRuntimeErrorDetail::LocalCommitsAhead { ahead: 4 }),
+    };
+    let json = serde_json::to_value(&with_count).expect("serialize");
+    assert_eq!(
+        json["detail"],
+        serde_json::json!({"kind": "local_commits_ahead", "ahead": 4})
+    );
+
+    let without_detail = VaultRuntimeError {
+        code: "managed_git_authentication_failed".to_string(),
+        message: "x".to_string(),
+        retryable: false,
+        detail: None,
+    };
+    let json = serde_json::to_value(&without_detail).expect("serialize");
+    assert!(
+        json.get("detail").is_none(),
+        "detail must be omitted, not serialized as null, for a code that carries none"
+    );
+}
+
 fn managed(mode: ManagedGitMode) -> VaultSource {
     VaultSource::ManagedGit(ManagedGitSource {
         repository_url: "https://example.test/vault.git".to_string(),

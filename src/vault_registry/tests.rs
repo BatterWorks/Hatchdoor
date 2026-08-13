@@ -705,6 +705,80 @@ fn a_poll_interval_below_the_minimum_saves_nothing() {
     assert!(!path.exists());
 }
 
+/// Issue #132's central acceptance criterion: "A Vault can be saved with a
+/// one-minute schedule". `MIN_MANAGED_GIT_POLL_INTERVAL_SECS` rejects only
+/// values strictly below it, so the floor itself (60s, one minute) is a
+/// valid schedule — for both scheduler-tracked source kinds, since the
+/// floor now applies identically to `ManagedGit` and a remote-backed
+/// `ExistingGit`.
+#[test]
+fn a_one_minute_poll_interval_is_accepted_for_both_managed_and_existing_git() {
+    let directory = tempdir().expect("temporary directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    let committed = store
+        .add(
+            0,
+            NewVaultDefinition {
+                name: "One-minute managed".to_string(),
+                enabled: true,
+                source: VaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: 60,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("a one-minute managed-Git schedule must be accepted");
+    assert_eq!(
+        committed
+            .definitions()
+            .next()
+            .expect("definition")
+            .source()
+            .managed_git_poll_interval(),
+        Some(std::time::Duration::from_secs(60))
+    );
+
+    let repository_path = directory.path().join("repository");
+    git2::Repository::init(&repository_path).expect("initialize repository");
+    let committed = store
+        .add(
+            1,
+            NewVaultDefinition {
+                name: "One-minute existing".to_string(),
+                enabled: true,
+                source: VaultSource::ExistingGit {
+                    repository_path,
+                    repository_url: Some("https://example.test/notes.git".to_string()),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: 60,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("a one-minute existing-Git schedule must be accepted");
+    let definition = committed
+        .definitions()
+        .find(|definition| definition.name() == "One-minute existing")
+        .expect("definition");
+    assert_eq!(
+        definition.source().managed_git_poll_interval(),
+        Some(std::time::Duration::from_secs(60))
+    );
+}
+
 /// Issue #132: the same floor applies to a remote-backed `ExistingGit`
 /// source (`PullOnly`/`TwoWay`) — it is scheduled by `ManagedGitScheduler`
 /// exactly like `ManagedGit`, so it shares the same reasoning

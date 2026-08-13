@@ -1534,4 +1534,55 @@ mod tests {
             "manual retry must no longer be refused for an ExistingGit PullOnly Vault"
         );
     }
+
+    /// Companion to `sync_and_retry_admit_an_existing_git_pull_only_vault_and_track_its_schedule`:
+    /// the other half of the acceptance criterion "An `ExistingGit` Vault in
+    /// `LocalHistory` ... still refuse[s] both and carr[ies] no schedule" —
+    /// `LocalHistory` has no remote to poll and must keep refusing both
+    /// endpoints exactly as before this ticket.
+    #[tokio::test]
+    async fn sync_and_retry_still_refuse_an_existing_git_local_history_vault() {
+        let (state, _worker, directory) = test_state();
+        let repository_path = directory.path().join("local-history-repo");
+        std::fs::create_dir_all(&repository_path).expect("create repo directory");
+        git2::Repository::init(&repository_path).expect("init git repo");
+
+        let create_request = CreateVaultRequest {
+            expected_registry_revision: 0,
+            name: "Local history checkout".to_string(),
+            enabled: true,
+            source: VaultSource::ExistingGit {
+                repository_path,
+                repository_url: None,
+                branch: None,
+                vault_subdirectory: None,
+                mode: VaultGitMode::LocalHistory,
+                poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            },
+            exclude_patterns: Vec::new(),
+            https_credentials: None,
+            archive_folder: None,
+            commit_identity: None,
+        };
+        let response = create_vault_handler(State(state.clone()), Ok(Json(create_request))).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        assert_eq!(
+            state.managed_git.poll_interval_for_test(vault_id),
+            None,
+            "a LocalHistory Vault must never be tracked by the scheduler"
+        );
+
+        let sync = sync_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(sync.status(), StatusCode::CONFLICT);
+
+        let retry = retry_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
+        assert_eq!(retry.status(), StatusCode::CONFLICT);
+    }
 }

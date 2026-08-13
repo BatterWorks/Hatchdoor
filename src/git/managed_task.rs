@@ -1250,6 +1250,42 @@ mod tests {
         assert!(after_success.next_attempt >= before + TEST_POLL_INTERVAL - Duration::from_secs(1));
     }
 
+    /// Issue #132's second acceptance criterion: a transient failure on a
+    /// one-minute Vault "backs off and recovers on a scale proportionate to
+    /// its schedule, not the old one-hour cap." Reads the raw `backoff`
+    /// field (not `next_attempt`, which is also offset by wall-clock elapsed
+    /// time between calls) so the plateau value is exact.
+    #[test]
+    fn repeated_transient_failures_plateau_at_the_new_backoff_max_not_the_old_one_hour_cap() {
+        let (_coordinator, scheduler) = scheduler();
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        scheduler.activate(vault, Duration::from_secs(60));
+        let transient = Err(VaultWorkError::new(
+            "managed_git_remote_unreachable",
+            "x",
+            true,
+        ));
+
+        let mut last_backoff = None;
+        for _ in 0..10 {
+            scheduler.record_outcome(vault, &transient);
+            last_backoff = {
+                let entries = scheduler.entries.lock().expect("scheduler entries");
+                entries[&vault].schedule.backoff
+            };
+        }
+
+        assert_eq!(
+            last_backoff,
+            Some(BACKOFF_MAX),
+            "ten consecutive transient failures must plateau at BACKOFF_MAX, not keep doubling"
+        );
+        assert!(
+            BACKOFF_MAX < Duration::from_secs(60 * 60),
+            "the cap itself must be well under the pre-#132 one-hour bound"
+        );
+    }
+
     #[test]
     fn a_non_retryable_failure_including_authentication_waits_for_the_normal_schedule_not_backoff()
     {
