@@ -6,8 +6,9 @@ use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
 use super::{
-    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, DEFAULT_VAULT_REGISTRY_PATH, HttpsCredentialUpdate,
-    HttpsCredentials, NewVaultDefinition, REGISTRY_SCHEMA_VERSION, VaultDefinitionEdit,
+    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, DEFAULT_VAULT_REGISTRY_PATH,
+    HTTPS_CREDENTIALS_USERNAME_PLACEHOLDER, HttpsCredentialUpdate, HttpsCredentials,
+    NewVaultDefinition, REGISTRY_SCHEMA_VERSION, VaultCommitIdentity, VaultDefinitionEdit,
     VaultDefinitionError, VaultGitMode, VaultId, VaultRecord, VaultRegistryError,
     VaultRegistryRecoveryKind, VaultRegistryState, VaultRegistryStore, VaultSource,
 };
@@ -96,6 +97,8 @@ fn local_definition_add_round_trips_through_the_public_snapshot() {
                 },
                 exclude_patterns: vec![" private/** ".to_string(), "".to_string()],
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add local Vault");
@@ -221,6 +224,8 @@ fn managed_https_credentials_are_persisted_but_redacted_from_reads_and_debug() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: Some(credentials),
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -266,6 +271,8 @@ fn crate_private_https_credentials_accessor_returns_plaintext_only_for_configure
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: Some(credentials.clone()),
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -286,6 +293,8 @@ fn crate_private_https_credentials_accessor_returns_plaintext_only_for_configure
                 source: VaultSource::Local { path: local_path },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add local Vault");
@@ -338,6 +347,8 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add existing checkout");
@@ -372,6 +383,8 @@ fn existing_git_source_requires_a_readable_checkout_and_canonicalizes_its_locati
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect_err("ordinary directory accepted as existing Git");
@@ -403,6 +416,8 @@ fn existing_git_retains_remote_identity_while_git_mode_changes_normally() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("connect local history without discarding remote identity");
@@ -424,6 +439,8 @@ fn existing_git_retains_remote_identity_while_git_mode_changes_normally() {
                 exclude_patterns: Vec::new(),
                 https_credentials: HttpsCredentialUpdate::Keep,
                 confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("change only Git behavior while enabled");
@@ -465,6 +482,8 @@ fn existing_git_symlink_subdirectory_cannot_bypass_canonical_overlap_validation(
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add existing checkout");
@@ -509,6 +528,8 @@ fn existing_git_source_rejects_the_repository_metadata_directory_as_its_location
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect_err("repository metadata accepted as checkout root");
@@ -545,6 +566,8 @@ fn malformed_https_repository_urls_save_nothing() {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect_err("malformed HTTPS URL accepted");
@@ -583,6 +606,8 @@ fn a_poll_interval_below_the_minimum_saves_nothing() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect_err("below-minimum poll interval accepted");
@@ -636,6 +661,245 @@ fn a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_wi
             DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
         ))
     );
+}
+
+/// Issue #130: `add` normalizes a per-Vault archive folder to a single
+/// trailing slash regardless of how the caller spelled it, and normalizes a
+/// commit identity's name/email by trimming whitespace, mirroring how
+/// `exclude_patterns` and HTTPS credentials are already normalized.
+#[test]
+fn archive_folder_and_commit_identity_are_normalized_and_round_trip_through_add() {
+    let directory = tempdir().expect("temporary directory");
+    let vault_path = directory.path().join("notes");
+    std::fs::create_dir(&vault_path).expect("create Vault directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    let committed = store
+        .add(
+            0,
+            NewVaultDefinition {
+                archive_folder: Some("  /Team Archive/  ".to_string()),
+                commit_identity: Some(VaultCommitIdentity {
+                    name: "  Work Bot  ".to_string(),
+                    email: "  work-bot@example.test  ".to_string(),
+                }),
+                ..local_definition("Team Vault", vault_path, true)
+            },
+        )
+        .expect("add Vault with per-Vault archive folder and commit identity");
+
+    let definition = committed.definitions().next().expect("definition");
+    assert_eq!(definition.archive_folder(), Some("Team Archive/"));
+    assert_eq!(
+        definition.commit_identity(),
+        Some(&VaultCommitIdentity {
+            name: "Work Bot".to_string(),
+            email: "work-bot@example.test".to_string(),
+        })
+    );
+}
+
+#[test]
+fn archive_folder_rejects_an_empty_or_control_character_value() {
+    let directory = tempdir().expect("temporary directory");
+    let vault_path = directory.path().join("notes");
+    std::fs::create_dir(&vault_path).expect("create Vault directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    for invalid in ["   ", "///", "bad\u{0007}folder"] {
+        let error = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    archive_folder: Some(invalid.to_string()),
+                    ..local_definition("Vault", vault_path.clone(), true)
+                },
+            )
+            .expect_err("invalid archive folder accepted");
+        assert_eq!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidArchiveFolder)
+        );
+    }
+}
+
+#[test]
+fn commit_identity_requires_a_non_empty_name_and_email_together() {
+    let directory = tempdir().expect("temporary directory");
+    let vault_path = directory.path().join("notes");
+    std::fs::create_dir(&vault_path).expect("create Vault directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    for invalid in [
+        VaultCommitIdentity {
+            name: String::new(),
+            email: "person@example.test".to_string(),
+        },
+        VaultCommitIdentity {
+            name: "Person".to_string(),
+            email: "   ".to_string(),
+        },
+    ] {
+        let error = store
+            .add(
+                0,
+                NewVaultDefinition {
+                    commit_identity: Some(invalid),
+                    ..local_definition("Vault", vault_path.clone(), true)
+                },
+            )
+            .expect_err("invalid commit identity accepted");
+        assert_eq!(
+            error,
+            VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidCommitIdentity)
+        );
+    }
+}
+
+/// Mirrors `a_managed_git_record_written_before_poll_interval_secs_existed_still_loads_with_the_default`:
+/// a registry record written before `archive_folder`/`commit_identity`
+/// existed (same schema version 1, neither key present) must still load
+/// `Ready`, with both fields defaulting to absent rather than the whole
+/// registry entering recovery.
+#[test]
+fn a_record_written_before_archive_folder_and_commit_identity_existed_still_loads_with_defaults() {
+    let directory = tempdir().expect("temporary directory");
+    let path = directory.path().join("vaults.json");
+    let original = br#"{
+        "schema_version": 1,
+        "revision": 1,
+        "vaults": {
+            "018f47a0-7768-4d0c-8da3-5aa28d1c31c7": {
+                "name": "Pre-identity Vault",
+                "enabled": true,
+                "source": {
+                    "type": "local",
+                    "path": "/tmp/pre-identity-vault"
+                },
+                "exclude_patterns": []
+            }
+        }
+    }"#;
+    std::fs::write(&path, original).expect("write pre-identity registry");
+    let store = VaultRegistryStore::new(&path);
+
+    let VaultRegistryState::Ready(snapshot) = store.load().expect("load registry") else {
+        panic!("a schema-compatible pre-identity record entered recovery");
+    };
+
+    let definition = snapshot.definitions().next().expect("one definition");
+    assert_eq!(definition.archive_folder(), None);
+    assert_eq!(definition.commit_identity(), None);
+}
+
+/// Issue #130: HTTPS credentials accept a token alone. An absent or
+/// empty-after-trim username is substituted with the documented fixed
+/// placeholder rather than rejected, since `git2::Cred::userpass_plaintext`
+/// requires a non-empty username but token-authenticating providers accept
+/// any non-empty value there.
+#[test]
+fn https_credentials_accept_a_token_alone_and_substitute_the_documented_placeholder_username() {
+    let directory = tempdir().expect("temporary directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    let committed = store
+        .add(
+            0,
+            NewVaultDefinition {
+                https_credentials: Some(HttpsCredentials {
+                    username: String::new(),
+                    token: "token-only-secret".to_string(),
+                }),
+                ..managed_git_definition("Token-only Vault")
+            },
+        )
+        .expect("token-alone credentials accepted");
+    let vault_id = committed
+        .definitions()
+        .next()
+        .expect("definition")
+        .vault_id();
+
+    let credentials = store
+        .https_credentials(vault_id)
+        .expect("credentials lookup")
+        .expect("credentials configured");
+    assert_eq!(credentials.username, HTTPS_CREDENTIALS_USERNAME_PLACEHOLDER);
+    assert_eq!(credentials.token, "token-only-secret");
+}
+
+#[test]
+fn https_credentials_reject_an_empty_token_even_with_a_username() {
+    let directory = tempdir().expect("temporary directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+
+    let error = store
+        .add(
+            0,
+            NewVaultDefinition {
+                https_credentials: Some(HttpsCredentials {
+                    username: "git-user".to_string(),
+                    token: "   ".to_string(),
+                }),
+                ..managed_git_definition("Empty-token Vault")
+            },
+        )
+        .expect_err("empty token accepted");
+
+    assert!(matches!(
+        error,
+        VaultRegistryError::InvalidDefinition(VaultDefinitionError::InvalidSource(_))
+    ));
+}
+
+/// Issue #130: `edit` can set a previously-absent archive folder/commit
+/// identity, and can clear a previously-set one back to absent (the
+/// instance-wide default), since both fields are plain `Option`s resent in
+/// full on every edit — unlike HTTPS credentials, there is no secret to
+/// protect from "Keep versus clear" ambiguity here.
+#[test]
+fn edit_can_set_and_then_clear_archive_folder_and_commit_identity() {
+    let directory = tempdir().expect("temporary directory");
+    let vault_path = directory.path().join("notes");
+    std::fs::create_dir(&vault_path).expect("create Vault directory");
+    let store = VaultRegistryStore::new(directory.path().join("vaults.json"));
+    let committed = store
+        .add(0, local_definition("Vault", vault_path.clone(), false))
+        .expect("add disabled Vault");
+    let vault_id = committed
+        .definitions()
+        .next()
+        .expect("definition")
+        .vault_id();
+
+    let committed = store
+        .edit(
+            committed.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                archive_folder: Some("Archive".to_string()),
+                commit_identity: Some(VaultCommitIdentity {
+                    name: "Person".to_string(),
+                    email: "person@example.test".to_string(),
+                }),
+                ..local_edit("Vault", vault_path.clone(), false)
+            },
+        )
+        .expect("set archive folder and commit identity");
+    let definition = committed.definitions().next().expect("definition");
+    assert_eq!(definition.archive_folder(), Some("Archive/"));
+    assert!(definition.commit_identity().is_some());
+
+    let committed = store
+        .edit(
+            committed.revision(),
+            vault_id,
+            local_edit("Vault", vault_path, false),
+        )
+        .expect("clear archive folder and commit identity");
+    let definition = committed.definitions().next().expect("definition");
+    assert_eq!(definition.archive_folder(), None);
+    assert_eq!(definition.commit_identity(), None);
 }
 
 #[test]
@@ -858,6 +1122,8 @@ fn enabled_definitions_allow_name_mode_and_credential_changes() {
                     username: "old-user".to_string(),
                     token: "old-token".to_string(),
                 }),
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add remote Vault");
@@ -882,6 +1148,8 @@ fn enabled_definitions_allow_name_mode_and_credential_changes() {
                     token: "new-token".to_string(),
                 }),
                 confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("edit non-identity fields");
@@ -911,6 +1179,8 @@ fn enabled_definitions_allow_name_mode_and_credential_changes() {
                 exclude_patterns: vec!["drafts/**".to_string()],
                 https_credentials: HttpsCredentialUpdate::Remove,
                 confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("remove credential");
@@ -980,6 +1250,8 @@ fn invalid_sources_reject_the_transaction_without_leaking_credentials() {
                 source: unsafe_source,
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect_err("credential-bearing URL accepted");
@@ -1001,6 +1273,8 @@ fn invalid_sources_reject_the_transaction_without_leaking_credentials() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect_err("escaping subdirectory accepted");
@@ -1104,6 +1378,8 @@ fn confirmed_repository_change_does_not_carry_an_old_credential() {
                     username: "old-user".to_string(),
                     token: "old-repository-token".to_string(),
                 }),
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -1125,6 +1401,8 @@ fn confirmed_repository_change_does_not_carry_an_old_credential() {
                 exclude_patterns: Vec::new(),
                 https_credentials: HttpsCredentialUpdate::Keep,
                 confirm_identity_change: true,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("confirm repository change");
@@ -1162,6 +1440,8 @@ fn managed_checkout_paths_participate_in_overlap_validation() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -1213,6 +1493,8 @@ fn absent_managed_checkout_resolves_a_symlinked_state_parent_for_overlap_checks(
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault before checkout acquisition");
@@ -1237,6 +1519,26 @@ fn local_definition(name: &str, path: PathBuf, enabled: bool) -> NewVaultDefinit
         source: VaultSource::Local { path },
         exclude_patterns: Vec::new(),
         https_credentials: None,
+        archive_folder: None,
+        commit_identity: None,
+    }
+}
+
+fn managed_git_definition(name: &str) -> NewVaultDefinition {
+    NewVaultDefinition {
+        name: name.to_string(),
+        enabled: true,
+        source: VaultSource::ManagedGit {
+            repository_url: "https://example.test/owner/notes.git".to_string(),
+            branch: None,
+            vault_subdirectory: None,
+            mode: VaultGitMode::PullOnly,
+            poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+        },
+        exclude_patterns: Vec::new(),
+        https_credentials: None,
+        archive_folder: None,
+        commit_identity: None,
     }
 }
 
@@ -1247,6 +1549,8 @@ fn local_edit(name: &str, path: PathBuf, confirm_identity_change: bool) -> Vault
         exclude_patterns: Vec::new(),
         https_credentials: HttpsCredentialUpdate::Keep,
         confirm_identity_change,
+        archive_folder: None,
+        commit_identity: None,
     }
 }
 

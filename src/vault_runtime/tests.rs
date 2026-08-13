@@ -141,6 +141,8 @@ fn local_history_ready_state_never_exposes_remote_capabilities() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add local-history Vault");
@@ -174,6 +176,8 @@ fn add_local_vault(
                 source: RegistryVaultSource::Local { path },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add local Vault")
@@ -757,6 +761,8 @@ fn activation_failure_is_isolated_from_healthy_local_markdown() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault before acquisition");
@@ -869,6 +875,8 @@ fn set_local_content_status_makes_a_managed_vault_browsable_after_first_acquisit
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault before acquisition");
@@ -964,6 +972,8 @@ fn editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -1003,6 +1013,8 @@ fn editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status() {
                 exclude_patterns: Vec::new(),
                 https_credentials: HttpsCredentialUpdate::Keep,
                 confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("edit only the poll interval");
@@ -1058,6 +1070,8 @@ fn disabling_and_reenabling_a_managed_git_vault_forces_a_fresh_pending_sync() {
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -1135,6 +1149,8 @@ fn managed_git_control_block(
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add managed Vault");
@@ -1536,6 +1552,8 @@ async fn dispatch_managed_git_turn_commits_existing_git_local_history_drift_thro
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add local-history Vault");
@@ -1721,6 +1739,8 @@ fn existing_git_control_block(
                 },
                 exclude_patterns: Vec::new(),
                 https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("add ExistingGit Vault");
@@ -2337,6 +2357,8 @@ async fn an_older_reconciliation_cannot_readmit_work_after_a_newer_snapshot_appl
                 exclude_patterns: vec!["ignored/**".to_string()],
                 https_credentials: HttpsCredentialUpdate::Keep,
                 confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("replace enabled Vault definition");
@@ -3243,6 +3265,8 @@ async fn replacing_an_enabled_vault_waits_for_old_work_then_reconstructs_new_wor
                 exclude_patterns: vec!["ignored/**".to_string()],
                 https_credentials: HttpsCredentialUpdate::Keep,
                 confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
             },
         )
         .expect("replace enabled Vault definition");

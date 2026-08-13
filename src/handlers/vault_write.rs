@@ -783,9 +783,11 @@ pub async fn vault_scoped_archive_note_handler(
         Ok(entry) => entry,
         Err(error) => return respond(error),
     };
-    // Archive prefix stays an instance-wide setting (issue #62), not per-Vault.
+    // The Vault's own configured archive folder overrides the instance-wide
+    // setting when present (#130).
     let snapshot = state.runtime_snapshot();
-    let archive_prefix = match AppState::runtime_archive_prefix(&snapshot) {
+    let archive_prefix = match AppState::vault_archive_prefix(Some(control.definition()), &snapshot)
+    {
         Ok(prefix) => prefix,
         Err(error) => {
             return crate::handlers::vaults::internal_error_response(error, Some(vault_id));

@@ -176,6 +176,8 @@ pub fn migrate_legacy_vault(
         source,
         exclude_patterns,
         https_credentials,
+        archive_folder: None,
+        commit_identity: None,
     };
     let imported = match registry.add(0, definition) {
         Ok(snapshot) => snapshot,

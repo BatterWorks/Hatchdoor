@@ -15,7 +15,7 @@ use crate::embed::Embedder;
 use crate::startup::{IndexingProgressSnapshot, StartupTracker};
 use crate::vault::{VaultIndex, VaultScanConfig, seed_empty_vault};
 use crate::vault_migration::LegacyMigrationRecovery;
-use crate::vault_registry::VaultRegistryStore;
+use crate::vault_registry::{VaultDefinition, VaultRegistryStore};
 use crate::vault_runtime::VaultCollectionRuntime;
 use crate::vault_runtime::VaultSource;
 
@@ -265,6 +265,23 @@ impl AppState {
             .setting("HATCHDOOR_ARCHIVE_PREFIX")
             .map(|setting| Arc::from(setting.value.as_str()))
             .ok_or_else(|| "runtime configuration is missing HATCHDOOR_ARCHIVE_PREFIX".to_string())
+    }
+
+    /// Resolve the archive folder for one Vault: its own configured folder
+    /// (`VaultDefinition::archive_folder`) if set, else the instance-wide
+    /// `HATCHDOOR_ARCHIVE_PREFIX` default. `definition` is `None` when the
+    /// Vault has no reconciled runtime yet — that degrades to the
+    /// instance-wide default rather than failing, since the caller's own
+    /// Vault-existence check (a not-found/unavailable status) is the
+    /// authoritative error for that case.
+    pub fn vault_archive_prefix(
+        definition: Option<&VaultDefinition>,
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Arc<str>, String> {
+        if let Some(folder) = definition.and_then(VaultDefinition::archive_folder) {
+            return Ok(Arc::from(folder));
+        }
+        Self::runtime_archive_prefix(snapshot)
     }
 
     pub fn runtime_scan_config(
@@ -899,6 +916,80 @@ mod tests {
         assert!(
             after.exclude.is_excluded(Path::new("Secret.md"), false),
             "the saved HATCHDOOR_EXCLUDE pattern must take effect immediately"
+        );
+    }
+
+    /// Issue #130: a Vault's own configured archive folder overrides the
+    /// instance-wide `HATCHDOOR_ARCHIVE_PREFIX` default when present, and the
+    /// default applies unchanged both when the Vault has none configured and
+    /// when no Vault definition is available at all (e.g. no reconciled
+    /// runtime yet).
+    #[test]
+    fn vault_archive_prefix_prefers_the_vaults_own_folder_and_falls_back_to_the_instance_default() {
+        let directory = tempdir().expect("temp dir");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("vault dir");
+        let store =
+            crate::vault_registry::VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let committed = store
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Team Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_path.clone(),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: Some("Team Archive".to_string()),
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault with its own archive folder");
+        let with_override = committed.definitions().next().expect("definition");
+
+        std::fs::create_dir_all(directory.path().join("plain")).expect("plain vault dir");
+        let plain_committed = store
+            .add(
+                committed.revision(),
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Plain Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: directory.path().join("plain"),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault without an archive folder");
+        let without_override = plain_committed
+            .definitions()
+            .find(|definition| definition.name() == "Plain Vault")
+            .expect("plain definition");
+
+        let snapshot = crate::runtime_config::RuntimeConfig::for_tests().snapshot();
+
+        assert_eq!(
+            AppState::vault_archive_prefix(Some(&with_override), &snapshot)
+                .expect("resolve override")
+                .as_ref(),
+            "Team Archive/"
+        );
+        assert_eq!(
+            AppState::vault_archive_prefix(Some(&without_override), &snapshot)
+                .expect("resolve default")
+                .as_ref(),
+            "90-archive/"
+        );
+        assert_eq!(
+            AppState::vault_archive_prefix(None, &snapshot)
+                .expect("resolve default with no definition")
+                .as_ref(),
+            "90-archive/"
         );
     }
 }

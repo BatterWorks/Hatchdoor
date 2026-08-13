@@ -376,19 +376,40 @@ atomically replace the file with owner-only permissions. Corrupt, unsupported,
 future-schema, or structurally invalid definition files expose no Vault records
 and are never overwritten automatically.
 
+Issue #130 gives `VaultRecord`/`VaultDefinition` two further optional fields,
+both `#[serde(default)]` so a registry written before they existed keeps
+loading under the same `REGISTRY_SCHEMA_VERSION` (the `poll_interval_secs`
+precedent above): an `archive_folder`, normalized to a single-trailing-slash
+form (e.g. `"Archive/"`) and read by `VaultDefinition::archive_folder`, and a
+`commit_identity` (`VaultCommitIdentity { name, email }`, not a secret —
+unlike credentials it round-trips through every projection unredacted) read
+by `VaultDefinition::commit_identity`. Both are absent by default; the
+instance-wide `HATCHDOOR_ARCHIVE_PREFIX` setting and
+`HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` settings apply when
+absent. The same issue makes `HttpsCredentials`' input username optional:
+`normalize_credentials` substitutes the documented
+`HTTPS_CREDENTIALS_USERNAME_PLACEHOLDER` constant when a caller supplies a
+token alone, and validation now rejects only an empty token, not an empty
+username.
+
 **Consumers:** the legacy single-Vault import consumes the registry load, add,
 and confirmed-empty initialization contracts. Runtime composition loads the
 registry after migration and `VaultCollectionRuntime` consumes its safe
 projections and resolved paths; its managed-Git Git-turn dispatch
 (`dispatch_managed_git_turn`) is the one consumer of the crate-private
-`https_credentials` accessor. `handlers/vaults.rs` is the first HTTP consumer
-of the `add`/`edit`/`enable`/`disable`/`disconnect` mutation contracts and of
-`load` for authenticated discovery, including its explicit `Recovery` state.
-`ManagedGitScheduler::activate` (runtime composition's reconcile loop) and
-`handlers/vaults.rs`'s manual sync/retry and credential-replacement-retry
-controls consume `VaultSource::managed_git_poll_interval`.
-MCP, frontend, cache, and search adapters remain separately owned later
-packets.
+`https_credentials` accessor, and also resolves `commit_identity` through
+`git::config::resolve_commit_identity` before every Git turn. `handlers/vaults.rs`
+is the first HTTP consumer of the `add`/`edit`/`enable`/`disable`/`disconnect`
+mutation contracts and of `load` for authenticated discovery, including its
+explicit `Recovery` state. `ManagedGitScheduler::activate` (runtime
+composition's reconcile loop) and `handlers/vaults.rs`'s manual sync/retry and
+credential-replacement-retry controls consume
+`VaultSource::managed_git_poll_interval`. `AppState::vault_archive_prefix`
+(Vault mutation's three archive call sites: `handlers/vault_content.rs`,
+`handlers/vault_write.rs`, `mcp/tools/write.rs`) consumes `archive_folder`,
+falling back to `AppState::runtime_archive_prefix` when absent. MCP (its
+`create_vault`/`edit_vault` tools reuse the same HTTP request/patch types),
+frontend, cache, and search adapters remain separately owned later packets.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
 `src/app_state.rs` construct and retain it; `/data/state` deployment
@@ -863,7 +884,14 @@ superseding ADR-05.
 runtime setting), `GitConfig`, write-record/message types, sync outcomes and
 errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
 and `spawn_sync_task`. The crate-private `parse_mode` and `non_empty_setting`
-helpers keep startup and one-time migration interpretation identical. Local
+helpers keep startup and one-time migration interpretation identical.
+`resolve_commit_identity` (issue #130) resolves one Vault's own configured
+`VaultCommitIdentity` (`vault_registry.rs`) if set, else the instance-wide
+`HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` defaults; runtime
+composition's `dispatch_managed_git_turn` calls it once per turn, before
+dispatching to any of the branches below, so every commit this boundary makes
+for a Vault — managed-Git, existing-Git remote-sync, or existing-Git
+Local-history — honors that Vault's own identity. Local
 mode commits without network access and discovers an enclosing existing
 checkout while staging only the configured Vault subtree; remote mode
 retains the safe fetch/integrate/push phases. The settings HTTP boundary owns

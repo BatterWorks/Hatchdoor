@@ -1317,6 +1317,8 @@ mod tests {
                     source: crate::vault_registry::VaultSource::Local { path: vault_path },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add Vault");
@@ -1433,6 +1435,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add two-way Vault");
@@ -1476,6 +1480,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add existing-git two-way Vault");
@@ -1512,6 +1518,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add pull-only Vault");
@@ -1530,6 +1538,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add local-history Vault");
@@ -1548,6 +1558,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add disabled two-way Vault");
@@ -1678,6 +1690,8 @@ mod tests {
                     source: crate::vault_registry::VaultSource::Local { path: vault_path },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add Vault");
@@ -4252,6 +4266,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add vault to registry");
@@ -4354,6 +4370,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add vault to registry");
@@ -4919,6 +4937,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add unavailable vault");
@@ -5005,6 +5025,8 @@ mod tests {
                     },
                     exclude_patterns: Vec::new(),
                     https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
                 },
             )
             .expect("add available vault");

@@ -253,10 +253,28 @@ pub enum VaultGitMode {
     TwoWay,
 }
 
+/// Username handed to `git2::Cred::userpass_plaintext` when a caller supplies
+/// a token without a username. `git2` requires a non-empty username argument,
+/// but HTTPS token authentication providers (GitHub, GitLab, Gitea, and
+/// others) accept any non-empty value paired with the token as the password,
+/// so the management UI and MCP callers no longer need to invent one.
+pub const HTTPS_CREDENTIALS_USERNAME_PLACEHOLDER: &str = "x-access-token";
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpsCredentials {
     pub username: String,
     pub token: String,
+}
+
+/// A Vault's own commit author identity, overriding the server-wide
+/// `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` settings for every
+/// commit the managed sync makes on its behalf. Not a secret: unlike
+/// [`HttpsCredentials`], it is safe to read back and log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultCommitIdentity {
+    pub name: String,
+    pub email: String,
 }
 
 impl fmt::Debug for HttpsCredentials {
@@ -310,6 +328,10 @@ pub struct NewVaultDefinition {
     pub source: VaultSource,
     pub exclude_patterns: Vec<String>,
     pub https_credentials: Option<HttpsCredentials>,
+    /// Absent by default: the server-wide `HATCHDOOR_ARCHIVE_PREFIX` applies.
+    pub archive_folder: Option<String>,
+    /// Absent by default: the server-wide author identity applies.
+    pub commit_identity: Option<VaultCommitIdentity>,
 }
 
 #[derive(Debug)]
@@ -325,6 +347,10 @@ pub struct VaultDefinitionEdit {
     pub exclude_patterns: Vec<String>,
     pub https_credentials: HttpsCredentialUpdate,
     pub confirm_identity_change: bool,
+    /// Absent means the server-wide `HATCHDOOR_ARCHIVE_PREFIX` applies.
+    pub archive_folder: Option<String>,
+    /// Absent means the server-wide author identity applies.
+    pub commit_identity: Option<VaultCommitIdentity>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -335,6 +361,8 @@ pub struct VaultDefinition {
     source: VaultSource,
     exclude_patterns: Vec<String>,
     credential_configured: bool,
+    archive_folder: Option<String>,
+    commit_identity: Option<VaultCommitIdentity>,
 }
 
 impl VaultDefinition {
@@ -361,6 +389,19 @@ impl VaultDefinition {
     pub fn credential_configured(&self) -> bool {
         self.credential_configured
     }
+
+    /// This Vault's own archive folder, normalized with a single trailing
+    /// slash (e.g. `"Archive/"`). Absent means the server-wide
+    /// `HATCHDOOR_ARCHIVE_PREFIX` applies.
+    pub fn archive_folder(&self) -> Option<&str> {
+        self.archive_folder.as_deref()
+    }
+
+    /// This Vault's own commit author identity. Absent means the server-wide
+    /// `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` settings apply.
+    pub fn commit_identity(&self) -> Option<&VaultCommitIdentity> {
+        self.commit_identity.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +413,14 @@ struct VaultRecord {
     exclude_patterns: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     https_credentials: Option<StoredHttpsCredentials>,
+    /// Defaulted on deserialization so an on-disk registry written before
+    /// this field existed keeps loading under the same
+    /// `REGISTRY_SCHEMA_VERSION`, mirroring `VaultSource::ManagedGit`'s
+    /// `poll_interval_secs` precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    archive_folder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit_identity: Option<VaultCommitIdentity>,
 }
 
 impl VaultRecord {
@@ -383,6 +432,8 @@ impl VaultRecord {
             source: self.source.clone(),
             exclude_patterns: self.exclude_patterns.clone(),
             credential_configured: self.https_credentials.is_some(),
+            archive_folder: self.archive_folder.clone(),
+            commit_identity: self.commit_identity.clone(),
         }
     }
 
@@ -396,6 +447,8 @@ impl VaultRecord {
             },
             exclude_patterns: Vec::new(),
             https_credentials: None,
+            archive_folder: None,
+            commit_identity: None,
         }
     }
 }
@@ -458,6 +511,8 @@ impl VaultRegistrySnapshot {
 pub enum VaultDefinitionError {
     InvalidName,
     InvalidExclusionPattern,
+    InvalidArchiveFolder,
+    InvalidCommitIdentity,
     DuplicateName,
     PathOverlap,
     VaultNotFound,
@@ -473,6 +528,12 @@ impl fmt::Display for VaultDefinitionError {
             Self::InvalidExclusionPattern => {
                 formatter.write_str("Vault exclusion patterns must not contain control characters")
             }
+            Self::InvalidArchiveFolder => {
+                formatter.write_str("Vault archive folder must be a non-empty relative path")
+            }
+            Self::InvalidCommitIdentity => formatter.write_str(
+                "Vault commit identity must supply a non-empty name and email together",
+            ),
             Self::DuplicateName => {
                 formatter.write_str("Vault name is already used by another definition")
             }
@@ -631,6 +692,8 @@ impl VaultRegistryStore {
         let exclude_patterns = normalize_exclude_patterns(definition.exclude_patterns)?;
         let mut vaults = current.vaults;
         let https_credentials = normalize_credentials(&source, definition.https_credentials)?;
+        let archive_folder = normalize_archive_folder(definition.archive_folder)?;
+        let commit_identity = normalize_commit_identity(definition.commit_identity)?;
         vaults.insert(
             vault_id,
             VaultRecord {
@@ -639,6 +702,8 @@ impl VaultRegistryStore {
                 source,
                 exclude_patterns,
                 https_credentials,
+                archive_folder,
+                commit_identity,
             },
         );
         self.commit(expected_revision, vaults)
@@ -717,6 +782,8 @@ impl VaultRegistryStore {
                 source,
                 exclude_patterns: normalize_exclude_patterns(edit.exclude_patterns)?,
                 https_credentials,
+                archive_folder: normalize_archive_folder(edit.archive_folder)?,
+                commit_identity: normalize_commit_identity(edit.commit_identity)?,
             },
         );
         self.commit(expected_revision, vaults)
@@ -911,6 +978,23 @@ impl VaultRegistryStore {
                     || credentials.token.trim() != credentials.token)
             {
                 return Err("Vault definition contains invalid HTTPS credentials");
+            }
+            if let Some(folder) = &record.archive_folder
+                && (folder.trim_matches('/').is_empty()
+                    || !folder.ends_with('/')
+                    || folder.chars().any(char::is_control))
+            {
+                return Err("Vault definition contains an invalid archive folder");
+            }
+            if let Some(identity) = &record.commit_identity
+                && (identity.name.trim().is_empty()
+                    || identity.email.trim().is_empty()
+                    || identity.name.trim() != identity.name
+                    || identity.email.trim() != identity.email
+                    || identity.name.chars().any(char::is_control)
+                    || identity.email.chars().any(char::is_control))
+            {
+                return Err("Vault definition contains an invalid commit identity");
             }
         }
         let definitions = vaults.iter().collect::<Vec<_>>();
@@ -1333,16 +1417,58 @@ fn normalize_credentials(
             ),
         ));
     }
-    let username = credentials.username.trim().to_string();
     let token = credentials.token.trim().to_string();
-    if username.is_empty() || token.is_empty() {
+    if token.is_empty() {
         return Err(VaultRegistryError::InvalidDefinition(
             VaultDefinitionError::InvalidSource(
-                "HTTPS credential username and token must both be non-empty".to_string(),
+                "HTTPS credential token must be non-empty".to_string(),
             ),
         ));
     }
+    let username = credentials.username.trim().to_string();
+    let username = if username.is_empty() {
+        HTTPS_CREDENTIALS_USERNAME_PLACEHOLDER.to_string()
+    } else {
+        username
+    };
     Ok(Some(StoredHttpsCredentials { username, token }))
+}
+
+/// Normalize a per-Vault archive folder to a single-trailing-slash form
+/// (e.g. `"Archive/"`), matching the shape the server-wide
+/// `HATCHDOOR_ARCHIVE_PREFIX` setting already uses — so either value can be
+/// used interchangeably by every archive-prefix call site.
+fn normalize_archive_folder(folder: Option<String>) -> Result<Option<String>, VaultRegistryError> {
+    let Some(folder) = folder else {
+        return Ok(None);
+    };
+    let trimmed = folder.trim().trim_matches('/');
+    if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+        return Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::InvalidArchiveFolder,
+        ));
+    }
+    Ok(Some(format!("{trimmed}/")))
+}
+
+fn normalize_commit_identity(
+    identity: Option<VaultCommitIdentity>,
+) -> Result<Option<VaultCommitIdentity>, VaultRegistryError> {
+    let Some(identity) = identity else {
+        return Ok(None);
+    };
+    let name = identity.name.trim().to_string();
+    let email = identity.email.trim().to_string();
+    if name.is_empty()
+        || email.is_empty()
+        || name.chars().any(char::is_control)
+        || email.chars().any(char::is_control)
+    {
+        return Err(VaultRegistryError::InvalidDefinition(
+            VaultDefinitionError::InvalidCommitIdentity,
+        ));
+    }
+    Ok(Some(VaultCommitIdentity { name, email }))
 }
 
 fn source_is_remote_backed(source: &VaultSource) -> bool {
