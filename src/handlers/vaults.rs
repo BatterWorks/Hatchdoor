@@ -111,6 +111,10 @@ pub struct VaultDiscoveryResponse {
     pub vaults: Vec<VaultSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RegistryRecoveryInfo>,
+    /// Instance-wide publication posture: `true` only under
+    /// `HATCHDOOR_DEMO_MODE`. Always serialized (never omitted) so the
+    /// browser can tell "not a demo" from "did not say".
+    pub demo_mode: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -523,6 +527,7 @@ pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
                 collection_revision: collection_snapshot.collection_revision,
                 vaults,
                 recovery: None,
+                demo_mode: state.demo_mode,
             })
             .into_response()
         }
@@ -531,6 +536,7 @@ pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
             collection_revision: 0,
             vaults: Vec::new(),
             recovery: Some(RegistryRecoveryInfo::from(&recovery)),
+            demo_mode: state.demo_mode,
         })
         .into_response(),
         Err(error) => internal_error_response(error.to_string(), None),
