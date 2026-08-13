@@ -20,6 +20,18 @@ export function describeMissingVaults(missing: string[]): string {
   return `${joinWithAnd(missing)} did not answer.`;
 }
 
+/** "X could not be drawn." / "X and Y could not be drawn." — the all-Vault
+ * graph's own wording for a Vault that contributes no island (#118's
+ * resolution, implemented by #143). Distinct from `describeMissingVaults`:
+ * a Vault answering from a stale snapshot still draws an island (its
+ * caption carries the condition word instead), so the graph's "did not
+ * draw" set is narrower than "not fresh" and is computed by the caller from
+ * which Vaults are absent from the response data, not from participant
+ * state. */
+export function describeVaultsNotDrawn(missing: string[]): string {
+  return `${joinWithAnd(missing)} could not be drawn.`;
+}
+
 function joinWithAnd(names: string[]): string {
   if (names.length <= 1) {
     return names[0] ?? "";

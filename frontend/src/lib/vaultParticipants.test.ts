@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import type { VaultParticipant } from "../types";
-import { describeMissingVaults, missingVaultNames } from "./vaultParticipants";
+import {
+  describeMissingVaults,
+  describeVaultsNotDrawn,
+  missingVaultNames,
+} from "./vaultParticipants";
 
 function participant(
   name: string,
@@ -49,5 +53,25 @@ describe("describeMissingVaults", () => {
     expect(
       describeMissingVaults(["Archive", "Journal", "Scratch", "Vault Four"]),
     ).toBe("Archive, Journal, Scratch, and Vault Four did not answer.");
+  });
+});
+
+describe("describeVaultsNotDrawn", () => {
+  it("names one Vault", () => {
+    expect(describeVaultsNotDrawn(["Field Station"])).toBe(
+      "Field Station could not be drawn.",
+    );
+  });
+
+  it("joins two Vaults with 'and'", () => {
+    expect(describeVaultsNotDrawn(["Field Station", "Archive"])).toBe(
+      "Field Station and Archive could not be drawn.",
+    );
+  });
+
+  it("joins three or more Vaults with a serial comma", () => {
+    expect(
+      describeVaultsNotDrawn(["Field Station", "Archive", "Journal"]),
+    ).toBe("Field Station, Archive, and Journal could not be drawn.");
   });
 });

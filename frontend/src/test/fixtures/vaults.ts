@@ -170,6 +170,12 @@ export function discoveryResponse(
 /** The sizing case named in #137's acceptance criteria. */
 export const ONE_VAULT: VaultSummary[] = [healthyVault("Solo Vault")];
 
+/** The sizing case named in #143's acceptance criteria. */
+export const TWO_VAULTS: VaultSummary[] = [
+  healthyVault("Vault Alpha"),
+  healthyVault("Vault Beta"),
+];
+
 /** The common case named in #137's acceptance criteria. */
 export const THREE_VAULTS: VaultSummary[] = [
   healthyVault("Alpha"),

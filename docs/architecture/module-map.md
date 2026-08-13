@@ -1765,14 +1765,23 @@ and full frontend checks.
 - `frontend/src/components/graph/graphSimulation.ts`
 - `frontend/src/styles/graph.css`
 
-**Public contract:** `GraphPage`, graph simulation helpers, and the `/api/graph`
-payload.
+**Public contract:** `GraphPage`, graph simulation helpers (including the
+island layout primitives `computeIslandCenters`, `buildIslandGraphs`, and
+`createIslandSimulation` — #143), and the `/api/v1/vaults/{scope}/graph`
+payload. Under `all` with more than one participating Vault, every Vault's
+component is laid out on its own and placed as a labelled, dash-enclosed
+island on one shared canvas (one zoom, one pan); at zero or one participating
+component — including a single-enabled-Vault instance under `all` — the page
+is byte-identical to the narrowed single-Vault graph (#118's resolution).
 
-**Consumed dependencies:** shared API/error/types/UI, router navigation, and
-`d3-force`.
+**Consumed dependencies:** shared API/error/types/UI, router navigation,
+`d3-force`, `useVaultDiscovery` (Vault-management order and per-Vault
+condition, reused via `deriveVaultSlot` for each island's caption), and
+`describeVaultsNotDrawn` from `lib/vaultParticipants.ts`.
 
 **Coordination paths:** `App.tsx`, `types.ts`, backend graph wire types/handler,
-and responsive CSS.
+`app/vaultSlotLogic.ts`, `lib/vaultParticipants.ts`, `hooks/useVaultScope.ts`,
+`test/fixtures/vaults.ts`, and responsive CSS.
 
 **Validation:** `GraphPage.test.tsx`, `graphSimulation.test.ts`, an App route
 smoke test if routing changes, and full frontend checks.

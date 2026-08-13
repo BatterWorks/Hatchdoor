@@ -4,20 +4,26 @@ import { type Simulation } from "d3-force";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
-import { useVaultScope } from "../../hooks/useVaultScope";
+import { deriveVaultSlot, type VaultSlotState } from "../../app/vaultSlotLogic";
+import { useVaultDiscovery, useVaultScope } from "../../hooks/useVaultScope";
+import { describeVaultsNotDrawn } from "../../lib/vaultParticipants";
 import type {
   GraphData,
   GraphNode,
   VaultGraph,
+  VaultParticipant,
   VaultReadProjection,
 } from "../../types";
 import { StateBlock } from "../ui";
 import {
+  buildIslandGraphs,
   buildSimulationGraph,
   createGraphSimulation,
+  createIslandSimulation,
   hitTest as hitTestNodes,
   nodeKey,
   nodeRadius,
+  type GraphIsland,
   type SimLink,
   type SimNode,
 } from "./graphSimulation";
@@ -66,10 +72,12 @@ interface ThemeColors {
   ink: string;
   muted: string;
   hot: string;
+  warn: string;
+  err: string;
 }
 
-// getComputedStyle forces a synchronous style recalc, so the six theme reads
-// are resolved once here and cached — refreshed only when the theme changes
+// getComputedStyle forces a synchronous style recalc, so the theme reads are
+// resolved once here and cached — refreshed only when the theme changes
 // rather than on every animation frame.
 function readThemeColors(): ThemeColors {
   return {
@@ -79,7 +87,17 @@ function readThemeColors(): ThemeColors {
     ink: cssVar("--ink"),
     muted: cssVar("--muted"),
     hot: cssVar("--hot"),
+    warn: cssVar("--warn-fg"),
+    err: cssVar("--err-fg"),
   };
+}
+
+const ISLAND_ENCLOSURE_MARGIN = 40;
+const ISLAND_CAPTION_GAP = 14;
+const ISLAND_CAPTION_LINE_HEIGHT = 16;
+
+interface RenderIsland extends GraphIsland {
+  slot: VaultSlotState;
 }
 
 // ── component ─────────────────────────────────────────────────────────────────
@@ -87,20 +105,28 @@ function readThemeColors(): ThemeColors {
 export function GraphPage() {
   const navigate = useNavigate();
   const [scope] = useVaultScope();
+  const { vaults, loading: loadingVaults } = useVaultDiscovery();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [vaultGraphs, setVaultGraphs] = useState<VaultGraph[] | null>(null);
+  const [participants, setParticipants] = useState<VaultParticipant[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [allTags, setAllTags] = useState<string[]>([]);
   const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
   const [nodeCount, setNodeCount] = useState(0);
   const [edgeCount, setEdgeCount] = useState(0);
+  // Island mode is driven by how many Vaults actually answered, not by the
+  // requested scope: a single-enabled-Vault instance under "all" is the same
+  // picture as narrowed (#118's resolution), so it takes the plain path too.
+  const [islandMode, setIslandMode] = useState(false);
+  const [notDrawnVaultNames, setNotDrawnVaultNames] = useState<string[]>([]);
 
   // mutable state shared between render loop and event handlers
   const simNodesRef = useRef<SimNode[]>([]);
   const simLinksRef = useRef<SimLink[]>([]);
+  const islandsRef = useRef<RenderIsland[]>([]);
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const hoveredRef = useRef<SimNode | null>(null);
   const selectedRef = useRef<SimNode | null>(null);
@@ -153,16 +179,20 @@ export function GraphPage() {
         const projection = (await res.json()) as VaultReadProjection<
           VaultGraph[]
         >;
-        const data = mergeVaultGraphs(projection.data);
         if (cancelled) return;
 
-        setGraphData(data);
-        setNodeCount(data.nodes.length);
-        setEdgeCount(data.edges.length);
+        setVaultGraphs(projection.data);
+        setParticipants(projection.participants);
+
+        const nodes = projection.data.flatMap((vg) => vg.nodes);
+        setNodeCount(nodes.length);
+        setEdgeCount(
+          projection.data.reduce((sum, vg) => sum + vg.edges.length, 0),
+        );
 
         const tags = Array.from(
           new Set(
-            data.nodes
+            nodes
               .map((n: GraphNode) => n.primary_tag)
               .filter((t): t is string => t !== null),
           ),
@@ -299,6 +329,36 @@ export function GraphPage() {
         if (nodeKey(link.target) === nodeKey(selected))
           connectedKeys.add(nodeKey(link.source));
       }
+    }
+
+    // ── island enclosures (#143) — drawn under edges/nodes, at the settled
+    // layout radius (recomputed every frame from live node positions) plus a
+    // margin. World-space sizing throughout: unlike node labels below, this
+    // is canvas furniture that scales with zoom rather than staying a
+    // constant screen size (#118's resolution).
+    const islands = islandsRef.current;
+    const islandRadii = new Map<string, number>();
+    if (islands.length > 0) {
+      ctx.save();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = ruleColor;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.7;
+      for (const island of islands) {
+        let maxDist = 0;
+        for (const node of island.nodes) {
+          const dist =
+            Math.hypot(node.x - island.cx, node.y - island.cy) +
+            nodeRadius(node.backlink_count);
+          if (dist > maxDist) maxDist = dist;
+        }
+        const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
+        islandRadii.set(island.vaultId, radius);
+        ctx.beginPath();
+        ctx.arc(island.cx, island.cy, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     // draw edges
@@ -537,6 +597,39 @@ export function GraphPage() {
       ctx.restore();
     }
 
+    // ── island captions (#143) — inert: drawn on canvas, not a DOM element,
+    // so clicking one does nothing. Vault name in display ink over a mono
+    // count line; the count line takes the condition word and its ink when
+    // the Vault is not healthy (#116/#139's slot vocabulary reused verbatim).
+    if (islands.length > 0) {
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      for (const island of islands) {
+        const radius = islandRadii.get(island.vaultId) ?? 0;
+        const countY = island.cy - radius - ISLAND_CAPTION_GAP;
+        const nameY = countY - ISLAND_CAPTION_LINE_HEIGHT;
+
+        ctx.font = '700 15px "Bricolage Grotesque", system-ui, sans-serif';
+        ctx.fillStyle = inkColor;
+        ctx.fillText(island.vaultName, island.cx, nameY);
+
+        const slot = island.slot;
+        const countLine =
+          slot.kind === "condition" ? slot.word : String(island.nodeCount);
+        const countColor =
+          slot.kind === "condition"
+            ? slot.tier === "error"
+              ? theme.err
+              : theme.warn
+            : mutedColor;
+        ctx.font = '500 11px "JetBrains Mono", "SF Mono", Menlo, monospace';
+        ctx.fillStyle = countColor;
+        ctx.fillText(countLine, island.cx, countY);
+      }
+      ctx.restore();
+    }
+
     ctx.restore();
     ctx.restore();
   }, []);
@@ -571,16 +664,38 @@ export function GraphPage() {
 
   // ── simulation setup ─────────────────────────────────────────────────────────
 
+  // Waits on vault discovery too so islands can be ordered and captioned in
+  // one pass — the same trade-off StatsPage makes, and #143's layout has
+  // nothing sensible to draw before both are in anyway.
   useEffect(() => {
-    if (!graphData) return;
+    if (!vaultGraphs || loadingVaults) return;
 
-    // Nodes live in world space centred at (0,0). The canvas transform maps
-    // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
-    // using them caused a double-shift that put every node off-screen.
-    const { nodes, links } = buildSimulationGraph(graphData);
+    const vaultOrder = new Map(vaults.map((v, i) => [v.vault_id, i]));
+    const ordered = [...vaultGraphs].sort(
+      (a, b) => (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+    );
 
-    simNodesRef.current = nodes;
-    simLinksRef.current = links;
+    // A Vault absent from the response (unavailable — never a fresh-but-
+    // stale participant, which still contributes its component) draws no
+    // island and is named instead (#118's resolution).
+    const drawnIds = new Set(ordered.map((vg) => vg.vault_id));
+    const missingNames = participants
+      .filter((p) => !drawnIds.has(p.vault_id))
+      .sort(
+        (a, b) => (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+      )
+      .map((p) => p.vault_name);
+
+    // Island mode is a property of the instance — under "all" scope with
+    // more than one *enabled* Vault — not of how many happened to answer
+    // this particular read. A Vault going down doesn't collapse the shape
+    // back to plain: it stays an island field with one fewer island and a
+    // line naming the gap (#118's resolution: "no threshold, no fallback").
+    // A genuine single-Vault instance, or any narrowed scope, is always the
+    // byte-identical plain single-graph path instead.
+    const nextIslandMode = scope === "all" && vaults.length > 1;
+    setIslandMode(nextIslandMode);
+    setNotDrawnVaultNames(nextIslandMode ? missingNames : []);
 
     // Centre transform on the canvas. The canvas is already sized by the
     // ResizeObserver so clientWidth/Height are reliable here.
@@ -590,15 +705,44 @@ export function GraphPage() {
     transformRef.current = { x: W / 2, y: H / 2, k: 0.9 };
 
     simRef.current?.stop();
-    const sim = createGraphSimulation(nodes, links);
 
+    if (!nextIslandMode) {
+      islandsRef.current = [];
+
+      // Nodes live in world space centred at (0,0). The canvas transform maps
+      // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
+      // using them caused a double-shift that put every node off-screen.
+      const { nodes, links } = buildSimulationGraph(mergeVaultGraphs(ordered));
+      simNodesRef.current = nodes;
+      simLinksRef.current = links;
+
+      const sim = createGraphSimulation(nodes, links);
+      simRef.current = sim;
+      requestRender();
+      return () => {
+        sim.stop();
+      };
+    }
+
+    const vaultById = new Map(vaults.map((v) => [v.vault_id, v]));
+    const { islands, nodes, links } = buildIslandGraphs(ordered);
+    simNodesRef.current = nodes;
+    simLinksRef.current = links;
+    islandsRef.current = islands.map((island) => {
+      const vault = vaultById.get(island.vaultId);
+      const slot: VaultSlotState = vault
+        ? deriveVaultSlot(vault, island.nodeCount)
+        : { kind: "count", count: island.nodeCount };
+      return { ...island, slot };
+    });
+
+    const sim = createIslandSimulation(nodes, links);
     simRef.current = sim;
     requestRender();
-
     return () => {
       sim.stop();
     };
-  }, [graphData, requestRender]);
+  }, [vaultGraphs, vaults, loadingVaults, participants, scope, requestRender]);
 
   // ── canvas resize ───────────────────────────────────────────────────────────
 
@@ -1033,10 +1177,14 @@ export function GraphPage() {
     </div>
   );
 
+  const effectiveLoading = loading || loadingVaults;
+
   return (
     <div className="graph-page">
       <div className="graph-header">
-        <p className="graph-eyebrow">Vault · Knowledge Graph</p>
+        <p className="graph-eyebrow">
+          {islandMode ? "ALL VAULTS · KNOWLEDGE GRAPH" : "Vault · Knowledge Graph"}
+        </p>
 
         <div className="graph-header-row">
           <h1 className="graph-title">Graph</h1>
@@ -1078,6 +1226,12 @@ export function GraphPage() {
           Scroll to zoom · Drag background to pan · Click node to select ·
           Double-click to open
         </p>
+
+        {islandMode && notDrawnVaultNames.length > 0 && (
+          <p className="graph-not-drawn">
+            {describeVaultsNotDrawn(notDrawnVaultNames)}
+          </p>
+        )}
       </div>
 
       {/* Mobile-only filter overlay — sits on top of canvas, doesn't push it */}
@@ -1095,14 +1249,14 @@ export function GraphPage() {
       <div className="graph-canvas-wrap" ref={wrapRef}>
         <canvas ref={canvasRef} className="graph-canvas" />
 
-        {loading && (
+        {effectiveLoading && (
           <div className="graph-overlay">
             <div className="graph-loading-pulse" />
             <div className="graph-loading-label">Mapping your vault…</div>
           </div>
         )}
 
-        {!loading && (error || !graphData) && (
+        {!effectiveLoading && (error || !vaultGraphs) && (
           <div className="graph-overlay">
             <StateBlock
               title="Graph Unavailable"
