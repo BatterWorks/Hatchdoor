@@ -3,7 +3,11 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SearchDialog, type SearchResult } from ".";
-import { EIGHT_VAULTS, THREE_VAULTS } from "../../test/fixtures/vaults";
+import {
+  EIGHT_VAULTS,
+  participantFor,
+  THREE_VAULTS,
+} from "../../test/fixtures/vaults";
 
 function renderDialog(
   overrides?: Partial<ComponentProps<typeof SearchDialog>>,
@@ -21,6 +25,8 @@ function renderDialog(
     results: [],
     partial: false,
     missingVaultNames: [],
+    participants: [],
+    initialVaultFilter: undefined,
     vaults: [],
     scope: "all",
     inputRef,
@@ -223,5 +229,285 @@ describe("SearchDialog tells the truth about a partial read (#141)", () => {
 
     expect(container.querySelector(".state-block.error")).toBeNull();
     expect(screen.getByText("No matching notes.")).toBeInTheDocument();
+  });
+});
+
+const [ALPHA, BETA, GAMMA] = THREE_VAULTS;
+
+/** Alpha contributed two results, Beta answered fresh with none, Gamma did
+ * not answer at all — the three facet states #144 must render. */
+const FACET_RESULTS: SearchResult[] = [
+  resultFor(ALPHA.vault_id, { note_slug: "one", note_title: "One" }),
+  resultFor(ALPHA.vault_id, { note_slug: "two", note_title: "Two" }),
+];
+const FACET_PARTICIPANTS = [
+  participantFor(ALPHA, "fresh"),
+  participantFor(BETA, "fresh"),
+  participantFor(GAMMA, "unavailable"),
+];
+
+describe("SearchDialog's own Vault filter — never the browsing scope (#144)", () => {
+  afterEach(cleanup);
+
+  it("never exposes a way to change the browsing scope — the click handlers touch only local state", () => {
+    const { props } = renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Beta/ }));
+    fireEvent.click(screen.getByRole("button", { name: /All results/ }));
+
+    // The component receives no scope-changing prop at all; picking a facet
+    // can only have touched the callbacks it was actually given, and none
+    // of those is one.
+    expect(props.onQueryChange).not.toHaveBeenCalled();
+    expect(props.onIncludeContentChange).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(props.onSelect).not.toHaveBeenCalled();
+  });
+
+  it("lists every reached Vault in Vault-management order, with All results permanent and first", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const rail = document.querySelector(".search-facet-rail");
+    const labels = Array.from(
+      rail?.querySelectorAll(".search-facet-label") ?? [],
+    ).map((el) => el.textContent);
+    expect(labels).toEqual(["All results", "Alpha", "Beta", "Gamma"]);
+  });
+
+  it("shows the contributed count for All results and for a Vault with matches", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const all = screen.getByRole("button", { name: /All results/ });
+    expect(all).toHaveClass("is-selected");
+    expect(all.querySelector(".side-count")).toHaveTextContent("2");
+
+    const alpha = screen.getByRole("button", { name: /^Alpha/ });
+    expect(alpha.querySelector(".side-count")).toHaveTextContent("2");
+  });
+
+  it("shows 0, inert, for a Vault that answered with nothing — and it stays selectable", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const beta = screen.getByRole("button", { name: /^Beta/ });
+    expect(beta.querySelector(".side-count")).toHaveTextContent("0");
+    expect(beta).not.toHaveAttribute("aria-disabled", "true");
+
+    fireEvent.click(beta);
+    expect(beta).toHaveClass("is-selected");
+  });
+
+  it("shows 'no answer' in error ink for a Vault that did not answer, and refuses the click", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const gamma = screen.getByRole("button", { name: /^Gamma/ });
+    expect(gamma).toHaveAttribute("aria-disabled", "true");
+    const word = gamma.querySelector(".vault-slot-condition");
+    expect(word).toHaveTextContent("no answer");
+    expect(word).toHaveClass("vault-tier-error");
+
+    fireEvent.click(gamma);
+    expect(gamma).not.toHaveClass("is-selected");
+  });
+
+  it("filters the visible results without changing their order or re-fetching", () => {
+    renderDialog({
+      results: [
+        ...FACET_RESULTS,
+        resultFor(GAMMA.vault_id, { note_slug: "three", note_title: "Three" }),
+      ],
+      participants: [
+        participantFor(ALPHA, "fresh"),
+        participantFor(BETA, "fresh"),
+        participantFor(GAMMA, "fresh"),
+      ],
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const titlesBefore = screen
+      .getAllByText(/^(One|Two|Three)$/)
+      .map((el) => el.textContent);
+    expect(titlesBefore).toEqual(["One", "Two", "Three"]);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.getByText("Two")).toBeInTheDocument();
+    expect(screen.queryByText("Three")).not.toBeInTheDocument();
+  });
+
+  it("shows a plain message, not the partial error block, when the filter narrows to nothing", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Beta/ }));
+
+    expect(screen.getByText("No results in Beta.")).toBeInTheDocument();
+    expect(document.querySelector(".state-block.error")).toBeNull();
+    expect(screen.queryByText("One")).not.toBeInTheDocument();
+  });
+
+  it("is absent when scope is narrowed — the Scope zone is already on screen", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: ALPHA.vault_id,
+    });
+
+    expect(document.querySelector(".search-facet-rail")).toBeNull();
+  });
+
+  it("is absent at one enabled Vault", () => {
+    renderDialog({
+      results: [resultFor(ALPHA.vault_id)],
+      participants: [participantFor(ALPHA, "fresh")],
+      vaults: [ALPHA],
+      scope: "all",
+    });
+
+    expect(document.querySelector(".search-facet-rail")).toBeNull();
+  });
+
+  it("pre-selects the facet a tag tap named, via initialVaultFilter", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+      initialVaultFilter: ALPHA.vault_id,
+    });
+
+    expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveClass(
+      "is-selected",
+    );
+    expect(screen.queryByText("Two")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /All results/ }),
+    ).not.toHaveClass("is-selected");
+  });
+
+  it("starts fresh at All results on a later, unrelated open — the filter does not survive remounting", () => {
+    const first = renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Alpha/ }));
+    expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveClass(
+      "is-selected",
+    );
+    first.unmount();
+
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    expect(screen.getByRole("button", { name: /All results/ })).toHaveClass(
+      "is-selected",
+    );
+  });
+});
+
+describe("SearchDialog's mobile field strip (#144)", () => {
+  afterEach(cleanup);
+
+  it("offers Scope as a native select, sharing state with the desktop rail", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const scopeSelect = screen.getByLabelText("Scope") as HTMLSelectElement;
+    fireEvent.change(scopeSelect, { target: { value: ALPHA.vault_id } });
+
+    expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveClass(
+      "is-selected",
+    );
+  });
+
+  it("disables the option for a Vault that did not answer", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "all",
+    });
+
+    const option = screen.getByRole("option", {
+      name: "Gamma (no answer)",
+    }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+  });
+
+  it("omits the Scope field at one enabled Vault, but keeps Mode", () => {
+    renderDialog({
+      results: [],
+      participants: [],
+      vaults: [ALPHA],
+      scope: "all",
+    });
+
+    expect(screen.queryByLabelText("Scope")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Mode")).toBeInTheDocument();
+  });
+
+  it("keeps the Scope field even when the browsing scope is narrowed", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: ALPHA.vault_id,
+    });
+
+    expect(screen.getByLabelText("Scope")).toBeInTheDocument();
+  });
+
+  it("controls the same Mode state as the desktop toggle", () => {
+    const { props } = renderDialog({ includeContent: false });
+
+    fireEvent.change(screen.getByLabelText("Mode"), {
+      target: { value: "keyword" },
+    });
+
+    expect(props.onIncludeContentChange).toHaveBeenCalledExactlyOnceWith(
+      true,
+    );
   });
 });

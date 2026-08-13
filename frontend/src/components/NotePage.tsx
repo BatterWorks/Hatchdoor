@@ -41,6 +41,7 @@ import type {
   ExplorerNote,
   Note,
   NoteLinks,
+  VaultId,
   VaultQualifiedLinks,
   VaultQualifiedNote,
   VaultSummary,
@@ -111,7 +112,9 @@ export function NotePage({
   vaults,
 }: {
   onActiveNoteChange: (meta: ActiveNoteMeta | null) => void;
-  onTagSelect: (tag: string) => void;
+  /** Tags are per-Vault vocabularies, so tapping one hands the search dialog
+   * this note's own Vault to pre-select in its filter (#144). */
+  onTagSelect: (tag: string, vaultId: VaultId) => void;
   propertiesCollapsedStorageKey: string;
   vaultRevision: number;
   writeEnabled: boolean;
@@ -1026,7 +1029,7 @@ export function NotePage({
           onChange={handleInlineChange}
           collapsed={propertiesCollapsed}
           onToggleCollapsed={() => setPropertiesCollapsed((prev) => !prev)}
-          onTagSelect={onTagSelect}
+          onTagSelect={(tag) => onTagSelect(tag, vaultId)}
         />
         <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
         <NoteTocMobile headings={tocHeadings} />

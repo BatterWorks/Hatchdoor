@@ -3,7 +3,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
 import { missingVaultNames } from "../../lib/vaultParticipants";
-import type { VaultReadProjection, VaultScope } from "../../types";
+import type {
+  VaultId,
+  VaultParticipant,
+  VaultReadProjection,
+  VaultScope,
+} from "../../types";
 import type { SearchResponse, SearchResult } from "./types";
 
 /**
@@ -11,7 +16,8 @@ import type { SearchResponse, SearchResult } from "./types";
  * focus-management effects. `setSearchOpen` is exposed so the shell's global
  * keyboard shortcuts can open the dialog. `scope` is the browsing scope
  * (#137: state/storage only, no chrome) — the dialog's own Keyword-mode
- * toggle is a filter over the answer, never the browsing scope itself (#119).
+ * toggle and Vault filter (#144) are lenses over the answer, never the
+ * browsing scope itself (#119).
  */
 export function useSearch(scope: VaultScope) {
   const [searchOpen, setSearchOpen] = useState(false);
@@ -22,16 +28,32 @@ export function useSearch(scope: VaultScope) {
   const [searchMissingVaultNames, setSearchMissingVaultNames] = useState<
     string[]
   >([]);
+  const [searchParticipants, setSearchParticipants] = useState<
+    VaultParticipant[]
+  >([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  // Pre-fills the dialog's own Vault filter from where a tag tap happened
+  // (#144). Read once by the dialog on open and cleared the moment it
+  // closes, so a later plain open never inherits a stale preselection.
+  const [searchInitialVaultFilter, setSearchInitialVaultFilter] = useState<
+    VaultId | undefined
+  >(undefined);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const prevFocusRef = useRef<Element | null>(null);
 
-  const openSearchForTag = useCallback((tag: string) => {
+  const openSearchForTag = useCallback((tag: string, vaultId: VaultId) => {
     setSearchQuery(`#${tag}`);
     setSearchIncludeContent(true);
+    setSearchInitialVaultFilter(vaultId);
     setSearchOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (!searchOpen) {
+      setSearchInitialVaultFilter(undefined);
+    }
+  }, [searchOpen]);
 
   useEffect(() => {
     if (searchOpen) {
@@ -58,6 +80,7 @@ export function useSearch(scope: VaultScope) {
       setSearchResults([]);
       setSearchPartial(false);
       setSearchMissingVaultNames([]);
+      setSearchParticipants([]);
       setSearchLoading(false);
       setSearchError(null);
       return;
@@ -88,12 +111,14 @@ export function useSearch(scope: VaultScope) {
             setSearchMissingVaultNames(
               missingVaultNames(projection.participants),
             );
+            setSearchParticipants(projection.participants);
           }
         } catch (error) {
           if (!cancelled) {
             setSearchResults([]);
             setSearchPartial(false);
             setSearchMissingVaultNames([]);
+            setSearchParticipants([]);
             setSearchError(
               error instanceof Error ? error.message : "Unknown search error",
             );
@@ -122,6 +147,8 @@ export function useSearch(scope: VaultScope) {
     searchResults,
     searchPartial,
     searchMissingVaultNames,
+    searchParticipants,
+    searchInitialVaultFilter,
     searchLoading,
     searchError,
     searchInputRef,

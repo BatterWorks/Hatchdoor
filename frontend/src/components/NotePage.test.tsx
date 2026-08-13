@@ -40,6 +40,7 @@ function renderNote(
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  window.localStorage.clear();
 });
 
 describe("NotePage write escalation (#141)", () => {
@@ -156,6 +157,48 @@ describe("NotePage write escalation (#141)", () => {
     expect(
       screen.queryByText(/The last index build for this Vault failed\./),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("NotePage tag taps hand over this note's own Vault (#144)", () => {
+  it("calls onTagSelect with the tag and the open note's Vault", async () => {
+    const vaultId = "vault-work";
+    const onTagSelect = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "---\ntitle: Home\ntags:\n  - orchard\n---\n# Body\n",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: vaultId, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    // The properties grid starts collapsed; expand it so the tag chip is
+    // actually reachable.
+    window.localStorage.setItem(NOTE_PROPERTIES_COLLAPSED_KEY, "0");
+    // writeEnabled: false so the tag chip selects rather than entering
+    // frontmatter edit mode (sections.tsx routes a tag click to onTagSelect
+    // only when the property grid is not itself editable).
+    renderNote(vaultId, { onTagSelect, vaults: [], writeEnabled: false });
+
+    const tagChip = await screen.findByRole("button", { name: "#orchard" });
+    tagChip.click();
+
+    expect(onTagSelect).toHaveBeenCalledExactlyOnceWith("orchard", vaultId);
   });
 });
 

@@ -1272,6 +1272,18 @@
     color: var(--muted);
   }
   .search-toggle input { accent-color: var(--hot); }
+
+  /* Facet rail (#119, #144) — the dialog's own Vault filter, never the browsing scope. */
+  .search-body { display: flex; align-items: flex-start; gap: 1rem; }
+  .search-facet-rail { flex: 0 0 auto; width: 9rem; display: flex; flex-direction: column; gap: 0.1rem; margin-top: 0.5rem; }
+  .search-facet-row { display: flex; align-items: center; justify-content: space-between; gap: 0.45rem; width: 100%; padding: 0.32rem 0.4rem; border: 0; background: transparent; font-family: var(--font-display); font-size: 0.82rem; color: var(--ink-soft); text-align: left; cursor: pointer; }
+  .search-facet-row.is-selected { color: var(--ink); font-weight: 600; background: var(--hot-soft); box-shadow: inset 3px 0 0 var(--hot); }
+  .search-facet-row[aria-disabled="true"] { cursor: not-allowed; color: var(--muted); }
+  .search-facet-label { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .search-main { flex: 1 1 auto; min-width: 0; }
+  .search-field-strip { display: flex; gap: 0.6rem; margin: 0.7rem 0 0.55rem; }
+  .search-field-strip .field { flex: 1 1 0; margin-bottom: 0; }
+
   .search-results {
     list-style: none;
     margin: 0.5rem 0 0;
@@ -2218,6 +2230,69 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-toggle</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
+
+      <h3 class="doc-sub">The dialog&rsquo;s own filter &mdash; never the browsing scope</h3>
+      <p class="blurb">The sidebar decides what you are browsing; the dialog decides what you are looking at right now. Selecting a facet (or the phone&rsquo;s <code>Scope</code> field) narrows only the results in view, changes no ranking, and dies the moment the dialog closes. No future surface may adopt either as a scope control (#119).</p>
+
+      <h4 class="doc-sub" style="font-size:0.86rem;">Desktop &mdash; the facet rail</h4>
+      <p class="blurb">A narrow column beside the results: every Vault the search reached, each ending in #116&rsquo;s own count-or-condition slot. <code>All results</code> is the permanent widening row. A Vault that answered with nothing reads <code>0</code>, inert; a Vault that did not answer keeps its row, reading <code>no answer</code> in error ink, <code>aria-disabled</code> rather than removed. Order is Vault-management order, never re-sorted by count or condition (#117). Absent when scope is narrowed or at one enabled Vault &mdash; there is nothing to filter across, and the Scope zone is already on screen behind the overlay.</p>
+      <div class="stage" style="padding:0; overflow:hidden;">
+        <div class="search-overlay">
+          <div class="search-panel">
+            <div class="search-panel-head">
+              <h2>Search vault</h2>
+              <button class="icon-btn" title="Close">✕</button>
+            </div>
+            <input class="search-input" placeholder="Search by title, folder, or content…" value="orchard" />
+            <div class="search-body">
+              <div class="search-facet-rail">
+                <button class="search-facet-row is-selected"><span class="search-facet-label">All results</span><span class="side-count">12</span></button>
+                <button class="search-facet-row"><span class="search-facet-label">Work</span><span class="side-count">09</span></button>
+                <button class="search-facet-row"><span class="search-facet-label">Personal</span><span class="side-count">00</span></button>
+                <button class="search-facet-row" aria-disabled="true"><span class="search-facet-label">Archive</span><span class="vault-slot-condition vault-tier-error">no answer</span></button>
+              </div>
+              <div class="search-main">
+                <ul class="search-results" style="margin:0;">
+                  <li><button class="search-result is-hover">
+                    <div class="search-main">
+                      <span>Field notes from the <span class="search-hit">orchard</span></span>
+                      <span class="crumb">Work &middot; Journal / 2026 / May</span>
+                    </div>
+                    <span class="search-kind">note</span>
+                  </button></li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.search-body</span><span class="key">.search-facet-rail</span><span class="key">.search-facet-row</span><span class="key">.search-facet-row.is-selected</span><span class="key">.search-facet-row[aria-disabled]</span><span class="key">.search-facet-label</span><span class="key">.search-main</span></div>
+
+      <h4 class="doc-sub" style="font-size:0.86rem;">Phone &mdash; the field strip</h4>
+      <p class="blurb">Below 920px a rail cannot be a column, so the same filter becomes the <code>Scope</code> field of a field strip under the input, beside <code>Mode</code>, using §18&rsquo;s documented field grammar. Same filter, same semantics, different form. The phone keeps <code>Scope</code> even when the sidebar&rsquo;s browsing scope is narrowed &mdash; the panel covers the Scope zone here, and the map&rsquo;s always-visible-scope rule needs the field to carry it regardless of whether there is anything left to switch to.</p>
+      <div class="stage" style="max-width: 22rem;">
+        <div class="search-field-strip" style="display:flex;">
+          <div class="field">
+            <span class="field-label">Scope</span>
+            <select class="field-input">
+              <option>All results</option>
+              <option>Work</option>
+              <option>Personal</option>
+              <option disabled>Archive (no answer)</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label">Mode</span>
+            <select class="field-input">
+              <option>Semantic</option>
+              <option>Keyword</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.search-field-strip</span></div>
+
+      <p class="blurb">Tapping a <code>#tag</code> opens the dialog with the query filled in and that note&rsquo;s own Vault already selected in the filter &mdash; tags are per-Vault vocabularies, and this is the dialog&rsquo;s own filter doing the pre-filling, not a scope change. Layer folders stay out of both shapes entirely: there is no way to reach a demoted note from the web application (#119).</p>
     </section>
 
     <!-- ───────── FIELDS ───────── -->
