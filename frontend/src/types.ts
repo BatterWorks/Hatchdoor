@@ -1,3 +1,103 @@
+// A Vault's immutable identity: a canonical UUID string. Never a display
+// name — names are editable and not unique (docs/migrations/vault-scoped-clients.md).
+export type VaultId = string;
+
+// One Vault ID, or the literal "all" for every enabled Vault. Collection
+// reads take a VaultScope; exact reads and mutations always take one VaultId.
+export type VaultScope = VaultId | "all";
+
+/** The stable `/api/v1/vaults/**` error body: `{code, message, vault_id?, retryable}`.
+ * `code` is branched on; `message` is for people and may change. */
+export type VaultApiError = {
+  code: string;
+  message: string;
+  vault_id?: VaultId;
+  retryable: boolean;
+};
+
+export type VaultParticipantState = "fresh" | "stale" | "unavailable";
+
+export type VaultReadError = {
+  code: string;
+  message: string;
+  vault_id: VaultId | null;
+  retryable: boolean;
+};
+
+export type VaultParticipant = {
+  vault_id: VaultId;
+  vault_name: string;
+  state: VaultParticipantState;
+  error?: VaultReadError;
+};
+
+/** The shared one-or-all collection-read envelope every `{scope}` route
+ * responds with. `partial` is true when any participant isn't `fresh`. */
+export type VaultReadProjection<T> = {
+  scope: string;
+  collection_revision: number;
+  partial: boolean;
+  participants: VaultParticipant[];
+  data: T;
+};
+
+export type VaultRuntimeErrorDetail =
+  | { kind: "affected_paths"; paths: string[]; total: number }
+  | { kind: "local_commits_ahead"; ahead: number };
+
+export type VaultRuntimeError = {
+  code: string;
+  message: string;
+  retryable: boolean;
+  detail?: VaultRuntimeErrorDetail;
+};
+
+export type VaultCapabilities = {
+  browse: boolean;
+  search: boolean;
+  mutate: boolean;
+  pull: boolean;
+  push: boolean;
+  retry: boolean;
+};
+
+/** One Vault's discovery entry from `GET /api/v1/vaults`. The four status
+ * fields are independent — a Vault can be `activation: "active"` and
+ * `git: "unavailable"` at once. There is no single unified condition field. */
+export type VaultSummary = {
+  vault_id: VaultId;
+  name: string;
+  enabled: boolean;
+  exclude_patterns: string[];
+  credential_configured: boolean;
+  archive_folder?: string;
+  commit_identity?: { name: string; email: string };
+  activation: "active" | "disabled" | "unavailable";
+  local_content: "read_write" | "read_only" | "unavailable";
+  search: "unavailable" | "indexing" | "ready" | "stale";
+  git: "disabled" | "pending" | "ready" | "unavailable";
+  watcher: "running" | "disabled" | "unavailable";
+  capabilities: VaultCapabilities;
+  activation_error?: VaultRuntimeError;
+  search_error?: VaultRuntimeError;
+  git_error?: VaultRuntimeError;
+  watcher_error?: VaultRuntimeError;
+};
+
+export type VaultRegistryRecovery = {
+  code: "vault_registry_recovery_required";
+  kind: "corrupt" | "unsupported_schema" | "future_schema";
+  message: string;
+};
+
+export type VaultDiscoveryResponse = {
+  registry_revision?: number;
+  collection_revision: number;
+  vaults: VaultSummary[];
+  recovery?: VaultRegistryRecovery;
+  demo_mode: boolean;
+};
+
 export type ExplorerFolder = {
   name: string;
   folders: ExplorerFolder[];
@@ -5,8 +105,17 @@ export type ExplorerFolder = {
 };
 
 export type ExplorerNote = {
+  vault_id: VaultId;
   title: string;
   slug: string;
+};
+
+/** One participating Vault's tree, as returned (grouped, never merged) by
+ * `GET /api/v1/vaults/{scope}/tree`. */
+export type VaultTree = {
+  vault_id: VaultId;
+  vault_name: string;
+  tree: ExplorerFolder;
 };
 
 export type Note = {
@@ -15,6 +124,7 @@ export type Note = {
   relative_path: string;
   content: string;
   content_hash: string;
+  layer: string | null;
   metadata?: NoteMetadata;
 };
 
@@ -24,54 +134,77 @@ export type NoteMetadata = {
   properties: Record<string, unknown>;
 };
 
+/** `GET /api/v1/vaults/{vault_id}/notes/{slug}` — `note` stays nested,
+ * `vault_id` is its sibling, not a field on `Note` itself. */
+export type VaultQualifiedNote = {
+  vault_id: VaultId;
+  note: Note;
+};
+
 export type NoteLink = {
   title: string;
   slug: string;
   relative_path: string;
+  layer: string | null;
 };
 
+export type VaultQualifiedNoteLink = {
+  vault_id: VaultId;
+  link: NoteLink;
+};
+
+/** `GET /api/v1/vaults/{vault_id}/notes/{slug}/links` — flat, not nested
+ * under a `links` key the way the legacy response was. */
+export type VaultQualifiedLinks = {
+  vault_id: VaultId;
+  outgoing: VaultQualifiedNoteLink[];
+  backlinks: VaultQualifiedNoteLink[];
+};
+
+/** The local, unwrapped shape `VaultQualifiedLinks` is flattened into after a
+ * fetch — every entry's `vault_id` is always the note's own (cross-Vault
+ * backlinks are ruled out by #62), so callers that already know which Vault
+ * they're reading don't carry it a second time per link. */
 export type NoteLinks = {
   outgoing: NoteLink[];
   backlinks: NoteLink[];
 };
 
-export type NoteLinksResponse = {
-  links: NoteLinks;
-};
-
 export type WriteCapabilities = {
+  vault_id: VaultId;
   enabled: boolean;
-  /** Absent only while talking to a pre-settings server. */
-  settings_enabled?: boolean;
   warnings: string[];
 };
 
 export type WriteOutcome = {
+  vault_id: VaultId;
   ok: boolean;
   slug: string | null;
   relative_path: string | null;
   content_hash: string | null;
   quality_warnings: string[];
-  git_sync_warning: string | null;
   rewritten_notes: number;
   moved_assets: number;
   trashed_path: string | null;
+  layer: string | null;
 };
 
 export type AttachmentOutcome = {
+  vault_id: VaultId;
   ok: boolean;
   attachment: {
     relative_path: string;
     size_bytes: number;
     content_hash: string;
+    layer: string | null;
   };
-  git_sync_warning: string | null;
   rewritten_notes: number;
   trashed_path: string | null;
   cleanup_warning: string | null;
 };
 
 export type ActiveNoteMeta = {
+  vaultId: VaultId;
   title: string;
   slug: string;
   relativePath: string;
@@ -83,15 +216,16 @@ export type RecentNote = ActiveNoteMeta & {
   viewedAt: number;
 };
 
+/** `GET /api/v1/vaults/{scope}/recent` — flattened across Vaults, each row
+ * individually carrying its own `vault_id`. Powers both the server-tracked
+ * "recently changed" panel and (unrelated) the client-tracked "recently
+ * viewed" list is `RecentNote` above, not this type. */
 export type ModifiedNote = {
+  vault_id: VaultId;
   title: string;
   slug: string;
   relative_path: string;
   mtime_ns: number;
-};
-
-export type RecentlyModifiedResponse = {
-  notes: ModifiedNote[];
 };
 
 export type ReadPrefs = {
@@ -100,7 +234,13 @@ export type ReadPrefs = {
   maxWidth: number;
 };
 
-export type ResolveBatchResponse = {
+export type VaultResolveResponse = {
+  vault_id: VaultId;
+  slug: string | null;
+};
+
+export type VaultResolveBatchResponse = {
+  vault_id: VaultId;
   results: Array<{
     target: string;
     slug: string | null;
@@ -116,6 +256,12 @@ export type MonthActivity = { month: string; modified_count: number };
 export type FolderStat = { folder: string; note_count: number };
 export type NoteList = { count: number; notes: NoteRef[] };
 
+/** The rich, exact single-Vault report from
+ * `GET /api/v1/vaults/{vault_id}/stats/detail`. Never `all` — this is an
+ * exact read, like `notes/{slug}`, not a `{scope}` collection read. The
+ * frozen `{scope}/stats` collection route intentionally returns only lean
+ * counts (`VaultStatistics`, see `VaultTree`'s sibling in the collection
+ * envelope) and cannot back this page. */
 export type VaultStats = {
   note_count: number;
   word_count: number;
@@ -138,13 +284,35 @@ export type VaultStats = {
   modified_this_month: NoteList;
 };
 
+/** `GET /api/v1/vaults/{vault_id}/stats/detail`'s response — `stats` nests,
+ * mirroring `VaultQualifiedNote`, not a flat merge. */
+export type VaultQualifiedStats = {
+  vault_id: VaultId;
+  stats: VaultStats;
+};
+
 export type GraphNode = {
+  vault_id: VaultId;
   slug: string;
   title: string;
   primary_tag: string | null;
   backlink_count: number;
 };
-export type GraphEdge = { source: string; target: string };
+export type GraphEdge = {
+  vault_id: VaultId;
+  source_slug: string;
+  target_slug: string;
+};
+
+/** One participating Vault's graph component, as returned (grouped, edges
+ * never crossing Vaults) by `GET /api/v1/vaults/{scope}/graph`. */
+export type VaultGraph = {
+  vault_id: VaultId;
+  vault_name: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
+
 export type GraphData = { nodes: GraphNode[]; edges: GraphEdge[] };
 
 export type MermaidApi = {

@@ -1,4 +1,4 @@
-import type { NoteMetadata } from "../../types";
+import type { NoteMetadata, VaultId } from "../../types";
 
 export type SearchMode = "semantic" | "keyword";
 
@@ -8,6 +8,7 @@ export interface OutboundLink {
 }
 
 export interface SearchResult {
+  vault_id: VaultId;
   chunk_id: number;
   note_slug: string;
   note_title: string;
@@ -15,11 +16,13 @@ export interface SearchResult {
   heading_path: string | null;
   content: string;
   score: number;
+  layer: string | null;
   outbound_links: OutboundLink[];
   metadata?: NoteMetadata;
 }
 
 export type SearchSelection = {
+  vaultId: VaultId;
   slug: string;
   query: string;
   matchKind: string;

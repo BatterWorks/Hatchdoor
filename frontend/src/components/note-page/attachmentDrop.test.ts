@@ -92,7 +92,8 @@ describe("attachmentRejection", () => {
 describe("uploadNoteAttachment", () => {
   it("uploads to the vault-root Attachments folder", async () => {
     const upload = vi.fn().mockResolvedValue({
-      attachment: { relative_path: "Attachments/report.pdf" },
+      vault_id: "vault-1",
+      attachment: { relative_path: "Attachments/report.pdf", layer: null },
     });
 
     await uploadNoteAttachment(pdfFile(), "Projects/Foo.md", upload);
@@ -105,7 +106,8 @@ describe("uploadNoteAttachment", () => {
 
   it("returns an embed path that resolves from a note in a subfolder", async () => {
     const upload = vi.fn().mockResolvedValue({
-      attachment: { relative_path: "Attachments/report.pdf" },
+      vault_id: "vault-1",
+      attachment: { relative_path: "Attachments/report.pdf", layer: null },
     });
 
     const result = await uploadNoteAttachment(
@@ -119,7 +121,8 @@ describe("uploadNoteAttachment", () => {
 
   it("strips characters the vault will not accept from the filename", async () => {
     const upload = vi.fn().mockResolvedValue({
-      attachment: { relative_path: "Attachments/my-report.pdf" },
+      vault_id: "vault-1",
+      attachment: { relative_path: "Attachments/my-report.pdf", layer: null },
     });
 
     await uploadNoteAttachment(pdfFile("my:report.pdf"), "Home.md", upload);
@@ -137,7 +140,8 @@ describe("uploadNoteAttachment", () => {
       .fn()
       .mockRejectedValueOnce(conflict)
       .mockResolvedValue({
-        attachment: { relative_path: "Attachments/report-1.pdf" },
+        vault_id: "vault-1",
+        attachment: { relative_path: "Attachments/report-1.pdf", layer: null },
       });
 
     const result = await uploadNoteAttachment(pdfFile(), "Home.md", upload);
@@ -163,7 +167,8 @@ describe("uploadNoteAttachment", () => {
       .mockRejectedValueOnce(conflict)
       .mockRejectedValueOnce(conflict)
       .mockResolvedValue({
-        attachment: { relative_path: "Attachments/report-2.pdf" },
+        vault_id: "vault-1",
+        attachment: { relative_path: "Attachments/report-2.pdf", layer: null },
       });
 
     await uploadNoteAttachment(pdfFile(), "Home.md", upload);
@@ -184,17 +189,6 @@ describe("uploadNoteAttachment", () => {
       uploadNoteAttachment(pdfFile(), "Home.md", upload),
     ).rejects.toThrow("vault is read-only");
     expect(upload).toHaveBeenCalledTimes(1);
-  });
-
-  it("surfaces the git sync warning when the server sends one", async () => {
-    const upload = vi.fn().mockResolvedValue({
-      attachment: { relative_path: "Attachments/report.pdf" },
-      git_sync_warning: "remote rejected",
-    });
-
-    const result = await uploadNoteAttachment(pdfFile(), "Home.md", upload);
-
-    expect(result.gitSyncWarning).toBe("remote rejected");
   });
 });
 

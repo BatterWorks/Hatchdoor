@@ -5,7 +5,11 @@ import { readErrorMessage } from "./apiError";
 describe("readErrorMessage", () => {
   it("returns the server's structured error message when present", async () => {
     const res = new Response(
-      JSON.stringify({ error: "Note not found: home" }),
+      JSON.stringify({
+        code: "note_not_found",
+        message: "Note not found: home",
+        retryable: false,
+      }),
       {
         status: 404,
       },
@@ -22,8 +26,10 @@ describe("readErrorMessage", () => {
     );
   });
 
-  it("falls back when the error field is empty or not a string", async () => {
-    const res = new Response(JSON.stringify({ error: "" }), { status: 503 });
+  it("falls back when the message field is empty or not a string", async () => {
+    const res = new Response(JSON.stringify({ message: "" }), {
+      status: 503,
+    });
     expect(await readErrorMessage(res, "Failed loading tree")).toBe(
       "Failed loading tree: 503",
     );

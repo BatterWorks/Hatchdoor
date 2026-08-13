@@ -1,5 +1,9 @@
-import { EXPANDED_FOLDERS_KEY, RECENT_NOTES_KEY } from "../app/constants";
-import type { RecentNote } from "../types";
+import {
+  EXPANDED_FOLDERS_KEY,
+  RECENT_NOTES_KEY,
+  VAULT_SCOPE_KEY,
+} from "../app/constants";
+import type { RecentNote, VaultScope } from "../types";
 
 export function getStoredNumber(
   key: string,
@@ -25,6 +29,7 @@ export function getStoredRecentNotes(): RecentNote[] {
     return parsed
       .filter(
         (item) =>
+          typeof item.vaultId === "string" &&
           typeof item.slug === "string" &&
           typeof item.title === "string" &&
           typeof item.relativePath === "string" &&
@@ -32,6 +37,7 @@ export function getStoredRecentNotes(): RecentNote[] {
       )
       .slice(0, 12)
       .map((item) => ({
+        vaultId: item.vaultId as string,
         slug: item.slug as string,
         title: item.title as string,
         relativePath: item.relativePath as string,
@@ -39,6 +45,23 @@ export function getStoredRecentNotes(): RecentNote[] {
       }));
   } catch {
     return [];
+  }
+}
+
+/** The selected Vault scope (state/URL/storage only per #137 — no chrome
+ * reads or writes this yet). Defaults to `"all"`, matching the design spec's
+ * stated default; with no chrome to narrow it, every collection read runs
+ * under `"all"` until a later slice adds the Scope zone. */
+export function getStoredScope(): VaultScope {
+  const raw = getStoredString(VAULT_SCOPE_KEY);
+  return raw ?? "all";
+}
+
+export function setStoredScope(scope: VaultScope): void {
+  try {
+    window.localStorage.setItem(VAULT_SCOPE_KEY, scope);
+  } catch {
+    // Ignore storage failures (private mode, disabled storage).
   }
 }
 

@@ -38,8 +38,9 @@ use crate::handlers::{
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
     vault_scoped_rename_note_handler, vault_scoped_resolve_batch_handler,
-    vault_scoped_resolve_handler, vault_scoped_update_note_handler,
-    vault_scoped_upload_attachment_handler, vault_scoped_write_capabilities_handler,
+    vault_scoped_resolve_handler, vault_scoped_stats_detail_handler,
+    vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
+    vault_scoped_write_capabilities_handler,
 };
 use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
 use crate::model_setup::{ModelSetup, SelectedModel};
@@ -429,6 +430,14 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/{vault_id}/write-capabilities",
                 get(vault_scoped_write_capabilities_handler).layer(demo_guard.clone()),
+            )
+            // #137: the rich, exact single-Vault statistics report the lean
+            // `{vault_id}/stats` collection projection below cannot back. A
+            // distinct nested path, not a query flag, keeping the exact/
+            // collection route split this group already uses everywhere else.
+            .route(
+                "/api/v1/vaults/{vault_id}/stats/detail",
+                get(vault_scoped_stats_detail_handler),
             )
             // #100: one-or-all collection reads and search. `{vault_id}` here
             // is a Vault-or-`all` scope (parsed by `parse_vault_scope`); the
@@ -5979,6 +5988,56 @@ mod tests {
             .collect();
         assert!(vault_ids.contains(&first));
         assert!(vault_ids.contains(&second));
+    }
+
+    #[tokio::test]
+    async fn vault_scoped_stats_detail_returns_the_rich_report_for_exactly_one_vault() {
+        let (app, tmp, state) = app_for_tests_with_web_auth(None);
+        let root = tmp.path().join("first");
+        let vault_id = create_vault_with_files(
+            &app,
+            "First",
+            &root,
+            &[
+                (
+                    "Home.md",
+                    "---\ntags: [alpha]\n---\n# Home\n\none two three\n\n[[Shared]]",
+                ),
+                ("Shared.md", "# Shared\n\nfour five"),
+            ],
+            0,
+        )
+        .await;
+        publish_vault_snapshot(&state, &vault_id, &root);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/stats/detail"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["vault_id"], vault_id);
+        assert_eq!(body["stats"]["note_count"], 2);
+        assert_eq!(body["stats"]["tag_count"], 1);
+        assert_eq!(body["stats"]["link_count"], 1);
+        assert_eq!(body["stats"]["most_linked"][0]["slug"], "shared", "{body}");
+
+        let not_found = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/00000000-0000-4000-8000-000000000000/stats/detail")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

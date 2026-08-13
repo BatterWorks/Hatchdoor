@@ -62,6 +62,15 @@ assets, downloads, tree, recent Notes, statistics, graph, and write-capability
 routes. Existing authentication, query-token fallback, optimistic content
 hashes, and safe-write semantics remain in force.
 
+`GET /api/v1/vaults/{vault_id}/stats/detail` returns the rich, exact
+single-Vault statistics report (word/tag/link counts, top tags, most-linked
+notes, activity by month, notes per folder, longest/shortest notes, orphan and
+no-tag notes, and notes modified this week/month) as
+`{ "vault_id": "...", "stats": { ... } }`. It is a distinct route from the
+collection-scope `GET /api/v1/vaults/{scope}/stats` above, which stays lean
+(`note_count`, `tag_count`, `link_count`, `vault_size_bytes` per participating
+Vault) for one-or-all reads; `stats/detail` never accepts `"all"`.
+
 The unscoped `POST /api/refresh` remains retired. To request a rebuild for one
 enabled Vault with usable local Markdown, use the authenticated control route:
 

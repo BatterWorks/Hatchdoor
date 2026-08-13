@@ -23,7 +23,7 @@ pub use vault_collection_reads::{
 pub use vault_content::{
     vault_scoped_asset_handler, vault_scoped_note_download_handler, vault_scoped_note_handler,
     vault_scoped_note_links_handler, vault_scoped_resolve_batch_handler,
-    vault_scoped_resolve_handler,
+    vault_scoped_resolve_handler, vault_scoped_stats_detail_handler,
 };
 pub use vault_write::{
     vault_scoped_archive_note_handler, vault_scoped_create_note_handler,

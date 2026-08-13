@@ -14,16 +14,36 @@ function sequenceRandom(values: number[]): () => number {
   return () => values[i++ % values.length];
 }
 
+const VAULT_ID = "vault-1";
+
 const DATA: GraphData = {
   nodes: [
-    { slug: "a", title: "Alpha", primary_tag: "topic/x", backlink_count: 3 },
-    { slug: "b", title: "Bravo", primary_tag: null, backlink_count: 0 },
-    { slug: "c", title: "Charlie", primary_tag: "topic/y", backlink_count: 1 },
+    {
+      vault_id: VAULT_ID,
+      slug: "a",
+      title: "Alpha",
+      primary_tag: "topic/x",
+      backlink_count: 3,
+    },
+    {
+      vault_id: VAULT_ID,
+      slug: "b",
+      title: "Bravo",
+      primary_tag: null,
+      backlink_count: 0,
+    },
+    {
+      vault_id: VAULT_ID,
+      slug: "c",
+      title: "Charlie",
+      primary_tag: "topic/y",
+      backlink_count: 1,
+    },
   ],
   edges: [
-    { source: "a", target: "b" },
-    { source: "b", target: "c" },
-    { source: "a", target: "ghost" }, // dangler — target missing
+    { vault_id: VAULT_ID, source_slug: "a", target_slug: "b" },
+    { vault_id: VAULT_ID, source_slug: "b", target_slug: "c" },
+    { vault_id: VAULT_ID, source_slug: "a", target_slug: "ghost" }, // dangler — target missing
   ],
 };
 
@@ -89,6 +109,7 @@ describe("hitTest", () => {
   const identity = { x: 0, y: 0, k: 1 };
   const nodes: SimNode[] = [
     {
+      vault_id: VAULT_ID,
       slug: "a",
       title: "Alpha",
       primary_tag: null,
@@ -97,6 +118,7 @@ describe("hitTest", () => {
       y: 0,
     },
     {
+      vault_id: VAULT_ID,
       slug: "b",
       title: "Bravo",
       primary_tag: null,

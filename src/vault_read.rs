@@ -76,6 +76,17 @@ pub struct VaultQualifiedNote {
     pub note: Note,
 }
 
+/// The rich, exact single-Vault statistics report — every field the legacy
+/// single-Vault `/api/stats` response computed. `stats` reuses
+/// `api_types::VaultStatsResponse` directly rather than duplicating its wire
+/// shape; `vault_id` sits alongside it, matching `VaultQualifiedNote`'s
+/// nesting rather than a flat merge.
+#[derive(Debug, Serialize)]
+pub struct VaultQualifiedStats {
+    pub vault_id: VaultId,
+    pub stats: crate::api_types::VaultStatsResponse,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct VaultQualifiedLink {
     pub vault_id: VaultId,
@@ -321,6 +332,33 @@ impl<'a> VaultReadCore<'a> {
             participants: projection.participants,
             data: notes,
         })
+    }
+
+    /// The rich per-Vault statistics report, scoped to exactly one Vault —
+    /// never `all`. This is an exact read, like `exact_note`, not a `{scope}`
+    /// collection projection: it returns the report directly rather than a
+    /// participants/partial envelope. It reuses `collection`'s
+    /// `VaultScope::One` gating for the identical not-found/disabled/
+    /// unavailable behavior the lean `statistics` (`{scope}/stats`) endpoint
+    /// already has, computed from the same published snapshot `statistics`
+    /// reads rather than the legacy single-Vault-shaped SQL cache tables
+    /// `cache::queries::metadata::vault_stats` used (unreachable from any
+    /// production route since #101; superseded by this method for the
+    /// multi-Vault architecture).
+    pub fn statistics_detail(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultQualifiedStats, VaultReadError> {
+        let projection = self.collection(
+            VaultScope::One(vault_id),
+            |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot),
+        )?;
+        let stats = projection
+            .data
+            .into_iter()
+            .next()
+            .expect("VaultScope::One yields exactly one participant on success");
+        Ok(VaultQualifiedStats { vault_id, stats })
     }
 
     /// The requested Vault's resolved local Markdown directory, gated by the
@@ -693,8 +731,289 @@ impl FolderBuilder {
     }
 }
 
+/// Computes every `VaultStatsResponse` field from one Vault's published
+/// snapshot. A Rust port of `cache::queries::metadata::vault_stats`'s SQL
+/// (unreachable from any production route since #101), rewritten against
+/// `VaultSnapshotRead` because the multi-Vault architecture publishes
+/// Vault-attributed data there rather than through that legacy single-Vault-
+/// shaped cache schema. Unlike the legacy function, this applies no
+/// `LayerSelection` filter, matching `VaultReadCore::statistics`'s existing
+/// lean projection: every note in the published snapshot counts, consistent
+/// with what that already-shipped collection endpoint reports for the same
+/// Vault.
+fn detailed_stats_for(snapshot: &VaultSnapshotRead) -> crate::api_types::VaultStatsResponse {
+    use crate::api_types::{
+        FolderStat, LinkedNoteRef, MonthActivity, NoteList, NoteRef, NoteWordRef, TagStat,
+        VaultStatsResponse,
+    };
+
+    let note_count = snapshot.notes.len() as i64;
+    let vault_size_bytes: i64 = snapshot.notes.iter().map(|note| note.size_bytes).sum();
+
+    let mut total_word_count = 0usize;
+    let mut total_image_count = 0usize;
+    let mut word_counts: Vec<(&str, &str, usize)> = Vec::with_capacity(snapshot.notes.len());
+    for note in &snapshot.notes {
+        let word_count = word_count_for_content(&note.content);
+        total_word_count += word_count;
+        total_image_count += note.content.matches("![").count();
+        word_counts.push((note.slug.as_str(), note.title.as_str(), word_count));
+    }
+    let avg_word_count = if note_count > 0 {
+        total_word_count / note_count as usize
+    } else {
+        0
+    };
+
+    word_counts.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(b.0)));
+    let longest_notes: Vec<NoteWordRef> = word_counts
+        .iter()
+        .take(5)
+        .map(|(slug, title, word_count)| NoteWordRef {
+            title: (*title).to_string(),
+            slug: (*slug).to_string(),
+            word_count: *word_count,
+        })
+        .collect();
+
+    word_counts.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| a.0.cmp(b.0)));
+    let shortest_notes: Vec<NoteWordRef> = word_counts
+        .iter()
+        .filter(|(_, _, word_count)| *word_count > 0)
+        .take(5)
+        .map(|(slug, title, word_count)| NoteWordRef {
+            title: (*title).to_string(),
+            slug: (*slug).to_string(),
+            word_count: *word_count,
+        })
+        .collect();
+
+    let mut tag_counts: BTreeMap<&str, i64> = BTreeMap::new();
+    for note in &snapshot.notes {
+        for tag in snapshot.tags_by_note.get(&note.slug).into_iter().flatten() {
+            *tag_counts.entry(tag.as_str()).or_insert(0) += 1;
+        }
+    }
+    let tag_count = tag_counts.len() as i64;
+    let mut top_tags: Vec<TagStat> = tag_counts
+        .into_iter()
+        .map(|(tag, note_count)| TagStat {
+            tag: tag.to_string(),
+            note_count,
+        })
+        .collect();
+    top_tags.sort_by(|a, b| {
+        b.note_count
+            .cmp(&a.note_count)
+            .then_with(|| a.tag.cmp(&b.tag))
+    });
+    top_tags.truncate(20);
+
+    let link_count = snapshot.links.len() as i64;
+
+    let mut backlinks_by_target: BTreeMap<&str, i64> = BTreeMap::new();
+    for link in &snapshot.links {
+        *backlinks_by_target
+            .entry(link.target_slug.as_str())
+            .or_insert(0) += 1;
+    }
+    let mut most_linked: Vec<LinkedNoteRef> = snapshot
+        .notes
+        .iter()
+        .filter_map(|note| {
+            let backlink_count = *backlinks_by_target.get(note.slug.as_str())?;
+            (backlink_count > 0).then(|| LinkedNoteRef {
+                title: note.title.clone(),
+                slug: note.slug.clone(),
+                backlink_count,
+            })
+        })
+        .collect();
+    most_linked.sort_by(|a, b| {
+        b.backlink_count
+            .cmp(&a.backlink_count)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    most_linked.truncate(20);
+
+    let mut activity: BTreeMap<String, i64> = BTreeMap::new();
+    for note in &snapshot.notes {
+        *activity.entry(month_key(note.mtime_ns)).or_insert(0) += 1;
+    }
+    let mut activity_by_month: Vec<MonthActivity> = activity
+        .into_iter()
+        .map(|(month, modified_count)| MonthActivity {
+            month,
+            modified_count,
+        })
+        .collect();
+    activity_by_month.sort_by(|a, b| b.month.cmp(&a.month));
+    activity_by_month.truncate(6);
+
+    let mut folder_counts: BTreeMap<String, i64> = BTreeMap::new();
+    for note in &snapshot.notes {
+        *folder_counts
+            .entry(top_folder(&note.relative_path))
+            .or_insert(0) += 1;
+    }
+    let mut notes_per_folder: Vec<FolderStat> = folder_counts
+        .into_iter()
+        .map(|(folder, note_count)| FolderStat { folder, note_count })
+        .collect();
+    notes_per_folder.sort_by(|a, b| {
+        b.note_count
+            .cmp(&a.note_count)
+            .then_with(|| a.folder.cmp(&b.folder))
+    });
+
+    let linked_sources: BTreeSet<&str> = snapshot
+        .links
+        .iter()
+        .map(|link| link.source_slug.as_str())
+        .collect();
+    let linked_targets: BTreeSet<&str> = snapshot
+        .links
+        .iter()
+        .map(|link| link.target_slug.as_str())
+        .collect();
+    let mut orphan_notes: Vec<NoteRef> = snapshot
+        .notes
+        .iter()
+        .filter(|note| {
+            !linked_sources.contains(note.slug.as_str())
+                && !linked_targets.contains(note.slug.as_str())
+        })
+        .map(|note| NoteRef {
+            title: note.title.clone(),
+            slug: note.slug.clone(),
+        })
+        .collect();
+    orphan_notes.sort_by(|a, b| a.title.cmp(&b.title));
+
+    let mut no_tag_notes: Vec<NoteRef> = snapshot
+        .notes
+        .iter()
+        .filter(|note| {
+            snapshot
+                .tags_by_note
+                .get(&note.slug)
+                .is_none_or(|tags| tags.is_empty())
+        })
+        .map(|note| NoteRef {
+            title: note.title.clone(),
+            slug: note.slug.clone(),
+        })
+        .collect();
+    no_tag_notes.sort_by(|a, b| a.title.cmp(&b.title));
+
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    let week_threshold = now_ns.saturating_sub(7 * 86_400 * 1_000_000_000);
+    let month_threshold = now_ns.saturating_sub(30 * 86_400 * 1_000_000_000);
+
+    let mut week_notes: Vec<&crate::cache::vault_snapshots::VaultSnapshotNote> = snapshot
+        .notes
+        .iter()
+        .filter(|note| note.mtime_ns >= week_threshold)
+        .collect();
+    week_notes.sort_by_key(|note| std::cmp::Reverse(note.mtime_ns));
+    let week_total = week_notes.len() as i64;
+    let week_notes: Vec<NoteRef> = week_notes
+        .into_iter()
+        .take(20)
+        .map(|note| NoteRef {
+            title: note.title.clone(),
+            slug: note.slug.clone(),
+        })
+        .collect();
+
+    let mut month_notes: Vec<&crate::cache::vault_snapshots::VaultSnapshotNote> = snapshot
+        .notes
+        .iter()
+        .filter(|note| note.mtime_ns >= month_threshold)
+        .collect();
+    month_notes.sort_by_key(|note| std::cmp::Reverse(note.mtime_ns));
+    let month_total = month_notes.len() as i64;
+    let month_notes: Vec<NoteRef> = month_notes
+        .into_iter()
+        .take(20)
+        .map(|note| NoteRef {
+            title: note.title.clone(),
+            slug: note.slug.clone(),
+        })
+        .collect();
+
+    VaultStatsResponse {
+        note_count,
+        word_count: total_word_count,
+        tag_count,
+        link_count,
+        image_count: total_image_count,
+        avg_word_count,
+        vault_size_bytes,
+        total_outgoing_links: link_count,
+        total_backlinks: link_count,
+        top_tags,
+        most_linked,
+        activity_by_month,
+        notes_per_folder,
+        longest_notes,
+        shortest_notes,
+        orphan_notes,
+        no_tag_notes,
+        modified_this_week: NoteList {
+            count: week_total,
+            notes: week_notes,
+        },
+        modified_this_month: NoteList {
+            count: month_total,
+            notes: month_notes,
+        },
+    }
+}
+
+/// The zero-padded `YYYY-MM` UTC month a nanosecond Unix timestamp falls in,
+/// matching `strftime('%Y-%m', mtime_ns / 1e9, 'unixepoch')`'s UTC bucketing.
+fn month_key(mtime_ns: i64) -> String {
+    let seconds = mtime_ns.div_euclid(1_000_000_000);
+    let nanos = mtime_ns.rem_euclid(1_000_000_000) as u32;
+    chrono::DateTime::from_timestamp(seconds, nanos)
+        .map(|datetime| datetime.format("%Y-%m").to_string())
+        .unwrap_or_default()
+}
+
+/// The first path segment of a note's Vault-relative path, or `""` for a
+/// Vault-root note — matching the legacy SQL's
+/// `instr(relative_path, '/')`-based top-level folder split.
+fn top_folder(relative_path: &str) -> String {
+    relative_path
+        .split_once('/')
+        .map_or(String::new(), |(folder, _rest)| folder.to_string())
+}
+
+fn word_count_for_content(content: &str) -> usize {
+    strip_frontmatter(content).split_whitespace().count()
+}
+
+fn strip_frontmatter(content: &str) -> &str {
+    let stripped = content.trim_start_matches('\n');
+    let Some(body) = stripped.strip_prefix("---\n") else {
+        return content;
+    };
+    if let Some(pos) = body.find("\n---\n") {
+        return &body[pos + 5..];
+    }
+    if body.strip_suffix("\n---").is_some() {
+        return "";
+    }
+    content
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -1061,5 +1380,89 @@ mod tests {
             .exact_note_for_download(first, "does-not-exist")
             .expect("lookup succeeds");
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn statistics_detail_computes_the_rich_report_from_one_vaults_snapshot() {
+        let workspace = workspace(&[(
+            "First",
+            &[
+                (
+                    "Home.md",
+                    "---\ntags: [alpha]\n---\n# Home\n\nfirst second third\n\n[[Second]]",
+                ),
+                (
+                    "Second.md",
+                    "---\ntags: [alpha, beta]\n---\n# Second\n\nfourth fifth",
+                ),
+                ("Folder/Orphan.md", "# Orphan\n\nlonely"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+
+        let result = reads
+            .statistics_detail(first)
+            .expect("statistics detail succeeds");
+        assert_eq!(result.vault_id, first);
+        let stats = result.stats;
+
+        assert_eq!(stats.note_count, 3);
+        assert_eq!(stats.tag_count, 2);
+        assert_eq!(stats.link_count, 1);
+        assert_eq!(stats.total_outgoing_links, 1);
+        assert_eq!(stats.total_backlinks, 1);
+        assert_eq!(
+            stats
+                .top_tags
+                .iter()
+                .map(|tag| (tag.tag.as_str(), tag.note_count))
+                .collect::<Vec<_>>(),
+            vec![("alpha", 2), ("beta", 1)]
+        );
+        assert_eq!(
+            stats
+                .most_linked
+                .iter()
+                .map(|note| (note.slug.as_str(), note.backlink_count))
+                .collect::<Vec<_>>(),
+            vec![("second", 1)]
+        );
+        assert_eq!(
+            stats
+                .orphan_notes
+                .iter()
+                .map(|note| note.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["orphan"]
+        );
+        assert_eq!(
+            stats
+                .no_tag_notes
+                .iter()
+                .map(|note| note.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["orphan"]
+        );
+        let folder_counts: BTreeMap<&str, i64> = stats
+            .notes_per_folder
+            .iter()
+            .map(|folder| (folder.folder.as_str(), folder.note_count))
+            .collect();
+        assert_eq!(folder_counts.get(""), Some(&2));
+        assert_eq!(folder_counts.get("Folder"), Some(&1));
+    }
+
+    #[test]
+    fn statistics_detail_reports_vault_not_found_for_an_unregistered_vault() {
+        let workspace = workspace(&[("First", &[("Home.md", "# Home\n")])]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let missing = VaultId::generate().expect("generate Vault id");
+        let error = reads
+            .statistics_detail(missing)
+            .expect_err("unregistered Vault errs");
+        assert_eq!(error.code, "vault_not_found");
+        assert!(!error.retryable);
     }
 }

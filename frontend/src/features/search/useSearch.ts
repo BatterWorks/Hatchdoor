@@ -2,14 +2,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
+import type { VaultReadProjection, VaultScope } from "../../types";
 import type { SearchResponse, SearchResult } from "./types";
 
 /**
  * Command-palette search state: open/query/mode plus the debounced fetch and
  * focus-management effects. `setSearchOpen` is exposed so the shell's global
- * keyboard shortcuts can open the dialog.
+ * keyboard shortcuts can open the dialog. `scope` is the browsing scope
+ * (#137: state/storage only, no chrome) — the dialog's own Keyword-mode
+ * toggle is a filter over the answer, never the browsing scope itself (#119).
  */
-export function useSearch() {
+export function useSearch(scope: VaultScope) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
@@ -64,13 +67,16 @@ export function useSearch() {
             limit: "30",
             per_note_cap: "2",
           });
-          const res = await apiFetch(`/api/search?${params.toString()}`);
+          const res = await apiFetch(
+            `/api/v1/vaults/${encodeURIComponent(scope)}/search?${params.toString()}`,
+          );
           if (!res.ok) {
             throw new Error(await readErrorMessage(res, "Search failed"));
           }
-          const json = (await res.json()) as SearchResponse;
+          const projection =
+            (await res.json()) as VaultReadProjection<SearchResponse>;
           if (!cancelled) {
-            setSearchResults(json.results);
+            setSearchResults(projection.data.results);
           }
         } catch (error) {
           if (!cancelled) {
@@ -91,7 +97,7 @@ export function useSearch() {
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [searchIncludeContent, searchOpen, searchQuery]);
+  }, [scope, searchIncludeContent, searchOpen, searchQuery]);
 
   return {
     searchOpen,

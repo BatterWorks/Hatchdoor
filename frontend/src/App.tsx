@@ -43,6 +43,11 @@ import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
 import { useNoteActions } from "./hooks/useNoteActions";
 import { useVaultTree } from "./hooks/useVaultTree";
+import {
+  resolvePrimaryVaultId,
+  useVaultDiscovery,
+  useVaultScope,
+} from "./hooks/useVaultScope";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import type { ActiveNoteMeta, RecentNote } from "./types";
@@ -75,27 +80,34 @@ export function VaultApp() {
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
+  const [scope] = useVaultScope();
+  const { vaults, demoMode } = useVaultDiscovery();
+  const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
+
   const {
     tree,
     loadingTree,
     treeError,
-    treeIsStale,
+    treePartial,
     modifiedNotes,
     vaultRevision,
     folderPaths,
     noteCandidates,
     loadTree,
     loadModifiedNotes,
-    refreshVault,
-  } = useVaultTree();
+  } = useVaultTree(scope);
+  const refreshVault = useCallback(async () => {
+    await loadTree();
+    await loadModifiedNotes();
+  }, [loadModifiedNotes, loadTree]);
   const {
     writeEnabled,
-    settingsEnabled,
     writeWarnings,
     setWriteWarnings,
     writeNotice,
     setWriteNotice,
-  } = useWriteMode();
+  } = useWriteMode(primaryVaultId);
+  const settingsEnabled = !demoMode;
   const {
     searchOpen,
     setSearchOpen,
@@ -108,7 +120,7 @@ export function VaultApp() {
     searchError,
     searchInputRef,
     openSearchForTag,
-  } = useSearch();
+  } = useSearch(scope);
   const {
     noteActionDialog,
     noteActionError,
@@ -121,7 +133,7 @@ export function VaultApp() {
     handleMoveNote,
     handleArchiveNote,
     handleDeleteNote,
-  } = useNoteActions({ activeNote, refreshVault, setWriteNotice });
+  } = useNoteActions({ activeNote, vaults, refreshVault, setWriteNotice });
 
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
@@ -251,7 +263,10 @@ export function VaultApp() {
 
     setRecentNotes((prev) => {
       const withoutCurrent = prev.filter(
-        (item) => item.slug !== activeNote.slug,
+        (item) =>
+          !(
+            item.vaultId === activeNote.vaultId && item.slug === activeNote.slug
+          ),
       );
       const next: RecentNote[] = [
         { ...activeNote, viewedAt: Date.now() },
@@ -265,7 +280,10 @@ export function VaultApp() {
     if (!activeNote) {
       return;
     }
-    window.localStorage.setItem(LAST_NOTE_KEY, activeNote.slug);
+    window.localStorage.setItem(
+      LAST_NOTE_KEY,
+      JSON.stringify({ vaultId: activeNote.vaultId, slug: activeNote.slug }),
+    );
   }, [activeNote]);
 
   useEffect(() => {
@@ -273,11 +291,22 @@ export function VaultApp() {
       return;
     }
     restoredLastNoteRef.current = true;
-    const lastSlug = getStoredString(LAST_NOTE_KEY);
-    if (!lastSlug) {
+    const raw = getStoredString(LAST_NOTE_KEY);
+    if (!raw) {
       return;
     }
-    navigate(`/n/${encodeURIComponent(lastSlug)}`, { replace: true });
+    try {
+      const last = JSON.parse(raw) as { vaultId?: unknown; slug?: unknown };
+      if (typeof last.vaultId !== "string" || typeof last.slug !== "string") {
+        return;
+      }
+      navigate(
+        `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
+        { replace: true },
+      );
+    } catch {
+      // Ignore malformed stored state (a pre-#137 slug-only value included).
+    }
   }, [location.pathname, navigate]);
 
   useEffect(() => {
@@ -366,7 +395,7 @@ export function VaultApp() {
       return;
     }
     const url = withAccessToken(
-      `/api/note/${encodeURIComponent(activeNote.slug)}/download`,
+      `/api/v1/vaults/${encodeURIComponent(activeNote.vaultId)}/notes/${encodeURIComponent(activeNote.slug)}/download`,
     );
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -393,7 +422,7 @@ export function VaultApp() {
         writeEnabled={writeEnabled}
         isMobile={isMobile}
         isOnline={isOnline}
-        treeIsStale={treeIsStale}
+        treeIsStale={treePartial}
         actionsMenuOpen={actionsMenuOpen}
         topbarRef={topbarRef}
         theme={theme}
@@ -516,7 +545,7 @@ export function VaultApp() {
             <Route path="/graph" element={<GraphPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route
-              path="/n/:slug"
+              path="/v/:vaultId/n/:slug"
               element={
                 <NotePage
                   onActiveNoteChange={setActiveNote}
@@ -564,7 +593,9 @@ export function VaultApp() {
               params.set("m", selection.matchKind);
             }
             const suffix = params.toString();
-            navigate(`/n/${selection.slug}${suffix ? `?${suffix}` : ""}`);
+            navigate(
+              `/v/${encodeURIComponent(selection.vaultId)}/n/${selection.slug}${suffix ? `?${suffix}` : ""}`,
+            );
           }}
         />
       ) : null}

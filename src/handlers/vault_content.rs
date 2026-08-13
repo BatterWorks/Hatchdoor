@@ -163,6 +163,34 @@ pub async fn vault_scoped_note_links_handler(
     }
 }
 
+/// `GET /api/v1/vaults/{vault_id}/stats/detail` — the rich, exact single-Vault
+/// statistics report `handlers/vault_collection_reads.rs`'s lean
+/// `{scope}/stats` collection projection cannot back. Never `all`: a distinct
+/// path from the collection route rather than a query flag, matching the
+/// exact-vs-collection route split already established for every other pair
+/// in this file/`vault_collection_reads.rs`.
+pub async fn vault_scoped_stats_detail_handler(
+    State(state): State<AppState>,
+    Path(raw_vault_id): Path<String>,
+) -> Response {
+    let vault_id = match parse_vault_id(&raw_vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(error) => return bad_request(error),
+    };
+    let cache = state.startup_sqlite.clone();
+    let vaults = state.vaults.clone();
+    let result = run_blocking(move || {
+        let core = VaultReadCore::new(&cache, &vaults);
+        Ok(core.statistics_detail(vault_id))
+    })
+    .await;
+    match result {
+        Ok(Ok(stats)) => (StatusCode::OK, Json(stats)).into_response(),
+        Ok(Err(error)) => vault_read_error_response(error),
+        Err(error) => error.into_response(),
+    }
+}
+
 enum DownloadOutcome {
     NotFound,
     ReadError(VaultReadError),

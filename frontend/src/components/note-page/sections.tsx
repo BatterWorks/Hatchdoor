@@ -256,7 +256,13 @@ export function SearchHitNavigator({
   );
 }
 
-export function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
+export function NoteLinksPanel({
+  vaultId,
+  links,
+}: {
+  vaultId: string;
+  links: NoteLinks | null;
+}) {
   const outgoing = links?.outgoing ?? [];
   const backlinks = links?.backlinks ?? [];
   if (outgoing.length === 0 && backlinks.length === 0) {
@@ -272,8 +278,12 @@ export function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
       </summary>
       <div className="note-links-body">
         <div className="note-links-grid">
-          <NoteLinksList title="Outgoing" links={outgoing} />
-          <NoteLinksList title="Backlinks" links={backlinks} />
+          <NoteLinksList vaultId={vaultId} title="Outgoing" links={outgoing} />
+          <NoteLinksList
+            vaultId={vaultId}
+            title="Backlinks"
+            links={backlinks}
+          />
         </div>
       </div>
     </details>
@@ -281,9 +291,11 @@ export function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
 }
 
 function NoteLinksList({
+  vaultId,
   title,
   links,
 }: {
+  vaultId: string;
   title: string;
   links: NoteLinks["outgoing"];
 }) {
@@ -296,7 +308,10 @@ function NoteLinksList({
         <ul>
           {links.map((link) => (
             <li key={`${title}-${link.slug}`}>
-              <Link to={`/n/${link.slug}`} title={`${link.relative_path}.md`}>
+              <Link
+                to={`/v/${encodeURIComponent(vaultId)}/n/${link.slug}`}
+                title={`${link.relative_path}.md`}
+              >
                 {link.title}
               </Link>
             </li>

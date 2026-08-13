@@ -13,8 +13,8 @@ const VISIBLE_LIMIT = 15;
  * of changes that arrived from outside this browser — MCP agents, git sync,
  * another device — so that it means "something happened behind my back". The
  * data to do that does not exist: the SSE stream only bumps a revision counter
- * and carries no per-note detail, and `/api/recently-modified` cannot tell your
- * own edit from an agent's.
+ * and carries no per-note detail, and `/api/v1/vaults/{scope}/recent` cannot
+ * tell your own edit from an agent's.
  *
  * Shipping a count off the wrong data would be worse than shipping none, since
  * it would tick up every time you saved a note yourself. So this lists the
@@ -47,12 +47,12 @@ export function ChangesPanel({
         <>
           <ul className="tree root-tree">
             {visible.map((note, index) => (
-              <li key={note.slug} className="note-item">
+              <li key={`${note.vault_id}-${note.slug}`} className="note-item">
                 {/* No active-note class: that highlight is canonical in the
                     tree only, which is what removed the multi-highlight bug. */}
                 <NavLink
                   className="note-link"
-                  to={`/n/${note.slug}`}
+                  to={`/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`}
                   onClick={onNavigate}
                   title={`${note.relative_path}.md`}
                 >

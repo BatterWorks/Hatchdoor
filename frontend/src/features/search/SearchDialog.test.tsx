@@ -58,6 +58,7 @@ describe("SearchDialog", () => {
   it("highlights literal query matches and emits selection/toggle events", () => {
     const results: SearchResult[] = [
       {
+        vault_id: "vault-1",
         chunk_id: 1,
         note_slug: "ab",
         note_title: "a.b",
@@ -65,6 +66,7 @@ describe("SearchDialog", () => {
         heading_path: null,
         content: "line a.b",
         score: 0.9,
+        layer: null,
         outbound_links: [],
       },
     ];
@@ -73,6 +75,7 @@ describe("SearchDialog", () => {
     expect(screen.getAllByText(".").length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /a.b/ }));
     expect(props.onSelect).toHaveBeenCalledWith({
+      vaultId: "vault-1",
       slug: "ab",
       query: ".",
       matchKind: "",

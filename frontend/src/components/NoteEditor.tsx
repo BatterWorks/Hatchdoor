@@ -536,7 +536,7 @@ function AutocompleteList({
       aria-label="Link suggestions"
     >
       {items.map((note, index) => (
-        <li key={note.slug} role="presentation">
+        <li key={`${note.vault_id}:${note.slug}`} role="presentation">
           <button
             type="button"
             role="option"

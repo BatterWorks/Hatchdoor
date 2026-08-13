@@ -23,14 +23,22 @@ describe("GraphPage", () => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    window.localStorage.clear();
   });
 
   it("requests the graph and renders the backend error", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ error: "Graph index is unavailable" }), {
-        status: 503,
-        headers: { "content-type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({
+          code: "vault_read_unavailable",
+          message: "Graph index is unavailable",
+          retryable: true,
+        }),
+        {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        },
+      ),
     );
 
     render(
@@ -44,8 +52,10 @@ describe("GraphPage", () => {
       await screen.findByRole("heading", { name: "Graph Unavailable" }),
     ).toBeVisible();
     expect(screen.getByText("Graph index is unavailable")).toBeVisible();
+    // useVaultScope() defaults to "all" (nothing stored) — the collection
+    // route is scoped by that value.
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/graph",
+      "/api/v1/vaults/all/graph",
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
   });

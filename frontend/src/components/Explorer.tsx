@@ -85,7 +85,7 @@ export function RecentNotesList({
                   issue #12 reported. */}
               <NavLink
                 className="note-link"
-                to={`/n/${note.slug}`}
+                to={`/v/${encodeURIComponent(note.vaultId)}/n/${note.slug}`}
                 onClick={onNavigate}
                 title={`${note.relativePath}.md`}
               >
@@ -117,10 +117,10 @@ export function FolderTree({
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
 }) {
-  const currentSlug = pathToNoteSlug(currentPath);
+  const current = pathToNoteIdentity(currentPath);
   const activePathFolders = useMemo(
-    () => collectAncestorFolderPaths(root, currentSlug),
-    [currentSlug, root],
+    () => collectAncestorFolderPaths(root, current),
+    [current, root],
   );
 
   return (
@@ -244,11 +244,12 @@ function NoteNode({
     <li className="note-item">
       <NavLink
         className={
-          currentPath === `/n/${note.slug}`
+          currentPath ===
+          `/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`
             ? "note-link active-note"
             : "note-link"
         }
-        to={`/n/${note.slug}`}
+        to={`/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`}
         title={`${note.title}.md`}
       >
         {/* §05: folders carry the caret, notes carry a mono index. This is what
@@ -262,26 +263,36 @@ function NoteNode({
   );
 }
 
-function pathToNoteSlug(pathname: string): string | null {
-  const match = pathname.match(/^\/n\/([^/]+)$/);
+type NoteIdentity = { vaultId: string; slug: string };
+
+function pathToNoteIdentity(pathname: string): NoteIdentity | null {
+  const match = pathname.match(/^\/v\/([^/]+)\/n\/([^/]+)$/);
   if (!match) {
     return null;
   }
 
-  return decodeURIComponent(match[1]);
+  return {
+    vaultId: decodeURIComponent(match[1]),
+    slug: decodeURIComponent(match[2]),
+  };
 }
 
 function collectAncestorFolderPaths(
   root: ExplorerFolder,
-  slug: string | null,
+  current: NoteIdentity | null,
 ): Set<string> {
   const paths = new Set<string>();
-  if (!slug) {
+  if (!current) {
     return paths;
   }
 
   const visit = (folder: ExplorerFolder, folderPath: string): boolean => {
-    if (folder.notes.some((note) => note.slug === slug)) {
+    if (
+      folder.notes.some(
+        (note) =>
+          note.slug === current.slug && note.vault_id === current.vaultId,
+      )
+    ) {
       paths.add(folderPath);
       return true;
     }

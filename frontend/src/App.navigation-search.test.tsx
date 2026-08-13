@@ -11,6 +11,26 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { VaultApp as App } from "./App";
+import { discoveryResponse, healthyVault } from "./test/fixtures/vaults";
+
+const VAULT = healthyVault("Vault");
+const VAULT_ID = VAULT.vault_id;
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
+}
+
+function collectionEnvelope(data: unknown): Response {
+  return jsonResponse({
+    scope: "all",
+    collection_revision: 1,
+    partial: false,
+    participants: [
+      { vault_id: VAULT_ID, vault_name: VAULT.name, state: "fresh" },
+    ],
+    data,
+  });
+}
 
 afterEach(() => {
   cleanup();
@@ -20,15 +40,26 @@ afterEach(() => {
 
 describe("App navigation/search", () => {
   it("renders empty state on root route", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          name: "Vault",
-          folders: [],
-          notes: [],
-        }),
-        { status: 200 },
-      ),
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: { name: "Vault", folders: [], notes: [] },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
     );
 
     render(
@@ -62,45 +93,59 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
-        }
-
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home\\n\\nHello",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home\\n\\nHello",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -127,91 +172,104 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+
+        if (url.includes("/tree")) {
           treeCalls += 1;
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes:
-                treeCalls === 1
-                  ? [{ title: "Home", slug: "home" }]
-                  : [
-                      { title: "Home", slug: "home" },
-                      { title: "Project", slug: "project" },
-                    ],
-            }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/recently-modified")) {
-          modifiedCalls += 1;
-          return new Response(
-            JSON.stringify({
-              notes:
-                modifiedCalls === 1
-                  ? []
-                  : [
-                      {
-                        title: "Project",
-                        slug: "project",
-                        relative_path: "Project",
-                        mtime_ns: 40,
-                      },
-                    ],
-            }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/note/home/links")) {
-          linksCalls += 1;
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/note/home")) {
-          noteCalls += 1;
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content:
-                  noteCalls === 1
-                    ? "# Home\n\nVersion 1"
-                    : "# Home\n\nVersion 2",
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes:
+                  treeCalls === 1
+                    ? [{ vault_id: VAULT_ID, title: "Home", slug: "home" }]
+                    : [
+                        { vault_id: VAULT_ID, title: "Home", slug: "home" },
+                        {
+                          vault_id: VAULT_ID,
+                          title: "Project",
+                          slug: "project",
+                        },
+                      ],
               },
-            }),
-            { status: 200 },
+            },
+          ]);
+        }
+
+        if (url.includes("/recent")) {
+          modifiedCalls += 1;
+          return collectionEnvelope(
+            modifiedCalls === 1
+              ? []
+              : [
+                  {
+                    vault_id: VAULT_ID,
+                    title: "Project",
+                    slug: "project",
+                    relative_path: "Project",
+                    mtime_ns: 40,
+                  },
+                ],
           );
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/home/links")) {
+          linksCalls += 1;
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/notes/home")) {
+          noteCalls += 1;
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content:
+                noteCalls === 1 ? "# Home\n\nVersion 1" : "# Home\n\nVersion 2",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
 
     expect(await screen.findByText("Version 1")).toBeInTheDocument();
-    expect(window.__hatchdoorEventSources[0]?.url).toBe("/api/vault-events");
+    expect(window.__hatchdoorEventSources[0]?.url).toBe(
+      "/api/v1/vaults/events",
+    );
 
     act(() => {
       window.__hatchdoorEventSources[0].emit(
-        "vault-revision",
-        JSON.stringify({ revision: 1 }),
+        "vault-collection-revision",
+        JSON.stringify({
+          collection_revision: 1,
+          vault_ids: [VAULT_ID],
+          category: "content",
+        }),
       );
     });
 
@@ -230,28 +288,33 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
 
-        if (url.includes("/api/recently-modified")) {
-          return new Response(JSON.stringify({ notes: [] }), { status: 200 });
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: { name: "Vault", folders: [], notes: [] },
+            },
+          ]);
         }
 
-        if (url.includes("/api/write-capabilities")) {
-          return new Response(JSON.stringify({ enabled: true, warnings: [] }), {
-            status: 200,
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
           });
         }
 
-        return new Response("not found", { status: 404 });
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
@@ -278,15 +341,26 @@ describe("App navigation/search", () => {
 
   it("does not install the old vault polling interval", async () => {
     const setIntervalSpy = vi.spyOn(window, "setInterval");
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          name: "Vault",
-          folders: [],
-          notes: [],
-        }),
-        { status: 200 },
-      ),
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: { name: "Vault", folders: [], notes: [] },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
     );
 
     render(
@@ -305,21 +379,37 @@ describe("App navigation/search", () => {
 
   it("renders folders collapsed by default on explorer root", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
-      async () =>
-        new Response(
-          JSON.stringify({
-            name: "Vault",
-            folders: [
-              {
-                name: "Projects",
-                folders: [],
-                notes: [{ title: "Plan", slug: "plan" }],
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [
+                  {
+                    name: "Projects",
+                    folders: [],
+                    notes: [
+                      { vault_id: VAULT_ID, title: "Plan", slug: "plan" },
+                    ],
+                  },
+                ],
+                notes: [],
               },
-            ],
-            notes: [],
-          }),
-          { status: 200 },
-        ),
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
     );
 
     render(
@@ -338,47 +428,68 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [
-                {
-                  name: "Projects",
-                  folders: [],
-                  notes: [{ title: "Plan", slug: "plan" }],
-                },
-              ],
-              notes: [],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
 
-        if (url.includes("/api/note/plan")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Plan",
-                slug: "plan",
-                relative_path: "Projects/Plan",
-                content: "# Plan",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [
+                  {
+                    name: "Projects",
+                    folders: [],
+                    notes: [
+                      { vault_id: VAULT_ID, title: "Plan", slug: "plan" },
+                    ],
+                  },
+                ],
+                notes: [],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/notes/plan/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+
+        if (url.includes("/notes/plan")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Plan",
+              slug: "plan",
+              relative_path: "Projects/Plan",
+              content: "# Plan",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/plan"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/plan`]}>
         <App />
       </MemoryRouter>,
     );
@@ -393,41 +504,60 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
 
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
         <App />
       </MemoryRouter>,
     );
@@ -445,43 +575,47 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [
-                { title: "Home", slug: "home" },
-                { title: "Project", slug: "project" },
-              ],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
 
-        if (url.includes("/api/recently-modified")) {
-          return new Response(
-            JSON.stringify({
-              notes: [
-                {
-                  title: "Project",
-                  slug: "project",
-                  relative_path: "Projects/Project",
-                  mtime_ns: 30,
-                },
-                {
-                  title: "Home",
-                  slug: "home",
-                  relative_path: "Home",
-                  mtime_ns: 20,
-                },
-              ],
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [
+                  { vault_id: VAULT_ID, title: "Home", slug: "home" },
+                  { vault_id: VAULT_ID, title: "Project", slug: "project" },
+                ],
+              },
+            },
+          ]);
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              title: "Project",
+              slug: "project",
+              relative_path: "Projects/Project",
+              mtime_ns: 30,
+            },
+            {
+              vault_id: VAULT_ID,
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              mtime_ns: 20,
+            },
+          ]);
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
@@ -503,7 +637,7 @@ describe("App navigation/search", () => {
     });
     expect(
       within(changes).getByRole("link", { name: "Project" }),
-    ).toHaveAttribute("href", "/n/project");
+    ).toHaveAttribute("href", `/v/${VAULT_ID}/n/project`);
     expect(within(changes).getByRole("link", { name: "Home" })).toHaveAttribute(
       "title",
       "Home.md",
@@ -514,39 +648,48 @@ describe("App navigation/search", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
 
-        if (url.includes("/api/search")) {
-          return new Response(
-            JSON.stringify({
-              mode: "semantic",
-              results: [
-                {
-                  chunk_id: 1,
-                  note_slug: "plan",
-                  note_title: "Plan",
-                  note_path: "Projects/Plan",
-                  heading_path: null,
-                  content: "Plan body text",
-                  score: 0.9,
-                  outbound_links: [],
-                },
-              ],
-            }),
-            { status: 200 },
-          );
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+
+        if (url.includes("/search")) {
+          return collectionEnvelope({
+            mode: "semantic",
+            results: [
+              {
+                vault_id: VAULT_ID,
+                chunk_id: 1,
+                note_slug: "plan",
+                note_title: "Plan",
+                note_path: "Projects/Plan",
+                heading_path: null,
+                content: "Plan body text",
+                score: 0.9,
+                outbound_links: [],
+              },
+            ],
+          });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 

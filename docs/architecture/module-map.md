@@ -626,7 +626,14 @@ backend checks.
 **Public contract:** `VaultReadCore`, explicit `VaultScope`, the common
 `VaultReadProjection` envelope, participant state/error types, and
 Vault-qualified exact-note, tree, statistics, graph, and recent-note
-projections. `VaultScope` serializes as the flat scalar
+projections. `statistics_detail` (#137) is the exact-read counterpart to the
+lean collection `statistics` projection: it returns `VaultQualifiedStats`
+directly (never wrapped in `VaultReadProjection`, like `exact_note`), scoped
+to exactly one Vault via `collection`'s `VaultScope::One` gating, computing
+every legacy `VaultStatsResponse` field from the same published snapshot
+`statistics`/`trees`/`graphs` read rather than the single-Vault-shaped SQL
+cache tables `cache::queries::metadata::vault_stats` used (unreachable from
+any production route since #101). `VaultScope` serializes as the flat scalar
 `docs/migrations/vault-scoped-clients.md`'s envelope documents — the Vault
 ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
 a caller passes as the `scope` path segment, rather than serde's derived
@@ -1183,10 +1190,15 @@ rejection-mapping helpers (`parse_vault_id`, `json_rejection_response`,
 `query_rejection_response`, `internal_error_response`, widened to
 `pub(crate)` for this reuse): `GET .../notes/{slug}`, `GET
 .../notes/{slug}/links`, `GET .../notes/{slug}/download`, `GET .../resolve`,
-`POST .../resolve-batch`, and `GET .../assets/{*path}` (serving both embedded
-assets and imported attachments, which share one containment rule). Exact
-reads always inspect the requested Vault's authoritative Markdown directory
-through `VaultReadCore`, never the disposable cache, run all blocking
+`POST .../resolve-batch`, `GET .../assets/{*path}` (serving both embedded
+assets and imported attachments, which share one containment rule), and `GET
+.../stats/detail` (#137's rich per-Vault statistics report). Every route but
+the last always inspects the requested Vault's authoritative Markdown
+directory through `VaultReadCore`, never the disposable cache; `stats/detail`
+is the sole exception, reading the same published snapshot the collection
+`{scope}/stats` route reads (word/mtime/size data `VaultReadCore`'s
+authoritative-index path does not carry), so it can briefly lag a write the
+way collection reads do, unlike every other route here. Exact reads run all blocking
 filesystem/index work off the async runtime via `run_blocking` (one trip per
 request, not one per batch entry or per path-resolution step), and are gated
 per-request by that Vault's own
@@ -1395,11 +1407,16 @@ boundaries are currently documentation-enforced.
 - `frontend/src/app/constants.ts`
 - `frontend/src/hooks/useIsMobile.ts`
 - `frontend/src/hooks/useTheme.ts`
+- `frontend/src/hooks/useVaultScope.ts`
 - `frontend/src/lib/storage.ts`
 
 **Contract and responsibility:** bootstraps React/router/PWA, composes feature
 hooks and routes, owns responsive shell state, navigation, persistent shell
-preferences, topbar actions, and explorer placement.
+preferences, topbar actions, and explorer placement. `useVaultScope.ts` (#137)
+owns the selected Vault scope (state/storage only — no chrome yet), Vault
+discovery (`useVaultDiscovery`), and the Vault-less-action default
+(`resolvePrimaryVaultId`), consumed by every collection-read and
+Vault-picking call site until #114's Scope zone exists.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -1678,7 +1695,9 @@ smoke test if routing changes, and full frontend checks.
 - `frontend/src/components/StatsPage.tsx`
 - `frontend/src/styles/stats.css`
 
-**Public contract:** `StatsPage` and the `/api/stats` payload.
+**Public contract:** `StatsPage` and the
+`GET /api/v1/vaults/{vault_id}/stats/detail` payload (#137; the legacy
+unscoped `/api/stats` this section previously cited was retired in #101).
 
 **Consumed dependencies:** shared API/error/types/UI and router links.
 
@@ -1781,11 +1800,17 @@ copy labels, workflows, or state ownership stay with their feature.
 **Paths:**
 
 - `frontend/src/test/setup.ts`
+- `frontend/src/test/fixtures/vaults.ts`
 - all `frontend/src/**/*.test.ts`
 - all `frontend/src/**/*.test.tsx`
 
 Tests follow the production boundary they cover. Cross-feature `App.*` tests
 belong to composition and must be run when their named integration changes.
+`test/fixtures/vaults.ts` (#137) is the shared multi-Vault fixture set every
+later slice's tests assert against: one, three, and eight Vaults, and a
+builder for each non-healthy per-Vault condition (indexing, stale, sync
+failed, sync stopped, conflict, unavailable) plus the collection-read
+envelope/participant shapes.
 
 ## Auxiliary repository paths
 

@@ -1,12 +1,17 @@
 export type NoteDraft = {
+  vaultId: string;
   slug: string;
   content: string;
   baseContentHash: string;
   savedAt: number;
 };
 
-export function noteDraftKey(slug: string): string {
-  return `hatchdoor:draft:note:${slug}`;
+/** Keyed by both `vaultId` and `slug`: a slug is only unique within its own
+ * Vault, and without the Vault ID an unsaved draft for one Vault's note could
+ * surface — confusingly, not silently, since staleness is still hash-checked
+ * — while editing a same-slug note in a different Vault. */
+export function noteDraftKey(vaultId: string, slug: string): string {
+  return `hatchdoor:draft:note:${vaultId}:${slug}`;
 }
 
 export function createDraftKey(): string {
@@ -60,12 +65,13 @@ export function clearCreateDraft(): void {
   }
 }
 
-export function loadNoteDraft(slug: string): NoteDraft | null {
+export function loadNoteDraft(vaultId: string, slug: string): NoteDraft | null {
   try {
-    const raw = window.localStorage.getItem(noteDraftKey(slug));
+    const raw = window.localStorage.getItem(noteDraftKey(vaultId, slug));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<NoteDraft>;
     if (
+      typeof parsed.vaultId !== "string" ||
       typeof parsed.slug !== "string" ||
       typeof parsed.content !== "string" ||
       typeof parsed.baseContentHash !== "string" ||
@@ -73,10 +79,11 @@ export function loadNoteDraft(slug: string): NoteDraft | null {
     ) {
       return null;
     }
-    if (parsed.slug !== slug) {
+    if (parsed.vaultId !== vaultId || parsed.slug !== slug) {
       return null;
     }
     return {
+      vaultId: parsed.vaultId,
       slug: parsed.slug,
       content: parsed.content,
       baseContentHash: parsed.baseContentHash,
@@ -87,20 +94,24 @@ export function loadNoteDraft(slug: string): NoteDraft | null {
   }
 }
 
-export function saveNoteDraft(slug: string, draft: NoteDraft): void {
+export function saveNoteDraft(
+  vaultId: string,
+  slug: string,
+  draft: NoteDraft,
+): void {
   try {
     window.localStorage.setItem(
-      noteDraftKey(slug),
-      JSON.stringify({ ...draft, slug }),
+      noteDraftKey(vaultId, slug),
+      JSON.stringify({ ...draft, vaultId, slug }),
     );
   } catch {
     // Storage can fail in private browsing or when quota is exceeded.
   }
 }
 
-export function clearNoteDraft(slug: string): void {
+export function clearNoteDraft(vaultId: string, slug: string): void {
   try {
-    window.localStorage.removeItem(noteDraftKey(slug));
+    window.localStorage.removeItem(noteDraftKey(vaultId, slug));
   } catch {
     // Ignore storage failures.
   }

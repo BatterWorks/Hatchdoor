@@ -11,20 +11,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ExplorerPane } from "./ExplorerPane";
 import type { ExplorerFolder, ModifiedNote, RecentNote } from "../types";
 
+const VAULT_ID = "vault-1";
+
 const TREE: ExplorerFolder = {
   name: "Vault",
   folders: [
     {
       name: "10-topics",
       folders: [],
-      notes: [{ title: "Finance", slug: "finance" }],
+      notes: [{ vault_id: VAULT_ID, title: "Finance", slug: "finance" }],
     },
   ],
-  notes: [{ title: "Home", slug: "home" }],
+  notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
 };
 
 const RECENT: RecentNote[] = [
   {
+    vaultId: VAULT_ID,
     title: "Home",
     slug: "home",
     relativePath: "Home",
@@ -34,6 +37,7 @@ const RECENT: RecentNote[] = [
 
 const MODIFIED: ModifiedNote[] = [
   {
+    vault_id: VAULT_ID,
     title: "Finance",
     slug: "finance",
     relative_path: "10-topics/Finance",
@@ -50,7 +54,7 @@ function renderPane(
     writeEnabled: true,
     settingsEnabled: true,
     onCreateNoteInFolder: vi.fn(),
-    locationPathname: "/n/home",
+    locationPathname: `/v/${VAULT_ID}/n/home`,
     recentNotes: RECENT,
     modifiedNotes: MODIFIED,
     loadingTree: false,
@@ -67,7 +71,7 @@ function renderPane(
   };
 
   render(
-    <MemoryRouter initialEntries={["/n/home"]}>
+    <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
       <ExplorerPane {...props} />
     </MemoryRouter>,
   );
