@@ -67,6 +67,41 @@ describe("useSearch", () => {
   });
 });
 
+describe("useSearch — tag-tap Vault preselection (#144)", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("opens with the query filled in and that Vault preselected", () => {
+    const { result } = renderHook(() => useSearch("all"));
+
+    act(() => {
+      result.current.openSearchForTag("orchard", "vault-work");
+    });
+
+    expect(result.current.searchOpen).toBe(true);
+    expect(result.current.searchQuery).toBe("#orchard");
+    expect(result.current.searchIncludeContent).toBe(true);
+    expect(result.current.searchInitialVaultFilter).toBe("vault-work");
+  });
+
+  it("clears the preselection once the dialog closes, so a later plain open starts fresh", () => {
+    const { result } = renderHook(() => useSearch("all"));
+
+    act(() => {
+      result.current.openSearchForTag("orchard", "vault-work");
+    });
+    expect(result.current.searchInitialVaultFilter).toBe("vault-work");
+
+    act(() => {
+      result.current.setSearchOpen(false);
+    });
+
+    expect(result.current.searchInitialVaultFilter).toBeUndefined();
+  });
+});
+
 describe("useSearch — partiality (#141)", () => {
   afterEach(() => {
     cleanup();

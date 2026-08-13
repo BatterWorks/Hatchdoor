@@ -122,6 +122,8 @@ export function VaultApp() {
     searchResults,
     searchPartial,
     searchMissingVaultNames,
+    searchParticipants,
+    searchInitialVaultFilter,
     searchLoading,
     searchError,
     searchInputRef,
@@ -609,6 +611,8 @@ export function VaultApp() {
           results={searchResults}
           partial={searchPartial}
           missingVaultNames={searchMissingVaultNames}
+          participants={searchParticipants}
+          initialVaultFilter={searchInitialVaultFilter}
           vaults={vaults}
           scope={scope}
           inputRef={searchInputRef}

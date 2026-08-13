@@ -69,6 +69,117 @@
   accent-color: var(--hot);
 }
 
+/* Phone field strip — Scope beside Mode, using §18's field grammar. Hidden
+   on desktop by default; the 920px breakpoint in responsive.css swaps this
+   for the checkbox above (#119, #144). */
+.search-field-strip {
+  display: none;
+  gap: 0.6rem;
+  margin: 0.7rem 0 0.55rem;
+}
+
+.search-field-strip .field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* ── Facet rail (#119, #144) — the dialog's own Vault filter, never the
+   browsing scope. A narrow column beside the results on desktop; hidden
+   below 920px, where the field strip above carries the same filter. ── */
+
+.search-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.search-facet-rail {
+  flex: 0 0 auto;
+  width: 9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  margin-top: 0.5rem;
+}
+
+.search-facet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem;
+  width: 100%;
+  padding: 0.32rem 0.4rem;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 400;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .search-facet-row:hover {
+    color: var(--ink);
+    background: var(--paper-2);
+  }
+}
+
+.search-facet-row:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+/* The current facet's active treatment — the same hot rail, hot-soft
+   background, and bolding `.note-link.active-note` and the Scope zone's
+   current row use (#119). */
+.search-facet-row.is-selected {
+  color: var(--ink);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 600;
+  background: var(--hot-soft);
+  box-shadow: inset 3px 0 0 var(--hot);
+}
+
+/* A Vault that did not answer keeps its row but cannot be selected — a
+   missing facet would be an absence, a named one is a fact (#116). */
+.search-facet-row[aria-disabled="true"] {
+  cursor: not-allowed;
+  color: var(--muted);
+}
+
+@media (hover: hover) {
+  .search-facet-row[aria-disabled="true"]:hover {
+    background: transparent;
+    color: var(--muted);
+  }
+}
+
+.search-facet-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.search-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.search-facet-empty {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 .search-results {
   list-style: none;
   margin: 0.5rem 0 0;

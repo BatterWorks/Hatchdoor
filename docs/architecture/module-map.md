@@ -1578,13 +1578,33 @@ search envelope (#141), rendered with the same never-a-banner rule
 below the last result, or `StateBlock tone="error"` replacing "No matching
 notes" outright when nothing is usable. Ranking is unchanged either way.
 
+`SearchDialog` also carries its own Vault filter (#144) — a lens over the
+answer in front of you, never the browsing scope, per #119's rule the
+component structurally cannot violate (it has no `onScopeChange` prop at
+all). `useSearch` exposes the raw `searchParticipants` (feeding per-Vault
+facet counts) and `searchInitialVaultFilter` (pre-fills the filter from a
+tag tap via `openSearchForTag(tag, vaultId)`, cleared the moment the dialog
+closes). The filter itself is local `useState` inside `SearchDialog`, not
+lifted to `useSearch` — it dies for free because `App.tsx` only mounts
+`<SearchDialog>` while `searchOpen` is true, so the component remounts
+fresh on every open. Two shapes, one meaning: a `.search-facet-rail` column
+beside the results on desktop (absent when scope is narrowed or at one
+enabled Vault), and a `.search-field-strip` `Scope`-beside-`Mode` pair
+(§18's field grammar) that replaces the desktop Mode checkbox below 920px —
+both rendered unconditionally and toggled by the same CSS breakpoint
+`responsive.css` already uses, so no `isMobile` prop crosses the boundary.
+Filtering is a client-side `Array.filter` over the already-fetched results;
+no re-fetch, no re-ranking.
+
 **Consumed dependencies:** shared API/error utilities, shared UI components
-(`components/ui.tsx`'s `VaultPrefix` and `StateBlock`),
+(`components/ui.tsx`'s `VaultPrefix` and `StateBlock`), the shared
+`.field`/`.field-label`/`.field-input` grammar (`App.css`),
 `lib/vaultParticipants.ts`, router navigation supplied by the shell, and
 backend Search.
 
-**Coordination paths:** `App.tsx`, `App.css`, backend search HTTP contract, and
-responsive CSS.
+**Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
+`openSearchForTag` this note's own Vault id), backend search HTTP contract,
+and responsive CSS.
 
 **Pilot constraint:** co-location or façade work is structure-only. It must not
 change backend retrieval, ranking, cache, or MCP behavior.
@@ -1640,7 +1660,12 @@ condition alone, so a stopped or conflicted Vault shows `SaveState`'s
 `Not saving` and a full-bleed `.write-notice` before a save is ever
 attempted (autosave's own `enabled` flag is gated on the same check), while
 every other non-healthy condition — or trouble in a Vault that is not the
-open note's — raises nothing here.
+open note's — raises nothing here. `NotePage`'s `onTagSelect` prop is
+`(tag, vaultId) => void` (#144): it wraps the raw `onTagSelect={tag =>
+onTagSelect(tag, vaultId)}` when calling `<NoteProperties>`, handing Search
+this note's own Vault id so a tag tap pre-selects it in the dialog's filter
+— tags are per-Vault vocabularies. `NoteProperties`'s own prop to
+`TagChips` is untouched.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, note editing, and `app/vaultSlotLogic.ts`'s
