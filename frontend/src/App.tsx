@@ -47,6 +47,7 @@ import { useVaultTree } from "./hooks/useVaultTree";
 import {
   resolvePrimaryVaultId,
   useVaultDiscovery,
+  useVaultNoteCounts,
   useVaultScope,
 } from "./hooks/useVaultScope";
 import { useWriteMode } from "./hooks/useWriteMode";
@@ -89,7 +90,6 @@ export function VaultApp() {
     tree,
     loadingTree,
     treeError,
-    treePartial,
     modifiedNotes,
     vaultRevision,
     folderPaths,
@@ -97,6 +97,7 @@ export function VaultApp() {
     loadTree,
     loadModifiedNotes,
   } = useVaultTree(scope);
+  const vaultNoteCounts = useVaultNoteCounts(vaults.length > 1, vaultRevision);
   const refreshVault = useCallback(async () => {
     await loadTree();
     await loadModifiedNotes();
@@ -430,7 +431,6 @@ export function VaultApp() {
         writeEnabled={writeEnabled}
         isMobile={isMobile}
         isOnline={isOnline}
-        treeIsStale={treePartial}
         actionsMenuOpen={actionsMenuOpen}
         topbarRef={topbarRef}
         theme={theme}
@@ -499,6 +499,7 @@ export function VaultApp() {
           scope={scope}
           onScopeChange={setScope}
           viewingVaultId={activeNote?.vaultId}
+          vaultNoteCounts={vaultNoteCounts}
           scopeZoneCollapsed={scopeZoneCollapsed}
           onScopeZoneCollapsedChange={(next) => {
             setScopeZoneCollapsed(next);

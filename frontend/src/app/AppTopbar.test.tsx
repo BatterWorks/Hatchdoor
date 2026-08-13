@@ -13,7 +13,6 @@ function renderTopbar(overrides: Partial<Parameters<typeof AppTopbar>[0]> = {}) 
     writeEnabled: false,
     isMobile: false,
     isOnline: true,
-    treeIsStale: false,
     actionsMenuOpen: false,
     theme: "auto" as const,
     onToggleDrawer: vi.fn(),

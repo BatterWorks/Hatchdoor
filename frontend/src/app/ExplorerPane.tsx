@@ -10,6 +10,8 @@ import {
   SettingsIcon,
 } from "../components/icons";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
+import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
+import { deriveVaultAggregate } from "./vaultSlotLogic";
 import type {
   ExplorerFolder,
   ModifiedNote,
@@ -46,6 +48,7 @@ function ScopeZone({
   viewingVaultId,
   collapsed,
   onToggleCollapsed,
+  noteCounts,
 }: {
   vaults: VaultSummary[];
   scope: VaultScope;
@@ -53,12 +56,19 @@ function ScopeZone({
   viewingVaultId: VaultId | undefined;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  noteCounts: Record<VaultId, number | undefined>;
 }) {
   if (vaults.length <= 1) {
     return null;
   }
 
   const viewingVault = vaults.find((vault) => vault.vault_id === viewingVaultId);
+  // The collapsed head names the scope in the worst ink present across every
+  // enabled Vault, not just the selected one, so narrowing scope never hides
+  // trouble elsewhere (#116, amended by #117).
+  const aggregate = deriveVaultAggregate(vaults, noteCounts);
+  const worstTierClass =
+    aggregate.kind === "shortfall" ? ` vault-tier-${aggregate.tier}` : "";
 
   return (
     <div className="scope-zone">
@@ -74,9 +84,12 @@ function ScopeZone({
         <span className="side-label">Scope</span>
         <span className="side-rule" />
         {collapsed ? (
-          <span className="scope-zone-current">
-            {scopeName(scope, vaults)}
-          </span>
+          <>
+            <span className={`scope-zone-current${worstTierClass}`}>
+              {scopeName(scope, vaults)}
+            </span>
+            <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+          </>
         ) : (
           <span className="side-count">
             {String(vaults.length).padStart(2, "0")}
@@ -97,6 +110,7 @@ function ScopeZone({
               onClick={() => onScopeChange("all")}
             >
               <span className="scope-row-label">All Vaults</span>
+              <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
             </button>
           </li>
           {vaults.map((vault) => (
@@ -110,6 +124,7 @@ function ScopeZone({
                 {viewingVaultId === vault.vault_id ? (
                   <span className="scope-row-viewing">Viewing</span>
                 ) : null}
+                <VaultSlot vault={vault} noteCount={noteCounts[vault.vault_id]} />
               </button>
             </li>
           ))}
@@ -209,6 +224,7 @@ type ExplorerPaneProps = {
   viewingVaultId: VaultId | undefined;
   scopeZoneCollapsed: boolean;
   onScopeZoneCollapsedChange: (next: boolean) => void;
+  vaultNoteCounts: Record<VaultId, number | undefined>;
 };
 
 export function ExplorerPane({
@@ -237,6 +253,7 @@ export function ExplorerPane({
   viewingVaultId,
   scopeZoneCollapsed,
   onScopeZoneCollapsedChange,
+  vaultNoteCounts,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
@@ -255,6 +272,7 @@ export function ExplorerPane({
           onToggleCollapsed={() =>
             onScopeZoneCollapsedChange(!scopeZoneCollapsed)
           }
+          noteCounts={vaultNoteCounts}
         />
       )}
       <ExplorerRail

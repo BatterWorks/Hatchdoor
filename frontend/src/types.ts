@@ -256,6 +256,20 @@ export type MonthActivity = { month: string; modified_count: number };
 export type FolderStat = { folder: string; note_count: number };
 export type NoteList = { count: number; notes: NoteRef[] };
 
+/** One Vault's lean statistics from the collection-scope
+ * `GET /api/v1/vaults/{scope}/stats` route — `VaultTree`'s sibling in the
+ * collection envelope. Powers the sidebar Scope zone's per-Vault note count
+ * (#139); too lean to back the Statistics page, which uses `VaultStats`
+ * below instead. */
+export type VaultStatistics = {
+  vault_id: VaultId;
+  vault_name: string;
+  note_count: number;
+  tag_count: number;
+  link_count: number;
+  vault_size_bytes: number;
+};
+
 /** The rich, exact single-Vault report from
  * `GET /api/v1/vaults/{vault_id}/stats/detail`. Never `all` — this is an
  * exact read, like `notes/{slug}`, not a `{scope}` collection read. The

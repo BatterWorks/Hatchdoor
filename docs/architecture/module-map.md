@@ -1404,6 +1404,8 @@ boundaries are currently documentation-enforced.
 - `frontend/src/App.tsx`
 - `frontend/src/app/AppTopbar.tsx`
 - `frontend/src/app/ExplorerPane.tsx`
+- `frontend/src/app/vaultSlot.tsx`
+- `frontend/src/app/vaultSlotLogic.ts`
 - `frontend/src/app/constants.ts`
 - `frontend/src/hooks/useIsMobile.ts`
 - `frontend/src/hooks/useTheme.ts`
@@ -1418,6 +1420,17 @@ the selected Vault scope (state/storage, per #137), Vault discovery
 (`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) is the
 only chrome that calls `setScope`, on the desktop only; every other
 collection-read and Vault-picking call site only reads the selected scope.
+`vaultSlot.tsx` (#139) derives each Vault's trailing count-or-condition slot
+and the shared All-Vaults/collapsed-head aggregate from `VaultSummary`'s
+status fields alone — no new endpoint. `useVaultScope.ts`'s
+`useVaultNoteCounts` is the one exception to "state/storage only": it fetches
+the lean collection-scope `GET /api/v1/vaults/all/stats` (always at `"all"`,
+independent of the browsing scope) to feed the slot's healthy-count reading,
+gated on more than one enabled Vault and refetched on the same
+`vaultRevision` `useVaultTree` already tracks rather than opening a second
+SSE subscription. The topbar's `Tree Stale` badge is deleted (#139) with
+nothing replacing it; `Offline` is the only condition left there, because it
+is about the workspace and not about any one Vault.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -1425,6 +1438,7 @@ surface is a coordination seam, not permission to move feature behavior into
 the shell.
 
 **Validation:** the applicable `App.*.test.tsx`, `app/ExplorerPane.test.tsx`,
+`app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
 `useTheme.test.tsx`, storage tests, then full frontend checks. Layout changes to
 the explorer pane need a browser as well as the suite: its zone structure
 depends on real cascade behavior that jsdom does not reproduce.

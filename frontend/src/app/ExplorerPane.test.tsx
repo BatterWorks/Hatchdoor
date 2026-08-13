@@ -73,6 +73,7 @@ function renderPane(
     scope: "all" as const,
     onScopeChange: vi.fn(),
     viewingVaultId: undefined,
+    vaultNoteCounts: {},
     scopeZoneCollapsed: false,
     onScopeZoneCollapsedChange: vi.fn(),
     ...overrides,
@@ -175,21 +176,18 @@ describe("ExplorerPane Scope zone", () => {
     const rows = screen
       .getAllByRole("button")
       .filter((button) => button.className.includes("scope-row"));
-    expect(rows.map((row) => row.textContent)).toEqual([
-      "All Vaults",
-      "Alpha",
-      "Beta",
-      "Gamma",
-    ]);
+    expect(
+      rows.map((row) => row.querySelector(".scope-row-label")?.textContent),
+    ).toEqual(["All Vaults", "Alpha", "Beta", "Gamma"]);
   });
 
   it("gives the current scope the active treatment", () => {
     renderPane({ vaults: THREE_VAULTS, scope: THREE_VAULTS[1].vault_id });
 
-    const selected = screen.getByRole("button", { name: "Beta" });
+    const selected = screen.getByRole("button", { name: /^Beta/ });
     expect(selected).toHaveClass("is-selected");
     expect(
-      screen.getByRole("button", { name: "All Vaults" }),
+      screen.getByRole("button", { name: /^All Vaults/ }),
     ).not.toHaveClass("is-selected");
   });
 
@@ -197,7 +195,7 @@ describe("ExplorerPane Scope zone", () => {
     const onScopeChange = vi.fn();
     renderPane({ vaults: THREE_VAULTS, onScopeChange });
 
-    fireEvent.click(screen.getByRole("button", { name: "Beta" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Beta/ }));
 
     expect(onScopeChange).toHaveBeenCalledExactlyOnceWith(
       THREE_VAULTS[1].vault_id,
@@ -219,7 +217,9 @@ describe("ExplorerPane Scope zone", () => {
     expect(
       screen.getByRole("button", { name: /Scope/ }),
     ).toHaveAttribute("aria-expanded", "true");
-    expect(screen.getByRole("button", { name: "All Vaults" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /^All Vaults/ }),
+    ).toBeVisible();
   });
 
   it("collapsed head names the current scope in place of the count", () => {
@@ -266,6 +266,50 @@ describe("ExplorerPane Scope zone", () => {
     });
 
     expect(screen.queryByText(/^Viewing:/)).not.toBeInTheDocument();
+  });
+
+  it("wires each row's note count from vaultNoteCounts (#139)", () => {
+    // THREE_VAULTS[0] (Alpha) is the fixture set's healthy Vault; Beta is
+    // indexing and Gamma is stale, so only Alpha's row shows a count.
+    renderPane({
+      vaults: THREE_VAULTS,
+      vaultNoteCounts: { [THREE_VAULTS[0].vault_id]: 42 },
+    });
+
+    const row = screen.getByRole("button", { name: /^Alpha/ });
+    expect(within(row).getByText("42")).toBeInTheDocument();
+  });
+
+  it("wires a Vault's condition word into its row from live status fields", () => {
+    renderPane({
+      vaults: [
+        THREE_VAULTS[0],
+        { ...THREE_VAULTS[1], activation: "unavailable" as const },
+        THREE_VAULTS[2],
+      ],
+    });
+
+    const row = screen.getByRole("button", { name: /^Beta/ });
+    expect(within(row).getByText("unavailable")).toHaveClass(
+      "vault-tier-error",
+    );
+  });
+
+  it("gives the collapsed head the worst ink present and the same aggregate as the All Vaults row", () => {
+    renderPane({
+      vaults: [
+        THREE_VAULTS[0],
+        { ...THREE_VAULTS[1], activation: "unavailable" as const },
+        THREE_VAULTS[2],
+      ],
+      scopeZoneCollapsed: true,
+    });
+
+    const head = screen.getByRole("button", { name: /Scope/ });
+    expect(within(head).getByText("All Vaults")).toHaveClass(
+      "vault-tier-error",
+    );
+    expect(within(head).getByText("1 of 3")).toBeInTheDocument();
   });
 });
 
