@@ -39,7 +39,8 @@ export async function requestJson(
     return {
       ok: false,
       payload: {
-        message: "Could not reach the server. Check the connection and try again.",
+        message:
+          "Could not reach the server. Check the connection and try again.",
       },
     };
   }

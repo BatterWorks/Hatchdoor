@@ -59,7 +59,11 @@ describe("deriveVaultSlot", () => {
 
   it("shows stale in warn tier when indexing has failed", () => {
     const result = deriveVaultSlot(staleVault("Alpha"), 40);
-    expect(result).toMatchObject({ kind: "condition", word: "stale", tier: "warn" });
+    expect(result).toMatchObject({
+      kind: "condition",
+      word: "stale",
+      tier: "warn",
+    });
     if (result.kind === "condition") {
       expect(result.sentence).toBe(
         "The last index build for this Vault failed.",
@@ -108,7 +112,9 @@ describe("deriveVaultSlot", () => {
       ...conflictVault("Alpha"),
       activation: "unavailable",
     };
-    expect(deriveVaultSlot(vault, undefined)).toMatchObject({ word: "unavailable" });
+    expect(deriveVaultSlot(vault, undefined)).toMatchObject({
+      word: "unavailable",
+    });
   });
 
   it("ranks a Git condition above a stale search condition", () => {
@@ -116,7 +122,9 @@ describe("deriveVaultSlot", () => {
       ...conflictVault("Alpha"),
       search: "stale",
     };
-    expect(deriveVaultSlot(vault, undefined)).toMatchObject({ word: "conflict" });
+    expect(deriveVaultSlot(vault, undefined)).toMatchObject({
+      word: "conflict",
+    });
   });
 });
 
@@ -131,7 +139,9 @@ describe("VaultSlot", () => {
   it("renders a shimmering placeholder while indexing, with no word", () => {
     render(<VaultSlot vault={indexingVault("Alpha")} noteCount={undefined} />);
 
-    expect(screen.getByRole("status", { name: "Indexing" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Indexing" }),
+    ).toBeInTheDocument();
   });
 
   it("distinguishes the red tier by form (a class), not colour alone", () => {
@@ -151,7 +161,9 @@ describe("VaultSlot", () => {
   });
 
   it("carries the plain-language sentence in hover text and accessible name, while the word on screen stays terse", () => {
-    render(<VaultSlot vault={syncStoppedVault("Alpha")} noteCount={undefined} />);
+    render(
+      <VaultSlot vault={syncStoppedVault("Alpha")} noteCount={undefined} />,
+    );
 
     const slot = screen.getByText("sync stopped");
     expect(slot).toHaveAttribute(
@@ -198,9 +210,7 @@ describe("deriveVaultAggregate", () => {
   it("shows the shortfall in error tier when any red condition is present, even alongside amber", () => {
     const stale = staleVault("Beta");
     const unavailable = unavailableVault("Gamma");
-    expect(
-      deriveVaultAggregate([alpha, stale, unavailable], {}),
-    ).toEqual({
+    expect(deriveVaultAggregate([alpha, stale, unavailable], {})).toEqual({
       kind: "shortfall",
       participating: 1,
       total: 3,

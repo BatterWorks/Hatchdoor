@@ -1,9 +1,16 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 
 import { apiFetch } from "../../api/api";
 import { VaultSlot } from "../../app/vaultSlot";
 import { deriveVaultSlot } from "../../app/vaultSlotLogic";
-import type { VaultDiscoveryResponse, VaultId, VaultSource, VaultSummary } from "../../types";
+import { StateBlock } from "../../components/ui";
+import type {
+  VaultDiscoveryResponse,
+  VaultId,
+  VaultRegistryRecovery,
+  VaultSource,
+  VaultSummary,
+} from "../../types";
 import {
   behaviorOf,
   behaviorOptions,
@@ -56,34 +63,45 @@ export function VaultSettingsIndex({
   const [vaults, setVaults] = useState<VaultSummary[]>([]);
   const [counts, setCounts] = useState<Counts>({});
   const [recovering, setRecovering] = useState<Record<VaultId, boolean>>({});
+  // The persisted registry file itself is unreadable (#150) — distinct from
+  // a Vault-level `needs attention` recovery above, this replaces the whole
+  // group. `legacy_migration_recovery` is deliberately not surfaced here:
+  // the registry loads fine (empty) in that case, so the group renders its
+  // ordinary zero-Vault "Add a Vault" state.
+  const [registryRecovery, setRegistryRecovery] =
+    useState<VaultRegistryRecovery | null>(null);
+
+  const loadVaults = useCallback(async (signal?: { cancelled: boolean }) => {
+    const response = await apiFetch("/api/v1/vaults");
+    if (!response.ok || signal?.cancelled) return;
+    const discovery = (await response.json()) as VaultDiscoveryResponse;
+    if (!Array.isArray(discovery.vaults)) return;
+    setVaults(discovery.vaults);
+    setRegistryRecovery(discovery.recovery ?? null);
+    if (discovery.recovery) return;
+    const stats = await apiFetch("/api/v1/vaults/all/stats");
+    if (!stats.ok || signal?.cancelled) return;
+    const payload = (await stats.json()) as {
+      data?: Array<{ vault_id: VaultId; note_count: number }>;
+    };
+    if (!signal?.cancelled)
+      setCounts(
+        Object.fromEntries(
+          (payload.data ?? []).map(({ vault_id, note_count }) => [
+            vault_id,
+            note_count,
+          ]),
+        ),
+      );
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const response = await apiFetch("/api/v1/vaults");
-      if (!response.ok) return;
-      const discovery = (await response.json()) as VaultDiscoveryResponse;
-      if (cancelled || !Array.isArray(discovery.vaults)) return;
-      setVaults(discovery.vaults);
-      const stats = await apiFetch("/api/v1/vaults/all/stats");
-      if (!stats.ok || cancelled) return;
-      const payload = (await stats.json()) as {
-        data?: Array<{ vault_id: VaultId; note_count: number }>;
-      };
-      if (!cancelled)
-        setCounts(
-          Object.fromEntries(
-            (payload.data ?? []).map(({ vault_id, note_count }) => [
-              vault_id,
-              note_count,
-            ]),
-          ),
-        );
-    })().catch(() => undefined);
+    const signal = { cancelled: false };
+    void loadVaults(signal).catch(() => undefined);
     return () => {
-      cancelled = true;
+      signal.cancelled = true;
     };
-  }, []);
+  }, [loadVaults]);
 
   const handleRecover = async (vaultId: VaultId) => {
     setRecovering((old) => ({ ...old, [vaultId]: true }));
@@ -99,11 +117,27 @@ export function VaultSettingsIndex({
     setRecovering((old) => ({ ...old, [vaultId]: false }));
   };
 
+  if (registryRecovery) {
+    return (
+      <section className="settings-vault-index" aria-label="Vaults">
+        <p className="settings-index-group">Vaults</p>
+        <StateBlock
+          tone="error"
+          title="Vault Registry Unavailable"
+          description={`${registryRecovery.message} Nothing was changed, and your Markdown is untouched.`}
+          actionLabel="Try again"
+          onAction={() => void loadVaults()}
+        />
+      </section>
+    );
+  }
+
   return (
     <section className="settings-vault-index" aria-label="Vaults">
       <p className="settings-index-group">Vaults</p>
       {vaults.map((vault) => {
-        const needsRecovery = !vault.enabled && isRecoveryPending(vault.vault_id);
+        const needsRecovery =
+          !vault.enabled && isRecoveryPending(vault.vault_id);
         return (
           <Fragment key={vault.vault_id}>
             <button
@@ -150,13 +184,19 @@ export function VaultSettingsIndex({
 
 function draftsFromSource(source: VaultSource | undefined) {
   const behavior = source ? behaviorOf(source) : null;
-  const repoUrl = source && source.type !== "local" ? (source.repository_url ?? "") : "";
+  const repoUrl =
+    source && source.type !== "local" ? (source.repository_url ?? "") : "";
   const branch = source && source.type !== "local" ? (source.branch ?? "") : "";
   const subdirectory =
     source && source.type !== "local" ? (source.vault_subdirectory ?? "") : "";
   const pollMinutes =
     source && source.type !== "local"
-      ? String(Math.max(MIN_POLL_MINUTES, Math.round(source.poll_interval_secs / 60)))
+      ? String(
+          Math.max(
+            MIN_POLL_MINUTES,
+            Math.round(source.poll_interval_secs / 60),
+          ),
+        )
       : String(DEFAULT_POLL_MINUTES);
   return { behavior, repoUrl, branch, subdirectory, pollMinutes };
 }
@@ -189,7 +229,9 @@ export function VaultSettingsDetail({
   const [repoUrlDraft, setRepoUrlDraft] = useState("");
   const [branchDraft, setBranchDraft] = useState("");
   const [subdirDraft, setSubdirDraft] = useState("");
-  const [pollMinutesDraft, setPollMinutesDraft] = useState(String(DEFAULT_POLL_MINUTES));
+  const [pollMinutesDraft, setPollMinutesDraft] = useState(
+    String(DEFAULT_POLL_MINUTES),
+  );
   const [plaqueEditing, setPlaqueEditing] = useState(false);
   const [signIn, setSignIn] = useState<"none" | "token">("none");
   const [credToken, setCredToken] = useState("");
@@ -293,8 +335,7 @@ export function VaultSettingsDetail({
 
   const remoteBackedDraft = isRemoteBacked(draftBehavior);
   const showPlaqueFields = draftBehavior !== null && draftBehavior !== "no_git";
-  const plaqueFieldsEditable =
-    vault.source?.type === "local" || plaqueEditing;
+  const plaqueFieldsEditable = vault.source?.type === "local" || plaqueEditing;
 
   const credentialsPatch = ():
     | { action: "keep" }
@@ -403,7 +444,10 @@ export function VaultSettingsDetail({
       const rollback = await recoverPausedVault(vaultId);
       if (rollback.ok) {
         if (rollback.vault) applyVault(rollback.vault);
-        else setVault((current) => (current ? { ...current, enabled: true } : current));
+        else
+          setVault((current) =>
+            current ? { ...current, enabled: true } : current,
+          );
         setMessage(
           editPayload.message
             ? `Nothing changed. ${editPayload.message}`
@@ -446,7 +490,9 @@ export function VaultSettingsDetail({
     setRecoveryPending(false);
     if (enablePayload.vault) applyVault(enablePayload.vault);
     else {
-      setVault((current) => (current ? { ...current, enabled: true } : current));
+      setVault((current) =>
+        current ? { ...current, enabled: true } : current,
+      );
       if (enablePayload.registry_revision !== undefined)
         setRevision(enablePayload.registry_revision);
     }
@@ -516,9 +562,10 @@ export function VaultSettingsDetail({
     setSyncing(false);
   };
 
-  const gitFailure = vault.git === "unavailable" && vault.git_error
-    ? describeGitFailure(vault.git_error)
-    : null;
+  const gitFailure =
+    vault.git === "unavailable" && vault.git_error
+      ? describeGitFailure(vault.git_error)
+      : null;
   const consoleVisible = vault.source !== undefined && vault.git !== "disabled";
 
   return (
@@ -712,7 +759,9 @@ export function VaultSettingsDetail({
                         className="settings-input settings-plaque-field"
                         aria-label="Repository URL"
                         value={repoUrlDraft}
-                        onChange={(event) => setRepoUrlDraft(event.target.value)}
+                        onChange={(event) =>
+                          setRepoUrlDraft(event.target.value)
+                        }
                       />
                     ) : (
                       repoUrlDraft || "not set"
@@ -867,8 +916,8 @@ export function VaultSettingsDetail({
                 <span>
                   <span className="settings-row-label">Sync schedule</span>
                   <span className="settings-row-help">
-                    Hatchdoor has no way to be told when something is pushed,
-                    so it checks on this schedule.
+                    Hatchdoor has no way to be told when something is pushed, so
+                    it checks on this schedule.
                   </span>
                 </span>
                 <div className="settings-inline">
@@ -879,7 +928,9 @@ export function VaultSettingsDetail({
                     max={MAX_POLL_MINUTES}
                     aria-label="Sync schedule in minutes"
                     value={pollMinutesDraft}
-                    onChange={(event) => setPollMinutesDraft(event.target.value)}
+                    onChange={(event) =>
+                      setPollMinutesDraft(event.target.value)
+                    }
                   />
                   <span className="settings-unit">minutes</span>
                 </div>
@@ -949,7 +1000,9 @@ export function VaultSettingsDetail({
           >
             <h3>Before this is saved</h3>
             <p>{IDENTITY_CHANGE_CONSEQUENCE}</p>
-            {confirmation.localHistory ? <p>{LOCAL_HISTORY_CONSEQUENCE}</p> : null}
+            {confirmation.localHistory ? (
+              <p>{LOCAL_HISTORY_CONSEQUENCE}</p>
+            ) : null}
             {vault.credential_configured ? (
               <p>
                 Its stored access token will be cleared — sign in again

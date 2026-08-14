@@ -279,10 +279,84 @@ describe("ExplorerPane Scope zone", () => {
     expect(screen.queryByText("Scope")).not.toBeInTheDocument();
   });
 
+  it("keeps the one-Vault Scope zone visible while startup work needs its progress slot (#150)", () => {
+    renderPane({
+      vaults: [THREE_VAULTS[0]],
+      startupProgress: { label: "Indexing 42%", percent: 42 },
+    });
+
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveAttribute(
+      "aria-label",
+      "Indexing 42%",
+    );
+  });
+
   it("is absent on mobile", () => {
     renderPane({ vaults: THREE_VAULTS, isMobile: true });
 
     expect(screen.queryByText("Scope")).not.toBeInTheDocument();
+  });
+
+  it("renders at zero enabled Vaults, reading All Vaults with no rows beneath it, in neutral ink (#150)", () => {
+    renderPane({ vaults: [] });
+
+    expect(screen.getByText("Scope")).toBeInTheDocument();
+    const rows = screen
+      .getAllByRole("radio")
+      .filter((button) => button.className.includes("scope-row"));
+    expect(
+      rows.map((row) => row.querySelector(".scope-row-label")?.textContent),
+    ).toEqual(["All Vaults"]);
+    // Neutral ink: the All Vaults row's slot reads a plain "0" count, not a
+    // shortfall badge.
+    expect(
+      scopeZone().getByRole("radio", { name: /^All Vaults/ }),
+    ).toHaveTextContent("0");
+    cleanup();
+
+    // Same neutral ink collapsed, where the head itself names the scope.
+    renderPane({ vaults: [], scopeZoneCollapsed: true });
+    const head = document.querySelector(".scope-zone-head") as HTMLElement;
+    expect(within(head).getByText("All Vaults")).toHaveClass(
+      "scope-zone-current",
+    );
+    expect(within(head).getByText("All Vaults").className).not.toMatch(
+      /vault-tier-/,
+    );
+  });
+
+  it("renders identically for a brand-new install and a just-emptied instance (#150)", () => {
+    renderPane({ vaults: [] });
+    const freshHtml = document.querySelector(".scope-zone")?.outerHTML;
+    cleanup();
+
+    renderPane({ vaults: [] });
+    expect(document.querySelector(".scope-zone")?.outerHTML).toBe(freshHtml);
+  });
+
+  it("shows the shrunk startup gate's progress in its own slot instead of the aggregate (#150)", () => {
+    renderPane({
+      vaults: THREE_VAULTS,
+      startupProgress: { label: "Indexing 42%", percent: 42 },
+    });
+
+    expect(
+      scopeZone().getByRole("radio", { name: /^All Vaults/ }),
+    ).toHaveTextContent("42%");
+    cleanup();
+
+    renderPane({
+      vaults: THREE_VAULTS,
+      scopeZoneCollapsed: true,
+      startupProgress: { label: "Indexing 42%", percent: 42 },
+    });
+    const head = document.querySelector(".scope-zone-head") as HTMLElement;
+    expect(within(head).getByRole("status")).toHaveAttribute(
+      "aria-label",
+      "Indexing 42%",
+    );
+    expect(within(head).getByText("42%")).toBeInTheDocument();
   });
 
   it("lists All Vaults plus every enabled Vault in Vault-management order", () => {
@@ -301,9 +375,9 @@ describe("ExplorerPane Scope zone", () => {
 
     const selected = screen.getByRole("radio", { name: /^Beta/ });
     expect(selected).toHaveClass("is-selected");
-    expect(
-      screen.getByRole("radio", { name: /^All Vaults/ }),
-    ).not.toHaveClass("is-selected");
+    expect(screen.getByRole("radio", { name: /^All Vaults/ })).not.toHaveClass(
+      "is-selected",
+    );
   });
 
   it("picking a row changes scope and nothing else", () => {
@@ -329,12 +403,11 @@ describe("ExplorerPane Scope zone", () => {
   it("defaults to expanded", () => {
     renderPane({ vaults: THREE_VAULTS });
 
-    expect(
-      screen.getByRole("button", { name: /Scope/ }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(
-      screen.getByRole("radio", { name: /^All Vaults/ }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: /Scope/ })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByRole("radio", { name: /^All Vaults/ })).toBeVisible();
   });
 
   it("collapsed head names the current scope in place of the count", () => {
@@ -508,9 +581,7 @@ describe("ExplorerPane Scope zone", () => {
       </MemoryRouter>,
     );
 
-    expect(
-      scopeZone().getByRole("radio", { name: /^Beta/ }),
-    ).toHaveFocus();
+    expect(scopeZone().getByRole("radio", { name: /^Beta/ })).toHaveFocus();
   });
 });
 
@@ -544,7 +615,11 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
   }
 
   it("shows the Vault prefix on Recently viewed when scope is all and multiple Vaults are enabled", () => {
-    renderPane({ vaults: THREE_VAULTS, scope: "all", recentNotes: recentAcrossVaults });
+    renderPane({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      recentNotes: recentAcrossVaults,
+    });
 
     const recent = screen.getByTestId("recent-notes");
     expect(within(recent).getByText("Beta")).toBeInTheDocument();
@@ -580,7 +655,9 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
     });
     openChanges();
 
-    const panel = screen.getByRole("region", { name: "Recently changed notes" });
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
     expect(within(panel).getByText("Gamma")).toBeInTheDocument();
   });
 
@@ -592,7 +669,9 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
     });
     openChanges();
 
-    const panel = screen.getByRole("region", { name: "Recently changed notes" });
+    const panel = screen.getByRole("region", {
+      name: "Recently changed notes",
+    });
     expect(within(panel).queryByText("Gamma")).not.toBeInTheDocument();
   });
 });
@@ -705,11 +784,15 @@ describe("ExplorerPane accordion (#142)", () => {
     });
 
     const heads = accordionHeads();
-    expect(heads.map((head) => head.querySelector(".side-label")?.textContent)).toEqual(
-      EIGHT_VAULTS.map((vault) => vault.name),
-    );
-    expect(heads.filter((head) => head.getAttribute("data-open") === "true")).toHaveLength(1);
-    expect(document.querySelectorAll(".explorer-nav > .tree.root-tree")).toHaveLength(1);
+    expect(
+      heads.map((head) => head.querySelector(".side-label")?.textContent),
+    ).toEqual(EIGHT_VAULTS.map((vault) => vault.name));
+    expect(
+      heads.filter((head) => head.getAttribute("data-open") === "true"),
+    ).toHaveLength(1);
+    expect(
+      document.querySelectorAll(".explorer-nav > .tree.root-tree"),
+    ).toHaveLength(1);
   });
 
   it("carries the Vault name and the count-or-condition slot on each head", () => {
@@ -758,7 +841,9 @@ describe("ExplorerPane accordion (#142)", () => {
     const heads = accordionHeads();
     expect(heads[0]).toHaveAttribute("data-open", "false");
     expect(heads[2]).toHaveAttribute("data-open", "true");
-    expect(document.querySelectorAll(".explorer-nav > .tree.root-tree")).toHaveLength(1);
+    expect(
+      document.querySelectorAll(".explorer-nav > .tree.root-tree"),
+    ).toHaveLength(1);
   });
 
   it("marks an unavailable Vault's head aria-disabled and refuses to unfold it", () => {
@@ -772,7 +857,9 @@ describe("ExplorerPane accordion (#142)", () => {
     fireEvent.click(head);
 
     expect(head).toHaveAttribute("data-open", "false");
-    expect(document.querySelectorAll(".explorer-nav > .tree.root-tree")).toHaveLength(0);
+    expect(
+      document.querySelectorAll(".explorer-nav > .tree.root-tree"),
+    ).toHaveLength(0);
   });
 
   describe("landing defaults", () => {
@@ -813,10 +900,14 @@ describe("ExplorerPane accordion (#142)", () => {
         locationPathname: "/",
       });
 
-      expect(accordionHeads().every((head) => head.getAttribute("data-open") === "false")).toBe(
-        true,
-      );
-      expect(document.querySelectorAll(".explorer-nav > .tree.root-tree")).toHaveLength(0);
+      expect(
+        accordionHeads().every(
+          (head) => head.getAttribute("data-open") === "false",
+        ),
+      ).toBe(true);
+      expect(
+        document.querySelectorAll(".explorer-nav > .tree.root-tree"),
+      ).toHaveLength(0);
     });
   });
 
@@ -842,19 +933,25 @@ describe("ExplorerPane accordion (#142)", () => {
     };
     openJournal();
     expect(
-      screen.getByText("Journal", { selector: ".folder-label" }).closest("details"),
+      screen
+        .getByText("Journal", { selector: ".folder-label" })
+        .closest("details"),
     ).toHaveAttribute("open");
 
     // Switch to Gamma, whose own "Journal" starts closed (not shared).
     fireEvent.click(accordionHeads()[2]);
     expect(
-      screen.getByText("Journal", { selector: ".folder-label" }).closest("details"),
+      screen
+        .getByText("Journal", { selector: ".folder-label" })
+        .closest("details"),
     ).not.toHaveAttribute("open");
 
     // Back to Alpha: its folder is still open.
     fireEvent.click(accordionHeads()[0]);
     expect(
-      screen.getByText("Journal", { selector: ".folder-label" }).closest("details"),
+      screen
+        .getByText("Journal", { selector: ".folder-label" })
+        .closest("details"),
     ).toHaveAttribute("open");
   });
 

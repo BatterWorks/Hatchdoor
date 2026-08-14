@@ -1170,6 +1170,29 @@ registry itself needs operator recovery. Every response uses the shared
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
 duplicating them. MCP discovery is #103.
 
+Discovery additionally reports `legacy_migration_recovery`
+(`{code: "legacy_migration_required", message}`) when `AppState`'s
+field of the same name — set once at startup from a failed safe legacy
+import, `src/vault_migration.rs`'s `LegacyMigrationOutcome::Recovery` — is
+still pending (#150). This is distinct from the sibling `recovery` field
+above: `legacy_migration_recovery` means the registry itself loaded fine
+(empty, revision 0) but automatic import could not prove the legacy
+deployment, where `recovery` means the persisted registry file itself is
+unreadable. Because a confirmed recovery action needs to clear this flag
+without a restart, the field is `Arc<StdRwLock<Option<LegacyMigrationRecovery>>>`
+rather than a plain `Option` fixed at construction.
+`POST /api/v1/vaults/start-with-no-vaults` (`start_with_no_vaults_handler`)
+is the confirmed recovery action: it requires `legacy_migration_recovery` to
+be pending and a `{"confirm": true}` body, calls
+`vault_migration::start_with_no_vaults` (an ordinary revision-0 commit,
+refusing `registry_revision_conflict` if the registry already holds real
+state), reconciles through `reconcile_after_commit` and responds through
+`mutation_response` exactly like every other registry-mutating handler
+here (so `state.vaults`'s own collection revision and the
+`/api/v1/vaults/events` SSE stream never lag this commit, even though
+today's transition is empty registry to empty registry), and clears the
+flag on success. Demo-gated like every other collection-management route.
+
 `edit_vault_handler` requests an immediate Git turn after a successful edit
 whose `https_credentials` was `Replace` (issue #97's reopening finding 3):
 `VaultDefinition`'s redaction-safe equality only ever compares
@@ -1436,6 +1459,7 @@ boundaries are currently documentation-enforced.
 - `frontend/src/hooks/useTheme.ts`
 - `frontend/src/hooks/useVaultScope.ts`
 - `frontend/src/lib/storage.ts`
+- `frontend/src/components/StartWithNoVaultsDialog.tsx`
 
 **Contract and responsibility:** bootstraps React/router/PWA, composes feature
 hooks and routes, owns responsive shell state, navigation, persistent shell
@@ -1470,6 +1494,26 @@ Vault unfold gate, the `LAST_UNFOLDED_VAULT_KEY` persistence pair, and the
 per-Vault namespacing of the shared `expandedFolders` record the accordion's
 folder-open memory needs. Unfolding a Vault never calls `setScope`, same
 invariant as the Scope zone's own narrow-scope call being the only one.
+
+The Scope zone renders at zero enabled Vaults too, not only above one
+(#150): `All Vaults` holds its place with no rows beneath it, in neutral
+ink, rather than disappearing along with the last Vault. It remains absent
+at exactly one enabled Vault where narrowing has nothing to offer, except
+while first-run startup progress needs its slot. Its
+collapsed-head and `All Vaults`-row slots also take an optional
+`startupProgress` (`StartupProgress`, exported from this file) that
+replaces the ordinary aggregate while the shrunk startup gate reports
+`scanning`/`indexing`, reusing the per-Vault "indexing" slot's animated-bar
+visual language. `App.tsx`'s `"/"` route similarly branches on genuine zero
+Vaults (a neutral `Add a Vault` empty state, inert until #153 wires the
+real flow) versus a broken start: `useVaultScope.ts`'s `useVaultDiscovery`
+now also exposes `recovery` (the persisted registry file is unreadable) and
+`legacyMigrationRecovery` (the registry loaded fine but a failed safe
+legacy import needs recovery) — mutually exclusive, both rendering the same
+documented error block with a `Try again` action (a plain re-fetch), and
+`legacyMigrationRecovery` additionally offering `components/StartWithNoVaultsDialog.tsx`'s
+once-confirmed `Start with no Vaults` action against the new
+`POST /api/v1/vaults/start-with-no-vaults` endpoint.
 
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
@@ -1520,18 +1564,35 @@ not verify Rust-to-TypeScript wire compatibility.
 **Owned paths:**
 
 - `frontend/src/startup/StartupGate.tsx`
+- `frontend/src/startup/useStartupStatus.ts`
 - `frontend/src/styles/startup.css`
 
-**Public contract:** `StartupGate` and the `/api/startup-status` plus model
-accept/decline/retry response shapes it consumes.
+**Public contract:** `StartupGate` (a pure, prop-driven presentational
+component — it no longer polls itself) and `useStartupStatus`, the shared
+hook that polls `/api/startup-status` and owns the model-setup actions
+(accept/decline Gemma, retry). Production `App.tsx` resolves Vault discovery
+before enabling this polling, so broken-registry and zero-Vault workspaces
+never poll or gate; it passes the resulting discovery plus startup
+`status`/`retryModelSetup` to its internal `VaultWorkspace` composition and
+the gate inputs to `StartupGate` (#150: the gate
+shrinks to exactly the `terms_required`/first-`downloading` model step —
+`hasSteppedPastGate` latches true the first time any other state is
+observed and never re-arms, so a later retry-triggered `downloading` never
+reopens the full-screen gate). Every other state — `scanning`, `indexing`,
+`ready`, `failed`, and anything registry- or zero-Vault-related the gate
+never observed in the first place — renders the ordinary workspace, which
+reads the same `status` for its own surfaces: `app/ExplorerPane.tsx`'s Scope
+zone slot (`StartupProgress`) and `features/search/SearchDialog.tsx`'s
+work-in-flight/failed-model blocks.
 
 **Consumed dependencies:** shared API client and theme hook.
 
-**Coordination paths:** `App.tsx`, backend startup/model setup handlers and
+**Coordination paths:** `App.tsx`, `app/ExplorerPane.tsx`,
+`features/search/SearchDialog.tsx`, backend startup/model setup handlers and
 types, and shell-wide styles.
 
-**Validation:** `StartupGate.test.tsx`, `App.startup-auth.test.tsx`, and full
-frontend checks.
+**Validation:** `StartupGate.test.tsx`, `useStartupStatus.test.ts`,
+`App.startup-auth.test.tsx`, and full frontend checks.
 
 ### Vault explorer
 
@@ -1643,15 +1704,25 @@ both rendered unconditionally and toggled by the same CSS breakpoint
 Filtering is a client-side `Array.filter` over the already-fetched results;
 no re-fetch, no re-ranking.
 
+`SearchDialog` also takes `startupStatus`/`onRetryModelSetup` (#150), the
+shrunk startup gate's own data (`startup/useStartupStatus.ts`): while
+`scanning`/`indexing`, the result area shows a work-in-flight block
+carrying the same percentage the Scope zone shows, with the query input
+left enabled and the topbar's search entry point never greyed; on a failed
+model download it shows the reason with a "Retry setup" action instead of
+the ordinary empty/error states. Both replace the normal loading/error/empty
+rendering only — the facet rail and results list underneath are unaffected
+(harmlessly empty, same as any other no-data state).
+
 **Consumed dependencies:** shared API/error utilities, shared UI components
 (`components/ui.tsx`'s `VaultPrefix` and `StateBlock`), the shared
 `.field`/`.field-label`/`.field-input` grammar (`App.css`),
-`lib/vaultParticipants.ts`, router navigation supplied by the shell, and
-backend Search.
+`lib/vaultParticipants.ts`, router navigation supplied by the shell,
+`startup/useStartupStatus.ts`'s status shape, and backend Search.
 
 **Coordination paths:** `App.tsx`, `App.css`, `NotePage.tsx` (tag taps hand
-`openSearchForTag` this note's own Vault id), backend search HTTP contract,
-and responsive CSS.
+`openSearchForTag` this note's own Vault id), `startup/useStartupStatus.ts`,
+backend search HTTP contract, and responsive CSS.
 
 **Pilot constraint:** co-location or façade work is structure-only. It must not
 change backend retrieval, ranking, cache, or MCP behavior.
@@ -1931,6 +2002,14 @@ complete response, confirms local Git initialisation and remote downgrades
 when the server requests it, and polls `/api/index-status` plus
 `/api/git-status` for dedicated background progress without using the
 startup gate.
+
+When `GET /api/v1/vaults` reports `recovery` (the registry file itself is
+unreadable, #150), `VaultSettingsIndex.tsx` replaces its whole `Vaults`
+group with the same documented error block `App.tsx`'s note-pane shows,
+omitting `Add a Vault`; `This server` is a separate group and keeps working.
+`legacyMigrationRecovery` is deliberately not surfaced here — the registry
+loads fine (empty) in that case, so the group renders its ordinary
+zero-Vault state.
 
 Out of this page's scope: giving a Vault a source it did not start with (its
 first repository, i.e. a Local Vault becoming `managed_git`, or a bare

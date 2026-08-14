@@ -104,7 +104,7 @@ const x = 1
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -190,7 +190,7 @@ const x = 1
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -261,7 +261,7 @@ const x = 1
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -331,7 +331,10 @@ const x = 1
     render(
       <StrictMode>
         <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-          <App />
+          <App
+            startupStatus={{ state: "ready" }}
+            onRetryModelSetup={() => {}}
+          />
         </MemoryRouter>
       </StrictMode>,
     );
@@ -417,7 +420,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -497,7 +500,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -568,7 +571,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -627,7 +630,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -698,7 +701,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -785,7 +788,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -877,7 +880,7 @@ Body`,
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

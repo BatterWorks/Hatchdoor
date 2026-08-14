@@ -22,7 +22,7 @@ import {
   SCOPE_ZONE_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
 } from "./app/constants";
-import { ExplorerPane } from "./app/ExplorerPane";
+import { ExplorerPane, type StartupProgress } from "./app/ExplorerPane";
 import {
   clampSidebarWidth,
   getStoredNumber,
@@ -42,6 +42,7 @@ import { GraphPage } from "./components/graph/GraphPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
+import { StartWithNoVaultsDialog } from "./components/StartWithNoVaultsDialog";
 import { useNoteActions } from "./hooks/useNoteActions";
 import { useVaultTree } from "./hooks/useVaultTree";
 import {
@@ -55,9 +56,21 @@ import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
 import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
+import {
+  useStartupStatus,
+  type StartupStatus,
+} from "./startup/useStartupStatus";
 import { SearchDialog, useSearch } from "./features/search";
 
-export function VaultApp() {
+function VaultWorkspace({
+  startupStatus,
+  onRetryModelSetup,
+  discovery,
+}: {
+  startupStatus: StartupStatus | null;
+  onRetryModelSetup: () => void;
+  discovery: ReturnType<typeof useVaultDiscovery>;
+}) {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
     return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
   });
@@ -74,6 +87,7 @@ export function VaultApp() {
   >(() => getStoredExpandedFolders());
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
   const [scopeSheetOpen, setScopeSheetOpen] = useState(false);
+  const [startWithNoVaultsOpen, setStartWithNoVaultsOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
@@ -85,7 +99,14 @@ export function VaultApp() {
   const { theme, cycleTheme } = useTheme();
 
   const [scope, setScope] = useVaultScope();
-  const { vaults, demoMode, loading: vaultsLoading } = useVaultDiscovery();
+  const {
+    vaults,
+    demoMode,
+    loading: vaultsLoading,
+    recovery: registryRecovery,
+    legacyMigrationRecovery,
+    loadVaults,
+  } = discovery;
   const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
 
   const {
@@ -435,7 +456,11 @@ export function VaultApp() {
   // the instant a pick lands, then its count-or-condition in the same
   // breath if already known, or as a short second sentence once it resolves
   // — never a value that is not yet known.
-  const scopeSlotDescription = describeScopeSlot(scope, vaults, vaultNoteCounts);
+  const scopeSlotDescription = describeScopeSlot(
+    scope,
+    vaults,
+    vaultNoteCounts,
+  );
 
   useEffect(() => {
     // Discovery still in flight means `vaults` is a temporary `[]`, not a
@@ -469,7 +494,11 @@ export function VaultApp() {
   }, [scope, vaultsLoading]);
 
   useEffect(() => {
-    if (vaultsLoading || announcedScopeSlotRef.current || !scopeSlotDescription) {
+    if (
+      vaultsLoading ||
+      announcedScopeSlotRef.current ||
+      !scopeSlotDescription
+    ) {
       return;
     }
     announcedScopeSlotRef.current = true;
@@ -675,6 +704,7 @@ export function VaultApp() {
           onScopeZoneCollapsedChange={handleScopeZoneCollapsedChange}
           scopeFocusRequestId={scopeFocusRequestId}
           onRestoreScopeFocus={restoreScopeFocusOrigin}
+          startupProgress={deriveStartupProgress(startupStatus)}
           onExpandedFoldersChange={setExpandedFolders}
           onCloseDrawer={() => setDrawerOpen(false)}
           onRefreshTree={() => {
@@ -729,7 +759,27 @@ export function VaultApp() {
           className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}
         >
           <Routes>
-            <Route path="/" element={<EmptyState />} />
+            <Route
+              path="/"
+              element={
+                vaultsLoading ? null : registryRecovery ? (
+                  <BrokenStartState
+                    message={registryRecovery.message}
+                    onTryAgain={() => void loadVaults()}
+                  />
+                ) : legacyMigrationRecovery ? (
+                  <BrokenStartState
+                    message={legacyMigrationRecovery.message}
+                    onTryAgain={() => void loadVaults()}
+                    onStartWithNoVaults={() => setStartWithNoVaultsOpen(true)}
+                  />
+                ) : vaults.length === 0 ? (
+                  <ZeroVaultState />
+                ) : (
+                  <EmptyState />
+                )
+              }
+            />
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/graph" element={<GraphPage />} />
             <Route path="/settings" element={<SettingsPage />} />
@@ -775,6 +825,8 @@ export function VaultApp() {
           vaults={vaults}
           scope={scope}
           inputRef={searchInputRef}
+          startupStatus={startupStatus}
+          onRetryModelSetup={onRetryModelSetup}
           onClose={() => setSearchOpen(false)}
           onQueryChange={setSearchQuery}
           onIncludeContentChange={setSearchIncludeContent}
@@ -812,12 +864,74 @@ export function VaultApp() {
           onDelete={() => void handleDeleteNote()}
         />
       ) : null}
+
+      {startWithNoVaultsOpen ? (
+        <StartWithNoVaultsDialog
+          onClose={() => setStartWithNoVaultsOpen(false)}
+          onConfirmed={() => {
+            setStartWithNoVaultsOpen(false);
+            void loadVaults();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
 
+/** The test-facing workspace composition still owns discovery when it is
+ * mounted directly. The production `App` lifts discovery above `StartupGate`
+ * so a broken registry is known before that gate can decide to lock the
+ * workspace (#150). */
+export function VaultApp({
+  startupStatus,
+  onRetryModelSetup,
+}: {
+  startupStatus: StartupStatus | null;
+  onRetryModelSetup: () => void;
+}) {
+  const discovery = useVaultDiscovery();
+  return (
+    <VaultWorkspace
+      startupStatus={startupStatus}
+      onRetryModelSetup={onRetryModelSetup}
+      discovery={discovery}
+    />
+  );
+}
+
+/** The Scope zone's own reading of the shrunk startup gate's progress
+ * (#150): `null` outside `scanning`/`indexing`, since every other state
+ * already renders the ordinary aggregate slot. */
+function deriveStartupProgress(
+  status: StartupStatus | null,
+): StartupProgress | undefined {
+  if (status?.state === "scanning") {
+    return { label: "Scanning", percent: null };
+  }
+  if (status?.state === "indexing") {
+    return { label: `Indexing ${status.percent}%`, percent: status.percent };
+  }
+  return undefined;
+}
+
 export function App() {
   const [authRequired, setAuthRequired] = useState(false);
+  const discovery = useVaultDiscovery();
+  const hasRegistryRecovery = Boolean(
+    discovery.recovery || discovery.legacyMigrationRecovery,
+  );
+  const hasNoVaults =
+    !discovery.loading &&
+    !discovery.error &&
+    !hasRegistryRecovery &&
+    discovery.vaults.length === 0;
+  // The startup route is neither useful nor permitted to poll while the
+  // workspace is a zero-Vault or broken-registry recovery surface (#150).
+  // Resolve discovery first so either condition can win before a model step
+  // ever has a chance to gate the page.
+  const startup = useStartupStatus(
+    !discovery.loading && !hasRegistryRecovery && !hasNoVaults,
+  );
 
   useEffect(() => {
     onUnauthorized(() => setAuthRequired(true));
@@ -835,8 +949,21 @@ export function App() {
           }}
         />
       ) : null}
-      <StartupGate>
-        <VaultApp />
+      <StartupGate
+        status={startup.status}
+        connectionIssue={startup.connectionIssue}
+        hasSteppedPastGate={startup.hasSteppedPastGate}
+        discoveryLoading={discovery.loading}
+        hasRegistryRecovery={hasRegistryRecovery}
+        hasNoVaults={hasNoVaults}
+        onAcceptGemma={() => void startup.acceptGemma()}
+        onDeclineGemma={() => void startup.declineGemma()}
+      >
+        <VaultWorkspace
+          startupStatus={startup.status}
+          onRetryModelSetup={() => void startup.retryModelSetup()}
+          discovery={discovery}
+        />
       </StartupGate>
     </>
   );
@@ -847,6 +974,49 @@ function EmptyState() {
     <StateBlock
       title="Notes Explorer"
       description="Select any note from the explorer to start reading."
+    />
+  );
+}
+
+/** The zero-Vault workspace (#150): a genuine "nothing added yet" instance,
+ * indistinguishable whether it is a brand-new install or one just emptied
+ * out — driven purely by `vaults.length === 0`, never a first-visit flag. */
+function ZeroVaultState() {
+  return (
+    <StateBlock
+      title="No Vaults Yet"
+      description="Add a Vault to start browsing and searching your notes."
+      actionLabel="Add a Vault"
+      // Inert for now: #148 introduced the matching Settings affordance in
+      // the same state, and #153 supplies the real creation flow for both.
+      onAction={() => {}}
+    />
+  );
+}
+
+/** A broken start (#150): the registry file itself is unreadable, or a
+ * failed legacy import needs recovery. Both open the ordinary workspace
+ * with this same documented error block rather than a full-screen gate. */
+function BrokenStartState({
+  message,
+  onTryAgain,
+  onStartWithNoVaults,
+}: {
+  message: string;
+  onTryAgain: () => void;
+  onStartWithNoVaults?: () => void;
+}) {
+  return (
+    <StateBlock
+      tone="error"
+      title="Vault Registry Unavailable"
+      description={`${message} Nothing was changed, and your Markdown is untouched.`}
+      actionLabel="Try again"
+      onAction={onTryAgain}
+      secondaryActionLabel={
+        onStartWithNoVaults ? "Start with no Vaults" : undefined
+      }
+      onSecondaryAction={onStartWithNoVaults}
     />
   );
 }

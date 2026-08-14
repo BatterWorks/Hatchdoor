@@ -3,10 +3,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
-import {
-  staleVault,
-  syncStoppedVault,
-} from "../test/fixtures/vaults";
+import { staleVault, syncStoppedVault } from "../test/fixtures/vaults";
 import { NotePage } from "./NotePage";
 
 function jsonResponse(body: unknown, status = 200): Response {

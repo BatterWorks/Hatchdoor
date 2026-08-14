@@ -34,7 +34,10 @@ pub struct AppState {
     pub managed_git: Arc<crate::git::ManagedGitScheduler>,
     /// Present when safe automatic import could not prove the legacy
     /// deployment. Collection/setup surfaces remain available for recovery.
-    pub legacy_migration_recovery: Option<LegacyMigrationRecovery>,
+    /// Cleared by a confirmed "Start with no Vaults"
+    /// (`start_with_no_vaults_handler`), so this needs interior mutability
+    /// rather than a plain `Option` fixed at startup.
+    pub legacy_migration_recovery: Arc<StdRwLock<Option<LegacyMigrationRecovery>>>,
     /// Disposable SQLite handle used while a configured local vault is still
     /// being indexed. It is published through `ready_vault` only after a
     /// successful build.
@@ -737,7 +740,7 @@ mod tests {
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: Arc::new(StdRwLock::new(None)),
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault { vault_path, cache }))),
             vault_revision: Arc::new(AtomicU64::new(0)),

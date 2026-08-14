@@ -68,12 +68,19 @@ export function StateBlock({
   description,
   actionLabel,
   onAction,
+  secondaryActionLabel,
+  onSecondaryAction,
   tone,
 }: {
   title: string;
   description: string;
   actionLabel?: string;
   onAction?: () => void;
+  /** A second, non-primary action alongside `actionLabel` — e.g. a broken
+   * start's `Try again` plus a confirmed recovery action (#150). Only
+   * offered together with `actionLabel`/`onAction`; never alone. */
+  secondaryActionLabel?: string;
+  onSecondaryAction?: () => void;
   /** The documented §23 error variant (red heading) — a genuine failure,
    * never the plain empty shell used for "nothing here yet". */
   tone?: "error";
@@ -85,9 +92,20 @@ export function StateBlock({
       <h2>{title}</h2>
       <p>{description}</p>
       {actionLabel && onAction ? (
-        <UiButton className="close-note" onClick={onAction}>
-          {actionLabel}
-        </UiButton>
+        secondaryActionLabel && onSecondaryAction ? (
+          <div className="modal-actions">
+            <UiButton className="close-note" onClick={onAction}>
+              {actionLabel}
+            </UiButton>
+            <UiButton onClick={onSecondaryAction}>
+              {secondaryActionLabel}
+            </UiButton>
+          </div>
+        ) : (
+          <UiButton className="close-note" onClick={onAction}>
+            {actionLabel}
+          </UiButton>
+        )
       ) : null}
     </UiPanel>
   );

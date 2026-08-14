@@ -4,9 +4,11 @@ import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
 import { getStoredScope, setStoredScope } from "../lib/storage";
 import type {
+  LegacyMigrationRecovery,
   VaultDiscoveryResponse,
   VaultId,
   VaultReadProjection,
+  VaultRegistryRecovery,
   VaultScope,
   VaultStatistics,
   VaultSummary,
@@ -35,12 +37,22 @@ export function useVaultScope(): [VaultScope, (next: VaultScope) => void] {
  * Enabled Vaults, in Vault-management order (the order `GET /api/v1/vaults`
  * returns), plus the instance's demo-mode posture. Disabled Vaults never
  * appear here and never participate in `"all"` (docs/migrations/vault-scoped-clients.md).
+ *
+ * `recovery` (the persisted registry file itself is unreadable) and
+ * `legacyMigrationRecovery` (the registry loaded fine, empty, but a failed
+ * safe legacy import still needs recovery) are mutually exclusive broken-start
+ * conditions (#150): both leave `vaults` empty, but only one is ever set.
+ * Neither is polled on an interval — a "Try again" action just calls
+ * `loadVaults` again, same as any other refresh.
  */
 export function useVaultDiscovery() {
   const [vaults, setVaults] = useState<VaultSummary[]>([]);
   const [demoMode, setDemoMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [recovery, setRecovery] = useState<VaultRegistryRecovery | null>(null);
+  const [legacyMigrationRecovery, setLegacyMigrationRecovery] =
+    useState<LegacyMigrationRecovery | null>(null);
 
   const loadVaults = useCallback(async () => {
     setError(null);
@@ -52,6 +64,8 @@ export function useVaultDiscovery() {
       const json = (await res.json()) as VaultDiscoveryResponse;
       setVaults(json.vaults.filter((vault) => vault.enabled));
       setDemoMode(json.demo_mode);
+      setRecovery(json.recovery ?? null);
+      setLegacyMigrationRecovery(json.legacy_migration_recovery ?? null);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Unknown Vault discovery error",
@@ -67,7 +81,15 @@ export function useVaultDiscovery() {
     })();
   }, [loadVaults]);
 
-  return { vaults, demoMode, loading, error, loadVaults };
+  return {
+    vaults,
+    demoMode,
+    loading,
+    error,
+    recovery,
+    legacyMigrationRecovery,
+    loadVaults,
+  };
 }
 
 /**

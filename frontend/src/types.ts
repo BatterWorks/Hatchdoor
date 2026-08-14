@@ -120,11 +120,21 @@ export type VaultRegistryRecovery = {
   message: string;
 };
 
+/** Present only when the registry itself loaded fine (empty, revision 0) but
+ * a failed safe legacy import still needs operator recovery (#150). Distinct
+ * from `VaultRegistryRecovery`: that one means the persisted registry file
+ * itself is unreadable. */
+export type LegacyMigrationRecovery = {
+  code: "legacy_migration_required";
+  message: string;
+};
+
 export type VaultDiscoveryResponse = {
   registry_revision?: number;
   collection_revision: number;
   vaults: VaultSummary[];
   recovery?: VaultRegistryRecovery;
+  legacy_migration_recovery?: LegacyMigrationRecovery;
   demo_mode: boolean;
 };
 

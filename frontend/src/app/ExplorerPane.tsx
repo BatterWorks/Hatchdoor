@@ -54,6 +54,28 @@ function countNotes(folder: ExplorerFolder): number {
   );
 }
 
+/** The first-run model-setup/indexing progress the shrunk startup gate no
+ * longer blocks on (#150): `percent` is unknown during `scanning`, known
+ * during `indexing`. */
+export type StartupProgress = { label: string; percent: number | null };
+
+/** Reuses the per-Vault "indexing" slot's visual language (an animated bar)
+ * rather than inventing a second one, adding only the percent when known. */
+function StartupProgressSlot({ progress }: { progress: StartupProgress }) {
+  return (
+    <span
+      className="vault-slot-indexing"
+      role="status"
+      aria-label={progress.label}
+    >
+      {progress.percent !== null ? (
+        <span className="side-count">{progress.percent}%</span>
+      ) : null}
+      <span className="vault-slot-indexing-bar" aria-hidden="true" />
+    </span>
+  );
+}
+
 /**
  * Vault scope, readable and changeable in exactly one place on the desktop
  * (#138): a collapsible zone pinned above the rail, never scrolling with the
@@ -76,6 +98,7 @@ function ScopeZone({
   noteCounts,
   scopeFocusRequestId,
   onRestoreScopeFocus,
+  startupProgress,
 }: {
   vaults: VaultSummary[];
   scope: VaultScope;
@@ -86,9 +109,15 @@ function ScopeZone({
   noteCounts: Record<VaultId, number | undefined>;
   scopeFocusRequestId: number;
   onRestoreScopeFocus: () => void;
+  /** The first-run model-setup/indexing progress the startup gate no longer
+   * blocks on (#150), surfaced here in the zone's own slot instead. */
+  startupProgress?: StartupProgress;
 }) {
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const rowIds: VaultScope[] = ["all", ...vaults.map((vault) => vault.vault_id)];
+  const rowIds: VaultScope[] = [
+    "all",
+    ...vaults.map((vault) => vault.vault_id),
+  ];
   const selectedIndex = Math.max(0, rowIds.indexOf(scope));
 
   useEffect(() => {
@@ -101,7 +130,12 @@ function ScopeZone({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeFocusRequestId, collapsed]);
 
-  if (vaults.length <= 1) {
+  // Absent at exactly one enabled Vault only when there is no startup work to
+  // report — narrowing scope has nothing to offer there. During first-run
+  // scanning/indexing it stays visible solely for the documented progress
+  // slot. Present at zero Vaults too (#150): the zone holds its place reading
+  // "All Vaults" with no rows beneath it, in neutral ink.
+  if (vaults.length === 1 && !startupProgress) {
     return null;
   }
 
@@ -126,7 +160,9 @@ function ScopeZone({
     }
   };
 
-  const viewingVault = vaults.find((vault) => vault.vault_id === viewingVaultId);
+  const viewingVault = vaults.find(
+    (vault) => vault.vault_id === viewingVaultId,
+  );
   // The collapsed head names the scope in the worst ink present across every
   // enabled Vault, not just the selected one, so narrowing scope never hides
   // trouble elsewhere (#116, amended by #117).
@@ -155,7 +191,11 @@ function ScopeZone({
             <span className={`scope-zone-current${worstTierClass}`}>
               {scopeName(scope, vaults)}
             </span>
-            <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+            {startupProgress ? (
+              <StartupProgressSlot progress={startupProgress} />
+            ) : (
+              <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+            )}
           </>
         ) : (
           <span className="side-count">
@@ -189,7 +229,11 @@ function ScopeZone({
               onKeyDown={(event) => onRowKeyDown(event, 0)}
             >
               <span className="scope-row-label">All Vaults</span>
-              <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+              {startupProgress ? (
+                <StartupProgressSlot progress={startupProgress} />
+              ) : (
+                <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+              )}
             </button>
           </li>
           {vaults.map((vault, index) => (
@@ -210,7 +254,10 @@ function ScopeZone({
                 {viewingVaultId === vault.vault_id ? (
                   <span className="scope-row-viewing">Viewing</span>
                 ) : null}
-                <VaultSlot vault={vault} noteCount={noteCounts[vault.vault_id]} />
+                <VaultSlot
+                  vault={vault}
+                  noteCount={noteCounts[vault.vault_id]}
+                />
               </button>
             </li>
           ))}
@@ -402,6 +449,7 @@ type ExplorerPaneProps = {
   vaultNoteCounts: Record<VaultId, number | undefined>;
   scopeFocusRequestId: number;
   onRestoreScopeFocus: () => void;
+  startupProgress?: StartupProgress;
 };
 
 export function ExplorerPane({
@@ -436,6 +484,7 @@ export function ExplorerPane({
   vaultNoteCounts,
   scopeFocusRequestId,
   onRestoreScopeFocus,
+  startupProgress,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
@@ -553,6 +602,7 @@ export function ExplorerPane({
           noteCounts={vaultNoteCounts}
           scopeFocusRequestId={scopeFocusRequestId}
           onRestoreScopeFocus={onRestoreScopeFocus}
+          startupProgress={startupProgress}
         />
       )}
       <ExplorerRail

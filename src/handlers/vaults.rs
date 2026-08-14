@@ -109,6 +109,21 @@ impl From<&VaultRegistryRecovery> for RegistryRecoveryInfo {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LegacyMigrationRecoveryInfo {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl From<&crate::vault_migration::LegacyMigrationRecovery> for LegacyMigrationRecoveryInfo {
+    fn from(recovery: &crate::vault_migration::LegacyMigrationRecovery) -> Self {
+        Self {
+            code: recovery.code(),
+            message: recovery.message().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct VaultDiscoveryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry_revision: Option<u64>,
@@ -116,6 +131,12 @@ pub struct VaultDiscoveryResponse {
     pub vaults: Vec<VaultSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RegistryRecoveryInfo>,
+    /// Present only when the registry itself is fine (empty, revision 0) but
+    /// safe automatic legacy import could not prove the deployment and needs
+    /// operator recovery (#150). Distinct from `recovery` above: that one
+    /// means the persisted registry file itself is unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_migration_recovery: Option<LegacyMigrationRecoveryInfo>,
     /// Instance-wide publication posture: `true` only under
     /// `HATCHDOOR_DEMO_MODE`. Always serialized (never omitted) so the
     /// browser can tell "not a demo" from "did not say".
@@ -558,6 +579,80 @@ fn mutation_response(
 /// `public_vault_summary`. A disabled definition is an operator's own bookkeeping
 /// about an instance a visitor cannot administer, and listing it would name a
 /// Vault the demo does not serve.
+#[derive(Debug, Deserialize)]
+pub struct StartWithNoVaultsRequest {
+    /// The one-shot confirmation flag: a bare POST is not enough (#150),
+    /// mirroring `vault_migration::start_with_no_vaults`'s own
+    /// `confirmed` gate rather than duplicating it here.
+    pub confirm: bool,
+}
+
+/// `POST /api/v1/vaults/start-with-no-vaults` — the confirmed recovery action
+/// offered only when a failed legacy import left `AppState`'s
+/// `legacy_migration_recovery` set (#150). Writes an ordinary empty,
+/// revision-1 registry and clears that recovery flag; unreachable (and left
+/// untouched) once the registry already holds real state, since
+/// `start_with_no_vaults` always commits from revision 0.
+pub async fn start_with_no_vaults_handler(
+    State(state): State<AppState>,
+    request: Result<Json<StartWithNoVaultsRequest>, JsonRejection>,
+) -> Response {
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(error) => return json_rejection_response(error),
+    };
+
+    let recovery_pending = state
+        .legacy_migration_recovery
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some();
+    if !recovery_pending {
+        return VaultApiError::new(
+            "legacy_migration_recovery_not_pending",
+            "There is no failed legacy import waiting for recovery.",
+            None,
+            false,
+        )
+        .respond(StatusCode::CONFLICT);
+    }
+
+    match crate::vault_migration::start_with_no_vaults(&state.vault_registry, request.confirm) {
+        Ok(snapshot) => {
+            // Reconciles like every other registry-mutating handler here,
+            // even though the transition is empty-registry to
+            // empty-registry today: it keeps `state.vaults`'s own
+            // collection revision (and its `/api/v1/vaults/events` SSE
+            // publication) from silently lagging the registry commit,
+            // matching what a future consumer of this collection revision
+            // expects.
+            if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
+                return internal_error_response(error, None);
+            }
+            *state
+                .legacy_migration_recovery
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            mutation_response(&state, &snapshot, None)
+        }
+        Err(crate::vault_migration::LegacyMigrationError::ConfirmationRequired) => {
+            VaultApiError::new(
+                "confirmation_required",
+                "Starting with no Vaults requires confirm: true.",
+                None,
+                false,
+            )
+            .respond(StatusCode::BAD_REQUEST)
+        }
+        Err(crate::vault_migration::LegacyMigrationError::Registry(error)) => {
+            registry_error_response(error, None)
+        }
+        Err(crate::vault_migration::LegacyMigrationError::Storage(detail)) => {
+            internal_error_response(detail, None)
+        }
+    }
+}
+
 pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
     match state.vault_registry.load() {
         Ok(VaultRegistryState::Ready(registry_snapshot)) => {
@@ -579,11 +674,18 @@ pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
                     }
                 })
                 .collect();
+            let legacy_migration_recovery = state
+                .legacy_migration_recovery
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map(LegacyMigrationRecoveryInfo::from);
             Json(VaultDiscoveryResponse {
                 registry_revision: Some(registry_snapshot.revision()),
                 collection_revision: collection_snapshot.collection_revision,
                 vaults,
                 recovery: None,
+                legacy_migration_recovery,
                 demo_mode: state.demo_mode,
             })
             .into_response()
@@ -593,6 +695,7 @@ pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
             collection_revision: 0,
             vaults: Vec::new(),
             recovery: Some(RegistryRecoveryInfo::from(&recovery)),
+            legacy_migration_recovery: None,
             demo_mode: state.demo_mode,
         })
         .into_response(),
@@ -1071,7 +1174,7 @@ mod tests {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: std::sync::Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: std::sync::Arc::new(
                 SqliteCache::in_memory(384).expect("in-memory cache"),
             ),

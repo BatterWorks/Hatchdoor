@@ -29,16 +29,16 @@ describe("isVaultUnfoldable", () => {
 describe("resolveInitialUnfoldedVault", () => {
   it("unfolds the landing Vault when one is given and it can unfold", () => {
     const landing = THREE_VAULTS[1].vault_id;
-    expect(
-      resolveInitialUnfoldedVault(landing, null, THREE_VAULTS),
-    ).toBe(landing);
+    expect(resolveInitialUnfoldedVault(landing, null, THREE_VAULTS)).toBe(
+      landing,
+    );
   });
 
   it("falls back to the stored Vault when there is no landing Vault", () => {
     const stored = THREE_VAULTS[2].vault_id;
-    expect(
-      resolveInitialUnfoldedVault(undefined, stored, THREE_VAULTS),
-    ).toBe(stored);
+    expect(resolveInitialUnfoldedVault(undefined, stored, THREE_VAULTS)).toBe(
+      stored,
+    );
   });
 
   it("unfolds nothing when neither a landing nor a stored Vault exists", () => {
@@ -120,7 +120,9 @@ describe("per-Vault folder-open namespacing", () => {
 
   it("reads back only the given Vault's own folder-open entries", () => {
     const stored = withVaultFolderChange({}, vaultA, { "10-journal": true });
-    const withB = withVaultFolderChange(stored, vaultB, { "10-journal": false });
+    const withB = withVaultFolderChange(stored, vaultB, {
+      "10-journal": false,
+    });
 
     expect(expandedFoldersForVault(withB, vaultA)).toEqual({
       "10-journal": true,

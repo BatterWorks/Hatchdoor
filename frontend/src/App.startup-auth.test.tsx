@@ -1,24 +1,49 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 
+const mocks = vi.hoisted(() => ({
+  acceptGemma: vi.fn(),
+  useVaultDiscovery: vi.fn(),
+}));
+
+vi.mock("./hooks/useVaultScope", () => ({
+  useVaultDiscovery: mocks.useVaultDiscovery,
+}));
+
+vi.mock("./startup/useStartupStatus", () => ({
+  useStartupStatus: () => ({
+    status: { state: "terms_required" },
+    connectionIssue: false,
+    hasSteppedPastGate: false,
+    acceptGemma: mocks.acceptGemma,
+    declineGemma: vi.fn(),
+    retryModelSetup: vi.fn(),
+  }),
+}));
+
 import { App } from "./App";
-import { clearToken } from "./api/api";
+import { clearToken, notifyUnauthorized } from "./api/api";
 
 afterEach(() => {
   cleanup();
   clearToken();
   vi.restoreAllMocks();
+  mocks.acceptGemma.mockReset();
+  mocks.useVaultDiscovery.mockReset();
 });
 
 it("prompts for the web token when first-run model setup is unauthorized", async () => {
-  vi.spyOn(globalThis, "fetch")
-    .mockResolvedValueOnce(
-      new Response(JSON.stringify({ state: "terms_required" }), {
-        status: 200,
-      }),
-    )
-    .mockResolvedValueOnce(new Response(null, { status: 401 }));
+  mocks.useVaultDiscovery.mockReturnValue({
+    vaults: [{ enabled: true }],
+    demoMode: false,
+    loading: false,
+    error: null,
+    recovery: null,
+    legacyMigrationRecovery: null,
+    loadVaults: vi.fn(),
+  });
+  mocks.acceptGemma.mockImplementation(() => notifyUnauthorized());
 
   render(
     <MemoryRouter>
@@ -26,12 +51,11 @@ it("prompts for the web token when first-run model setup is unauthorized", async
     </MemoryRouter>,
   );
 
-  await screen.findByRole("button", { name: "Accept terms and set up Gemma" });
-  await act(async () => {
-    screen
-      .getByRole("button", { name: "Accept terms and set up Gemma" })
-      .click();
-  });
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Accept terms and set up Gemma",
+    }),
+  );
 
   expect(
     await screen.findByRole("dialog", { name: "Access token required" }),
