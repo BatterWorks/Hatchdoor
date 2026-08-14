@@ -130,6 +130,19 @@ impl SqliteCache {
         let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
         let result = (|| {
             let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
+            // Seed the empty candidate with this Vault's published rows so the
+            // build's own reuse machinery can find them. Without this the
+            // candidate starts empty, every content hash misses, and an
+            // unchanged Vault re-embeds from scratch on every Index turn —
+            // including on every restart. Purely an optimisation: on failure the
+            // seeding transaction rolls back and the build proceeds from empty.
+            if let Err(error) = self.seed_candidate_from_snapshot(vault_id, &candidate) {
+                tracing::warn!(
+                    %vault_id,
+                    %error,
+                    "could not seed the candidate cache from the published snapshot; rebuilding this Vault from scratch"
+                );
+            }
             candidate.replace_with_options(
                 index,
                 embedder,
@@ -507,6 +520,74 @@ impl SqliteCache {
         Ok(())
     }
 
+    /// Copy one Vault's published snapshot back into a fresh candidate cache:
+    /// the exact inverse of [`SqliteCache::publish_vault_candidate`], and it
+    /// must stay in step with it table for table.
+    ///
+    /// The build path decides what to re-embed by looking up each chunk's
+    /// content hash *in the database it is writing to* (`preserve_existing_vectors`
+    /// in `cache::populate`), and skips an unchanged note entirely on its
+    /// stored hash/mtime/size. A candidate that starts empty therefore misses
+    /// every lookup by construction. Seeding restores exactly the state the
+    /// single-Vault startup path enjoys on its durable cache, so an unchanged
+    /// Vault costs a row copy instead of a full re-embed.
+    ///
+    /// Reuse is safe here because vectors are keyed by a hash of the embedded
+    /// input and `reset_if_embedder_changed` has already run: a model swap
+    /// wipes the snapshot before anything can be seeded from it, so no vector
+    /// can cross an embedding-space boundary. All work happens in one candidate
+    /// transaction, so a partial seed is never visible — either the whole prior
+    /// snapshot lands or the candidate stays empty.
+    fn seed_candidate_from_snapshot(
+        &self,
+        vault_id: VaultId,
+        candidate: &SqliteCache,
+    ) -> Result<(), String> {
+        let vault_id = vault_id.to_string();
+        let source = self.connection()?;
+        if source
+            .query_row(
+                "SELECT 1 FROM vault_snapshots WHERE vault_id = ?1",
+                params![vault_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("look up the published Vault snapshot: {error}"))?
+            .is_none()
+        {
+            return Ok(());
+        }
+
+        let mut target = candidate.connection()?;
+        let tx = target
+            .transaction()
+            .map_err(|error| format!("start candidate seeding: {error}"))?;
+
+        seed_metadata(&tx, &source, &vault_id)?;
+        seed_notes(&tx, &source, &vault_id)?;
+        seed_two_string_rows(
+            &tx,
+            &source,
+            &vault_id,
+            "SELECT source_slug, target_slug FROM vault_note_links WHERE vault_id = ?1",
+            "INSERT INTO note_links(source_slug, target_slug) VALUES (?1, ?2)",
+            "snapshot links",
+        )?;
+        seed_two_string_rows(
+            &tx,
+            &source,
+            &vault_id,
+            "SELECT note_slug, tag FROM vault_tags WHERE vault_id = ?1",
+            "INSERT INTO tags(note_slug, tag) VALUES (?1, ?2)",
+            "snapshot tags",
+        )?;
+        seed_headings(&tx, &source, &vault_id)?;
+        seed_chunks_and_vectors(&tx, &source, &vault_id)?;
+
+        tx.commit()
+            .map_err(|error| format!("commit candidate seeding: {error}"))
+    }
+
     fn publish_vault_candidate(
         &self,
         vault_id: VaultId,
@@ -685,6 +766,267 @@ fn copy_notes(
             params![vault_id, title, relative_path, content, slug],
         )
         .map_err(|error| format!("copy candidate note FTS: {error}"))?;
+    }
+    Ok(())
+}
+
+fn seed_metadata(
+    tx: &Transaction<'_>,
+    source: &rusqlite::Connection,
+    vault_id: &str,
+) -> Result<(), String> {
+    let mut statement = source
+        .prepare("SELECT key, value FROM vault_snapshot_metadata WHERE vault_id = ?1")
+        .map_err(|error| format!("prepare snapshot metadata: {error}"))?;
+    let rows = statement
+        .query_map(params![vault_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("query snapshot metadata: {error}"))?;
+    for row in rows {
+        let (key, value) = row.map_err(|error| format!("read snapshot metadata: {error}"))?;
+        // The build reads back marker-set and embed-layer metadata to decide
+        // whether every note needs a forced refresh; a fresh candidate already
+        // carries its own schema_version, so replace rather than insert.
+        tx.execute(
+            "INSERT INTO metadata(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map_err(|error| format!("seed snapshot metadata: {error}"))?;
+    }
+    Ok(())
+}
+
+fn seed_notes(
+    tx: &Transaction<'_>,
+    source: &rusqlite::Connection,
+    vault_id: &str,
+) -> Result<(), String> {
+    let mut statement = source
+        .prepare(
+            "SELECT slug, title, normalized_title, relative_path, normalized_relative_path, \
+                    absolute_path, content, content_hash, layer, aliases_json, frontmatter_json, \
+                    mtime_ns, size_bytes, indexed_at FROM vault_notes WHERE vault_id = ?1",
+        )
+        .map_err(|error| format!("prepare snapshot notes: {error}"))?;
+    let rows = statement
+        .query_map(params![vault_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, i64>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, i64>(13)?,
+            ))
+        })
+        .map_err(|error| format!("query snapshot notes: {error}"))?;
+    for row in rows {
+        let (
+            slug,
+            title,
+            normalized_title,
+            relative_path,
+            normalized_relative_path,
+            absolute_path,
+            content,
+            content_hash,
+            layer,
+            aliases_json,
+            frontmatter_json,
+            mtime_ns,
+            size_bytes,
+            indexed_at,
+        ) = row.map_err(|error| format!("read snapshot note: {error}"))?;
+        let note_id: i64 = tx
+            .query_row(
+                "INSERT INTO notes(slug, title, normalized_title, relative_path, \
+                 normalized_relative_path, absolute_path, content, content_hash, layer, \
+                 aliases_json, frontmatter_json, mtime_ns, size_bytes, indexed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 RETURNING id",
+                params![
+                    slug,
+                    title,
+                    normalized_title,
+                    relative_path,
+                    normalized_relative_path,
+                    absolute_path,
+                    content,
+                    content_hash,
+                    layer,
+                    aliases_json,
+                    frontmatter_json,
+                    mtime_ns,
+                    size_bytes,
+                    indexed_at,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("seed snapshot note: {error}"))?;
+        // `notes` has no FTS trigger — the build maintains note_fts by hand, so
+        // seeding must too or an unchanged note would publish without its row.
+        tx.execute(
+            "INSERT INTO note_fts(rowid, title, relative_path, content, slug) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![note_id, title, relative_path, content, slug],
+        )
+        .map_err(|error| format!("seed snapshot note FTS: {error}"))?;
+    }
+    Ok(())
+}
+
+fn seed_headings(
+    tx: &Transaction<'_>,
+    source: &rusqlite::Connection,
+    vault_id: &str,
+) -> Result<(), String> {
+    let mut statement = source
+        .prepare(
+            "SELECT note_slug, level, text, anchor, position FROM vault_headings \
+             WHERE vault_id = ?1",
+        )
+        .map_err(|error| format!("prepare snapshot headings: {error}"))?;
+    let rows = statement
+        .query_map(params![vault_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|error| format!("query snapshot headings: {error}"))?;
+    for row in rows {
+        let (note_slug, level, text, anchor, position) =
+            row.map_err(|error| format!("read snapshot heading: {error}"))?;
+        tx.execute(
+            "INSERT INTO headings(note_slug, level, text, anchor, position) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![note_slug, level, text, anchor, position],
+        )
+        .map_err(|error| format!("seed snapshot heading: {error}"))?;
+    }
+    Ok(())
+}
+
+fn seed_two_string_rows(
+    tx: &Transaction<'_>,
+    source: &rusqlite::Connection,
+    vault_id: &str,
+    select: &str,
+    insert: &str,
+    label: &str,
+) -> Result<(), String> {
+    let mut statement = source
+        .prepare(select)
+        .map_err(|error| format!("prepare {label}: {error}"))?;
+    let rows = statement
+        .query_map(params![vault_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("query {label}: {error}"))?;
+    for row in rows {
+        let (first, second) = row.map_err(|error| format!("read {label}: {error}"))?;
+        tx.execute(insert, params![first, second])
+            .map_err(|error| format!("seed {label}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn seed_chunks_and_vectors(
+    tx: &Transaction<'_>,
+    source: &rusqlite::Connection,
+    vault_id: &str,
+) -> Result<(), String> {
+    let mut statement = source
+        .prepare(
+            "SELECT c.note_slug, c.ordinal, c.heading_path, c.content, c.byte_start, \
+                    c.byte_end, c.content_hash, c.tags, c.aliases, v.embedding, \
+                    d.embedding, d.layer \
+             FROM vault_chunks c \
+             LEFT JOIN vault_chunk_vectors v ON v.chunk_id = c.id \
+             LEFT JOIN vault_chunk_vectors_demoted d ON d.chunk_id = c.id \
+             WHERE c.vault_id = ?1",
+        )
+        .map_err(|error| format!("prepare snapshot chunks: {error}"))?;
+    let rows = statement
+        .query_map(params![vault_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<String>>(8)?,
+                row.get::<_, Option<Vec<u8>>>(9)?,
+                row.get::<_, Option<Vec<u8>>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+            ))
+        })
+        .map_err(|error| format!("query snapshot chunks: {error}"))?;
+    for row in rows {
+        let (
+            note_slug,
+            ordinal,
+            heading_path,
+            content,
+            byte_start,
+            byte_end,
+            content_hash,
+            tags,
+            aliases,
+            default_embedding,
+            demoted_embedding,
+            demoted_layer,
+        ) = row.map_err(|error| format!("read snapshot chunk: {error}"))?;
+        let chunk_id: i64 = tx
+            .query_row(
+                "INSERT INTO chunks(note_slug, ordinal, heading_path, content, byte_start, \
+                 byte_end, content_hash, tags, aliases) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) RETURNING id",
+                params![
+                    note_slug,
+                    ordinal,
+                    heading_path,
+                    content,
+                    byte_start,
+                    byte_end,
+                    content_hash,
+                    tags,
+                    aliases,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("seed snapshot chunk: {error}"))?;
+        if let Some(embedding) = default_embedding {
+            tx.execute(
+                "INSERT INTO chunk_vectors(chunk_id, embedding) VALUES (?1, ?2)",
+                params![chunk_id, embedding],
+            )
+            .map_err(|error| format!("seed snapshot default vector: {error}"))?;
+        }
+        if let Some(embedding) = demoted_embedding {
+            tx.execute(
+                "INSERT INTO chunk_vectors_demoted(chunk_id, embedding, layer) \
+                 VALUES (?1, ?2, ?3)",
+                params![chunk_id, embedding, demoted_layer],
+            )
+            .map_err(|error| format!("seed snapshot demoted vector: {error}"))?;
+        }
     }
     Ok(())
 }
@@ -896,6 +1238,43 @@ mod tests {
         }
     }
 
+    /// Counts the texts actually sent for embedding, so a test can prove that a
+    /// rebuild reused prior vectors instead of paying for them again.
+    struct CountingEmbedder {
+        inner: StubEmbedder,
+        embedded: std::sync::atomic::AtomicUsize,
+    }
+    impl CountingEmbedder {
+        fn new() -> Self {
+            Self {
+                inner: StubEmbedder::new(384),
+                embedded: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn embedded(&self) -> usize {
+            self.embedded.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        fn reset(&self) {
+            self.embedded.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    impl Embedder for CountingEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.embedded
+                .fetch_add(texts.len(), std::sync::atomic::Ordering::Relaxed);
+            self.inner.embed(texts)
+        }
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+        fn identity(&self) -> String {
+            "counting-384".to_string()
+        }
+        fn token_count(&self, text: &str, add: bool) -> Result<usize, String> {
+            self.inner.token_count(text, add)
+        }
+    }
+
     fn vault_id(value: &str) -> VaultId {
         VaultId::from_str(value).expect("known Vault ID")
     }
@@ -909,6 +1288,117 @@ mod tests {
         }
         let index = VaultIndex::build(directory.path()).expect("build index");
         (directory, index)
+    }
+
+    /// Regression: every Index turn built its candidate in a fresh empty cache,
+    /// so the build's content-hash reuse lookup could never hit and an
+    /// unchanged Vault re-embedded itself in full — on every edit and every
+    /// restart.
+    #[test]
+    fn rebuilding_an_unchanged_vault_reuses_its_published_vectors() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[
+            ("Home.md", "# Home\n\nhome body\n\n[[Shared]]"),
+            ("Shared.md", "# Shared\n\nshared body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("publish the first snapshot");
+        let first_pass = embedder.embedded();
+        assert!(first_pass > 0, "the first build must embed something");
+
+        embedder.reset();
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("rebuild the unchanged Vault");
+        assert_eq!(
+            embedder.embedded(),
+            0,
+            "an unchanged Vault must reuse every published vector"
+        );
+
+        // Reuse must not cost the snapshot any content.
+        assert_eq!(cache.snapshot_note_count(id).expect("notes"), 2);
+        assert_eq!(cache.snapshot_chunk_count(id).expect("chunks"), 2);
+        assert_eq!(cache.snapshot_link_count(id).expect("links"), 1);
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "home")
+                .expect("content")
+                .as_deref(),
+            Some("# Home\n\nhome body\n\n[[Shared]]")
+        );
+    }
+
+    #[test]
+    fn editing_one_note_re_embeds_only_that_note() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, first_index) = index(&[
+            ("Home.md", "# Home\n\nhome body"),
+            ("Shared.md", "# Shared\n\nshared body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &first_index, &embedder)
+            .expect("publish the first snapshot");
+
+        std::fs::write(
+            directory.path().join("Home.md"),
+            "# Home\n\nhome body, rewritten",
+        )
+        .expect("edit one note");
+        let edited = VaultIndex::build(directory.path()).expect("rebuild index");
+        embedder.reset();
+        cache
+            .replace_vault_snapshot(id, &edited, &embedder)
+            .expect("rebuild after the edit");
+
+        assert_eq!(
+            embedder.embedded(),
+            1,
+            "only the edited note's chunk may be re-embedded"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "home")
+                .expect("content")
+                .as_deref(),
+            Some("# Home\n\nhome body, rewritten"),
+            "the edit must still reach the published snapshot"
+        );
+    }
+
+    /// Reuse must never cross an embedding space: a different model wipes the
+    /// shared cache before seeding can offer it anything.
+    #[test]
+    fn a_changed_embedder_re_embeds_instead_of_reusing_seeded_vectors() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[("Home.md", "# Home\n\nhome body")]);
+
+        cache
+            .replace_vault_snapshot(
+                id,
+                &index,
+                &NamedEmbedder {
+                    inner: StubEmbedder::new(384),
+                    identity: "first-model-384",
+                },
+            )
+            .expect("publish with the first model");
+
+        let second = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &index, &second)
+            .expect("rebuild with a different model");
+        assert!(
+            second.embedded() > 0,
+            "a model swap must re-embed rather than reuse the previous space"
+        );
     }
 
     #[test]
