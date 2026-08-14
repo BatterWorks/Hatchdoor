@@ -305,3 +305,74 @@ describe("GraphPage — all-Vault islands (#143)", () => {
     expect(screen.queryByText(/could not be drawn/)).not.toBeInTheDocument();
   });
 });
+
+describe("GraphPage — settles instantly under prefers-reduced-motion (#147)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn(() => 1),
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+  });
+
+  it("still draws the plain single-graph page with reduced motion preferred", async () => {
+    const [alpha] = THREE_VAULTS;
+    setStoredScope(alpha.vault_id);
+    mockDiscoveryAndGraph(
+      THREE_VAULTS,
+      collectionEnvelope(
+        alpha.vault_id,
+        [graphFor(alpha, 5)],
+        [participantFor(alpha, "fresh")],
+      ),
+    );
+
+    render(
+      <MemoryRouter>
+        <GraphPage />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText("Vault · Knowledge Graph"),
+    ).toBeVisible();
+  });
+
+  it("still draws the all-Vault island field with reduced motion preferred", async () => {
+    const graphs = THREE_VAULTS.map((vault, i) => graphFor(vault, i + 1));
+    mockDiscoveryAndGraph(
+      THREE_VAULTS,
+      collectionEnvelope(
+        "all",
+        graphs,
+        THREE_VAULTS.map((vault) => participantFor(vault, "fresh")),
+      ),
+    );
+
+    render(
+      <MemoryRouter>
+        <GraphPage />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText("ALL VAULTS · KNOWLEDGE GRAPH"),
+    ).toBeVisible();
+  });
+});

@@ -94,6 +94,34 @@ export function buildSimulationGraph(
   return { nodes, links };
 }
 
+/** Bound on synchronous ticks `settleSimulationSync` will spend advancing a
+ * simulation, so a pathologically large graph can't hang the main thread —
+ * comfortably past the ~340 ticks `alphaDecay(0.02)` takes to cross from
+ * alpha 1 to the default `alphaMin` (1e-3). */
+const MAX_SYNC_SETTLE_TICKS = 500;
+
+/**
+ * Run a freshly created simulation to its resting alpha synchronously, with
+ * its own timer stopped throughout, so no intermediate frame is ever
+ * painted — the `prefers-reduced-motion: reduce` path (#147): the graph
+ * "computes silently and paints already settled" instead of visibly
+ * animating into place.
+ */
+export function settleSimulationSync<
+  N extends SimulationNodeDatum,
+  L extends SimulationLinkDatum<N>,
+>(sim: Simulation<N, L>): Simulation<N, L> {
+  sim.stop();
+  for (
+    let i = 0;
+    i < MAX_SYNC_SETTLE_TICKS && sim.alpha() > sim.alphaMin();
+    i++
+  ) {
+    sim.tick();
+  }
+  return sim;
+}
+
 /** Configure the force simulation (link/charge/center/collide) used by the graph. */
 export function createGraphSimulation(
   nodes: SimNode[],
