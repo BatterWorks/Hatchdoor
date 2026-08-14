@@ -774,7 +774,14 @@ function VaultWorkspace({
                     onStartWithNoVaults={() => setStartWithNoVaultsOpen(true)}
                   />
                 ) : vaults.length === 0 ? (
-                  <ZeroVaultState />
+                  <ZeroVaultState
+                    demoMode={demoMode}
+                    onAddVault={() =>
+                      navigate("/settings", {
+                        state: { openVaultCreation: true },
+                      })
+                    }
+                  />
                 ) : (
                   <EmptyState />
                 )
@@ -782,7 +789,10 @@ function VaultWorkspace({
             />
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/graph" element={<GraphPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            <Route
+              path="/settings"
+              element={<SettingsPage onVaultDiscoveryRefresh={loadVaults} />}
+            />
             <Route
               path="/v/:vaultId/n/:slug"
               element={
@@ -980,16 +990,24 @@ function EmptyState() {
 
 /** The zero-Vault workspace (#150): a genuine "nothing added yet" instance,
  * indistinguishable whether it is a brand-new install or one just emptied
- * out — driven purely by `vaults.length === 0`, never a first-visit flag. */
-function ZeroVaultState() {
+ * out — driven purely by `vaults.length === 0`, never a first-visit flag.
+ * The action opens the same creation flow #148 wires into the Settings
+ * index (#153) — this route has no room for the flow itself, so it
+ * navigates there and asks it to open immediately. Absent rather than
+ * disabled in demo mode, matching every other operator affordance. */
+function ZeroVaultState({
+  demoMode,
+  onAddVault,
+}: {
+  demoMode: boolean;
+  onAddVault: () => void;
+}) {
   return (
     <StateBlock
       title="No Vaults Yet"
       description="Add a Vault to start browsing and searching your notes."
-      actionLabel="Add a Vault"
-      // Inert for now: #148 introduced the matching Settings affordance in
-      // the same state, and #153 supplies the real creation flow for both.
-      onAction={() => {}}
+      actionLabel={demoMode ? undefined : "Add a Vault"}
+      onAction={demoMode ? undefined : onAddVault}
     />
   );
 }

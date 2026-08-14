@@ -11,6 +11,7 @@ import type {
   VaultSource,
   VaultSummary,
 } from "../../types";
+import { VaultCreationDialog } from "./VaultCreation";
 import {
   behaviorOf,
   behaviorOptions,
@@ -25,7 +26,9 @@ import {
   markRecoveryPending,
   MAX_POLL_MINUTES,
   MIN_POLL_MINUTES,
+  missingRequiredRepositoryUrl,
   recoverPausedVault,
+  REPOSITORY_URL_REQUIRED_MESSAGE,
   requestJson,
   sameSourceIdentity,
   sourceLabel,
@@ -56,13 +59,26 @@ function lastChanged(mtimeNs: number | undefined): string {
 export function VaultSettingsIndex({
   selectedVaultId,
   onSelectVault,
+  autoOpenCreation,
+  onVaultCreated,
 }: {
   selectedVaultId: VaultId | null;
   onSelectVault: (vaultId: VaultId) => void;
+  /** Set by `SettingsPage` when navigation carried an "open the creation
+   * flow immediately" request — the zero-Vault workspace state (#150)'s
+   * `Add a Vault` button lands here rather than rendering its own copy of
+   * the flow. */
+  autoOpenCreation?: boolean;
+  /** Called after a successful create, in addition to this component's own
+   * list refresh, so the app-wide Vault discovery that drives the sidebar
+   * and scope zone also picks up the new Vault without a reload. */
+  onVaultCreated?: () => void;
 }) {
   const [vaults, setVaults] = useState<VaultSummary[]>([]);
   const [counts, setCounts] = useState<Counts>({});
   const [recovering, setRecovering] = useState<Record<VaultId, boolean>>({});
+  const [demoMode, setDemoMode] = useState(false);
+  const [creationOpen, setCreationOpen] = useState(Boolean(autoOpenCreation));
   // The persisted registry file itself is unreadable (#150) — distinct from
   // a Vault-level `needs attention` recovery above, this replaces the whole
   // group. `legacy_migration_recovery` is deliberately not surfaced here:
@@ -77,6 +93,7 @@ export function VaultSettingsIndex({
     const discovery = (await response.json()) as VaultDiscoveryResponse;
     if (!Array.isArray(discovery.vaults)) return;
     setVaults(discovery.vaults);
+    setDemoMode(discovery.demo_mode);
     setRegistryRecovery(discovery.recovery ?? null);
     if (discovery.recovery) return;
     const stats = await apiFetch("/api/v1/vaults/all/stats");
@@ -175,9 +192,26 @@ export function VaultSettingsIndex({
           </Fragment>
         );
       })}
-      <button className="settings-link" type="button">
-        Add a Vault
-      </button>
+      {demoMode ? null : (
+        <button
+          className="settings-link"
+          type="button"
+          onClick={() => setCreationOpen(true)}
+        >
+          Add a Vault
+        </button>
+      )}
+      {creationOpen && !demoMode ? (
+        <VaultCreationDialog
+          onClose={() => setCreationOpen(false)}
+          onCreated={(vault) => {
+            setCreationOpen(false);
+            setVaults((old) => [...old, vault]);
+            onVaultCreated?.();
+            onSelectVault(vault.vault_id);
+          }}
+        />
+      ) : null}
     </section>
   );
 }
@@ -505,12 +539,8 @@ export function VaultSettingsDetail({
       void plainSave(undefined);
       return;
     }
-    if (
-      draftSource.type !== "local" &&
-      draftSource.mode !== "local_history" &&
-      !draftSource.repository_url
-    ) {
-      setMessage("A repository is required for this behaviour.");
+    if (missingRequiredRepositoryUrl(draftSource)) {
+      setMessage(REPOSITORY_URL_REQUIRED_MESSAGE);
       return;
     }
     if (identityChanged) {

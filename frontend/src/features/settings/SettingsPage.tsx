@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
@@ -320,7 +321,31 @@ function formatWhen(timestamp: string | null | undefined): string | null {
   return days === 1 ? "1 day ago" : `${days} days ago`;
 }
 
-export function SettingsPage() {
+export function SettingsPage({
+  onVaultDiscoveryRefresh,
+}: {
+  /** Refreshes the app-wide Vault discovery `App.tsx` drives the sidebar and
+   * scope zone from, on top of this page's own Vault list (issue #153). */
+  onVaultDiscoveryRefresh?: () => void;
+} = {}) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  // Set once by the zero-Vault workspace state's `Add a Vault` button
+  // (#150) navigating here; consumed on this first render only so a later
+  // back/forward visit to `/settings` does not reopen the flow on its own.
+  const [autoOpenCreation] = useState(
+    () => Boolean((location.state as { openVaultCreation?: boolean } | null)
+      ?.openVaultCreation),
+  );
+  useEffect(() => {
+    if (autoOpenCreation) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // Only ever runs once, right after the initial render consumed the
+    // navigation state above — location/navigate are stable across
+    // re-renders for this purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [settings, setSettings] = useState<Setting[]>([]);
   const [active, setActive] = useState<SectionId>("notes");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -767,6 +792,8 @@ export function SettingsPage() {
           <VaultSettingsIndex
             selectedVaultId={selectedVaultId}
             onSelectVault={setSelectedVaultId}
+            autoOpenCreation={autoOpenCreation}
+            onVaultCreated={onVaultDiscoveryRefresh}
           />
           <p className="settings-index-group">This server</p>
           <nav aria-label="Settings sections">

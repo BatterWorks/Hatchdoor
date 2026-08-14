@@ -977,3 +977,91 @@ describe("VaultSettingsIndex — an unreadable registry (#150)", () => {
     expect(screen.getByRole("button", { name: "Add a Vault" })).toBeVisible();
   });
 });
+
+describe("VaultSettingsIndex — the creation flow entry point (#153)", () => {
+  it("opens the creation dialog from the settings-index Add a Vault button", async () => {
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 0,
+          collection_revision: 0,
+          vaults: [],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+    });
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add a Vault" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Add a Vault" }),
+    ).toBeVisible();
+  });
+
+  it("renders no Add a Vault affordance in demo mode", async () => {
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 0,
+          collection_revision: 0,
+          vaults: [],
+          demo_mode: true,
+        }),
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+    });
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Add a Vault" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("does not leave an already-open dialog usable once discovery reports demo mode", async () => {
+    let resolveDiscovery!: (value: Response) => void;
+    mockedApiFetch.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/v1/vaults") {
+        return new Promise<Response>((resolve) => {
+          resolveDiscovery = resolve;
+        });
+      }
+      if (url === "/api/v1/vaults/all/stats") return json({ data: [] });
+      throw new Error(`Unexpected API request: ${url}`);
+    });
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+
+    // `demoMode` starts `false`, so the button renders before discovery
+    // resolves — exactly the window a demo visitor could click through.
+    fireEvent.click(screen.getByRole("button", { name: "Add a Vault" }));
+    expect(
+      screen.getByRole("dialog", { name: "Add a Vault" }),
+    ).toBeVisible();
+
+    resolveDiscovery(
+      json({
+        registry_revision: 0,
+        collection_revision: 0,
+        vaults: [],
+        demo_mode: true,
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Add a Vault" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+});

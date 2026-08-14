@@ -198,6 +198,24 @@ export function isRemoteBacked(behavior: GitBehavior | null): boolean {
   return behavior === "pull_only" || behavior === "two_way";
 }
 
+export const REPOSITORY_URL_REQUIRED_MESSAGE =
+  "A repository is required for this behaviour.";
+
+/** Whether `source` is missing a `repository_url` its own Git behaviour
+ * requires — the one structural rule `normalize_structural_source`
+ * (`src/vault_registry.rs`) enforces for both `existing_git` and
+ * `managed_git` (never `local`, which has no `mode`). Shared by
+ * `VaultSettingsDetail.handleSave`'s edit-flow guard and the create flow's
+ * `validateCreateSource` so the rule and its message can't quietly diverge
+ * between the two. */
+export function missingRequiredRepositoryUrl(source: VaultSource): boolean {
+  return (
+    source.type !== "local" &&
+    source.mode !== "local_history" &&
+    !source.repository_url
+  );
+}
+
 export function clampPollMinutes(raw: string): number {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed)) return DEFAULT_POLL_MINUTES;
@@ -360,16 +378,28 @@ export function isRecoveryPending(vaultId: VaultId): boolean {
   }
 }
 
+/** The current `expected_registry_revision`, fetched fresh rather than
+ * trusted from whenever a caller last read it — every mutation that needs a
+ * revision (pause recovery, Vault creation) reads it immediately before
+ * acting, since the registry can change between when a form opens and when
+ * it submits. */
+export async function fetchRegistryRevision(): Promise<number | null> {
+  const discovery = await requestJson("/api/v1/vaults");
+  const registryRevision = (discovery.payload as VaultDiscoveryResponse)
+    .registry_revision;
+  return discovery.ok && registryRevision !== undefined
+    ? registryRevision
+    : null;
+}
+
 /** The single recovery action: re-enable with whatever revision is current
  * right now, since the marker may be read on a visit long after the failure.
  * Shared by the index's management entry and a Vault's own page. */
 export async function recoverPausedVault(
   vaultId: VaultId,
 ): Promise<{ ok: boolean; message: string; vault?: VaultSummary }> {
-  const discovery = await requestJson("/api/v1/vaults");
-  const registryRevision = (discovery.payload as VaultDiscoveryResponse)
-    .registry_revision;
-  if (!discovery.ok || registryRevision === undefined)
+  const registryRevision = await fetchRegistryRevision();
+  if (registryRevision === null)
     return {
       ok: false,
       message: "Could not check this Vault's status. Try again.",
