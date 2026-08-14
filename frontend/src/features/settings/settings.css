@@ -189,6 +189,57 @@
   margin-top: 0.6rem;
 }
 
+.settings-index-group {
+  margin: 0.8rem 0.55rem 0.35rem;
+  font-family: var(--font-display);
+  font-size: 0.68rem;
+  font-variation-settings:
+    "wdth" 85,
+    "wght" 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.settings-vault-index-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+.settings-vault-index-item[data-paused="true"] {
+  color: var(--muted);
+}
+.settings-vault-paused {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+}
+
+.settings-vault-detail .settings-sec-head {
+  margin-bottom: 0.6rem;
+}
+.settings-vault-condition {
+  margin: 0 0 1.3rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+.settings-vault-detail .settings-sec-actions {
+  justify-content: flex-end;
+  margin: 1rem 0 1.5rem;
+}
+.settings-vault-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  border-top: 1px solid var(--rule);
+  padding-top: 1.2rem;
+}
+.settings-btn-danger {
+  color: var(--err-fg);
+  border-color: var(--err-border);
+}
+
 .settings-index-item {
   display: grid;
   grid-template-columns: auto 1fr auto auto;
