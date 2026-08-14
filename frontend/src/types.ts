@@ -68,6 +68,8 @@ export type VaultSummary = {
   vault_id: VaultId;
   name: string;
   enabled: boolean;
+  /** The redacted, non-secret Vault source definition from discovery. */
+  source?: unknown;
   exclude_patterns: string[];
   credential_configured: boolean;
   archive_folder?: string;

@@ -1837,10 +1837,15 @@ route tests, and full frontend checks.
 **Owned paths:**
 
 - `frontend/src/features/settings/SettingsPage.tsx`
+- `frontend/src/features/settings/VaultSettingsIndex.tsx`
 - `frontend/src/features/settings/settings.css`
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
-**Public contract:** the Settings page presents server-provided setting metadata
+**Public contract:** the Settings page presents a two-level Vault-management index
+from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
+selected Vault's condition, editable definition fields, identity facts, and
+revisioned pause/rebuild/disconnect controls through the existing Vault API. It
+also presents server-provided setting metadata
 at `/settings`, keeps copy and section layout in the browser, confirms saves
 that rebuild indexing, generates an MCP token candidate without persisting it,
 reveals an MCP secret only when it grants the authenticated viewer no new
