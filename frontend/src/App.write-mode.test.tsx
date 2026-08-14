@@ -274,7 +274,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -317,7 +317,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -359,7 +359,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -376,7 +376,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -478,7 +478,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -539,7 +539,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -628,7 +628,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -662,7 +662,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -758,7 +758,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -783,7 +783,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -864,7 +864,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -881,7 +881,7 @@ describe("App write mode", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -929,7 +929,7 @@ describe("touch editing hint", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -942,7 +942,7 @@ describe("touch editing hint", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -957,7 +957,7 @@ describe("touch editing hint", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -973,7 +973,7 @@ describe("touch editing hint", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -1011,7 +1011,7 @@ describe("touch editing hint", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -1123,7 +1123,7 @@ describe("touch editing hint", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

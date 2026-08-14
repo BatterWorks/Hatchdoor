@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -61,12 +67,21 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
     const head = await screen.findByRole("button", { name: /Scope/ });
     expect(head).toHaveAttribute("aria-expanded", "false");
+
+    // The zone now holds its place at zero Vaults too (#150), so its mere
+    // presence is no longer proof discovery has landed — wait for real
+    // Vault data (the aggregate's shortfall reading) before touching focus,
+    // so `v` is not read while `vaults.length <= 1` still holds and
+    // silently no-ops.
+    await waitFor(() => {
+      expect(document.querySelector(".vault-slot-shortfall")).toBeTruthy();
+    });
 
     fireEvent.keyDown(window, { key: "v" });
 
@@ -84,11 +99,14 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
-    await screen.findByRole("radio", { name: /^All Vaults/ });
+    // The zone now holds its place at zero Vaults too (#150), so "All
+    // Vaults" alone is no longer proof discovery has landed — wait for a
+    // real Vault's own row.
+    await screen.findByRole("radio", { name: /^Alpha/ });
     fireEvent.keyDown(window, { key: "v" });
     const allVaultsRow = await screen.findByRole("radio", {
       name: /^All Vaults/,
@@ -108,11 +126,14 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
-    await screen.findByRole("radio", { name: /^All Vaults/ });
+    // The zone now holds its place at zero Vaults too (#150), so "All
+    // Vaults" alone is no longer proof discovery has landed — wait for a
+    // real Vault's own row.
+    await screen.findByRole("radio", { name: /^Alpha/ });
     const searchTrigger = screen.getByRole("button", { name: "Search" });
     searchTrigger.focus();
 
@@ -136,13 +157,16 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
     // Wait for Vault discovery to land before touching focus, so `v` is not
-    // read while `vaults.length <= 1` still holds and silently no-ops.
-    await screen.findByRole("radio", { name: /^All Vaults/ });
+    // read while `vaults.length <= 1` still holds and silently no-ops. The
+    // zone now holds its place at zero Vaults too (#150), so "All Vaults"
+    // alone is no longer proof discovery has landed — wait for a real
+    // Vault's own row instead.
+    await screen.findByRole("radio", { name: /^Alpha/ });
 
     const searchTrigger = screen.getByRole("button", { name: "Search" });
     searchTrigger.focus();
@@ -164,7 +188,7 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -204,7 +228,7 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -225,7 +249,7 @@ describe("App scope shortcut (#146)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

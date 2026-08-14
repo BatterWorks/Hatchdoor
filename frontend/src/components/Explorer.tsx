@@ -43,11 +43,11 @@ export function SideHead({
       {collapsible ? <span className="side-caret" aria-hidden="true" /> : null}
       <span className="side-label">{label}</span>
       <span className="side-rule" />
-      {slot !== undefined
-        ? slot
-        : count === undefined
-          ? null
-          : <span className="side-count">{String(count).padStart(2, "0")}</span>}
+      {slot !== undefined ? (
+        slot
+      ) : count === undefined ? null : (
+        <span className="side-count">{String(count).padStart(2, "0")}</span>
+      )}
     </>
   );
 

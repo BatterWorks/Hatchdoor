@@ -31,10 +31,11 @@ use crate::handlers::{
     generate_mcp_token_handler, get_git_status_handler, get_index_status_handler,
     get_settings_handler, health_handler, list_vaults_handler, patch_settings_handler,
     refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    spa_index_handler, sync_vault_handler, vault_collection_events_handler,
-    vault_scope_graph_handler, vault_scope_recent_handler, vault_scope_search_handler,
-    vault_scope_stats_handler, vault_scope_tree_handler, vault_scoped_archive_note_handler,
-    vault_scoped_asset_handler, vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
+    spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
+    vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
+    vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
+    vault_scoped_archive_note_handler, vault_scoped_asset_handler,
+    vault_scoped_create_note_handler, vault_scoped_delete_note_handler,
     vault_scoped_move_note_handler, vault_scoped_move_rename_note_handler,
     vault_scoped_note_download_handler, vault_scoped_note_handler, vault_scoped_note_links_handler,
     vault_scoped_rename_note_handler, vault_scoped_resolve_batch_handler,
@@ -349,6 +350,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
             .route(
                 "/api/v1/vaults/events",
                 get(vault_collection_events_handler),
+            )
+            .route(
+                "/api/v1/vaults/start-with-no-vaults",
+                post(start_with_no_vaults_handler).layer(demo_guard.clone()),
             )
             .route(
                 "/api/v1/vaults/{vault_id}",
@@ -1106,7 +1111,7 @@ pub async fn run_server() {
         vaults,
         vault_work: vault_work.clone(),
         managed_git: managed_git.clone(),
-        legacy_migration_recovery,
+        legacy_migration_recovery: Arc::new(std::sync::RwLock::new(legacy_migration_recovery)),
         startup_sqlite: sqlite.clone(),
         ready_vault: Arc::new(RwLock::new(None)),
         vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1648,7 +1653,7 @@ mod tests {
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -1839,7 +1844,7 @@ mod tests {
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -5526,6 +5531,195 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["recovery"]["code"], "vault_registry_recovery_required");
         assert_eq!(body["demo_mode"], true);
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_discovery_reports_legacy_migration_recovery_distinctly_from_registry_recovery()
+     {
+        // #150: an unreadable registry file and a failed legacy import look
+        // different to the browser, even though the registry itself loads
+        // fine (empty, revision 0) in the legacy-migration-recovery case.
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") =
+            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
+                "legacy Vault path is not a readable directory",
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["registry_revision"], 0);
+        assert_eq!(body["vaults"], serde_json::json!([]));
+        assert!(body["recovery"].is_null());
+        assert_eq!(
+            body["legacy_migration_recovery"]["code"],
+            "legacy_migration_required"
+        );
+        assert_eq!(
+            body["legacy_migration_recovery"]["message"],
+            "legacy Vault path is not a readable directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn vaults_v1_discovery_omits_legacy_migration_recovery_when_absent() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = json_body(response).await;
+        assert!(body["legacy_migration_recovery"].is_null());
+    }
+
+    #[tokio::test]
+    async fn start_with_no_vaults_requires_a_pending_recovery() {
+        let (app, _tmp, _state) = app_for_tests_with_web_auth(None);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "legacy_migration_recovery_not_pending");
+    }
+
+    #[tokio::test]
+    async fn start_with_no_vaults_requires_explicit_confirmation() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") =
+            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
+                "legacy Vault path is not a readable directory",
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":false}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "confirmation_required");
+        // Refused, not silently discarded: the recovery flag survives.
+        assert!(
+            state
+                .legacy_migration_recovery
+                .read()
+                .expect("recovery lock")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn start_with_no_vaults_confirmed_writes_an_empty_registry_and_clears_recovery() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") =
+            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
+                "legacy Vault path is not a readable directory",
+            ));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["registry_revision"], 1);
+        assert!(body["vault"].is_null());
+        assert!(
+            state
+                .legacy_migration_recovery
+                .read()
+                .expect("recovery lock")
+                .is_none()
+        );
+
+        // Discovery now reads back the ordinary, no-longer-pending state.
+        let discovery = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = json_body(discovery).await;
+        assert!(body["recovery"].is_null());
+        assert!(body["legacy_migration_recovery"].is_null());
+        assert_eq!(body["vaults"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn start_with_no_vaults_is_refused_in_demo_mode() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") =
+            Some(crate::vault_migration::LegacyMigrationRecovery::for_test(
+                "legacy Vault path is not a readable directory",
+            ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = json_body(response).await;
+        assert_eq!(body["code"], "demo_read_only");
     }
 
     #[tokio::test]

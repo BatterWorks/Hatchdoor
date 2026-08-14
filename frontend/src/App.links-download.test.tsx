@@ -115,7 +115,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -168,7 +168,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -210,7 +210,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -265,7 +265,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -326,7 +326,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -389,7 +389,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -445,7 +445,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -500,7 +500,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -564,7 +564,7 @@ describe("App links/download", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

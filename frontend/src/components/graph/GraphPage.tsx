@@ -32,7 +32,9 @@ import {
 /** Read fresh each time a simulation is (re)created rather than cached —
  * cheap, and the setting can change mid-session. */
 function prefersReducedMotion(): boolean {
-  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+  return (
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+  );
 }
 
 /** Settles a freshly created simulation synchronously under reduced motion
@@ -691,7 +693,8 @@ export function GraphPage() {
 
     const vaultOrder = new Map(vaults.map((v, i) => [v.vault_id, i]));
     const ordered = [...vaultGraphs].sort(
-      (a, b) => (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+      (a, b) =>
+        (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
     );
 
     // A Vault absent from the response (unavailable — never a fresh-but-
@@ -701,7 +704,8 @@ export function GraphPage() {
     const missingNames = participants
       .filter((p) => !drawnIds.has(p.vault_id))
       .sort(
-        (a, b) => (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+        (a, b) =>
+          (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
       )
       .map((p) => p.vault_name);
 
@@ -1202,7 +1206,9 @@ export function GraphPage() {
     <div className="graph-page">
       <div className="graph-header">
         <p className="graph-eyebrow">
-          {islandMode ? "ALL VAULTS · KNOWLEDGE GRAPH" : "Vault · Knowledge Graph"}
+          {islandMode
+            ? "ALL VAULTS · KNOWLEDGE GRAPH"
+            : "Vault · Knowledge Graph"}
         </p>
 
         <div className="graph-header-row">

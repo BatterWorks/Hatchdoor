@@ -195,9 +195,9 @@ describe("pure helpers", () => {
       mode: "pull_only" as const,
       poll_interval_secs: 60,
     };
-    expect(sameSourceIdentity(a, { ...a, mode: "two_way", poll_interval_secs: 999 })).toBe(
-      true,
-    );
+    expect(
+      sameSourceIdentity(a, { ...a, mode: "two_way", poll_interval_secs: 999 }),
+    ).toBe(true);
     expect(sameSourceIdentity(a, { ...a, branch: "dev" })).toBe(false);
     expect(
       sameSourceIdentity(a, { type: "local", path: a.repository_path }),
@@ -280,13 +280,18 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
 
     await screen.findByRole("heading", { name: "Field notes" });
     const group = screen.getByRole("group", { name: "Git behaviour" });
-    expect(within(group).getByRole("button", { name: "No Git" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-    expect(within(group).getByRole("button", { name: "Local history" })).toBeVisible();
-    expect(within(group).getByRole("button", { name: "Pull-only" })).toBeVisible();
-    expect(within(group).getByRole("button", { name: "Two-way" })).toBeVisible();
+    expect(
+      within(group).getByRole("button", { name: "No Git" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      within(group).getByRole("button", { name: "Local history" }),
+    ).toBeVisible();
+    expect(
+      within(group).getByRole("button", { name: "Pull-only" }),
+    ).toBeVisible();
+    expect(
+      within(group).getByRole("button", { name: "Two-way" }),
+    ).toBeVisible();
   });
 
   it("offers only Pull-only and Two-way for a managed Git checkout", async () => {
@@ -310,12 +315,15 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
 
     await screen.findByRole("heading", { name: "Field notes" });
     const group = screen.getByRole("group", { name: "Git behaviour" });
-    expect(within(group).queryByRole("button", { name: "No Git" })).not.toBeInTheDocument();
-    expect(within(group).queryByRole("button", { name: "Local history" })).not.toBeInTheDocument();
-    expect(within(group).getByRole("button", { name: "Two-way" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(
+      within(group).queryByRole("button", { name: "No Git" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(group).queryByRole("button", { name: "Local history" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(group).getByRole("button", { name: "Two-way" }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
   it("saves a plain mode swap on an owned folder as a single PATCH, no confirmation", async () => {
@@ -419,12 +427,17 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
           json({ registry_revision: 4, collection_revision: 4 }),
         [`/api/v1/vaults/${VAULT_ID} PATCH`]: () =>
           new Response(
-            JSON.stringify({ message: "Something about this edit was refused." }),
+            JSON.stringify({
+              message: "Something about this edit was refused.",
+            }),
             { status: 409, headers: { "content-type": "application/json" } },
           ),
         [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
           json({
-            vault: baseVault({ type: "local", path: "/notes" }, { enabled: true }),
+            vault: baseVault(
+              { type: "local", path: "/notes" },
+              { enabled: true },
+            ),
             registry_revision: 5,
             collection_revision: 5,
           }),
@@ -441,9 +454,7 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
     await screen.findByRole("heading", { name: "Field notes" });
     fireEvent.click(screen.getByRole("button", { name: "Local history" }));
     fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Go ahead" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "Go ahead" }));
 
     await screen.findByText(/nothing changed/i);
     expect(isRecoveryPending(VAULT_ID)).toBe(false);
@@ -485,7 +496,10 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
         },
         [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
           json({
-            vault: baseVault({ type: "local", path: "/notes" }, { enabled: true }),
+            vault: baseVault(
+              { type: "local", path: "/notes" },
+              { enabled: true },
+            ),
             registry_revision: 5,
             collection_revision: 5,
           }),
@@ -515,7 +529,10 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
         [`/api/v1/vaults/${VAULT_ID}/disable POST`]: () =>
           json({ registry_revision: 4, collection_revision: 4 }),
         [`/api/v1/vaults/${VAULT_ID} PATCH`]: (init) => {
-          const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          const body = JSON.parse(String(init?.body)) as Record<
+            string,
+            unknown
+          >;
           return json({
             vault: baseVault(body.source, { enabled: false }),
             registry_revision: 5,
@@ -561,7 +578,9 @@ describe("VaultSettingsDetail — sign-in", () => {
       />,
     );
     await screen.findByRole("heading", { name: "Field notes" });
-    expect(screen.queryByRole("group", { name: "Sign-in" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("group", { name: "Sign-in" }),
+    ).not.toBeInTheDocument();
   });
 
   it("has one control with no separate Remove — choosing No sign-in is how a token is forgotten", async () => {
@@ -588,7 +607,9 @@ describe("VaultSettingsDetail — sign-in", () => {
     );
 
     await screen.findByRole("heading", { name: "Field notes" });
-    expect(screen.queryByRole("button", { name: "Remove" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Remove" }),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "No sign-in" }));
     fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
 
@@ -853,13 +874,18 @@ describe("VaultSettingsIndex — the management entry's recovery state", () => {
         json({
           registry_revision: 3,
           collection_revision: 3,
-          vaults: [baseVault({ type: "local", path: "/notes" }, { enabled: false })],
+          vaults: [
+            baseVault({ type: "local", path: "/notes" }, { enabled: false }),
+          ],
           demo_mode: false,
         }),
       "/api/v1/vaults/all/stats": () => json({ data: [] }),
       [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
         json({
-          vault: baseVault({ type: "local", path: "/notes" }, { enabled: true }),
+          vault: baseVault(
+            { type: "local", path: "/notes" },
+            { enabled: true },
+          ),
           registry_revision: 4,
           collection_revision: 4,
         }),
@@ -877,5 +903,77 @@ describe("VaultSettingsIndex — the management entry's recovery state", () => {
       expect(screen.queryByText("needs attention")).not.toBeInTheDocument(),
     );
     expect(isRecoveryPending(VAULT_ID)).toBe(false);
+  });
+});
+
+describe("VaultSettingsIndex — an unreadable registry (#150)", () => {
+  it("replaces the whole Vaults group with the documented error block and omits Add a Vault", async () => {
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          collection_revision: 0,
+          vaults: [],
+          recovery: {
+            code: "vault_registry_recovery_required",
+            kind: "corrupt",
+            message: "the registry file is not valid JSON",
+          },
+          demo_mode: false,
+        }),
+    });
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+
+    expect(await screen.findByText("Vault Registry Unavailable")).toBeVisible();
+    expect(
+      screen.getByText(
+        "the registry file is not valid JSON Nothing was changed, and your Markdown is untouched.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Add a Vault" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Try again re-fetches discovery and recovers once the registry reads fine", async () => {
+    let broken = true;
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        broken
+          ? json({
+              collection_revision: 0,
+              vaults: [],
+              recovery: {
+                code: "vault_registry_recovery_required",
+                kind: "corrupt",
+                message: "the registry file is not valid JSON",
+              },
+              demo_mode: false,
+            })
+          : json({
+              registry_revision: 0,
+              collection_revision: 0,
+              vaults: [],
+              demo_mode: false,
+            }),
+      "/api/v1/vaults/all/stats": () => json({ data: [] }),
+    });
+
+    render(
+      <VaultSettingsIndex selectedVaultId={null} onSelectVault={() => {}} />,
+    );
+    await screen.findByText("Vault Registry Unavailable");
+
+    broken = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+
+    await vi.waitFor(() => {
+      expect(
+        screen.queryByText("Vault Registry Unavailable"),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Add a Vault" })).toBeVisible();
   });
 });

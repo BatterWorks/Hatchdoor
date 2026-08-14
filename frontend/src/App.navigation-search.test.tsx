@@ -64,7 +64,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -80,7 +80,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -146,7 +146,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -253,7 +253,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -320,7 +320,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -365,7 +365,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -414,7 +414,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -490,7 +490,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/plan`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -558,7 +558,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -621,7 +621,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -695,7 +695,7 @@ describe("App navigation/search", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

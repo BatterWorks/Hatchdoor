@@ -255,14 +255,8 @@ export function createIslandSimulation(
         .strength(0.4),
     )
     .force("charge", forceManyBody<SimNode>().strength(-180).distanceMax(400))
-    .force(
-      "x",
-      forceX<SimNode>((d) => d.islandCx ?? 0).strength(0.08),
-    )
-    .force(
-      "y",
-      forceY<SimNode>((d) => d.islandCy ?? 0).strength(0.08),
-    )
+    .force("x", forceX<SimNode>((d) => d.islandCx ?? 0).strength(0.08))
+    .force("y", forceY<SimNode>((d) => d.islandCy ?? 0).strength(0.08))
     .force(
       "collide",
       forceCollide<SimNode>().radius((d) => nodeRadius(d.backlink_count) + 4),

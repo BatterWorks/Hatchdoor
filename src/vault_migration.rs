@@ -84,6 +84,13 @@ impl LegacyMigrationRecovery {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

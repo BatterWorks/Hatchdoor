@@ -3,7 +3,12 @@ import type { VaultId, VaultScope, VaultSummary } from "../types";
 export type VaultSlotState =
   | { kind: "count"; count: number }
   | { kind: "indexing" }
-  | { kind: "condition"; word: string; tier: "warn" | "error"; sentence: string };
+  | {
+      kind: "condition";
+      word: string;
+      tier: "warn" | "error";
+      sentence: string;
+    };
 
 export type VaultAggregate =
   | { kind: "count"; count: number }

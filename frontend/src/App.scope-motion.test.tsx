@@ -65,7 +65,7 @@ describe("App scope-change motion (#147)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -92,7 +92,7 @@ describe("App scope-change motion (#147)", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

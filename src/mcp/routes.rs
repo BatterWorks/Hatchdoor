@@ -219,7 +219,7 @@ mod tests {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,
@@ -266,7 +266,7 @@ mod tests {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
@@ -332,7 +332,7 @@ mod tests {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
-            legacy_migration_recovery: None,
+            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: cache.sqlite.clone(),
             ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
                 vault_path: vault_root,

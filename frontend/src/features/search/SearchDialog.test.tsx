@@ -30,6 +30,8 @@ function renderDialog(
     vaults: [],
     scope: "all",
     inputRef,
+    startupStatus: null,
+    onRetryModelSetup: vi.fn(),
     onClose,
     onQueryChange,
     onIncludeContentChange,
@@ -412,9 +414,9 @@ describe("SearchDialog's own Vault filter — never the browsing scope (#144)", 
       "is-selected",
     );
     expect(screen.queryByText("Two")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /All results/ }),
-    ).not.toHaveClass("is-selected");
+    expect(screen.getByRole("button", { name: /All results/ })).not.toHaveClass(
+      "is-selected",
+    );
   });
 
   it("starts fresh at All results on a later, unrelated open — the filter does not survive remounting", () => {
@@ -506,8 +508,60 @@ describe("SearchDialog's mobile field strip (#144)", () => {
       target: { value: "keyword" },
     });
 
-    expect(props.onIncludeContentChange).toHaveBeenCalledExactlyOnceWith(
-      true,
-    );
+    expect(props.onIncludeContentChange).toHaveBeenCalledExactlyOnceWith(true);
+  });
+});
+
+describe("SearchDialog surfaces the shrunk startup gate's state (#150)", () => {
+  afterEach(cleanup);
+
+  it("shows a work-in-flight block during a first index, with the current percentage", () => {
+    renderDialog({
+      startupStatus: { state: "indexing", percent: 42 } as never,
+    });
+
+    expect(screen.getByText("Could Not Load")).toBeVisible();
+    expect(screen.getByText(/42%/)).toBeVisible();
+  });
+
+  it("shows a work-in-flight block during scanning with no percentage yet", () => {
+    renderDialog({ startupStatus: { state: "scanning" } });
+
+    expect(screen.getByText("Could Not Load")).toBeVisible();
+  });
+
+  it("keeps the query input enabled and typable during a first index", () => {
+    const { props } = renderDialog({
+      startupStatus: { state: "indexing", percent: 10 } as never,
+    });
+
+    const input = screen.getByPlaceholderText("Search notes…");
+    expect(input).not.toBeDisabled();
+    fireEvent.change(input, { target: { value: "plan b" } });
+    expect(props.onQueryChange).toHaveBeenCalledWith("plan b");
+  });
+
+  it("shows the failed-model reason and a retry action instead of the ordinary empty state", () => {
+    const { props } = renderDialog({
+      query: "",
+      startupStatus: {
+        state: "failed",
+        message: "The search model could not be downloaded or loaded.",
+      },
+    });
+
+    expect(screen.getByText("Could Not Load")).toBeVisible();
+    expect(
+      screen.getByText("The search model could not be downloaded or loaded."),
+    ).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry setup" }));
+    expect(props.onRetryModelSetup).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show a work-in-flight or failed block once the gate has stepped aside", () => {
+    renderDialog({ startupStatus: { state: "ready" } });
+
+    expect(screen.queryByText("Could Not Load")).not.toBeInTheDocument();
   });
 });

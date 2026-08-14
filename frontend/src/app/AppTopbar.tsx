@@ -14,7 +14,12 @@ import {
 } from "../components/icons";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
 import { scopeName } from "./vaultSlotLogic";
-import type { ActiveNoteMeta, VaultId, VaultScope, VaultSummary } from "../types";
+import type {
+  ActiveNoteMeta,
+  VaultId,
+  VaultScope,
+  VaultSummary,
+} from "../types";
 import type { Theme } from "../hooks/useTheme";
 
 // One icon per theme state, mirroring the three-way cycle. The icon shows the
@@ -116,8 +121,7 @@ export function AppTopbar({
   // enabled Vault, where scope has nothing to say.
   const scopeEcho =
     vaults.length > 1
-      ? (vaults.find((vault) => vault.vault_id === activeNote?.vaultId)
-          ?.name ??
+      ? (vaults.find((vault) => vault.vault_id === activeNote?.vaultId)?.name ??
         (scope === "all"
           ? "All Vaults"
           : (vaults.find((vault) => vault.vault_id === scope)?.name ??
@@ -135,7 +139,9 @@ export function AppTopbar({
   // has nothing to offer there.
   const showScopeRow = isMobile && vaults.length > 1;
   const narrowedScopeVault =
-    scope === "all" ? undefined : vaults.find((vault) => vault.vault_id === scope);
+    scope === "all"
+      ? undefined
+      : vaults.find((vault) => vault.vault_id === scope);
   const scopeSlot =
     scope === "all" ? (
       <VaultAggregateSlot vaults={vaults} counts={vaultNoteCounts} />
@@ -149,7 +155,9 @@ export function AppTopbar({
   // Vault — this marker is the one exception, and only earns its place when
   // an exact read disagrees with a *narrowed* scope. At `all` every open note
   // is already within scope, so there is nothing to flag.
-  const viewingVault = vaults.find((vault) => vault.vault_id === viewingVaultId);
+  const viewingVault = vaults.find(
+    (vault) => vault.vault_id === viewingVaultId,
+  );
   const showViewingMarker =
     scope !== "all" && viewingVault !== undefined && viewingVaultId !== scope;
 
@@ -172,7 +180,10 @@ export function AppTopbar({
 
   // Rows are a pick-exactly-one radiogroup (#146), mirroring the desktop
   // Scope zone: `all` first, then every Vault in Vault-management order.
-  const scopeRowIds: VaultScope[] = ["all", ...vaults.map((vault) => vault.vault_id)];
+  const scopeRowIds: VaultScope[] = [
+    "all",
+    ...vaults.map((vault) => vault.vault_id),
+  ];
   const selectedScopeRowIndex = Math.max(0, scopeRowIds.indexOf(scope));
 
   const closeScopeSheetWithoutPicking = () => {
@@ -497,7 +508,9 @@ export function AppTopbar({
             aria-haspopup="dialog"
             aria-expanded={scopeSheetOpen}
           >
-            <span className="topbar-scope-name">{scopeName(scope, vaults)}</span>
+            <span className="topbar-scope-name">
+              {scopeName(scope, vaults)}
+            </span>
             <span className="topbar-scope-rule" aria-hidden="true">
               /
             </span>
@@ -552,7 +565,10 @@ export function AppTopbar({
                   }}
                 >
                   <span className="scope-row-label">All Vaults</span>
-                  <VaultAggregateSlot vaults={vaults} counts={vaultNoteCounts} />
+                  <VaultAggregateSlot
+                    vaults={vaults}
+                    counts={vaultNoteCounts}
+                  />
                 </button>
               </li>
               {vaults.map((vault, index) => (

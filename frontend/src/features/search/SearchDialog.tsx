@@ -7,6 +7,7 @@ import {
   VaultPrefix,
 } from "../../components/ui";
 import { describeMissingVaults } from "../../lib/vaultParticipants";
+import type { StartupStatus } from "../../startup/useStartupStatus";
 import type {
   VaultId,
   VaultParticipant,
@@ -122,6 +123,8 @@ export function SearchDialog({
   vaults,
   scope,
   inputRef,
+  startupStatus,
+  onRetryModelSetup,
   onClose,
   onQueryChange,
   onIncludeContentChange,
@@ -144,12 +147,22 @@ export function SearchDialog({
   vaults: VaultSummary[];
   scope: VaultScope;
   inputRef: RefObject<HTMLInputElement | null>;
+  /** The shrunk startup gate's own state (#150): a first index in flight or
+   * a failed model download replace the result area with a dedicated block
+   * instead of blocking the whole app. Typing stays live either way. */
+  startupStatus: StartupStatus | null;
+  onRetryModelSetup: () => void;
   onClose: () => void;
   onQueryChange: (value: string) => void;
   onIncludeContentChange: (value: boolean) => void;
   onSelect: (selection: SearchSelection) => void;
 }) {
   const trimmedQuery = query.trim();
+  const startupWorkInFlight =
+    startupStatus?.state === "scanning" || startupStatus?.state === "indexing";
+  const startupPercent =
+    startupStatus?.state === "indexing" ? startupStatus.percent : null;
+  const startupFailed = startupStatus?.state === "failed";
   // Provenance only where results can actually span Vaults (#140).
   const showVaultPrefix = scope === "all" && vaults.length > 1;
   const vaultName = (vaultId: string) =>
@@ -333,25 +346,53 @@ export function SearchDialog({
           </div>
         </div>
 
-        {loading ? <p>Searching…</p> : null}
-        {error ? <p className="error">{error}</p> : null}
-        {!loading &&
-        !error &&
-        trimmedQuery.length >= 2 &&
-        results.length === 0 ? (
-          partial ? (
-            // Nothing usable: the documented error block replaces the empty
-            // state entirely. "No matching notes" would be a lie when some
-            // Vaults never answered (#141).
-            <StateBlock
-              tone="error"
-              title="Nothing Found"
-              description={describeMissingVaults(missingVaultNames)}
-            />
-          ) : (
-            <p>No matching notes.</p>
-          )
-        ) : null}
+        {startupWorkInFlight ? (
+          // The shrunk startup gate (#150) no longer blocks the app for a
+          // first index; this dialog still opens normally and stays typable
+          // — it just can't answer yet, worded as work in flight and
+          // carrying the same percentage the Scope zone shows.
+          <StateBlock
+            title="Could Not Load"
+            description={
+              startupPercent === null
+                ? "Building the search index. Results will appear once it's ready."
+                : `Building the search index (${startupPercent}%). Results will appear once it's ready.`
+            }
+          />
+        ) : startupFailed ? (
+          <StateBlock
+            tone="error"
+            title="Could Not Load"
+            description={
+              (startupStatus?.state === "failed" && startupStatus.message) ||
+              "The search model could not be downloaded or loaded."
+            }
+            actionLabel="Retry setup"
+            onAction={onRetryModelSetup}
+          />
+        ) : (
+          <>
+            {loading ? <p>Searching…</p> : null}
+            {error ? <p className="error">{error}</p> : null}
+            {!loading &&
+            !error &&
+            trimmedQuery.length >= 2 &&
+            results.length === 0 ? (
+              partial ? (
+                // Nothing usable: the documented error block replaces the
+                // empty state entirely. "No matching notes" would be a lie
+                // when some Vaults never answered (#141).
+                <StateBlock
+                  tone="error"
+                  title="Nothing Found"
+                  description={describeMissingVaults(missingVaultNames)}
+                />
+              ) : (
+                <p>No matching notes.</p>
+              )
+            ) : null}
+          </>
+        )}
 
         <div className="search-body">
           {/* Desktop: the facet rail, a narrow column beside the results

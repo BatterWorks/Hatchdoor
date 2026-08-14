@@ -1,11 +1,19 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppTopbar } from "./AppTopbar";
 import { THREE_VAULTS } from "../test/fixtures/vaults";
 import type { ActiveNoteMeta } from "../types";
 
-function renderTopbar(overrides: Partial<Parameters<typeof AppTopbar>[0]> = {}) {
+function renderTopbar(
+  overrides: Partial<Parameters<typeof AppTopbar>[0]> = {},
+) {
   const props = {
     activeNote: null,
     vaults: [] as typeof THREE_VAULTS,
@@ -136,7 +144,9 @@ describe("AppTopbar mobile scope row (#145)", () => {
 
     const trigger = scopeTrigger();
     expect(trigger).not.toBeNull();
-    expect(within(trigger as HTMLElement).getByText("All Vaults")).toBeInTheDocument();
+    expect(
+      within(trigger as HTMLElement).getByText("All Vaults"),
+    ).toBeInTheDocument();
   });
 
   it("names a narrowed scope by Vault name", () => {
@@ -293,7 +303,9 @@ describe("AppTopbar mobile scope sheet (#145)", () => {
       onCloseScopeSheet,
     });
 
-    fireEvent.click(document.querySelector(".scope-sheet-backdrop") as HTMLElement);
+    fireEvent.click(
+      document.querySelector(".scope-sheet-backdrop") as HTMLElement,
+    );
     expect(onCloseScopeSheet).toHaveBeenCalledTimes(1);
   });
 
@@ -307,7 +319,9 @@ describe("AppTopbar mobile scope sheet (#145)", () => {
       onRestoreScopeFocus,
     });
 
-    fireEvent.click(document.querySelector(".scope-sheet-backdrop") as HTMLElement);
+    fireEvent.click(
+      document.querySelector(".scope-sheet-backdrop") as HTMLElement,
+    );
     expect(onRestoreScopeFocus).toHaveBeenCalledTimes(1);
   });
 

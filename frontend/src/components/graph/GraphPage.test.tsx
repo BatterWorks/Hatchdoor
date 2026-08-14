@@ -147,9 +147,7 @@ describe("GraphPage — all-Vault islands (#143)", () => {
       </MemoryRouter>,
     );
 
-    expect(
-      await screen.findByText("Vault · Knowledge Graph"),
-    ).toBeVisible();
+    expect(await screen.findByText("Vault · Knowledge Graph")).toBeVisible();
     expect(
       screen.queryByText("ALL VAULTS · KNOWLEDGE GRAPH"),
     ).not.toBeInTheDocument();
@@ -274,7 +272,9 @@ describe("GraphPage — all-Vault islands (#143)", () => {
       await screen.findByText("ALL VAULTS · KNOWLEDGE GRAPH"),
     ).toBeVisible();
     expect(
-      await screen.findByText(`${beta.name} and ${gamma.name} could not be drawn.`),
+      await screen.findByText(
+        `${beta.name} and ${gamma.name} could not be drawn.`,
+      ),
     ).toBeVisible();
   });
 
@@ -296,9 +296,7 @@ describe("GraphPage — all-Vault islands (#143)", () => {
       </MemoryRouter>,
     );
 
-    expect(
-      await screen.findByText("Vault · Knowledge Graph"),
-    ).toBeVisible();
+    expect(await screen.findByText("Vault · Knowledge Graph")).toBeVisible();
     expect(
       screen.queryByText("ALL VAULTS · KNOWLEDGE GRAPH"),
     ).not.toBeInTheDocument();
@@ -349,9 +347,7 @@ describe("GraphPage — settles instantly under prefers-reduced-motion (#147)", 
       </MemoryRouter>,
     );
 
-    expect(
-      await screen.findByText("Vault · Knowledge Graph"),
-    ).toBeVisible();
+    expect(await screen.findByText("Vault · Knowledge Graph")).toBeVisible();
   });
 
   it("still draws the all-Vault island field with reduced motion preferred", async () => {

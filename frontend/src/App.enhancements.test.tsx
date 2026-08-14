@@ -74,7 +74,7 @@ describe("App enhancements", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -170,7 +170,7 @@ describe("App enhancements", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -254,7 +254,7 @@ describe("App enhancements", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -347,7 +347,7 @@ describe("App enhancements", () => {
 
     render(
       <MemoryRouter initialEntries={["/"]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -434,7 +434,7 @@ describe("App enhancements", () => {
 
     render(
       <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home?q=token`]}>
-        <App />
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

@@ -47,8 +47,9 @@ export function useVaultTree(scope: VaultScope) {
   const [treePartial, setTreePartial] = useState(false);
   const [modifiedNotes, setModifiedNotes] = useState<ModifiedNote[]>([]);
   const [modifiedNotesPartial, setModifiedNotesPartial] = useState(false);
-  const [modifiedNotesMissingVaults, setModifiedNotesMissingVaults] =
-    useState<string[]>([]);
+  const [modifiedNotesMissingVaults, setModifiedNotesMissingVaults] = useState<
+    string[]
+  >([]);
   const [vaultRevision, setVaultRevision] = useState(0);
 
   const loadTree = useCallback(async () => {
@@ -90,9 +91,7 @@ export function useVaultTree(scope: VaultScope) {
       >;
       setModifiedNotes(projection.data.slice(0, 5));
       setModifiedNotesPartial(projection.partial);
-      setModifiedNotesMissingVaults(
-        missingVaultNames(projection.participants),
-      );
+      setModifiedNotesMissingVaults(missingVaultNames(projection.participants));
     } catch {
       setModifiedNotes([]);
       setModifiedNotesPartial(false);

@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { clearToken } from "../api/api";
 import {
   collectionEnvelope,
   discoveryResponse,
@@ -15,13 +16,127 @@ import {
   useVaultScope,
 } from "./useVaultScope";
 
-describe("useVaultScope", () => {
-  afterEach(() => {
-    cleanup();
-    vi.restoreAllMocks();
-    window.localStorage.clear();
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  clearToken();
+  window.localStorage.clear();
+});
+
+function jsonResponse(body: object, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("useVaultDiscovery", () => {
+  it("loads enabled Vaults and demo_mode from GET /api/v1/vaults", async () => {
+    const enabled = healthyVault("Enabled");
+    const disabled = { ...healthyVault("Disabled"), enabled: false };
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        jsonResponse(discoveryResponse([enabled, disabled], true)),
+      );
+
+    const { result } = renderHook(() => useVaultDiscovery());
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/vaults", expect.anything());
+    expect(result.current.vaults).toEqual([enabled]);
+    expect(result.current.demoMode).toBe(true);
+    expect(result.current.error).toBeNull();
   });
 
+  it("surfaces a load failure as an error message", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "internal_error",
+          message: "boom",
+          retryable: false,
+        },
+        500,
+      ),
+    );
+
+    const { result } = renderHook(() => useVaultDiscovery());
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.vaults).toEqual([]);
+    expect(result.current.error).toBe("boom");
+  });
+
+  it("exposes neither recovery field on an ordinary discovery response", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        registry_revision: 1,
+        collection_revision: 1,
+        vaults: [],
+        demo_mode: false,
+      }),
+    );
+
+    const { result } = renderHook(() => useVaultDiscovery());
+    await act(async () => {});
+
+    expect(result.current.recovery).toBeNull();
+    expect(result.current.legacyMigrationRecovery).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("surfaces an unreadable-registry recovery distinctly from a failed legacy upgrade", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        collection_revision: 0,
+        vaults: [],
+        recovery: {
+          code: "vault_registry_recovery_required",
+          kind: "corrupt",
+          message: "the registry file is not valid JSON",
+        },
+        demo_mode: false,
+      }),
+    );
+
+    const { result } = renderHook(() => useVaultDiscovery());
+    await act(async () => {});
+
+    expect(result.current.recovery).toEqual({
+      code: "vault_registry_recovery_required",
+      kind: "corrupt",
+      message: "the registry file is not valid JSON",
+    });
+    expect(result.current.legacyMigrationRecovery).toBeNull();
+  });
+
+  it("surfaces a failed legacy upgrade distinctly from an unreadable registry", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        registry_revision: 0,
+        collection_revision: 0,
+        vaults: [],
+        legacy_migration_recovery: {
+          code: "legacy_migration_required",
+          message: "legacy Vault path is not a readable directory",
+        },
+        demo_mode: false,
+      }),
+    );
+
+    const { result } = renderHook(() => useVaultDiscovery());
+    await act(async () => {});
+
+    expect(result.current.legacyMigrationRecovery).toEqual({
+      code: "legacy_migration_required",
+      message: "legacy Vault path is not a readable directory",
+    });
+    expect(result.current.recovery).toBeNull();
+  });
+});
+
+describe("useVaultScope", () => {
   it("defaults to all and persists a selected scope across instances", () => {
     const { result, unmount } = renderHook(() => useVaultScope());
     expect(result.current[0]).toBe("all");
@@ -37,60 +152,7 @@ describe("useVaultScope", () => {
   });
 });
 
-describe("useVaultDiscovery", () => {
-  afterEach(() => {
-    cleanup();
-    vi.restoreAllMocks();
-  });
-
-  it("loads enabled Vaults and demo_mode from GET /api/v1/vaults", async () => {
-    const enabled = healthyVault("Enabled");
-    const disabled = { ...healthyVault("Disabled"), enabled: false };
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify(discoveryResponse([enabled, disabled], true)),
-        {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        },
-      ),
-    );
-
-    const { result } = renderHook(() => useVaultDiscovery());
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(fetchMock).toHaveBeenCalledWith("/api/v1/vaults", expect.anything());
-    expect(result.current.vaults).toEqual([enabled]);
-    expect(result.current.demoMode).toBe(true);
-    expect(result.current.error).toBeNull();
-  });
-
-  it("surfaces a load failure as an error message", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          code: "internal_error",
-          message: "boom",
-          retryable: false,
-        }),
-        { status: 500 },
-      ),
-    );
-
-    const { result } = renderHook(() => useVaultDiscovery());
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.vaults).toEqual([]);
-    expect(result.current.error).toBe("boom");
-  });
-});
-
 describe("useVaultNoteCounts", () => {
-  afterEach(() => {
-    cleanup();
-    vi.restoreAllMocks();
-  });
-
   it("fetches /api/v1/vaults/all/stats and maps note_count by vault_id when enabled", async () => {
     const alpha = healthyVault("Alpha");
     const beta = healthyVault("Beta");
@@ -112,17 +174,16 @@ describe("useVaultNoteCounts", () => {
         vault_size_bytes: 256,
       },
     ];
-    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify(
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        jsonResponse(
           collectionEnvelope("all", stats, [
             participantFor(alpha),
             participantFor(beta),
           ]),
         ),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
+      );
 
     const { result } = renderHook(() => useVaultNoteCounts(true, 0));
 
@@ -149,24 +210,21 @@ describe("useVaultNoteCounts", () => {
   it("refetches when vaultRevision changes", async () => {
     const alpha = healthyVault("Alpha");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(
-        JSON.stringify(
-          collectionEnvelope(
-            "all",
-            [
-              {
-                vault_id: alpha.vault_id,
-                vault_name: alpha.name,
-                note_count: 1,
-                tag_count: 0,
-                link_count: 0,
-                vault_size_bytes: 10,
-              },
-            ],
-            [participantFor(alpha)],
-          ),
+      jsonResponse(
+        collectionEnvelope(
+          "all",
+          [
+            {
+              vault_id: alpha.vault_id,
+              vault_name: alpha.name,
+              note_count: 1,
+              tag_count: 0,
+              link_count: 0,
+              vault_size_bytes: 10,
+            },
+          ],
+          [participantFor(alpha)],
         ),
-        { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
 
