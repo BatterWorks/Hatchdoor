@@ -6405,14 +6405,24 @@ mod tests {
             )
             .await
             .expect("response");
-        // The frontend is not built in this test environment, so
-        // `spa_index_handler` reports 503 rather than 200 — the discriminator
-        // here is that it is *not* a router 404, proving the canonical Note
-        // URL dispatches to the SPA shell rather than falling through.
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        assert!(String::from_utf8_lossy(&bytes).contains("Frontend not built"));
+        // The discriminator is that this is *not* a router 404: the canonical
+        // Note URL dispatches to the SPA shell rather than falling through.
+        // Which success-side status the shell reports depends on whether
+        // `frontend/dist` happens to exist — absent in CI and in a fresh
+        // checkout (503), present for anyone who has run `just prod-check` or
+        // `npm run build` (200). Asserting one of them makes the test pass or
+        // fail on an untracked build artifact rather than on the routing this
+        // covers, so accept both and pin the reason only in the 503 case.
+        let status = response.status();
+        assert!(
+            status == StatusCode::OK || status == StatusCode::SERVICE_UNAVAILABLE,
+            "canonical Note URL must reach the SPA shell, got {status}"
+        );
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            assert!(String::from_utf8_lossy(&bytes).contains("Frontend not built"));
+        }
     }
 }
