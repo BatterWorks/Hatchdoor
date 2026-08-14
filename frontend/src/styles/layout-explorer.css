@@ -49,6 +49,18 @@
   margin-bottom: 0.5rem;
 }
 
+/* `v` keycap after the SCOPE label (#146) — wide screens only, since the
+   zone itself never renders on mobile. */
+.scope-zone-keycap {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  padding: 0.02rem 0.32rem;
+  border-radius: var(--radius-pill);
+}
+
 /* Collapsed head names the current scope in place of the usual mono count. */
 .scope-zone-current {
   flex: 0 0 auto;

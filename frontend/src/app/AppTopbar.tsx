@@ -1,5 +1,8 @@
 import { useEffect, useRef, type ReactElement, type Ref } from "react";
 
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 import { StatusBadge, UiButton } from "../components/ui";
 import {
   ContrastIcon,
@@ -62,6 +65,8 @@ type TopbarProps = {
   scopeSheetOpen: boolean;
   onToggleScopeSheet: () => void;
   onCloseScopeSheet: () => void;
+  scopeFocusRequestId: number;
+  onRestoreScopeFocus: () => void;
 };
 
 export function AppTopbar({
@@ -94,9 +99,14 @@ export function AppTopbar({
   scopeSheetOpen,
   onToggleScopeSheet,
   onCloseScopeSheet,
+  scopeFocusRequestId,
+  onRestoreScopeFocus,
 }: TopbarProps) {
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const scopeHostRef = useRef<HTMLDivElement>(null);
+  const scopeTriggerRef = useRef<HTMLButtonElement>(null);
+  const scopeSheetRef = useRef<HTMLDivElement>(null);
+  const scopeRowRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
@@ -160,6 +170,27 @@ export function AppTopbar({
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [actionsMenuOpen, onCloseActionsMenu]);
 
+  // Rows are a pick-exactly-one radiogroup (#146), mirroring the desktop
+  // Scope zone: `all` first, then every Vault in Vault-management order.
+  const scopeRowIds: VaultScope[] = ["all", ...vaults.map((vault) => vault.vault_id)];
+  const selectedScopeRowIndex = Math.max(0, scopeRowIds.indexOf(scope));
+
+  const closeScopeSheetWithoutPicking = () => {
+    onCloseScopeSheet();
+    onRestoreScopeFocus();
+  };
+
+  const pickScope = (next: VaultScope) => {
+    onScopeChange(next);
+    onCloseScopeSheet();
+    scopeTriggerRef.current?.focus();
+  };
+
+  const focusScopeRow = (index: number) => {
+    const wrapped = (index + scopeRowIds.length) % scopeRowIds.length;
+    scopeRowRefs.current[wrapped]?.focus();
+  };
+
   useEffect(() => {
     if (!scopeSheetOpen) {
       return;
@@ -170,12 +201,59 @@ export function AppTopbar({
       if (target instanceof Node && scopeHostRef.current?.contains(target)) {
         return;
       }
-      onCloseScopeSheet();
+      closeScopeSheetWithoutPicking();
     };
 
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
-  }, [scopeSheetOpen, onCloseScopeSheet]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeSheetOpen]);
+
+  // Focus lands on the current scope row the instant the sheet opens (#146)
+  // — whether opened by `v` or by tapping the trigger — and the sheet traps
+  // Tab within itself and closes on `Escape`, restoring focus like any other
+  // dialog (#146's general "traps focus and returns it on close").
+  useEffect(() => {
+    if (!scopeSheetOpen) {
+      return;
+    }
+
+    scopeRowRefs.current[selectedScopeRowIndex]?.focus();
+
+    const root = scopeSheetRef.current;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeScopeSheetWithoutPicking();
+        return;
+      }
+      if (event.key !== "Tab" || !root) {
+        return;
+      }
+      const items = Array.from(
+        root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      );
+      if (items.length === 0) {
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+    // Refocusing the selected row on every render (e.g. a scope-independent
+    // rerender) would fight the user's own arrow-key navigation; only the
+    // sheet opening or a fresh `v` press should re-home focus.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeSheetOpen, scopeFocusRequestId]);
 
   return (
     <>
@@ -413,6 +491,7 @@ export function AppTopbar({
         <div className="topbar-mobile-meta" ref={scopeHostRef}>
           <button
             type="button"
+            ref={scopeTriggerRef}
             className="topbar-scope-trigger"
             onClick={onToggleScopeSheet}
             aria-haspopup="dialog"
@@ -433,11 +512,12 @@ export function AppTopbar({
           {scopeSheetOpen ? (
             <div
               className="scope-sheet-backdrop"
-              onClick={onCloseScopeSheet}
+              onClick={closeScopeSheetWithoutPicking}
               aria-hidden="true"
             />
           ) : null}
           <div
+            ref={scopeSheetRef}
             className="scope-sheet"
             role="dialog"
             aria-modal="true"
@@ -445,28 +525,56 @@ export function AppTopbar({
             aria-hidden={!scopeSheetOpen}
             data-open={scopeSheetOpen}
           >
-            <ul className="scope-sheet-list">
+            <ul
+              className="scope-sheet-list"
+              role="radiogroup"
+              aria-label="Vault scope"
+            >
               <li>
                 <button
                   type="button"
+                  role="radio"
+                  aria-checked={scope === "all"}
+                  tabIndex={selectedScopeRowIndex === 0 ? 0 : -1}
+                  ref={(el) => {
+                    scopeRowRefs.current[0] = el;
+                  }}
                   className={`scope-row${scope === "all" ? " is-selected" : ""}`}
-                  onClick={() => {
-                    onScopeChange("all");
-                    onCloseScopeSheet();
+                  onClick={() => pickScope("all")}
+                  onKeyDown={(event) => {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      focusScopeRow(1);
+                    } else if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      focusScopeRow(-1);
+                    }
                   }}
                 >
                   <span className="scope-row-label">All Vaults</span>
                   <VaultAggregateSlot vaults={vaults} counts={vaultNoteCounts} />
                 </button>
               </li>
-              {vaults.map((vault) => (
+              {vaults.map((vault, index) => (
                 <li key={vault.vault_id}>
                   <button
                     type="button"
+                    role="radio"
+                    aria-checked={scope === vault.vault_id}
+                    tabIndex={selectedScopeRowIndex === index + 1 ? 0 : -1}
+                    ref={(el) => {
+                      scopeRowRefs.current[index + 1] = el;
+                    }}
                     className={`scope-row${scope === vault.vault_id ? " is-selected" : ""}`}
-                    onClick={() => {
-                      onScopeChange(vault.vault_id);
-                      onCloseScopeSheet();
+                    onClick={() => pickScope(vault.vault_id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "ArrowDown") {
+                        event.preventDefault();
+                        focusScopeRow(index + 2);
+                      } else if (event.key === "ArrowUp") {
+                        event.preventDefault();
+                        focusScopeRow(index);
+                      }
                     }}
                   >
                     <span className="scope-row-label">{vault.name}</span>

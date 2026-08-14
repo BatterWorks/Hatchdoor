@@ -13,7 +13,11 @@ import {
 } from "../test/fixtures/vaults";
 import type { VaultSummary } from "../types";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
-import { deriveVaultAggregate, deriveVaultSlot } from "./vaultSlotLogic";
+import {
+  deriveVaultAggregate,
+  deriveVaultSlot,
+  describeScopeSlot,
+} from "./vaultSlotLogic";
 
 afterEach(cleanup);
 
@@ -202,6 +206,48 @@ describe("deriveVaultAggregate", () => {
       total: 3,
       tier: "error",
     });
+  });
+});
+
+describe("describeScopeSlot", () => {
+  const alpha = healthyVault("Alpha");
+  const beta = healthyVault("Beta");
+
+  it("names the plain Vault count at all scope", () => {
+    expect(describeScopeSlot("all", [alpha, beta], {})).toBe("2 Vaults");
+  });
+
+  it("uses the singular for exactly one Vault", () => {
+    expect(describeScopeSlot("all", [alpha], {})).toBe("1 Vault");
+  });
+
+  it("names the shortfall in the slot's own words at all scope", () => {
+    const unavailable = unavailableVault("Beta");
+    expect(describeScopeSlot("all", [alpha, unavailable], {})).toBe("1 of 2");
+  });
+
+  it("names a healthy Vault's note count when narrowed", () => {
+    expect(
+      describeScopeSlot(alpha.vault_id, [alpha, beta], {
+        [alpha.vault_id]: 42,
+      }),
+    ).toBe("42 notes");
+  });
+
+  it("uses the singular for exactly one note", () => {
+    expect(
+      describeScopeSlot(alpha.vault_id, [alpha], { [alpha.vault_id]: 1 }),
+    ).toBe("1 note");
+  });
+
+  it("names a condition word when narrowed to a Vault in trouble", () => {
+    const stale = staleVault("Alpha");
+    expect(describeScopeSlot(stale.vault_id, [stale], {})).toBe("stale");
+  });
+
+  it("is unknown while the narrowed Vault is still indexing", () => {
+    const indexing = indexingVault("Alpha");
+    expect(describeScopeSlot(indexing.vault_id, [indexing], {})).toBeNull();
   });
 });
 

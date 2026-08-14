@@ -100,6 +100,38 @@ export function deriveVaultSlot(
 }
 
 /**
+ * The current scope's count-or-condition, in the same words §27's slot
+ * renders, for the shell's polite live region (#146). `null` means not yet
+ * known (an indexing Vault) — the live region must never announce a value it
+ * does not have.
+ */
+export function describeScopeSlot(
+  scope: VaultScope,
+  vaults: VaultSummary[],
+  counts: Record<VaultId, number | undefined>,
+): string | null {
+  if (scope === "all") {
+    const aggregate = deriveVaultAggregate(vaults, counts);
+    if (aggregate.kind === "count") {
+      return `${aggregate.count} Vault${aggregate.count === 1 ? "" : "s"}`;
+    }
+    return `${aggregate.participating} of ${aggregate.total}`;
+  }
+  const vault = vaults.find((candidate) => candidate.vault_id === scope);
+  if (!vault) {
+    return null;
+  }
+  const slot = deriveVaultSlot(vault, counts[vault.vault_id]);
+  if (slot.kind === "indexing") {
+    return null;
+  }
+  if (slot.kind === "condition") {
+    return slot.word;
+  }
+  return `${slot.count} note${slot.count === 1 ? "" : "s"}`;
+}
+
+/**
  * The `All Vaults` row's and the collapsed Scope head's shared aggregate:
  * the enabled-Vault count when every Vault is healthy or indexing (both
  * "participating" — an indexing Vault keeps answering from its previous

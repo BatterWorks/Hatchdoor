@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from "react";
 import { NavLink } from "react-router-dom";
@@ -49,6 +50,12 @@ function countNotes(folder: ExplorerFolder): number {
  * (#138): a collapsible zone pinned above the rail, never scrolling with the
  * notes. Absent at one enabled Vault or on mobile — narrowing scope has
  * nothing to offer there (mobile scope chrome is #145's ticket).
+ *
+ * The row list is a pick-exactly-one radiogroup (#146): one tab stop for the
+ * whole group, up/down move between rows, `Enter`/`Space` picks via the
+ * button's own native activation. `scopeFocusRequestId` is a bare counter —
+ * bumping it (regardless of the new value) asks this zone to focus its
+ * currently selected row, the `v` shortcut's job in `App.tsx`.
  */
 function ScopeZone({
   vaults,
@@ -58,6 +65,8 @@ function ScopeZone({
   collapsed,
   onToggleCollapsed,
   noteCounts,
+  scopeFocusRequestId,
+  onRestoreScopeFocus,
 }: {
   vaults: VaultSummary[];
   scope: VaultScope;
@@ -66,10 +75,47 @@ function ScopeZone({
   collapsed: boolean;
   onToggleCollapsed: () => void;
   noteCounts: Record<VaultId, number | undefined>;
+  scopeFocusRequestId: number;
+  onRestoreScopeFocus: () => void;
 }) {
+  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const rowIds: VaultScope[] = ["all", ...vaults.map((vault) => vault.vault_id)];
+  const selectedIndex = Math.max(0, rowIds.indexOf(scope));
+
+  useEffect(() => {
+    if (scopeFocusRequestId === 0 || collapsed) {
+      return;
+    }
+    rowRefs.current[selectedIndex]?.focus();
+    // Only the counter bumping matters; re-running on every selection change
+    // would steal focus back whenever `scope` itself changes elsewhere.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeFocusRequestId, collapsed]);
+
   if (vaults.length <= 1) {
     return null;
   }
+
+  const focusRow = (index: number) => {
+    const wrapped = (index + rowIds.length) % rowIds.length;
+    rowRefs.current[wrapped]?.focus();
+  };
+
+  const onRowKeyDown = (
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusRow(index + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusRow(index - 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      onRestoreScopeFocus();
+    }
+  };
 
   const viewingVault = vaults.find((vault) => vault.vault_id === viewingVaultId);
   // The collapsed head names the scope in the worst ink present across every
@@ -91,6 +137,9 @@ function ScopeZone({
       >
         <span className="side-caret" aria-hidden="true" />
         <span className="side-label">Scope</span>
+        <span className="scope-zone-keycap" aria-hidden="true">
+          V
+        </span>
         <span className="side-rule" />
         {collapsed ? (
           <>
@@ -111,23 +160,42 @@ function ScopeZone({
       ) : null}
 
       {collapsed ? null : (
-        <ul id="scope-zone-list" className="scope-zone-list">
+        <ul
+          id="scope-zone-list"
+          className="scope-zone-list"
+          role="radiogroup"
+          aria-label="Vault scope"
+        >
           <li>
             <button
               type="button"
+              role="radio"
+              aria-checked={scope === "all"}
+              tabIndex={selectedIndex === 0 ? 0 : -1}
+              ref={(el) => {
+                rowRefs.current[0] = el;
+              }}
               className={`scope-row${scope === "all" ? " is-selected" : ""}`}
               onClick={() => onScopeChange("all")}
+              onKeyDown={(event) => onRowKeyDown(event, 0)}
             >
               <span className="scope-row-label">All Vaults</span>
               <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
             </button>
           </li>
-          {vaults.map((vault) => (
+          {vaults.map((vault, index) => (
             <li key={vault.vault_id}>
               <button
                 type="button"
+                role="radio"
+                aria-checked={scope === vault.vault_id}
+                tabIndex={selectedIndex === index + 1 ? 0 : -1}
+                ref={(el) => {
+                  rowRefs.current[index + 1] = el;
+                }}
                 className={`scope-row${scope === vault.vault_id ? " is-selected" : ""}`}
                 onClick={() => onScopeChange(vault.vault_id)}
+                onKeyDown={(event) => onRowKeyDown(event, index + 1)}
               >
                 <span className="scope-row-label">{vault.name}</span>
                 {viewingVaultId === vault.vault_id ? (
@@ -323,6 +391,8 @@ type ExplorerPaneProps = {
   scopeZoneCollapsed: boolean;
   onScopeZoneCollapsedChange: (next: boolean) => void;
   vaultNoteCounts: Record<VaultId, number | undefined>;
+  scopeFocusRequestId: number;
+  onRestoreScopeFocus: () => void;
 };
 
 export function ExplorerPane({
@@ -355,6 +425,8 @@ export function ExplorerPane({
   scopeZoneCollapsed,
   onScopeZoneCollapsedChange,
   vaultNoteCounts,
+  scopeFocusRequestId,
+  onRestoreScopeFocus,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
@@ -423,6 +495,8 @@ export function ExplorerPane({
             onScopeZoneCollapsedChange(!scopeZoneCollapsed)
           }
           noteCounts={vaultNoteCounts}
+          scopeFocusRequestId={scopeFocusRequestId}
+          onRestoreScopeFocus={onRestoreScopeFocus}
         />
       )}
       <ExplorerRail

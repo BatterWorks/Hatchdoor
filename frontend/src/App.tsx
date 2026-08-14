@@ -50,9 +50,10 @@ import {
   useVaultNoteCounts,
   useVaultScope,
 } from "./hooks/useVaultScope";
+import { describeScopeSlot, scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
-import type { ActiveNoteMeta, RecentNote } from "./types";
+import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
 import { SearchDialog, useSearch } from "./features/search";
 
@@ -84,7 +85,7 @@ export function VaultApp() {
   const { theme, cycleTheme } = useTheme();
 
   const [scope, setScope] = useVaultScope();
-  const { vaults, demoMode } = useVaultDiscovery();
+  const { vaults, demoMode, loading: vaultsLoading } = useVaultDiscovery();
   const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
 
   const {
@@ -162,6 +163,16 @@ export function VaultApp() {
   );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
+  // The `v` shortcut's keyboard-accessible route to the Scope zone/sheet
+  // (#146). `scopeFocusRequestId` is a bare counter: bumping it asks
+  // whichever surface is on screen to (re)focus its current scope row.
+  // `scopeShortcutOriginRef` remembers where focus was before the zone/sheet
+  // opened, so `Escape` without picking can give it back.
+  const [scopeFocusRequestId, setScopeFocusRequestId] = useState(0);
+  const scopeShortcutOriginRef = useRef<HTMLElement | null>(null);
+  const [scopeLiveMessage, setScopeLiveMessage] = useState("");
+  const announcedScopeRef = useRef<VaultScope | null>(null);
+  const announcedScopeSlotRef = useRef(false);
 
   useEffect(() => {
     // Drafts only bridge an interrupted edit; drop ones older than a week.
@@ -319,6 +330,53 @@ export function VaultApp() {
     );
   }, [location.pathname, navigate]);
 
+  const handleScopeZoneCollapsedChange = useCallback((next: boolean) => {
+    setScopeZoneCollapsed(next);
+    window.localStorage.setItem(SCOPE_ZONE_COLLAPSED_KEY, next ? "1" : "0");
+  }, []);
+
+  // Give focus back to wherever `v` was pressed (#146) — read once, then
+  // cleared, so a later `Escape` with no shortcut in flight is a no-op.
+  const restoreScopeFocusOrigin = useCallback(() => {
+    const origin = scopeShortcutOriginRef.current;
+    scopeShortcutOriginRef.current = null;
+    origin?.focus();
+  }, []);
+
+  // `v` — the keyboard route to the Scope zone/sheet (#146). Wide, it
+  // unfolds the zone for good and focuses the current row; narrow, it opens
+  // the sheet with focus on the current row. Pressing it again while already
+  // open just re-homes focus — harmless, not a toggle.
+  const handleScopeShortcut = useCallback(() => {
+    if (vaults.length <= 1) {
+      return;
+    }
+    const activeElement =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    // A repeat `v` press while focus already sits on a scope row (wide) or
+    // inside the sheet (narrow) must stay harmless — it must not clobber the
+    // origin with the row itself, or `Escape` would "restore" focus to where
+    // it already is instead of back to wherever `v` was first pressed.
+    const alreadyInScopeUi =
+      activeElement?.closest(".scope-zone, .scope-sheet") != null;
+    if (isMobile) {
+      setScopeSheetOpen((prev) => {
+        if (!prev && !alreadyInScopeUi) {
+          scopeShortcutOriginRef.current = activeElement;
+        }
+        return true;
+      });
+    } else {
+      if (!alreadyInScopeUi) {
+        scopeShortcutOriginRef.current = activeElement;
+      }
+      handleScopeZoneCollapsedChange(false);
+    }
+    setScopeFocusRequestId((id) => id + 1);
+  }, [vaults.length, isMobile, handleScopeZoneCollapsedChange]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -343,12 +401,80 @@ export function VaultApp() {
       if (event.key === "/" && !isEditableTarget(event.target)) {
         event.preventDefault();
         setSearchOpen(true);
+        return;
+      }
+
+      if (
+        event.key.toLowerCase() === "v" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !isEditableTarget(event.target) &&
+        !noteActionDialog &&
+        !searchOpen &&
+        !actionsMenuOpen
+      ) {
+        event.preventDefault();
+        handleScopeShortcut();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openCreateDialog, setSearchOpen, writeEnabled]);
+  }, [
+    openCreateDialog,
+    setSearchOpen,
+    writeEnabled,
+    handleScopeShortcut,
+    noteActionDialog,
+    searchOpen,
+    actionsMenuOpen,
+  ]);
+
+  // The shell's polite scope live region (#146): announces the scope name
+  // the instant a pick lands, then its count-or-condition in the same
+  // breath if already known, or as a short second sentence once it resolves
+  // — never a value that is not yet known.
+  const scopeSlotDescription = describeScopeSlot(scope, vaults, vaultNoteCounts);
+
+  useEffect(() => {
+    // Discovery still in flight means `vaults` is a temporary `[]`, not a
+    // real "zero Vaults" answer — announcing off it would read a value the
+    // shell does not actually have yet. Wait it out.
+    if (vaultsLoading || announcedScopeRef.current === scope) {
+      return;
+    }
+    // The baseline scope discovery lands with, on mount, is not a pick —
+    // record it silently so the first genuine scope change is the first
+    // announcement.
+    const isInitialBaseline = announcedScopeRef.current === null;
+    announcedScopeRef.current = scope;
+    if (isInitialBaseline) {
+      announcedScopeSlotRef.current = Boolean(scopeSlotDescription);
+      return;
+    }
+    const name = scopeName(scope, vaults);
+    if (scopeSlotDescription) {
+      announcedScopeSlotRef.current = true;
+      setScopeLiveMessage(`${name}. ${scopeSlotDescription}`);
+    } else {
+      announcedScopeSlotRef.current = false;
+      setScopeLiveMessage(name);
+    }
+    // Only a genuine scope change (or discovery finally landing) should
+    // restart the announcement; `vaults` and `scopeSlotDescription` are read
+    // for their value at that moment, not watched for their own updates
+    // (the effect below owns that).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, vaultsLoading]);
+
+  useEffect(() => {
+    if (vaultsLoading || announcedScopeSlotRef.current || !scopeSlotDescription) {
+      return;
+    }
+    announcedScopeSlotRef.current = true;
+    setScopeLiveMessage(scopeSlotDescription);
+  }, [scopeSlotDescription, vaultsLoading]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -455,9 +581,26 @@ export function VaultApp() {
         viewingVaultId={activeNote?.vaultId}
         vaultNoteCounts={vaultNoteCounts}
         scopeSheetOpen={scopeSheetOpen}
-        onToggleScopeSheet={() => setScopeSheetOpen((prev) => !prev)}
+        onToggleScopeSheet={() =>
+          setScopeSheetOpen((prev) => {
+            const next = !prev;
+            if (next) {
+              scopeShortcutOriginRef.current =
+                document.activeElement instanceof HTMLElement
+                  ? document.activeElement
+                  : null;
+            }
+            return next;
+          })
+        }
         onCloseScopeSheet={() => setScopeSheetOpen(false)}
+        scopeFocusRequestId={scopeFocusRequestId}
+        onRestoreScopeFocus={restoreScopeFocusOrigin}
       />
+
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {scopeLiveMessage}
+      </div>
 
       {writeWarnings.length > 0 || writeNotice ? (
         <div className="write-notice" role="status">
@@ -513,13 +656,9 @@ export function VaultApp() {
           viewingVaultId={activeNote?.vaultId}
           vaultNoteCounts={vaultNoteCounts}
           scopeZoneCollapsed={scopeZoneCollapsed}
-          onScopeZoneCollapsedChange={(next) => {
-            setScopeZoneCollapsed(next);
-            window.localStorage.setItem(
-              SCOPE_ZONE_COLLAPSED_KEY,
-              next ? "1" : "0",
-            );
-          }}
+          onScopeZoneCollapsedChange={handleScopeZoneCollapsedChange}
+          scopeFocusRequestId={scopeFocusRequestId}
+          onRestoreScopeFocus={restoreScopeFocusOrigin}
           onExpandedFoldersChange={setExpandedFolders}
           onCloseDrawer={() => setDrawerOpen(false)}
           onRefreshTree={() => {
