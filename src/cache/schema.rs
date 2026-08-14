@@ -4,7 +4,7 @@ use rusqlite::{OpenFlags, OptionalExtension};
 use tracing::warn;
 
 use super::SqliteCache;
-use crate::embed::Embedder;
+use crate::embed::{Embedder, PENDING_IDENTITY};
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
@@ -107,8 +107,22 @@ impl SqliteCache {
     /// silently ruins semantic search). A cache with no stored identity yet
     /// (fresh, or built by a version that never stamped it) is left alone — the
     /// build stamps the current identity and there is no old model to conflict.
+    ///
+    /// An embedder whose model has not loaded yet reports
+    /// [`PENDING_IDENTITY`], which names no embedding space at all. Comparing
+    /// that placeholder against a stored identity would mismatch every time and
+    /// destroy a perfectly valid cache on every startup, so it is refused
+    /// outright: there is no meaningful index to build without a model, and the
+    /// caller is expected to defer the work until setup completes.
     pub fn reset_if_embedder_changed(&self, embedder: &dyn Embedder) -> Result<(), String> {
         let current = embedder.identity();
+        if current == PENDING_IDENTITY {
+            return Err(
+                "embedding model setup is not complete; refusing to evaluate the cache's \
+                 embedder identity against a placeholder"
+                    .to_string(),
+            );
+        }
         let stored = match self.get_metadata("embedder_id")? {
             Some(identity) => Some(identity),
             None => {
@@ -523,6 +537,61 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
 #[cfg(test)]
 mod tests {
     use crate::cache::SqliteCache;
+    use crate::embed::{RuntimeEmbedder, StubEmbedder};
+
+    /// Regression: startup queued index work before first-run model setup had
+    /// installed the embedder, so the identity check compared a real stored
+    /// identity against the pending placeholder, mismatched, and wiped the
+    /// cache. Every restart paid a full reindex.
+    #[test]
+    fn pending_embedder_identity_never_wipes_a_valid_cache() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        cache
+            .set_metadata("embedder_id", "stub-384")
+            .expect("stamp a real identity from a previous build");
+
+        let error = cache
+            .reset_if_embedder_changed(&RuntimeEmbedder::new())
+            .expect_err("an unloaded model must be refused, not treated as a model swap");
+        assert!(
+            error.contains("setup is not complete"),
+            "unexpected error: {error}"
+        );
+
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("stub-384"),
+            "the cache must survive the refusal intact"
+        );
+        let chunks: i64 = cache
+            .connection()
+            .expect("conn")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(chunks, 1, "the schema must not have been wiped");
+    }
+
+    #[test]
+    fn a_genuine_embedder_swap_still_wipes_the_cache() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        cache
+            .set_metadata("embedder_id", "some-other-model-384")
+            .expect("stamp");
+
+        cache
+            .reset_if_embedder_changed(&StubEmbedder::new(384))
+            .expect("a loaded model with a different identity is a real swap");
+
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get"),
+            None,
+            "wiping must clear the previous model's identity along with its vectors"
+        );
+    }
 
     #[test]
     fn interrupted_schema_init_rebuilds_instead_of_bricking_startup() {

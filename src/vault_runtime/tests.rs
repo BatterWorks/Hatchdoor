@@ -304,7 +304,7 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
         crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
     };
     let one = add_local_vault(&registry, &empty, "First", first_path.clone());
-    let both = add_local_vault(&registry, &one, "Second", second_path);
+    let both = add_local_vault(&registry, &one, "Second", second_path.clone());
     let first = vault_id_named(&both, "First");
     let second = vault_id_named(&both, "Second");
     let collection = VaultCollectionRuntime::new();
@@ -346,6 +346,16 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
             .as_deref(),
         Some("# Home\n\nsecond version")
     );
+
+    // Edit the note so the next turn genuinely has embedding work to do: a
+    // rebuild of an *unchanged* Vault reuses its published vectors and never
+    // calls the embedder, so `PanicEmbedder` would never fire and this would
+    // assert nothing.
+    std::fs::write(
+        second_path.join("Home.md"),
+        "# Home\n\nsecond version, edited",
+    )
+    .expect("edit the second Vault's note");
 
     coordinator.request(second, VaultWorkKind::Index);
     let panicked = worker
@@ -430,6 +440,74 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
             .snapshot()
             .search,
         VaultSearchStatus::Ready
+    );
+}
+
+/// Regression: activation queues Index work before first-run model setup has
+/// installed the embedder. The turn used to run anyway, wiping the cache
+/// (placeholder identity vs. the stored one) and then panicking in the
+/// chunker's tokenizer, so every restart paid a full reindex. It must defer
+/// with a retryable error and leave the cache untouched instead.
+#[tokio::test]
+async fn index_turn_defers_while_the_embedding_model_is_still_being_set_up() {
+    let directory = tempdir().expect("temporary state directory");
+    let vault_path = directory.path().join("vault");
+    std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+    std::fs::write(vault_path.join("Note.md"), "# Note\n\nbody").expect("write note");
+
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let snapshot = add_local_vault(&registry, &empty, "Only", vault_path);
+    let vault_id = vault_id_named(&snapshot, "Only");
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+        .await;
+
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    cache
+        .set_metadata("embedder_id", "stub-384")
+        .expect("stamp the identity a previous build left behind");
+    // An empty slot: exactly the state during model download/first-run setup.
+    let embedder: Arc<dyn Embedder> = Arc::new(crate::embed::RuntimeEmbedder::new());
+
+    coordinator.request(vault_id, VaultWorkKind::Index);
+    let outcome = worker
+        .run_next({
+            let collection = collection.clone();
+            let cache = cache.clone();
+            let embedder = embedder.clone();
+            move |request| async move {
+                dispatch_vault_index_turn_with_embed_layers(
+                    &collection,
+                    cache,
+                    embedder,
+                    true,
+                    request,
+                )
+                .await
+            }
+        })
+        .await
+        .expect("queued Index turn");
+
+    let error = outcome
+        .result
+        .expect_err("the turn must defer rather than index against a missing model");
+    assert_eq!(error.code(), "embedder_not_ready");
+    assert!(
+        error.retryable(),
+        "the model-load path re-requests this work, so it must not be terminal"
+    );
+    assert_eq!(
+        cache.get_metadata("embedder_id").expect("get").as_deref(),
+        Some("stub-384"),
+        "the deferred turn must leave the existing cache intact"
     );
 }
 
