@@ -1505,8 +1505,12 @@ collapsed-head and `All Vaults`-row slots also take an optional
 replaces the ordinary aggregate while the shrunk startup gate reports
 `scanning`/`indexing`, reusing the per-Vault "indexing" slot's animated-bar
 visual language. `App.tsx`'s `"/"` route similarly branches on genuine zero
-Vaults (a neutral `Add a Vault` empty state, inert until #153 wires the
-real flow) versus a broken start: `useVaultScope.ts`'s `useVaultDiscovery`
+Vaults (a neutral `Add a Vault` empty state; the action itself is Settings'
+`VaultCreationDialog` (#153) — this route has no room for the flow, so
+`ZeroVaultState`'s `onAddVault` navigates to `/settings` with
+`{state: {openVaultCreation: true}}` instead, absent entirely in demo mode via
+the `demoMode` prop threaded down from this hook) versus a broken start:
+`useVaultScope.ts`'s `useVaultDiscovery`
 now also exposes `recovery` (the persisted registry file is unreadable) and
 `legacyMigrationRecovery` (the registry loaded fine but a failed safe
 legacy import needs recovery) — mutually exclusive, both rendering the same
@@ -1935,6 +1939,9 @@ route tests, and full frontend checks.
 - `frontend/src/features/settings/VaultSettingsIndex.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.test.tsx`
 - `frontend/src/features/settings/vaultGitBehavior.ts`
+- `frontend/src/features/settings/VaultCreation.tsx`
+- `frontend/src/features/settings/VaultCreation.test.tsx`
+- `frontend/src/features/settings/vaultCreation.ts`
 - `frontend/src/features/settings/settings.css`
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
@@ -2011,6 +2018,39 @@ omitting `Add a Vault`; `This server` is a separate group and keeps working.
 loads fine (empty) in that case, so the group renders its ordinary
 zero-Vault state.
 
+`VaultCreation.tsx`'s `VaultCreationDialog` (issue #153) is the one creation
+flow both `Add a Vault` entry points open: the settings index's own button
+here, and the zero-Vault workspace state's button in `App.tsx`, which has no
+room for the flow itself and instead navigates to `/settings` carrying
+`{state: {openVaultCreation: true}}`, consumed once by `SettingsPage.tsx` (via
+`useLocation`, cleared with `navigate(..., {replace: true})` so a later
+back/forward visit does not reopen it) and threaded down as
+`VaultSettingsIndex`'s `autoOpenCreation` prop. The dialog collects a name and
+one source configuration, reusing `vaultGitBehavior.ts`'s
+`behaviorOptions`/`buildSourceForBehavior`/`withIdentityFields` unchanged —
+the same two-step composition the edit flow already uses, starting from an
+empty `local` or `managed_git` source instead of an existing Vault's — so a
+brand-new Vault's Git behaviour is chosen with the identical four-or-two-option
+control the edit page presents. `vaultCreation.ts` holds the pieces specific to
+creation: `baseSourceForKind`, `validateCreateSource`, and the
+`POST /api/v1/vaults` call itself, fetching a fresh `expected_registry_revision`
+immediately before submitting (the same pattern `recoverPausedVault` already
+uses) rather than trusting a value read whenever the dialog opened. On success
+the dialog calls back with the created `VaultSummary`: `VaultSettingsIndex`
+appends it to its own list, calls the optional `onVaultCreated` prop (wired to
+`App.tsx`'s `discovery.loadVaults`, so the sidebar/scope zone/explorer also
+learn about the new Vault without a reload — the settings index's own list is
+a separate fetch from that app-wide discovery), and opens the new Vault's own
+page the same way clicking it in the index does. A registry-revision conflict
+and every structured API failure render as a form-level notice without
+clearing entered fields; a credential token is held only in the dialog's own
+React state, never logged, never echoed back, and simply omitted from the
+request body when no sign-in is chosen. Demo mode removes the button in both
+entry points (`VaultSettingsIndex`'s own `demo_mode` read, and `App.tsx`
+passing its `demoMode` down as `ZeroVaultState`'s `demoMode` prop) — belt and
+suspenders alongside the invariant below, since the zero-Vault state renders
+on a route demo visitors can otherwise reach.
+
 Out of this page's scope: giving a Vault a source it did not start with (its
 first repository, i.e. a Local Vault becoming `managed_git`, or a bare
 first-run Vault) is the separate first-run flow (#122), not a field this page
@@ -2038,8 +2078,10 @@ environment-managed and permanently unavailable values are records rather than
 disabled form controls; secret values are never rendered from the settings
 document.
 
-**Validation:** `SettingsPage.test.tsx`, affected shell tests, frontend
-typecheck, then full frontend checks.
+**Validation:** `SettingsPage.test.tsx`, `VaultSettingsIndex.test.tsx`,
+`VaultCreation.test.tsx`, affected shell tests (`App.startup-workspace-states.test.tsx`
+covers the zero-Vault entry point), frontend typecheck, then full frontend
+checks.
 
 ### Shared UI and styling
 

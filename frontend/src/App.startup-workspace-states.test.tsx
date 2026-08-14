@@ -144,6 +144,55 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     ).not.toBeInTheDocument();
   });
 
+  it("opens the same creation flow as Settings from the zero-Vault Add a Vault button (#153)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse({
+            registry_revision: 0,
+            collection_revision: 0,
+            vaults: [],
+            demo_mode: false,
+          });
+        }
+        if (url.endsWith("/api/v1/vaults/all/stats")) {
+          return jsonResponse({ data: [] });
+        }
+        if (url.includes("/tree") || url.includes("/recent")) {
+          return emptyEnvelope();
+        }
+        return jsonResponse({}, 404);
+      },
+    );
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <RootApp />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add a Vault" }));
+
+    expect(
+      await screen.findByRole("dialog", { name: "Add a Vault" }),
+    ).toBeVisible();
+  });
+
+  it("renders no Add a Vault action in the zero-Vault demo state", async () => {
+    mockDiscovery({
+      registry_revision: 0,
+      collection_revision: 0,
+      vaults: [],
+      demo_mode: true,
+    });
+    renderApp();
+
+    expect(await screen.findByText("No Vaults Yet")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Add a Vault" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the same empty state for a just-emptied instance as for a brand-new install", async () => {
     mockDiscovery({
       registry_revision: 3,

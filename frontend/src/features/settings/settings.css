@@ -740,6 +740,14 @@
   padding: 1.2rem 1.3rem;
 }
 
+/* The creation flow (#153) has more rows than the plain confirmation
+   dialogs this class is otherwise used for, so it alone scrolls internally
+   rather than overflowing the viewport on short screens. */
+.settings-modal-form {
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
 .settings-modal h3 {
   font-family: var(--font-display);
   font-variation-settings:

@@ -1,8 +1,17 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
 import { SettingsPage } from "./SettingsPage";
+
+function renderSettingsPage() {
+  return render(
+    <MemoryRouter initialEntries={["/settings"]}>
+      <SettingsPage />
+    </MemoryRouter>,
+  );
+}
 
 vi.mock("../../api/api", () => ({ apiFetch: vi.fn() }));
 const mockedApiFetch = vi.mocked(apiFetch);
@@ -151,7 +160,7 @@ afterEach(() => {
 describe("SettingsPage", () => {
   it("opens a Vault's own settings page from the management index", async () => {
     mockPage();
-    render(<SettingsPage />);
+    renderSettingsPage();
     fireEvent.click(await screen.findByRole("button", { name: /Field notes/ }));
 
     expect(
@@ -177,7 +186,7 @@ describe("SettingsPage", () => {
 
   it("keeps a paused Vault in Settings and nowhere in the server section", async () => {
     mockPage([vault("Field notes"), vault("Archive", false)]);
-    render(<SettingsPage />);
+    renderSettingsPage();
 
     const paused = await screen.findByRole("button", { name: /Archive/ });
     expect(paused).toHaveAttribute("data-paused", "true");
