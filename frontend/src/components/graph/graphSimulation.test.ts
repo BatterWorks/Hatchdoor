@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { GraphData, VaultGraph } from "../../types";
 import {
@@ -9,6 +9,7 @@ import {
   createIslandSimulation,
   hitTest,
   nodeRadius,
+  settleSimulationSync,
   type SimNode,
 } from "./graphSimulation";
 
@@ -104,6 +105,65 @@ describe("createGraphSimulation", () => {
       expect(sim.nodes()).toHaveLength(3);
     } finally {
       sim.stop();
+    }
+  });
+});
+
+describe("settleSimulationSync", () => {
+  it("stops the simulation's own timer and leaves it at rest", () => {
+    const { nodes, links } = buildSimulationGraph(DATA, {
+      random: sequenceRandom([0.5]),
+    });
+    const sim = createGraphSimulation(nodes, links);
+    try {
+      settleSimulationSync(sim);
+      expect(sim.alpha()).toBeLessThanOrEqual(sim.alphaMin());
+    } finally {
+      sim.stop();
+    }
+  });
+
+  it("moves nodes off their initial scatter position — the layout actually ran", () => {
+    const { nodes, links } = buildSimulationGraph(DATA, {
+      random: sequenceRandom([0.1, 0.9, 0.3]),
+    });
+    const initial = nodes.map((n) => ({ x: n.x, y: n.y }));
+    const sim = createGraphSimulation(nodes, links);
+    try {
+      settleSimulationSync(sim);
+      const moved = nodes.some(
+        (n, i) => n.x !== initial[i].x || n.y !== initial[i].y,
+      );
+      expect(moved).toBe(true);
+      for (const n of nodes) {
+        expect(Number.isFinite(n.x)).toBe(true);
+        expect(Number.isFinite(n.y)).toBe(true);
+      }
+    } finally {
+      sim.stop();
+    }
+  });
+
+  it("leaves no running timer behind — node positions hold after it returns", () => {
+    vi.useFakeTimers();
+    try {
+      const { nodes, links } = buildSimulationGraph(DATA, {
+        random: sequenceRandom([0.1, 0.9, 0.3]),
+      });
+      const sim = createGraphSimulation(nodes, links);
+      try {
+        settleSimulationSync(sim);
+        const settled = nodes.map((n) => ({ x: n.x, y: n.y }));
+        // If d3-force's own timer were still scheduled, advancing past
+        // several animation-frame intervals would keep perturbing alpha
+        // and node positions.
+        vi.advanceTimersByTime(2000);
+        expect(nodes.map((n) => ({ x: n.x, y: n.y }))).toEqual(settled);
+      } finally {
+        sim.stop();
+      }
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

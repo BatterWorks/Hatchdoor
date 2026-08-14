@@ -38,6 +38,15 @@ import type {
   VaultTree,
 } from "../types";
 
+/** How long a scope change holds the outgoing scope's content on screen
+ * before giving way to the skeleton (#147). `loadingTree` only toggles on a
+ * scope change or first mount — the SSE-driven background tree refresh
+ * never touches it — so gating the skeleton on this timer rather than on
+ * `loadingTree` directly is what keeps a fast answer silent and a slow one
+ * announced, without the skeleton ever stacking on top of the tree it is
+ * about to replace. */
+const SCOPE_CHANGE_SKELETON_DELAY_MS = 200;
+
 function countNotes(folder: ExplorerFolder): number {
   return (
     folder.notes.length +
@@ -476,10 +485,57 @@ export function ExplorerPane({
     setStoredUnfoldedVault(vaultId);
   };
 
-  const showAccordion = scope === "all" && vaults.length > 1;
+  // The scope-change motion policy (#147): the outgoing tree stays on screen
+  // untouched until the narrowed answer lands, and only gives way to the
+  // skeleton once loading has run longer than the hold. A fast answer never
+  // shows the skeleton at all. A cold mount has no prior content to hold, so
+  // it keeps the pre-#147 behavior of showing the skeleton immediately —
+  // `tree` is read only to snapshot that at the instant loading starts, not
+  // to react to the fetch later replacing it.
+  const [showTreeSkeleton, setShowTreeSkeleton] = useState(false);
+  useEffect(() => {
+    if (!loadingTree) {
+      setShowTreeSkeleton(false);
+      return;
+    }
+    if (tree === null) {
+      setShowTreeSkeleton(true);
+      return;
+    }
+    const id = window.setTimeout(
+      () => setShowTreeSkeleton(true),
+      SCOPE_CHANGE_SKELETON_DELAY_MS,
+    );
+    return () => window.clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingTree]);
+
+  // The content region's own scope-derived branch (accordion vs. flat tree,
+  // which Vault's slot) holds at the outgoing scope until `tree`/`vaultTrees`
+  // actually land for the new one — never the live `scope` mid-flight, or a
+  // scope change would pair the new Vault's header with the old Vault's (or
+  // old accordion's) still-loaded content. The chrome above (Scope zone /
+  // topbar) is unaffected — it always reflects live `scope`.
+  //
+  // Synced off `tree`/`vaultTrees` themselves, not off `loadingTree` — a
+  // `loadingTree`-keyed sync raced `useVaultTree`'s own scope-triggered
+  // fetch: React fires a child's effects before its parent's in the same
+  // commit, so this component's effect could observe the new `scope` prop
+  // with `loadingTree` still momentarily false, one tick before the parent's
+  // effect sets it true. `vaultTrees` never has that gap: `useVaultTree`
+  // only ever replaces it (a fresh array, no equality bail-out) once a fetch
+  // for the current `scope` has actually resolved, so watching it directly
+  // is the one signal that can't fire early.
+  const [committedScope, setCommittedScope] = useState(scope);
+  useEffect(() => {
+    setCommittedScope(scope);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tree, vaultTrees]);
+
+  const showAccordion = committedScope === "all" && vaults.length > 1;
   const narrowedVault =
-    scope !== "all"
-      ? vaults.find((vault) => vault.vault_id === scope)
+    committedScope !== "all"
+      ? vaults.find((vault) => vault.vault_id === committedScope)
       : undefined;
 
   return (
@@ -533,8 +589,8 @@ export function ExplorerPane({
           scope={scope}
         />
 
-        {loadingTree ? <ExplorerSkeleton /> : null}
-        {!loadingTree && treeError && !tree ? (
+        {showTreeSkeleton ? <ExplorerSkeleton /> : null}
+        {!showTreeSkeleton && !loadingTree && treeError && !tree ? (
           <StateBlock
             title="Explorer Unavailable"
             description={treeError}
@@ -542,7 +598,7 @@ export function ExplorerPane({
             onAction={onRefreshTree}
           />
         ) : null}
-        {showAccordion ? (
+        {showTreeSkeleton ? null : showAccordion ? (
           <VaultAccordion
             vaults={vaults}
             vaultTrees={vaultTrees}

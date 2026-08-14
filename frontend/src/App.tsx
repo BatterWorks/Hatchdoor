@@ -514,6 +514,22 @@ export function VaultApp() {
     restoredExplorerScrollRef.current = true;
   }, [tree]);
 
+  // The scope-change motion policy (#147): the explorer returns to the top
+  // the instant the browsing scope changes — never on mount (the restore
+  // effect above owns that) and never on the accordion's own unfold, which
+  // deliberately never touches scope.
+  const previousScopeRef = useRef(scope);
+  useEffect(() => {
+    if (previousScopeRef.current === scope) {
+      return;
+    }
+    previousScopeRef.current = scope;
+    const container = explorerScrollRef.current;
+    if (container) {
+      container.scrollTop = 0;
+    }
+  }, [scope]);
+
   const copyNoteLink = useCallback(async () => {
     if (!activeNote) {
       return;

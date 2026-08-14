@@ -23,10 +23,29 @@ import {
   hitTest as hitTestNodes,
   nodeKey,
   nodeRadius,
+  settleSimulationSync,
   type GraphIsland,
   type SimLink,
   type SimNode,
 } from "./graphSimulation";
+
+/** Read fresh each time a simulation is (re)created rather than cached —
+ * cheap, and the setting can change mid-session. */
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
+
+/** Settles a freshly created simulation synchronously under reduced motion
+ * (#147) — shared by both the plain and island simulation-setup paths below,
+ * which otherwise only differ in how they build `nodes`/`links`. */
+function activateSimulation(
+  sim: Simulation<SimNode, SimLink>,
+): Simulation<SimNode, SimLink> {
+  if (prefersReducedMotion()) {
+    settleSimulationSync(sim);
+  }
+  return sim;
+}
 
 /** Merges every participating Vault's graph component into the one
  * `GraphData` shape the simulation already renders. With exactly one
@@ -717,7 +736,7 @@ export function GraphPage() {
       simLinksRef.current = links;
 
       const sim = createGraphSimulation(nodes, links);
-      simRef.current = sim;
+      simRef.current = activateSimulation(sim);
       requestRender();
       return () => {
         sim.stop();
@@ -737,7 +756,7 @@ export function GraphPage() {
     });
 
     const sim = createIslandSimulation(nodes, links);
-    simRef.current = sim;
+    simRef.current = activateSimulation(sim);
     requestRender();
     return () => {
       sim.stop();

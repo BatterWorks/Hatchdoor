@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -155,7 +156,12 @@ function headFor(name: string): HTMLElement {
 /** Renders `ExplorerPane` with `scope` and `expandedFolders` as real,
  * round-tripping state — needed for the narrow/widen and per-Vault
  * folder-memory tests, which must observe state ExplorerPane itself owns
- * (`unfoldedVaultId`) surviving a controlled prop change. */
+ * (`unfoldedVaultId`) surviving a controlled prop change. `vaultTrees` gets a
+ * fresh array reference on every scope change too (#147): production
+ * `useVaultTree` never reuses a reference across two different scopes' own
+ * fetches, and ExplorerPane's own scope-change content-hold logic keys off
+ * exactly that signal — a `vaultTrees` prop held constant across a scope
+ * change, unlike the real hook, would never look "answered" to it. */
 function renderStatefulPane(
   overrides: Partial<Parameters<typeof ExplorerPane>[0]> = {},
 ) {
@@ -165,6 +171,11 @@ function renderStatefulPane(
     const [expandedFolders, setExpandedFolders] = useState(
       initial.expandedFolders,
     );
+    const [vaultTrees, setVaultTrees] = useState(initial.vaultTrees);
+    useEffect(() => {
+      setVaultTrees([...initial.vaultTrees]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [scope]);
     return (
       <ExplorerPane
         {...initial}
@@ -172,6 +183,7 @@ function renderStatefulPane(
         onScopeChange={setScope}
         expandedFolders={expandedFolders}
         onExpandedFoldersChange={setExpandedFolders}
+        vaultTrees={vaultTrees}
       />
     );
   }
@@ -874,5 +886,142 @@ describe("ExplorerPane accordion (#142)", () => {
     fireEvent.click(scopeZone().getByRole("radio", { name: /^All Vaults/ }));
 
     expect(headFor("Gamma")).toHaveAttribute("data-open", "true");
+  });
+});
+
+describe("ExplorerPane scope-change motion (#147)", () => {
+  const OTHER_TREE: ExplorerFolder = {
+    name: "Vault",
+    folders: [],
+    notes: [{ vault_id: VAULT_ID, title: "Narrowed note", slug: "narrowed" }],
+  };
+
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+  });
+
+  function renderPaneStateful(
+    overrides: Partial<Parameters<typeof ExplorerPane>[0]> = {},
+  ) {
+    const props = { ...defaultPaneProps(), ...overrides };
+    const { rerender } = render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <ExplorerPane {...props} />
+      </MemoryRouter>,
+    );
+    return (next: Partial<Parameters<typeof ExplorerPane>[0]>) => {
+      Object.assign(props, next);
+      rerender(
+        <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+          <ExplorerPane {...props} />
+        </MemoryRouter>,
+      );
+    };
+  }
+
+  it("holds the outgoing tree on screen with no skeleton before the 200ms hold elapses", () => {
+    const rerenderWith = renderPaneStateful({ loadingTree: false, tree: TREE });
+
+    rerenderWith({ loadingTree: true });
+
+    // "Finance" is unique to the folder tree — unlike "Home", which also
+    // appears in the always-rendered Recently viewed list.
+    expect(screen.getByText("Finance")).toBeInTheDocument();
+    expect(document.querySelector(".skeleton-list")).toBeNull();
+
+    act(() => {
+      vi.advanceTimersByTime(199);
+    });
+
+    expect(screen.getByText("Finance")).toBeInTheDocument();
+    expect(document.querySelector(".skeleton-list")).toBeNull();
+  });
+
+  it("gives way to the skeleton, replacing the outgoing tree, once the hold elapses", () => {
+    const rerenderWith = renderPaneStateful({ loadingTree: false, tree: TREE });
+    rerenderWith({ loadingTree: true });
+
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(document.querySelector(".skeleton-list")).not.toBeNull();
+    expect(screen.queryByText("Finance")).not.toBeInTheDocument();
+  });
+
+  it("swaps straight to the narrowed answer with no skeleton flash once it lands", () => {
+    const rerenderWith = renderPaneStateful({ loadingTree: false, tree: TREE });
+    rerenderWith({ loadingTree: true });
+    rerenderWith({ loadingTree: false, tree: OTHER_TREE });
+
+    expect(document.querySelector(".skeleton-list")).toBeNull();
+    expect(screen.getByText("Narrowed note")).toBeInTheDocument();
+  });
+
+  it("never shows the empty/error state while a scope change is in flight", () => {
+    const rerenderWith = renderPaneStateful({
+      loadingTree: false,
+      tree: null,
+      treeError: "Vault unavailable",
+    });
+
+    expect(screen.getByText("Explorer Unavailable")).toBeInTheDocument();
+
+    rerenderWith({ loadingTree: true });
+
+    expect(screen.queryByText("Explorer Unavailable")).not.toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(200);
+    });
+
+    // Still nothing to say yet — the skeleton is on screen, not a stale
+    // error and not an empty state pretending to be an answer.
+    expect(screen.queryByText("Explorer Unavailable")).not.toBeInTheDocument();
+    expect(document.querySelector(".skeleton-list")).not.toBeNull();
+  });
+
+  it("shows the skeleton immediately on a cold mount — there is no prior content to hold", () => {
+    renderPaneStateful({ loadingTree: true, tree: null });
+
+    // No 200ms wait: a first load has nothing to hold, so it keeps the
+    // pre-#147 immediate skeleton rather than a silent blank pause.
+    expect(document.querySelector(".skeleton-list")).not.toBeNull();
+  });
+
+  it("holds the outgoing accordion untouched — never pairs the narrowed Vault's header with the stale all-Vaults tree", () => {
+    const vaultTrees = THREE_VAULTS.map((vault) => vaultTreeFor(vault));
+    const target = THREE_VAULTS[1];
+    const rerenderWith = renderPaneStateful({
+      scope: "all",
+      vaults: THREE_VAULTS,
+      vaultTrees,
+      tree: TREE,
+      loadingTree: false,
+    });
+
+    expect(accordionHeads().length).toBeGreaterThan(0);
+
+    // The user narrows to Beta. `scope` and the Scope zone update at once;
+    // the fetch is in flight but `tree`/`vaultTrees` haven't landed yet.
+    rerenderWith({ scope: target.vault_id, loadingTree: true });
+
+    // Still the outgoing accordion, not Beta's slot header stapled onto
+    // still-merged all-Vaults data.
+    expect(accordionHeads().length).toBeGreaterThan(0);
+    expect(document.querySelector(".vault-accordion-head")).not.toBeNull();
+
+    // The narrowed answer lands.
+    const narrowedTree = vaultTreeFor(target).tree;
+    rerenderWith({
+      loadingTree: false,
+      tree: narrowedTree,
+      vaultTrees: [vaultTreeFor(target)],
+    });
+
+    expect(document.querySelector(".vault-accordion-head")).toBeNull();
+    expect(accordionHeads()).toHaveLength(0);
   });
 });
