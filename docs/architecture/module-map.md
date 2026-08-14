@@ -1838,22 +1838,84 @@ route tests, and full frontend checks.
 
 - `frontend/src/features/settings/SettingsPage.tsx`
 - `frontend/src/features/settings/VaultSettingsIndex.tsx`
+- `frontend/src/features/settings/VaultSettingsIndex.test.tsx`
+- `frontend/src/features/settings/vaultGitBehavior.ts`
 - `frontend/src/features/settings/settings.css`
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
 **Public contract:** the Settings page presents a two-level Vault-management index
 from `GET /api/v1/vaults`, including disabled Vaults only in Settings, and each
 selected Vault's condition, editable definition fields, identity facts, and
-revisioned pause/rebuild/disconnect controls through the existing Vault API. It
-also presents server-provided setting metadata
-at `/settings`, keeps copy and section layout in the browser, confirms saves
-that rebuild indexing, generates an MCP token candidate without persisting it,
-reveals an MCP secret only when it grants the authenticated viewer no new
-capability, PATCHes only the active section's changed keys to `/api/settings`
-before replacing its state with the complete response, confirms local Git
-initialisation and remote downgrades when the server requests it, and polls
-`/api/index-status` plus `/api/git-status` for dedicated background progress
-without using the startup gate.
+revisioned pause/rebuild/disconnect controls through the existing Vault API.
+
+A git-backed Vault's own page (issue #149, resolving #121) carries one
+segmented Git-behaviour control offering the four behaviours legal on a
+folder Hatchdoor did not clone (`local`/`existing_git`: No Git, Local
+history, Pull-only, Two-way) or the two legal on one it did
+(`managed_git`: Pull-only, Two-way) — illegal options are absent, not
+greyed. The plaque above it states the folder's source kind as a fixed
+identity fact and, once the behaviour requires a remote, gains an
+affordance that opens its repository, branch and folder
+(`vault_subdirectory`) lines into fields; a Vault's own `repository_path`
+disk location is never itself editable here. Every change that would alter
+`same_source_identity` (`src/vault_registry.rs`) — crossing the No-Git/Git
+boundary, or editing repository/branch/folder — runs one refuse-then-confirm
+round trip: a confirmation modal, then a client-orchestrated
+disable→PATCH(`confirm_identity_change: true`)→enable sequence. A failed
+disable or a failed edit is rolled back by re-enabling and reporting nothing
+changed; a failed final enable leaves the Vault paused with a persistent
+red-line recovery state (a `hatchdoor:vault-recovery:{vaultId}`
+`localStorage` marker, since the registry has no "wanted enabled but
+couldn't" flag of its own) shown on both the Vault's own page and its
+management entry in the index, each carrying one recovery button that
+re-enables with a freshly fetched revision. Sign-in is one no-sign-in/access-
+token control with no separate Remove; the token field is always empty and
+its state reads `saved`, `none`, or (the instant an identity field changes)
+`will be cleared`. The sync schedule is a 1–1440-minute field (client-side
+bounded; the registry enforces only a 60s floor) defaulting to 1440,
+shown whenever the drafted behaviour is remote-backed — this resolves #148's
+outstanding AC4: the legacy `HATCHDOOR_GIT_DEBOUNCE_SECONDS`
+local-edit-to-commit debounce has no per-Vault successor (the multi-Vault
+pipeline already coalesces writes through `vault_watcher.rs`'s fixed,
+non-configurable watcher debounce), so that concept is retired rather than
+folded into this field; the schedule field answers a different question —
+how often to poll a remote for incoming changes — which is the only new
+per-Vault timing control this page adds. A live sync console
+(shown whenever the Vault's own `git` status is not `"disabled"`) carries a
+`Sync now`/`Try again` button calling `POST .../sync` or `.../retry`, and
+renders one of nine failure sentences off `git_error.code` (plus an
+unrecognised-code fallback) — the two carrying an affected-file list
+(`managed_git_dirty_working_copy`, `managed_git_conflict`) render it from
+`git_error.detail`'s `affected_paths` data, not from the message string.
+This page owns all of this wording itself; the server sends only codes
+(matching this page's existing reindex/Git-init confirmation copy).
+`vaultGitBehavior.ts` holds every pure helper above (behaviour derivation,
+identity comparison, failure-code copy, the recovery marker) split out of
+the component file because a file exporting non-component values breaks
+Fast Refresh (`react-refresh/only-export-components`).
+
+Switching `mode` alone (a behaviour swap that stays within
+`local`/`existing_git`'s three Git modes, or `managed_git`'s two) never needs
+the Vault disabled or `confirm_identity_change`, since `mode` and
+`poll_interval_secs` sit outside source identity. This page also presents
+server-provided setting metadata at `/settings`, keeps copy and section
+layout in the browser, confirms saves that rebuild indexing, generates an MCP
+token candidate without persisting it, reveals an MCP secret only when it
+grants the authenticated viewer no new capability, PATCHes only the active
+section's changed keys to `/api/settings` before replacing its state with the
+complete response, confirms local Git initialisation and remote downgrades
+when the server requests it, and polls `/api/index-status` plus
+`/api/git-status` for dedicated background progress without using the
+startup gate.
+
+Out of this page's scope: giving a Vault a source it did not start with (its
+first repository, i.e. a Local Vault becoming `managed_git`, or a bare
+first-run Vault) is the separate first-run flow (#122), not a field this page
+edits. `docs/design/design-system.html` is not documented against this
+ticket's primitives — on this branch it predates even #120's Settings work
+and has diverged from `development`'s own (also incomplete) copy; treated as
+separate, pre-existing design-system documentation debt rather than in scope
+here.
 
 **Consumed dependencies:** authenticated `apiFetch` and the settings HTTP
 contract.
@@ -1861,8 +1923,12 @@ contract.
 **Coordination paths:** `frontend/src/App.tsx` (route),
 `frontend/src/app/ExplorerPane.tsx` (normal-deployment navigation),
 `frontend/src/App.css` (stylesheet aggregation), `src/server.rs` (SPA/API
-routes), and `src/handlers/settings.rs` (settings, index-status, and git-status
-wire producer).
+routes), `src/handlers/settings.rs` (settings, index-status, and git-status
+wire producer), and `frontend/src/types.ts` (`VaultSource`/`VaultGitMode`,
+mirroring `src/vault_registry.rs`'s same-named types, and `VaultSummary`'s
+`source` field, now typed rather than `unknown`; consumed by this section and
+by `frontend/src/app/vaultSlotLogic.ts`, already listed under Vault chrome's
+own `types.ts` coordination entry).
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than
