@@ -294,35 +294,131 @@
   background: var(--rule);
 }
 
-/* Mobile meta row (below topbar) */
+/* Mobile meta row (below topbar) — the scope row (#145). Below 920px this is
+   the only on-screen place scope is legible; the note path left the chrome
+   entirely (the note's own Vault property row and title already say where it
+   is, and the magnifier in col 3 is the same search entry point the path
+   button used to be). */
 .topbar-mobile-meta {
   display: none;
   border-bottom: 1px solid var(--rule);
   background: var(--paper);
   padding: 0.32rem 0.75rem;
+  position: relative;
 }
 
-.topbar-mobile-path {
+.topbar-scope-trigger {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
   background: transparent;
   border: 0;
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-variation-settings:
-    "wdth" 96,
-    "wght" 400;
-  font-size: 0.82rem;
-  line-height: 1.28;
   padding: 0.12rem 0.2rem;
-  width: 100%;
   text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   cursor: pointer;
 }
 
 @media (hover: hover) {
-  .topbar-mobile-path:hover {
+  .topbar-scope-trigger:hover {
     background: var(--paper-2);
   }
+}
+
+/* Truncation priority under width pressure, in a fixed order (#145): the
+   rule collapses first (a `flex-shrink` two orders of magnitude past the
+   name's claims nearly all the shrinkage before the name loses a pixel),
+   then the Vault name ellipsizes, and the status word never truncates
+   (`flex-shrink: 0` — it keeps its natural size no matter how tight the row
+   gets, the same "count/condition over path" priority the sidebar Scope
+   zone slot already carries). */
+.topbar-scope-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 500;
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+.topbar-scope-rule {
+  flex: 0 1 auto;
+  flex-shrink: 999;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--tertiary);
+  margin: 0 0.3rem;
+}
+
+.topbar-scope-viewing {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-right: 0.4rem;
+}
+
+.topbar-scope-slot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 0.4rem;
+}
+
+/* Bottom sheet picker (#145) — the only other chrome besides the desktop
+   Scope zone (#138) that calls `onScopeChange`. Reuses the Scope zone's own
+   `.scope-row`/`.scope-row-label`/`.is-selected` grammar from
+   `layout-explorer.css` for every row's look; only the touch height and the
+   sheet's own positioning are this component's to own. */
+.scope-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  z-index: 60;
+}
+
+.scope-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border-top: 1px solid var(--rule-strong);
+  box-shadow: var(--shadow-overlay);
+  padding: 0.5rem 0 calc(0.5rem + env(safe-area-inset-bottom));
+  z-index: 70;
+  transform: translateY(100%);
+  transition: transform 160ms ease;
+}
+
+.scope-sheet[data-open="true"] {
+  transform: translateY(0);
+}
+
+.scope-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The 46px touch height is this sheet's own convention, distinct from the
+   44px floor the rest of mobile chrome uses (`responsive.css`) — a fuller
+   list of short taps earns the couple of extra pixels. */
+.scope-sheet .scope-row {
+  min-height: 46px;
+  padding-left: 1rem;
+  padding-right: 1rem;
 }

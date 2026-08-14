@@ -2774,6 +2774,74 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       </div>
     </section>
 
+    <!-- ───────── MOBILE SCOPE ROW ───────── -->
+    <section class="doc-section" id="mobile-scope-row">
+      <div class="doc-section-num">§30</div>
+      <h2>Mobile scope row &amp; bottom sheet</h2>
+      <p class="blurb">Below 920px the topbar's second row stops describing the document and becomes
+      the scope row (#145). The note path leaves the chrome entirely for this row's real estate: the
+      open note's own <span class="key">Vault</span> property row and title block (§07) already say
+      where it is, the magnifier in row one is the same search entry point the path button used to be,
+      and scope persists where a path does not. The row carries three things, always in this order:
+      the browsing scope's name, a rule, and §27's own count-or-condition slot &mdash; every one of
+      them on screen at all times, drawer closed, zero interaction.</p>
+
+      <div class="stage" style="max-width: 22rem; padding: 0;">
+        <div style="border-bottom:1px solid var(--rule); background:var(--paper); padding:0.32rem 0.75rem;">
+          <button class="topbar-scope-trigger" style="display:flex;align-items:center;width:100%;background:transparent;border:0;padding:0.12rem 0.2rem;text-align:left;cursor:pointer;">
+            <span class="topbar-scope-name">Personal</span>
+            <span class="topbar-scope-rule" aria-hidden="true">/</span>
+            <span class="topbar-scope-viewing">Viewing: Work</span>
+            <span class="topbar-scope-slot"><span class="vault-slot-condition vault-tier-warn">stale</span></span>
+          </button>
+        </div>
+      </div>
+
+      <p class="blurb"><b>The slot always describes the browsing scope, never the open note's
+      Vault</b> &mdash; a slot that changed subject with the page is a slot nobody could learn. The
+      <code>Viewing: &hellip;</code> marker pictured above is the one exception, and it is not a
+      status: it sits between the rule and the slot, and appears only on an exact read whose Vault
+      differs from a <i>narrowed</i> scope &mdash; reading a note reached from elsewhere while
+      <span class="key">Personal</span> is selected, say. At <span class="key">all</span> scope every
+      open note is already within scope by definition, so the marker never appears there, and it is
+      absent with no note open. This is deliberately not the sidebar Scope zone's own
+      <code>Viewing: &hellip;</code> line (§27), which names the open note's Vault unconditionally,
+      even when it matches the selected scope &mdash; two different jobs for two different chrome
+      surfaces at two different breakpoints.</p>
+
+      <p class="blurb"><b>Truncation priority is fixed, not proportional.</b> Under width pressure,
+      in order: the rule collapses first (a <code>flex-shrink</code> two orders of magnitude past the
+      name's absorbs nearly all the shrinkage before the name loses a pixel), then the Vault name
+      ellipsizes, and the status word never truncates (<code>flex-shrink: 0</code>) &mdash; the same
+      "condition over path" priority the sidebar's own slot already carries. Asserted at the
+      narrowest supported phone width with a long Vault name.</p>
+
+      <h4 class="doc-sub" style="font-size:0.86rem;">The bottom sheet</h4>
+      <p class="blurb">Tapping the row opens a bottom sheet holding the scope rows at
+      <b>46px touch height</b> &mdash; a couple of pixels past the 44px floor the rest of mobile
+      chrome uses (§05), earned by a fuller list of short taps. <span class="key">All Vaults</span> is
+      first, then every Vault in Vault-management order, reusing the desktop Scope zone's own
+      <code>.scope-row</code>/<code>.scope-row-label</code>/<code>.is-selected</code> grammar (§27)
+      row for row. Picking one sets scope and dismisses the sheet in the same tap; tapping the
+      backdrop or anywhere outside the sheet dismisses without changing scope. The drawer holds notes
+      and nothing else below 920px: the sidebar's Scope zone is not rendered there at all (§05), so
+      this sheet is the only narrowing control on a phone.</p>
+
+      <div class="stage" style="max-width: 22rem; padding: 0; background: var(--bg);">
+        <ul class="scope-sheet-list" style="list-style:none;margin:0;padding:0.4rem 0;">
+          <li><button class="scope-row" style="min-height:46px;padding-left:1rem;padding-right:1rem;"><span class="scope-row-label">All Vaults</span><span class="side-count">03</span></button></li>
+          <li><button class="scope-row is-selected" style="min-height:46px;padding-left:1rem;padding-right:1rem;"><span class="scope-row-label">Personal</span><span class="vault-slot-condition vault-tier-warn">stale</span></button></li>
+          <li><button class="scope-row" style="min-height:46px;padding-left:1rem;padding-right:1rem;"><span class="scope-row-label">Work</span><span class="side-count">126</span></button></li>
+        </ul>
+      </div>
+
+      <div class="tag-row">
+        <span class="key">app/AppTopbar.tsx</span><span class="key">app/vaultSlotLogic.ts <i>(scopeName)</i></span>
+        <span class="key">.topbar-scope-trigger</span><span class="key">.topbar-scope-name</span><span class="key">.topbar-scope-rule</span><span class="key">.topbar-scope-viewing</span><span class="key">.topbar-scope-slot</span>
+        <span class="key">.scope-sheet</span><span class="key">.scope-sheet-backdrop</span><span class="key">.scope-sheet-list</span>
+      </div>
+    </section>
+
   </main>
 </div>
 

@@ -17,7 +17,7 @@ import {
 } from "../components/icons";
 import { ExplorerSkeleton, StateBlock, UiButton } from "../components/ui";
 import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
-import { deriveVaultAggregate } from "./vaultSlotLogic";
+import { deriveVaultAggregate, scopeName } from "./vaultSlotLogic";
 import {
   expandedFoldersForVault,
   getStoredUnfoldedVault,
@@ -42,13 +42,6 @@ function countNotes(folder: ExplorerFolder): number {
     folder.notes.length +
     folder.folders.reduce((sum, f) => sum + countNotes(f), 0)
   );
-}
-
-function scopeName(scope: VaultScope, vaults: VaultSummary[]): string {
-  if (scope === "all") {
-    return "All Vaults";
-  }
-  return vaults.find((vault) => vault.vault_id === scope)?.name ?? "All Vaults";
 }
 
 /**
