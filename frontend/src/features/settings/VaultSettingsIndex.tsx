@@ -19,6 +19,7 @@ import {
   MAX_POLL_MINUTES,
   MIN_POLL_MINUTES,
   recoverPausedVault,
+  requestJson,
   sameSourceIdentity,
   sourceLabel,
   withIdentityFields,
@@ -328,13 +329,13 @@ export function VaultSettingsDetail({
 
   const mutate = async (path: string, init: RequestInit) => {
     setMessage(null);
-    const response = await apiFetch(path, init);
-    const payload = (await response.json().catch(() => ({}))) as {
+    const { ok, payload: raw } = await requestJson(path, init);
+    const payload = raw as {
       vault?: VaultSummary;
       registry_revision?: number;
       message?: string;
     };
-    if (!response.ok) {
+    if (!ok) {
       setMessage(payload.message ?? "This Vault could not be changed.");
       return false;
     }
@@ -367,14 +368,15 @@ export function VaultSettingsDetail({
     setBusy(true);
     setMessage(null);
 
-    const disableResponse = await apiFetch(
+    const disableResult = await requestJson(
       `/api/v1/vaults/${vaultId}/disable?expected_registry_revision=${revision}`,
       { method: "POST" },
     );
-    const disablePayload = (await disableResponse
-      .json()
-      .catch(() => ({}))) as { registry_revision?: number; message?: string };
-    if (!disableResponse.ok || disablePayload.registry_revision === undefined) {
+    const disablePayload = disableResult.payload as {
+      registry_revision?: number;
+      message?: string;
+    };
+    if (!disableResult.ok || disablePayload.registry_revision === undefined) {
       setMessage(
         disablePayload.message
           ? `Nothing changed. ${disablePayload.message}`
@@ -387,17 +389,17 @@ export function VaultSettingsDetail({
     setRevision(pausedRevision);
     setVault((current) => (current ? { ...current, enabled: false } : current));
 
-    const editResponse = await apiFetch(`/api/v1/vaults/${vaultId}`, {
+    const editResult = await requestJson(`/api/v1/vaults/${vaultId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(editVaultBody(newSource, pausedRevision, true)),
     });
-    const editPayload = (await editResponse.json().catch(() => ({}))) as {
+    const editPayload = editResult.payload as {
       vault?: VaultSummary;
       registry_revision?: number;
       message?: string;
     };
-    if (!editResponse.ok || editPayload.registry_revision === undefined) {
+    if (!editResult.ok || editPayload.registry_revision === undefined) {
       const rollback = await recoverPausedVault(vaultId);
       if (rollback.ok) {
         if (rollback.vault) applyVault(rollback.vault);
@@ -424,15 +426,15 @@ export function VaultSettingsDetail({
     // Set before the final call: if it fails, the marker is what makes the
     // red-line recovery state survive a reload (issue #121).
     markRecoveryPending(vaultId);
-    const enableResponse = await apiFetch(
+    const enableResult = await requestJson(
       `/api/v1/vaults/${vaultId}/enable?expected_registry_revision=${editedRevision}`,
       { method: "POST" },
     );
-    const enablePayload = (await enableResponse.json().catch(() => ({}))) as {
+    const enablePayload = enableResult.payload as {
       vault?: VaultSummary;
       registry_revision?: number;
     };
-    if (!enableResponse.ok) {
+    if (!enableResult.ok) {
       setRecoveryPending(true);
       setMessage(
         "This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.",
@@ -495,19 +497,20 @@ export function VaultSettingsDetail({
     setSyncing(true);
     setMessage(null);
     const healthy = vault.git !== "unavailable";
-    const response = await apiFetch(
+    const { ok, payload } = await requestJson(
       `/api/v1/vaults/${vaultId}/${healthy ? "sync" : "retry"}`,
       { method: "POST" },
     );
-    const payload = (await response.json().catch(() => ({}))) as {
-      message?: string;
-    };
-    if (!response.ok)
-      setMessage(payload.message ?? "Could not start a Git sync for this Vault.");
-    const discoveryResponse = await apiFetch("/api/v1/vaults");
-    if (discoveryResponse.ok) {
-      const discovery = (await discoveryResponse.json()) as VaultDiscoveryResponse;
-      const refreshed = discovery.vaults?.find((item) => item.vault_id === vaultId);
+    if (!ok)
+      setMessage(
+        (payload as { message?: string }).message ??
+          "Could not start a Git sync for this Vault.",
+      );
+    const discovery = await requestJson("/api/v1/vaults");
+    if (discovery.ok) {
+      const refreshed = (
+        discovery.payload as VaultDiscoveryResponse
+      ).vaults?.find((item) => item.vault_id === vaultId);
       if (refreshed) applyVault(refreshed);
     }
     setSyncing(false);

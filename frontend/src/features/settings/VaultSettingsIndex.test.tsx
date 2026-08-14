@@ -475,6 +475,40 @@ describe("VaultSettingsDetail — the Git behaviour control", () => {
     await screen.findByText(/nothing changed.*this vault is busy right now/i);
   });
 
+  it("rolls back and reports nothing changed, rather than hanging forever, when the edit step's request itself fails (network error, not just a bad response)", async () => {
+    mockDetail(baseVault({ type: "local", path: "/notes" }), {
+      extraRoutes: {
+        [`/api/v1/vaults/${VAULT_ID}/disable POST`]: () =>
+          json({ registry_revision: 4, collection_revision: 4 }),
+        [`/api/v1/vaults/${VAULT_ID} PATCH`]: () => {
+          throw new TypeError("Failed to fetch");
+        },
+        [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
+          json({
+            vault: baseVault({ type: "local", path: "/notes" }, { enabled: true }),
+            registry_revision: 5,
+            collection_revision: 5,
+          }),
+      },
+    });
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Field notes" });
+    fireEvent.click(screen.getByRole("button", { name: "Local history" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save Vault" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Go ahead" }));
+
+    await screen.findByText(/nothing changed/i);
+    expect(screen.getByRole("button", { name: "Save Vault" })).toBeEnabled();
+    expect(isRecoveryPending(VAULT_ID)).toBe(false);
+  });
+
   it("leaves a persistent red-line recovery state when the final un-pause fails", async () => {
     mockDetail(baseVault({ type: "local", path: "/notes" }), {
       extraRoutes: {
