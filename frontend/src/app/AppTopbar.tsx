@@ -9,7 +9,9 @@ import {
   MoreHorizIcon,
   SearchIcon,
 } from "../components/icons";
-import type { ActiveNoteMeta, VaultScope, VaultSummary } from "../types";
+import { VaultAggregateSlot, VaultSlot } from "./vaultSlot";
+import { scopeName } from "./vaultSlotLogic";
+import type { ActiveNoteMeta, VaultId, VaultScope, VaultSummary } from "../types";
 import type { Theme } from "../hooks/useTheme";
 
 // One icon per theme state, mirroring the three-way cycle. The icon shows the
@@ -54,6 +56,12 @@ type TopbarProps = {
   onArchiveNote: () => void;
   onDeleteNote: () => void;
   onCycleTheme: () => void;
+  onScopeChange: (next: VaultScope) => void;
+  viewingVaultId: VaultId | undefined;
+  vaultNoteCounts: Record<VaultId, number | undefined>;
+  scopeSheetOpen: boolean;
+  onToggleScopeSheet: () => void;
+  onCloseScopeSheet: () => void;
 };
 
 export function AppTopbar({
@@ -80,8 +88,15 @@ export function AppTopbar({
   onArchiveNote,
   onDeleteNote,
   onCycleTheme,
+  onScopeChange,
+  viewingVaultId,
+  vaultNoteCounts,
+  scopeSheetOpen,
+  onToggleScopeSheet,
+  onCloseScopeSheet,
 }: TopbarProps) {
   const actionsMenuRef = useRef<HTMLDivElement>(null);
+  const scopeHostRef = useRef<HTMLDivElement>(null);
   const crumbText = activeNote
     ? activeNote.relativePath.replace(/\//g, " / ")
     : "Notes Explorer";
@@ -104,6 +119,30 @@ export function AppTopbar({
   // would be stray rules against nothing.
   const showMenuDividers = Boolean(activeNote) && writeEnabled;
 
+  // Below 920px, col 2's breadcrumb is CSS-hidden, and this second row takes
+  // over as the only place scope is legible (#145). Absent below two enabled
+  // Vaults, same as the desktop echo and the sidebar Scope zone — narrowing
+  // has nothing to offer there.
+  const showScopeRow = isMobile && vaults.length > 1;
+  const narrowedScopeVault =
+    scope === "all" ? undefined : vaults.find((vault) => vault.vault_id === scope);
+  const scopeSlot =
+    scope === "all" ? (
+      <VaultAggregateSlot vaults={vaults} counts={vaultNoteCounts} />
+    ) : narrowedScopeVault ? (
+      <VaultSlot
+        vault={narrowedScopeVault}
+        noteCount={vaultNoteCounts[narrowedScopeVault.vault_id]}
+      />
+    ) : null;
+  // The slot above always names the browsing scope, never the open note's
+  // Vault — this marker is the one exception, and only earns its place when
+  // an exact read disagrees with a *narrowed* scope. At `all` every open note
+  // is already within scope, so there is nothing to flag.
+  const viewingVault = vaults.find((vault) => vault.vault_id === viewingVaultId);
+  const showViewingMarker =
+    scope !== "all" && viewingVault !== undefined && viewingVaultId !== scope;
+
   useEffect(() => {
     if (!actionsMenuOpen) {
       return;
@@ -120,6 +159,23 @@ export function AppTopbar({
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [actionsMenuOpen, onCloseActionsMenu]);
+
+  useEffect(() => {
+    if (!scopeSheetOpen) {
+      return;
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && scopeHostRef.current?.contains(target)) {
+        return;
+      }
+      onCloseScopeSheet();
+    };
+
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [scopeSheetOpen, onCloseScopeSheet]);
 
   return (
     <>
@@ -353,18 +409,76 @@ export function AppTopbar({
         </div>
       </header>
 
-      {isMobile ? (
-        <div className="topbar-mobile-meta">
+      {showScopeRow ? (
+        <div className="topbar-mobile-meta" ref={scopeHostRef}>
           <button
             type="button"
-            className="topbar-mobile-path"
-            onClick={onOpenSearch}
-            title={
-              activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"
-            }
+            className="topbar-scope-trigger"
+            onClick={onToggleScopeSheet}
+            aria-haspopup="dialog"
+            aria-expanded={scopeSheetOpen}
           >
-            {activeNote ? `${activeNote.relativePath}.md` : "Notes Explorer"}
+            <span className="topbar-scope-name">{scopeName(scope, vaults)}</span>
+            <span className="topbar-scope-rule" aria-hidden="true">
+              /
+            </span>
+            {showViewingMarker ? (
+              <span className="topbar-scope-viewing">
+                Viewing: {viewingVault?.name}
+              </span>
+            ) : null}
+            <span className="topbar-scope-slot">{scopeSlot}</span>
           </button>
+
+          {scopeSheetOpen ? (
+            <div
+              className="scope-sheet-backdrop"
+              onClick={onCloseScopeSheet}
+              aria-hidden="true"
+            />
+          ) : null}
+          <div
+            className="scope-sheet"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Choose Vault scope"
+            aria-hidden={!scopeSheetOpen}
+            data-open={scopeSheetOpen}
+          >
+            <ul className="scope-sheet-list">
+              <li>
+                <button
+                  type="button"
+                  className={`scope-row${scope === "all" ? " is-selected" : ""}`}
+                  onClick={() => {
+                    onScopeChange("all");
+                    onCloseScopeSheet();
+                  }}
+                >
+                  <span className="scope-row-label">All Vaults</span>
+                  <VaultAggregateSlot vaults={vaults} counts={vaultNoteCounts} />
+                </button>
+              </li>
+              {vaults.map((vault) => (
+                <li key={vault.vault_id}>
+                  <button
+                    type="button"
+                    className={`scope-row${scope === vault.vault_id ? " is-selected" : ""}`}
+                    onClick={() => {
+                      onScopeChange(vault.vault_id);
+                      onCloseScopeSheet();
+                    }}
+                  >
+                    <span className="scope-row-label">{vault.name}</span>
+                    <VaultSlot
+                      vault={vault}
+                      noteCount={vaultNoteCounts[vault.vault_id]}
+                    />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
       ) : null}
     </>

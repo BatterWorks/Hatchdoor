@@ -99,7 +99,7 @@ describe("client audit launch contracts", () => {
 
   it("guards touch-sticky hover styles behind hover-capable media queries", () => {
     expect(topbarCss).toMatch(
-      /@media\s*\(hover:\s*hover\)\s*{[^}]*\.topbar-mobile-path:hover/s,
+      /@media\s*\(hover:\s*hover\)\s*{[^}]*\.topbar-scope-trigger:hover/s,
     );
     expect(explorerCss).toMatch(
       /@media\s*\(hover:\s*hover\)\s*{[^}]*\.note-link:hover/s,

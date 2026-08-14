@@ -1,4 +1,4 @@
-import type { VaultId, VaultSummary } from "../types";
+import type { VaultId, VaultScope, VaultSummary } from "../types";
 
 export type VaultSlotState =
   | { kind: "count"; count: number }
@@ -13,6 +13,16 @@ export type VaultAggregate =
       total: number;
       tier: "warn" | "error";
     };
+
+/** The browsing scope's display name: `All Vaults`, or the narrowed Vault's
+ * own name — shared by the desktop Scope zone (#138) and the mobile scope
+ * row (#145), the two chrome surfaces that name the current scope. */
+export function scopeName(scope: VaultScope, vaults: VaultSummary[]): string {
+  if (scope === "all") {
+    return "All Vaults";
+  }
+  return vaults.find((vault) => vault.vault_id === scope)?.name ?? "All Vaults";
+}
 
 /**
  * Each Vault's single trailing slot: its note count when healthy, a

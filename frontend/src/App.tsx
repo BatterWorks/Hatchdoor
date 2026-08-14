@@ -72,6 +72,7 @@ export function VaultApp() {
     Record<string, boolean>
   >(() => getStoredExpandedFolders());
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [scopeSheetOpen, setScopeSheetOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
@@ -208,6 +209,7 @@ export function VaultApp() {
       setDrawerOpen(false);
     }
     setActionsMenuOpen(false);
+    setScopeSheetOpen(false);
   }, [location.pathname, isMobile]);
 
   useLayoutEffect(() => {
@@ -449,6 +451,12 @@ export function VaultApp() {
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
         onCycleTheme={cycleTheme}
+        onScopeChange={setScope}
+        viewingVaultId={activeNote?.vaultId}
+        vaultNoteCounts={vaultNoteCounts}
+        scopeSheetOpen={scopeSheetOpen}
+        onToggleScopeSheet={() => setScopeSheetOpen((prev) => !prev)}
+        onCloseScopeSheet={() => setScopeSheetOpen(false)}
       />
 
       {writeWarnings.length > 0 || writeNotice ? (

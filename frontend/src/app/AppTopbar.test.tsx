@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AppTopbar } from "./AppTopbar";
@@ -29,6 +29,12 @@ function renderTopbar(overrides: Partial<Parameters<typeof AppTopbar>[0]> = {}) 
     onArchiveNote: vi.fn(),
     onDeleteNote: vi.fn(),
     onCycleTheme: vi.fn(),
+    onScopeChange: vi.fn(),
+    viewingVaultId: undefined,
+    vaultNoteCounts: {},
+    scopeSheetOpen: false,
+    onToggleScopeSheet: vi.fn(),
+    onCloseScopeSheet: vi.fn(),
     ...overrides,
   };
 
@@ -84,5 +90,208 @@ describe("AppTopbar scope echo", () => {
     const echo = screen.getByText("All Vaults");
     expect(echo.tagName).not.toBe("BUTTON");
     expect(echo.closest("button")).toBeNull();
+  });
+});
+
+function scopeTrigger(): HTMLElement | null {
+  return document.querySelector(".topbar-scope-trigger");
+}
+
+function scopeSheet(): HTMLElement {
+  const sheet = document.querySelector(".scope-sheet");
+  if (!sheet) {
+    throw new Error("scope sheet not found");
+  }
+  return sheet as HTMLElement;
+}
+
+describe("AppTopbar mobile scope row (#145)", () => {
+  afterEach(cleanup);
+
+  it("is absent on desktop", () => {
+    renderTopbar({ vaults: THREE_VAULTS, scope: "all", isMobile: false });
+
+    expect(scopeTrigger()).toBeNull();
+  });
+
+  it("is absent at one enabled Vault, same as the desktop echo", () => {
+    renderTopbar({
+      vaults: [THREE_VAULTS[0]],
+      scope: "all",
+      isMobile: true,
+    });
+
+    expect(scopeTrigger()).toBeNull();
+  });
+
+  it("shows the browsing scope's name and slot at all times, with no interaction", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      vaultNoteCounts: { [THREE_VAULTS[0].vault_id]: 5 },
+    });
+
+    const trigger = scopeTrigger();
+    expect(trigger).not.toBeNull();
+    expect(within(trigger as HTMLElement).getByText("All Vaults")).toBeInTheDocument();
+  });
+
+  it("names a narrowed scope by Vault name", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      isMobile: true,
+    });
+
+    expect(
+      within(scopeTrigger() as HTMLElement).getByText("Beta"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the viewing marker when the exact read's Vault differs from a narrowed scope", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[0].vault_id,
+      viewingVaultId: THREE_VAULTS[2].vault_id,
+      isMobile: true,
+    });
+
+    const trigger = within(scopeTrigger() as HTMLElement);
+    expect(trigger.getByText(/viewing/i)).toBeInTheDocument();
+    expect(trigger.getByText(/gamma/i)).toBeInTheDocument();
+  });
+
+  it("omits the viewing marker when the exact read matches the narrowed scope", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[0].vault_id,
+      viewingVaultId: THREE_VAULTS[0].vault_id,
+      isMobile: true,
+    });
+
+    expect(
+      within(scopeTrigger() as HTMLElement).queryByText(/viewing/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("omits the viewing marker at all scope, even with a note open elsewhere", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      viewingVaultId: THREE_VAULTS[2].vault_id,
+      isMobile: true,
+    });
+
+    expect(
+      within(scopeTrigger() as HTMLElement).queryByText(/viewing/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("omits the viewing marker with no note open", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[0].vault_id,
+      viewingVaultId: undefined,
+      isMobile: true,
+    });
+
+    expect(
+      within(scopeTrigger() as HTMLElement).queryByText(/viewing/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("tapping the row toggles the sheet", () => {
+    const onToggleScopeSheet = vi.fn();
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      onToggleScopeSheet,
+    });
+
+    fireEvent.click(scopeTrigger() as HTMLElement);
+    expect(onToggleScopeSheet).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AppTopbar mobile scope sheet (#145)", () => {
+  afterEach(cleanup);
+
+  it("lists All Vaults first, then every Vault in Vault-management order", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    const rows = within(scopeSheet()).getAllByRole("button");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      expect.stringContaining("All Vaults"),
+      expect.stringContaining("Alpha"),
+      expect.stringContaining("Beta"),
+      expect.stringContaining("Gamma"),
+    ]);
+  });
+
+  it("marks the current scope's row selected", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    const betaRow = within(scopeSheet()).getByText("Beta").closest("button");
+    expect(betaRow?.className).toMatch(/is-selected/);
+  });
+
+  it("picking a Vault row sets scope and dismisses the sheet", () => {
+    const onScopeChange = vi.fn();
+    const onCloseScopeSheet = vi.fn();
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+      onScopeChange,
+      onCloseScopeSheet,
+    });
+
+    fireEvent.click(within(scopeSheet()).getByText("Beta"));
+    expect(onScopeChange).toHaveBeenCalledWith(THREE_VAULTS[1].vault_id);
+    expect(onCloseScopeSheet).toHaveBeenCalledTimes(1);
+  });
+
+  it("picking All Vaults sets scope to all and dismisses the sheet", () => {
+    const onScopeChange = vi.fn();
+    const onCloseScopeSheet = vi.fn();
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      isMobile: true,
+      scopeSheetOpen: true,
+      onScopeChange,
+      onCloseScopeSheet,
+    });
+
+    fireEvent.click(within(scopeSheet()).getByText("All Vaults"));
+    expect(onScopeChange).toHaveBeenCalledWith("all");
+    expect(onCloseScopeSheet).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes when the backdrop is clicked", () => {
+    const onCloseScopeSheet = vi.fn();
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+      onCloseScopeSheet,
+    });
+
+    fireEvent.click(document.querySelector(".scope-sheet-backdrop") as HTMLElement);
+    expect(onCloseScopeSheet).toHaveBeenCalledTimes(1);
   });
 });

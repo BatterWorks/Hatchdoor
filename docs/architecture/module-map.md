@@ -1418,8 +1418,10 @@ hooks and routes, owns responsive shell state, navigation, persistent shell
 preferences, topbar actions, and explorer placement. `useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137), Vault discovery
 (`useVaultDiscovery`), and the Vault-less-action default
-(`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) is the
-only chrome that calls `setScope`, on the desktop only; every other
+(`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) calls
+`setScope` on the desktop; `app/AppTopbar.tsx`'s scope row and its bottom
+sheet (#145) call it below 920px, where the Scope zone itself does not
+render. The breakpoint keeps the two callers mutually exclusive — every other
 collection-read and Vault-picking call site only reads the selected scope.
 `vaultSlot.tsx`/`vaultSlotLogic.ts` (#139) derive each Vault's trailing
 count-or-condition slot and the shared All-Vaults/collapsed-head aggregate

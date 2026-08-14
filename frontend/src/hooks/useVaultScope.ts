@@ -16,7 +16,9 @@ import type {
  * The selected Vault scope: state and storage only. Persists per browser
  * across navigation and reloads via `lib/storage`'s
  * `getStoredScope`/`setStoredScope`. `setScope` is called by the sidebar
- * Scope zone (#138), the only chrome that narrows scope.
+ * Scope zone (#138) on desktop and the mobile topbar's scope bottom sheet
+ * (#145) below 920px — never both at once, since one replaces the other at
+ * that breakpoint.
  */
 export function useVaultScope(): [VaultScope, (next: VaultScope) => void] {
   const [scope, setScopeState] = useState<VaultScope>(() => getStoredScope());
