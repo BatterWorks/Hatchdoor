@@ -16,6 +16,35 @@ import type {
   VaultSummary,
 } from "../../types";
 
+/** `apiFetch` throws on a network failure, a timeout, or an aborted request
+ * — not just on a non-2xx response. The identity round trip below needs to
+ * tell "the server refused this step" and "this step never reached the
+ * server" apart from every OTHER step's perspective (so it knows whether to
+ * roll back or leave the Vault's already-changed state alone), which is only
+ * possible if a network failure is turned into an ordinary `ok: false`
+ * result rather than an uncaught rejection that would otherwise skip the
+ * rest of the round trip's rollback/recovery logic entirely. */
+export async function requestJson(
+  path: string,
+  init?: RequestInit,
+): Promise<{ ok: boolean; payload: Record<string, unknown> }> {
+  try {
+    const response = await apiFetch(path, init);
+    const payload = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
+    return { ok: response.ok, payload };
+  } catch {
+    return {
+      ok: false,
+      payload: {
+        message: "Could not reach the server. Check the connection and try again.",
+      },
+    };
+  }
+}
+
 /** The choice this page's segmented control offers, independent of
  * `VaultGitMode`: `no_git` is Local Git behaviour, not a `VaultSource` type
  * of its own. */
@@ -336,27 +365,20 @@ export function isRecoveryPending(vaultId: VaultId): boolean {
 export async function recoverPausedVault(
   vaultId: VaultId,
 ): Promise<{ ok: boolean; message: string; vault?: VaultSummary }> {
-  const discoveryResponse = await apiFetch("/api/v1/vaults");
-  if (!discoveryResponse.ok)
+  const discovery = await requestJson("/api/v1/vaults");
+  const registryRevision = (discovery.payload as VaultDiscoveryResponse)
+    .registry_revision;
+  if (!discovery.ok || registryRevision === undefined)
     return {
       ok: false,
       message: "Could not check this Vault's status. Try again.",
     };
-  const discovery = (await discoveryResponse.json()) as VaultDiscoveryResponse;
-  if (discovery.registry_revision === undefined)
-    return {
-      ok: false,
-      message: "Could not check this Vault's status. Try again.",
-    };
-  const response = await apiFetch(
-    `/api/v1/vaults/${vaultId}/enable?expected_registry_revision=${discovery.registry_revision}`,
+  const result = await requestJson(
+    `/api/v1/vaults/${vaultId}/enable?expected_registry_revision=${registryRevision}`,
     { method: "POST" },
   );
-  const payload = (await response.json().catch(() => ({}))) as {
-    vault?: VaultSummary;
-    message?: string;
-  };
-  if (!response.ok)
+  const payload = result.payload as { vault?: VaultSummary; message?: string };
+  if (!result.ok)
     return {
       ok: false,
       message: payload.message ?? "This Vault is still paused. Try again.",
