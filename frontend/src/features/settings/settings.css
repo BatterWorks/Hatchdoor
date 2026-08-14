@@ -210,10 +210,20 @@
 .settings-vault-index-item[data-paused="true"] {
   color: var(--muted);
 }
+.settings-vault-index-item[data-recovery="true"] {
+  color: var(--err-fg);
+  box-shadow: inset 3px 0 0 var(--err-fg);
+}
 .settings-vault-paused {
   margin-left: auto;
   font-family: var(--font-mono);
   font-size: 0.62rem;
+}
+.settings-vault-needs-attention {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--err-fg);
 }
 
 .settings-vault-detail .settings-sec-head {
@@ -328,6 +338,13 @@
   margin-bottom: 1.6rem;
 }
 
+/* The Vault Git sync console (#149) carries one live-state cell rather than
+   SettingsPage's two — its cell doesn't need to share the row with a
+   sibling. */
+.settings-git-console {
+  grid-template-columns: 1fr;
+}
+
 .settings-console-cell {
   padding: 0.7rem 0.9rem;
   border-right: 1px solid var(--rule);
@@ -365,6 +382,64 @@
   height: 100%;
   background: var(--hot);
   transition: width 0.6s linear;
+}
+
+/* The console condition block (#149's fourth owed design-system addition):
+   healthy and broken are the same strip with different contents, so nothing
+   jumps position when a Vault's Git sync fails. Spans the console's full
+   width as its third grid child, under the two live-state cells. */
+.settings-console-strip {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 0.9rem;
+  border-top: 1px solid var(--rule);
+}
+
+.settings-console-strip p {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  flex: 1 1 20rem;
+}
+
+.settings-console-strip[data-tier="warn"] {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+
+.settings-console-strip[data-tier="error"] {
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+
+.settings-console-files {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  flex-basis: 100%;
+}
+
+/* The one condition allowed to persist across visits (#149/#121): a Vault
+   whose identity edit saved but whose final un-pause failed. */
+.settings-recovery-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  border-left: 3px solid var(--err-fg);
+  background: var(--err-bg);
+  color: var(--err-fg);
+  padding: 0.6rem 0.8rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-bottom: 1rem;
 }
 
 /* ── section ────────────────────────────────────────────────────────────── */
@@ -444,6 +519,20 @@
   line-height: 1.5;
   margin: 0.25rem 0 0;
   max-width: 52ch;
+}
+
+/* The token's state — a word beside the label, not buried in the help line
+   (#149/#121: "its state is a word beside the label, saved or none"). */
+.settings-token-state {
+  margin-left: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: lowercase;
+  color: var(--muted);
+}
+
+.settings-token-state-warn {
+  color: var(--warn-fg);
 }
 
 /* A fact about the setting rather than an instruction: quieter than the help,
@@ -561,6 +650,26 @@
   text-transform: uppercase;
   color: var(--muted);
   margin: 0 0 0.6rem;
+}
+
+.settings-plaque-head-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.settings-plaque-head-row .settings-plaque-head {
+  margin-bottom: 0;
+}
+
+/* The plaque's one affordance that opens repository, branch and folder into
+   fields (#149/#121) — sized to the row rather than the wide default. */
+.settings-plaque-field {
+  width: 16rem;
+  max-width: 100%;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.78rem;
 }
 
 .settings-plaque dl {

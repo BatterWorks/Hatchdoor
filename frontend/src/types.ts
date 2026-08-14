@@ -61,6 +61,34 @@ export type VaultCapabilities = {
   retry: boolean;
 };
 
+/** How a git-backed Vault's history is kept: local commits only, or synced
+ * against a remote (`src/vault_registry.rs`'s `VaultGitMode`). Excluded from
+ * source identity, so switching it needs no disable/confirm round trip. */
+export type VaultGitMode = "local_history" | "pull_only" | "two_way";
+
+/** A Vault's origin, discriminated on `type` (`src/vault_registry.rs`'s
+ * `#[serde(tag = "type")] VaultSource`). Never carries credentials — those
+ * live behind `credential_configured` on `VaultSummary` instead. */
+export type VaultSource =
+  | { type: "local"; path: string }
+  | {
+      type: "existing_git";
+      repository_path: string;
+      repository_url?: string;
+      branch?: string;
+      vault_subdirectory?: string;
+      mode: VaultGitMode;
+      poll_interval_secs: number;
+    }
+  | {
+      type: "managed_git";
+      repository_url: string;
+      branch?: string;
+      vault_subdirectory?: string;
+      mode: VaultGitMode;
+      poll_interval_secs: number;
+    };
+
 /** One Vault's discovery entry from `GET /api/v1/vaults`. The four status
  * fields are independent — a Vault can be `activation: "active"` and
  * `git: "unavailable"` at once. There is no single unified condition field. */
@@ -68,8 +96,8 @@ export type VaultSummary = {
   vault_id: VaultId;
   name: string;
   enabled: boolean;
-  /** The redacted, non-secret Vault source definition from discovery. */
-  source?: unknown;
+  /** The non-secret Vault source definition from discovery. */
+  source?: VaultSource;
   exclude_patterns: string[];
   credential_configured: boolean;
   archive_folder?: string;

@@ -1,25 +1,30 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 import { apiFetch } from "../../api/api";
 import { VaultSlot } from "../../app/vaultSlot";
 import { deriveVaultSlot } from "../../app/vaultSlotLogic";
-import type {
-  VaultDiscoveryResponse,
-  VaultId,
-  VaultSummary,
-} from "../../types";
+import type { VaultDiscoveryResponse, VaultId, VaultSource, VaultSummary } from "../../types";
+import {
+  behaviorOf,
+  behaviorOptions,
+  buildSourceForBehavior,
+  clampPollMinutes,
+  clearRecoveryPending,
+  DEFAULT_POLL_MINUTES,
+  describeGitFailure,
+  type GitBehavior,
+  isRecoveryPending,
+  isRemoteBacked,
+  markRecoveryPending,
+  MAX_POLL_MINUTES,
+  MIN_POLL_MINUTES,
+  recoverPausedVault,
+  sameSourceIdentity,
+  sourceLabel,
+  withIdentityFields,
+} from "./vaultGitBehavior";
 
 type Counts = Record<VaultId, number>;
-
-function sourceLabel(source: unknown): string {
-  if (!source || typeof source !== "object" || !("type" in source))
-    return "Vault source";
-  const type = (source as { type?: string }).type;
-  if (type === "local") return "A folder on this server";
-  if (type === "existing_git") return "An existing Git folder";
-  if (type === "managed_git") return "A managed Git checkout";
-  return "Vault source";
-}
 
 function conditionSentence(
   vault: VaultSummary,
@@ -49,6 +54,7 @@ export function VaultSettingsIndex({
 }) {
   const [vaults, setVaults] = useState<VaultSummary[]>([]);
   const [counts, setCounts] = useState<Counts>({});
+  const [recovering, setRecovering] = useState<Record<VaultId, boolean>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -78,32 +84,87 @@ export function VaultSettingsIndex({
     };
   }, []);
 
+  const handleRecover = async (vaultId: VaultId) => {
+    setRecovering((old) => ({ ...old, [vaultId]: true }));
+    const result = await recoverPausedVault(vaultId);
+    if (result.ok)
+      setVaults((old) =>
+        old.map((item) =>
+          item.vault_id === vaultId
+            ? (result.vault ?? { ...item, enabled: true })
+            : item,
+        ),
+      );
+    setRecovering((old) => ({ ...old, [vaultId]: false }));
+  };
+
   return (
     <section className="settings-vault-index" aria-label="Vaults">
       <p className="settings-index-group">Vaults</p>
-      {vaults.map((vault) => (
-        <button
-          className="settings-index-item settings-vault-index-item"
-          data-active={vault.vault_id === selectedVaultId}
-          data-paused={!vault.enabled}
-          key={vault.vault_id}
-          onClick={() => onSelectVault(vault.vault_id)}
-          type="button"
-        >
-          <span className="settings-index-title">{vault.name}</span>
-          {vault.enabled ? (
-            <VaultSlot vault={vault} noteCount={counts[vault.vault_id]} />
-          ) : (
-            <span className="settings-vault-paused">paused</span>
-          )}
-        </button>
-      ))}
+      {vaults.map((vault) => {
+        const needsRecovery = !vault.enabled && isRecoveryPending(vault.vault_id);
+        return (
+          <Fragment key={vault.vault_id}>
+            <button
+              className="settings-index-item settings-vault-index-item"
+              data-active={vault.vault_id === selectedVaultId}
+              data-paused={!vault.enabled}
+              data-recovery={needsRecovery}
+              onClick={() => onSelectVault(vault.vault_id)}
+              type="button"
+            >
+              <span className="settings-index-title">{vault.name}</span>
+              {needsRecovery ? (
+                <span className="settings-vault-paused settings-vault-needs-attention">
+                  needs attention
+                </span>
+              ) : vault.enabled ? (
+                <VaultSlot vault={vault} noteCount={counts[vault.vault_id]} />
+              ) : (
+                <span className="settings-vault-paused">paused</span>
+              )}
+            </button>
+            {needsRecovery ? (
+              <div className="settings-recovery-line" role="alert">
+                <span>This Vault changed but did not start back up.</span>
+                <button
+                  type="button"
+                  className="settings-mini settings-btn-danger"
+                  disabled={recovering[vault.vault_id]}
+                  onClick={() => void handleRecover(vault.vault_id)}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : null}
+          </Fragment>
+        );
+      })}
       <button className="settings-link" type="button">
         Add a Vault
       </button>
     </section>
   );
 }
+
+function draftsFromSource(source: VaultSource | undefined) {
+  const behavior = source ? behaviorOf(source) : null;
+  const repoUrl = source && source.type !== "local" ? (source.repository_url ?? "") : "";
+  const branch = source && source.type !== "local" ? (source.branch ?? "") : "";
+  const subdirectory =
+    source && source.type !== "local" ? (source.vault_subdirectory ?? "") : "";
+  const pollMinutes =
+    source && source.type !== "local"
+      ? String(Math.max(MIN_POLL_MINUTES, Math.round(source.poll_interval_secs / 60)))
+      : String(DEFAULT_POLL_MINUTES);
+  return { behavior, repoUrl, branch, subdirectory, pollMinutes };
+}
+
+const IDENTITY_CHANGE_CONSEQUENCE =
+  "This runs as one step: the Vault pauses, the change saves, and the Vault starts back up. It stays out of the sidebar and All Vaults for that moment.";
+
+const LOCAL_HISTORY_CONSEQUENCE =
+  "Local history creates a hidden .git folder inside this Vault's notes folder to hold its history. That folder grows permanently: every image and PDF attached stays in it, even after you delete the file from the Vault.";
 
 export function VaultSettingsDetail({
   vaultId,
@@ -123,7 +184,44 @@ export function VaultSettingsDetail({
   const [archive, setArchive] = useState("");
   const [identityName, setIdentityName] = useState("");
   const [identityEmail, setIdentityEmail] = useState("");
+  const [draftBehavior, setDraftBehavior] = useState<GitBehavior | null>(null);
+  const [repoUrlDraft, setRepoUrlDraft] = useState("");
+  const [branchDraft, setBranchDraft] = useState("");
+  const [subdirDraft, setSubdirDraft] = useState("");
+  const [pollMinutesDraft, setPollMinutesDraft] = useState(String(DEFAULT_POLL_MINUTES));
+  const [plaqueEditing, setPlaqueEditing] = useState(false);
+  const [signIn, setSignIn] = useState<"none" | "token">("none");
+  const [credToken, setCredToken] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<{
+    newSource: VaultSource;
+    localHistory: boolean;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [recoveryPending, setRecoveryPending] = useState(false);
+
+  const applyVault = (next: VaultSummary) => {
+    setVault(next);
+    setName(next.name);
+    setExclude(next.exclude_patterns.join(", "));
+    setArchive(next.archive_folder ?? "");
+    setIdentityName(next.commit_identity?.name ?? "");
+    setIdentityEmail(next.commit_identity?.email ?? "");
+    const drafts = draftsFromSource(next.source);
+    setDraftBehavior(drafts.behavior);
+    setRepoUrlDraft(drafts.repoUrl);
+    setBranchDraft(drafts.branch);
+    setSubdirDraft(drafts.subdirectory);
+    setPollMinutesDraft(drafts.pollMinutes);
+    setSignIn(next.credential_configured ? "token" : "none");
+    setCredToken("");
+    setPlaqueEditing(false);
+    if (next.enabled && isRecoveryPending(next.vault_id)) {
+      clearRecoveryPending(next.vault_id);
+    }
+    setRecoveryPending(!next.enabled && isRecoveryPending(next.vault_id));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -134,13 +232,8 @@ export function VaultSettingsDetail({
         (await discoveryResponse.json()) as VaultDiscoveryResponse;
       const next = discovery.vaults?.find((item) => item.vault_id === vaultId);
       if (!next || cancelled) return;
-      setVault(next);
+      applyVault(next);
       setRevision(discovery.registry_revision ?? null);
-      setName(next.name);
-      setExclude(next.exclude_patterns.join(", "));
-      setArchive(next.archive_folder ?? "");
-      setIdentityName(next.commit_identity?.name ?? "");
-      setIdentityEmail(next.commit_identity?.email ?? "");
       const [statsResponse, recentResponse] = await Promise.all([
         apiFetch("/api/v1/vaults/all/stats"),
         apiFetch(`/api/v1/vaults/${vaultId}/recent?limit=1`),
@@ -166,10 +259,77 @@ export function VaultSettingsDetail({
     };
   }, [vaultId]);
 
+  if (!vault)
+    return (
+      <div className="settings-main">
+        <p className="settings-muted">Loading Vault…</p>
+      </div>
+    );
+
+  const paused = !vault.enabled;
+  const identity =
+    identityName || identityEmail
+      ? { name: identityName, email: identityEmail }
+      : null;
+
+  const draftSource: VaultSource | undefined =
+    vault.source && draftBehavior
+      ? withIdentityFields(
+          buildSourceForBehavior(vault.source, draftBehavior),
+          {
+            repositoryUrl: repoUrlDraft,
+            branch: branchDraft,
+            subdirectory: subdirDraft,
+            pollMinutes: clampPollMinutes(pollMinutesDraft),
+          },
+        )
+      : vault.source;
+
+  const identityChanged =
+    vault.source && draftSource
+      ? !sameSourceIdentity(vault.source, draftSource)
+      : false;
+
+  const remoteBackedDraft = isRemoteBacked(draftBehavior);
+  const showPlaqueFields = draftBehavior !== null && draftBehavior !== "no_git";
+  const plaqueFieldsEditable =
+    vault.source?.type === "local" || plaqueEditing;
+
+  const credentialsPatch = ():
+    | { action: "keep" }
+    | { action: "remove" }
+    | { action: "replace"; token: string } => {
+    if (signIn === "none") return { action: "remove" };
+    if (credToken.trim()) return { action: "replace", token: credToken.trim() };
+    return { action: "keep" };
+  };
+
+  /** The `PATCH` body shared by a plain field save and the identity round
+   * trip's edit step — they differ only in which revision they carry, which
+   * source they send, and whether the server needs to be told this is an
+   * identity change it must otherwise refuse. */
+  const editVaultBody = (
+    source: VaultSource | undefined,
+    expectedRevision: number,
+    confirmIdentityChange: boolean,
+  ) => ({
+    expected_registry_revision: expectedRevision,
+    name,
+    source: source ?? vault.source,
+    exclude_patterns: exclude
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+    https_credentials: credentialsPatch(),
+    ...(confirmIdentityChange ? { confirm_identity_change: true } : {}),
+    archive_folder: archive || null,
+    commit_identity: identity,
+  });
+
   const mutate = async (path: string, init: RequestInit) => {
     setMessage(null);
     const response = await apiFetch(path, init);
-    const payload = (await response.json()) as {
+    const payload = (await response.json().catch(() => ({}))) as {
       vault?: VaultSummary;
       registry_revision?: number;
       message?: string;
@@ -178,24 +338,185 @@ export function VaultSettingsDetail({
       setMessage(payload.message ?? "This Vault could not be changed.");
       return false;
     }
-    if (payload.vault) setVault(payload.vault);
+    if (payload.vault) applyVault(payload.vault);
     if (payload.registry_revision !== undefined)
       setRevision(payload.registry_revision);
     setMessage("Saved.");
     return true;
   };
 
-  if (!vault)
-    return (
-      <div className="settings-main">
-        <p className="settings-muted">Loading Vault…</p>
-      </div>
+  const plainSave = async (source: VaultSource | undefined) => {
+    if (revision === null) return;
+    await mutate(`/api/v1/vaults/${vaultId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(editVaultBody(source, revision, false)),
+    });
+  };
+
+  /** Issue #121's round trip: accepting an identity change runs pause, edit
+   * and un-pause as one client-orchestrated act, so a settings change never
+   * makes a Vault silently disappear from the sidebar. Three distinct
+   * failure points, three distinct outcomes: a failed pause has nothing to
+   * roll back; a failed edit is rolled back by re-enabling and reporting
+   * nothing changed; a failed final un-pause is the one condition allowed to
+   * persist across visits. */
+  const runIdentityChange = async (newSource: VaultSource) => {
+    if (revision === null) return;
+    setConfirmation(null);
+    setBusy(true);
+    setMessage(null);
+
+    const disableResponse = await apiFetch(
+      `/api/v1/vaults/${vaultId}/disable?expected_registry_revision=${revision}`,
+      { method: "POST" },
     );
-  const paused = !vault.enabled;
-  const identity =
-    identityName || identityEmail
-      ? { name: identityName, email: identityEmail }
-      : null;
+    const disablePayload = (await disableResponse
+      .json()
+      .catch(() => ({}))) as { registry_revision?: number; message?: string };
+    if (!disableResponse.ok || disablePayload.registry_revision === undefined) {
+      setMessage(
+        disablePayload.message
+          ? `Nothing changed. ${disablePayload.message}`
+          : "Nothing changed — this Vault could not be paused for the edit.",
+      );
+      setBusy(false);
+      return;
+    }
+    const pausedRevision = disablePayload.registry_revision;
+    setRevision(pausedRevision);
+    setVault((current) => (current ? { ...current, enabled: false } : current));
+
+    const editResponse = await apiFetch(`/api/v1/vaults/${vaultId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(editVaultBody(newSource, pausedRevision, true)),
+    });
+    const editPayload = (await editResponse.json().catch(() => ({}))) as {
+      vault?: VaultSummary;
+      registry_revision?: number;
+      message?: string;
+    };
+    if (!editResponse.ok || editPayload.registry_revision === undefined) {
+      const rollback = await recoverPausedVault(vaultId);
+      if (rollback.ok) {
+        if (rollback.vault) applyVault(rollback.vault);
+        else setVault((current) => (current ? { ...current, enabled: true } : current));
+        setMessage(
+          editPayload.message
+            ? `Nothing changed. ${editPayload.message}`
+            : "Nothing changed.",
+        );
+      } else {
+        markRecoveryPending(vaultId);
+        setRecoveryPending(true);
+        setMessage(
+          "This Vault is paused and could not be restored automatically. Use the button below to bring it back.",
+        );
+      }
+      setBusy(false);
+      return;
+    }
+    const editedRevision = editPayload.registry_revision;
+    setRevision(editedRevision);
+    if (editPayload.vault) applyVault(editPayload.vault);
+
+    // Set before the final call: if it fails, the marker is what makes the
+    // red-line recovery state survive a reload (issue #121).
+    markRecoveryPending(vaultId);
+    const enableResponse = await apiFetch(
+      `/api/v1/vaults/${vaultId}/enable?expected_registry_revision=${editedRevision}`,
+      { method: "POST" },
+    );
+    const enablePayload = (await enableResponse.json().catch(() => ({}))) as {
+      vault?: VaultSummary;
+      registry_revision?: number;
+    };
+    if (!enableResponse.ok) {
+      setRecoveryPending(true);
+      setMessage(
+        "This Vault changed but Hatchdoor could not turn it back on. It is paused and hidden until you bring it back below.",
+      );
+      setBusy(false);
+      return;
+    }
+    clearRecoveryPending(vaultId);
+    setRecoveryPending(false);
+    if (enablePayload.vault) applyVault(enablePayload.vault);
+    else {
+      setVault((current) => (current ? { ...current, enabled: true } : current));
+      if (enablePayload.registry_revision !== undefined)
+        setRevision(enablePayload.registry_revision);
+    }
+    setMessage("Saved.");
+    setBusy(false);
+  };
+
+  const handleSave = () => {
+    if (!draftSource) {
+      void plainSave(undefined);
+      return;
+    }
+    if (
+      draftSource.type !== "local" &&
+      draftSource.mode !== "local_history" &&
+      !draftSource.repository_url
+    ) {
+      setMessage("A repository is required for this behaviour.");
+      return;
+    }
+    if (identityChanged) {
+      setConfirmation({
+        newSource: draftSource,
+        localHistory:
+          draftSource.type === "existing_git" &&
+          draftSource.mode === "local_history",
+      });
+      return;
+    }
+    void plainSave(draftSource);
+  };
+
+  const handleRecover = async () => {
+    setBusy(true);
+    setMessage(null);
+    const result = await recoverPausedVault(vaultId);
+    if (result.ok) {
+      setRecoveryPending(false);
+      if (result.vault) applyVault(result.vault);
+      setMessage("This Vault is back.");
+    } else {
+      setMessage(result.message);
+    }
+    setBusy(false);
+  };
+
+  const syncOrRetry = async () => {
+    setSyncing(true);
+    setMessage(null);
+    const healthy = vault.git !== "unavailable";
+    const response = await apiFetch(
+      `/api/v1/vaults/${vaultId}/${healthy ? "sync" : "retry"}`,
+      { method: "POST" },
+    );
+    const payload = (await response.json().catch(() => ({}))) as {
+      message?: string;
+    };
+    if (!response.ok)
+      setMessage(payload.message ?? "Could not start a Git sync for this Vault.");
+    const discoveryResponse = await apiFetch("/api/v1/vaults");
+    if (discoveryResponse.ok) {
+      const discovery = (await discoveryResponse.json()) as VaultDiscoveryResponse;
+      const refreshed = discovery.vaults?.find((item) => item.vault_id === vaultId);
+      if (refreshed) applyVault(refreshed);
+    }
+    setSyncing(false);
+  };
+
+  const gitFailure = vault.git === "unavailable" && vault.git_error
+    ? describeGitFailure(vault.git_error)
+    : null;
+  const consoleVisible = vault.source !== undefined && vault.git !== "disabled";
 
   return (
     <div className="settings-main settings-vault-detail">
@@ -208,6 +529,63 @@ export function VaultSettingsDetail({
           </p>
         </div>
       </div>
+      {recoveryPending ? (
+        <div className="settings-recovery-line" role="alert">
+          <span>
+            This Vault changed but did not start back up. It is paused and
+            hidden until it is back.
+          </span>
+          <button
+            type="button"
+            className="settings-mini settings-btn-danger"
+            disabled={busy}
+            onClick={() => void handleRecover()}
+          >
+            Try to bring this Vault back
+          </button>
+        </div>
+      ) : null}
+      {consoleVisible ? (
+        <div className="settings-console settings-git-console">
+          <div className="settings-console-cell">
+            <span className="settings-console-lbl">Sync</span>
+            <span className="settings-console-val">
+              {gitFailure ? gitFailure.label : "Healthy"}
+            </span>
+          </div>
+          <div
+            className="settings-console-strip"
+            data-tier={gitFailure ? gitFailure.tier : "ok"}
+          >
+            <p>
+              {gitFailure
+                ? gitFailure.sentence
+                : "This Vault's Git sync is healthy."}
+            </p>
+            {gitFailure?.files ? (
+              <ul className="settings-console-files">
+                {gitFailure.files.map((path) => (
+                  <li key={path}>{path}</li>
+                ))}
+                {gitFailure.filesTotal !== undefined &&
+                gitFailure.filesTotal > gitFailure.files.length ? (
+                  <li>
+                    and {gitFailure.filesTotal - gitFailure.files.length} more
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
+            <button
+              type="button"
+              className="settings-btn"
+              disabled={!vault.enabled || syncing || vault.git === "pending"}
+              onClick={() => void syncOrRetry()}
+            >
+              {gitFailure ? "Try again" : "Sync now"}
+            </button>
+          </div>
+        </div>
+      ) : null}
       <p className="settings-vault-condition">
         {paused
           ? "This Vault is paused. It is kept here so you can turn it back on."
@@ -294,54 +672,233 @@ export function VaultSettingsDetail({
           />
         </label>
       </div>
+      {vault.source ? (
+        <div className="settings-plaque">
+          <div className="settings-plaque-head-row">
+            <p className="settings-plaque-head">Identity</p>
+            {showPlaqueFields && !plaqueFieldsEditable ? (
+              <button
+                type="button"
+                className="settings-mini"
+                onClick={() => setPlaqueEditing(true)}
+              >
+                Edit
+              </button>
+            ) : null}
+          </div>
+          <dl>
+            <div className="settings-plaque-row">
+              <dt>Where this Vault came from</dt>
+              <dd>{sourceLabel(vault.source)}</dd>
+            </div>
+            <div className="settings-plaque-row">
+              <dt>Commit identity</dt>
+              <dd>
+                {vault.commit_identity
+                  ? `${vault.commit_identity.name} <${vault.commit_identity.email}>`
+                  : `${serverIdentity.name || "not set"} <${serverIdentity.email || "not set"}>`}
+              </dd>
+            </div>
+            {showPlaqueFields ? (
+              <>
+                <div className="settings-plaque-row">
+                  <dt>Repository</dt>
+                  <dd>
+                    {plaqueFieldsEditable ? (
+                      <input
+                        className="settings-input settings-plaque-field"
+                        aria-label="Repository URL"
+                        value={repoUrlDraft}
+                        onChange={(event) => setRepoUrlDraft(event.target.value)}
+                      />
+                    ) : (
+                      repoUrlDraft || "not set"
+                    )}
+                  </dd>
+                </div>
+                <div className="settings-plaque-row">
+                  <dt>Branch</dt>
+                  <dd>
+                    {plaqueFieldsEditable ? (
+                      <input
+                        className="settings-input settings-plaque-field"
+                        aria-label="Branch"
+                        value={branchDraft}
+                        onChange={(event) => setBranchDraft(event.target.value)}
+                      />
+                    ) : (
+                      branchDraft || "repository default"
+                    )}
+                  </dd>
+                </div>
+                <div className="settings-plaque-row">
+                  <dt>Folder</dt>
+                  <dd>
+                    {plaqueFieldsEditable ? (
+                      <input
+                        className="settings-input settings-plaque-field"
+                        aria-label="Folder within the repository"
+                        value={subdirDraft}
+                        onChange={(event) => setSubdirDraft(event.target.value)}
+                      />
+                    ) : (
+                      subdirDraft || "repository root"
+                    )}
+                  </dd>
+                </div>
+              </>
+            ) : null}
+          </dl>
+        </div>
+      ) : null}
+      {vault.source ? (
+        <div className="settings-rows">
+          <div className="settings-row">
+            <span>
+              <span className="settings-row-label">Git behaviour</span>
+              <span className="settings-row-help">
+                {vault.source.type === "managed_git"
+                  ? "How Hatchdoor keeps this checkout's history."
+                  : "Whether — and how — this Vault's folder keeps Git history."}
+              </span>
+            </span>
+            <div
+              className="settings-segmented"
+              role="group"
+              aria-label="Git behaviour"
+            >
+              {behaviorOptions(vault.source).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-pressed={draftBehavior === item.id}
+                  onClick={() => setDraftBehavior(item.id)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            {identityChanged ? (
+              <p className="settings-row-class">
+                Saving this runs the Vault through a pause‑edit‑restart round
+                trip.
+              </p>
+            ) : null}
+          </div>
+          {remoteBackedDraft ? (
+            <>
+              <div className="settings-row">
+                <span>
+                  <span className="settings-row-label">
+                    Sign-in
+                    {signIn === "token" ? (
+                      <span
+                        className={
+                          identityChanged
+                            ? "settings-token-state settings-token-state-warn"
+                            : "settings-token-state"
+                        }
+                      >
+                        {identityChanged
+                          ? "will be cleared"
+                          : vault.credential_configured
+                            ? "saved"
+                            : "none"}
+                      </span>
+                    ) : null}
+                  </span>
+                  <span className="settings-row-help">
+                    {signIn === "token"
+                      ? identityChanged
+                        ? "This identity change clears the stored token even if left blank. Sign in again afterward if this Vault still needs one."
+                        : "Blank means keep."
+                      : "No sign-in removes any stored token."}
+                  </span>
+                </span>
+                <div>
+                  <div
+                    className="settings-segmented"
+                    role="group"
+                    aria-label="Sign-in"
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={signIn === "none"}
+                      onClick={() => {
+                        setSignIn("none");
+                        setCredToken("");
+                      }}
+                    >
+                      No sign-in
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={signIn === "token"}
+                      onClick={() => setSignIn("token")}
+                    >
+                      Access token
+                    </button>
+                  </div>
+                  {signIn === "token" ? (
+                    <input
+                      className="settings-input"
+                      type="password"
+                      aria-label="Repository access token"
+                      value={credToken}
+                      onChange={(event) => setCredToken(event.target.value)}
+                    />
+                  ) : null}
+                </div>
+              </div>
+              {/* #148's AC4 (per-Vault write-debounce) resolved: the legacy
+                  HATCHDOOR_GIT_DEBOUNCE_SECONDS concept ("wait N seconds
+                  after the last local edit before committing") has no
+                  successor in the multi-Vault pipeline, which already
+                  coalesces writes through a fixed watcher debounce
+                  independent of any per-Vault setting. This schedule field —
+                  "how often to check the remote" — is a different question
+                  Hatchdoor genuinely has no other way to answer, and is the
+                  only per-Vault timing control this ticket adds. #148's AC4
+                  is retired with no successor, not folded into this field. */}
+              <div className="settings-row">
+                <span>
+                  <span className="settings-row-label">Sync schedule</span>
+                  <span className="settings-row-help">
+                    Hatchdoor has no way to be told when something is pushed,
+                    so it checks on this schedule.
+                  </span>
+                </span>
+                <div className="settings-inline">
+                  <input
+                    className="settings-input settings-input-short"
+                    type="number"
+                    min={MIN_POLL_MINUTES}
+                    max={MAX_POLL_MINUTES}
+                    aria-label="Sync schedule in minutes"
+                    value={pollMinutesDraft}
+                    onChange={(event) => setPollMinutesDraft(event.target.value)}
+                  />
+                  <span className="settings-unit">minutes</span>
+                </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+      ) : null}
       <div className="settings-sec-actions">
         <button
           className="settings-btn settings-btn-hot"
-          disabled={revision === null}
-          onClick={() =>
-            void mutate(`/api/v1/vaults/${vaultId}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                expected_registry_revision: revision,
-                name,
-                source: vault.source,
-                exclude_patterns: exclude
-                  .split(",")
-                  .map((item) => item.trim())
-                  .filter(Boolean),
-                https_credentials: { action: "keep" },
-                archive_folder: archive || null,
-                commit_identity: identity,
-              }),
-            })
-          }
+          disabled={revision === null || busy}
+          onClick={handleSave}
           type="button"
         >
           Save Vault
         </button>
       </div>
-      <div className="settings-plaque">
-        <p className="settings-plaque-head">Identity</p>
-        <dl>
-          <div className="settings-plaque-row">
-            <dt>Where this Vault came from</dt>
-            <dd>{sourceLabel(vault.source)}</dd>
-          </div>
-          <div className="settings-plaque-row">
-            <dt>Commit identity</dt>
-            <dd>
-              {vault.commit_identity
-                ? `${vault.commit_identity.name} <${vault.commit_identity.email}>`
-                : `${serverIdentity.name || "not set"} <${serverIdentity.email || "not set"}>`}
-            </dd>
-          </div>
-        </dl>
-      </div>
       <div className="settings-vault-actions">
         <button
           className="settings-btn"
-          disabled={revision === null}
+          disabled={revision === null || busy}
           onClick={() =>
             void mutate(
               `/api/v1/vaults/${vaultId}/${paused ? "enable" : "disable"}?expected_registry_revision=${revision}`,
@@ -364,7 +921,7 @@ export function VaultSettingsDetail({
         </button>
         <button
           className="settings-btn settings-btn-danger"
-          disabled={revision === null}
+          disabled={revision === null || busy}
           onClick={async () => {
             if (
               await mutate(
@@ -379,6 +936,42 @@ export function VaultSettingsDetail({
           Disconnect Vault
         </button>
       </div>
+      {confirmation ? (
+        <div className="settings-modal-back">
+          <div
+            className="settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Before this is saved"
+          >
+            <h3>Before this is saved</h3>
+            <p>{IDENTITY_CHANGE_CONSEQUENCE}</p>
+            {confirmation.localHistory ? <p>{LOCAL_HISTORY_CONSEQUENCE}</p> : null}
+            {vault.credential_configured ? (
+              <p>
+                Its stored access token will be cleared — sign in again
+                afterward if this Vault still needs one.
+              </p>
+            ) : null}
+            <div className="settings-modal-actions">
+              <button
+                type="button"
+                className="settings-btn"
+                onClick={() => setConfirmation(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="settings-btn settings-btn-hot"
+                onClick={() => void runIdentityChange(confirmation.newSource)}
+              >
+                Go ahead
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
