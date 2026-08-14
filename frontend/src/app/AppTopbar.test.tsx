@@ -35,6 +35,8 @@ function renderTopbar(overrides: Partial<Parameters<typeof AppTopbar>[0]> = {}) 
     scopeSheetOpen: false,
     onToggleScopeSheet: vi.fn(),
     onCloseScopeSheet: vi.fn(),
+    scopeFocusRequestId: 0,
+    onRestoreScopeFocus: vi.fn(),
     ...overrides,
   };
 
@@ -226,7 +228,7 @@ describe("AppTopbar mobile scope sheet (#145)", () => {
       scopeSheetOpen: true,
     });
 
-    const rows = within(scopeSheet()).getAllByRole("button");
+    const rows = within(scopeSheet()).getAllByRole("radio");
     expect(rows.map((row) => row.textContent)).toEqual([
       expect.stringContaining("All Vaults"),
       expect.stringContaining("Alpha"),
@@ -293,5 +295,119 @@ describe("AppTopbar mobile scope sheet (#145)", () => {
 
     fireEvent.click(document.querySelector(".scope-sheet-backdrop") as HTMLElement);
     expect(onCloseScopeSheet).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores focus to the shortcut origin when the backdrop closes it without picking", () => {
+    const onRestoreScopeFocus = vi.fn();
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+      onRestoreScopeFocus,
+    });
+
+    fireEvent.click(document.querySelector(".scope-sheet-backdrop") as HTMLElement);
+    expect(onRestoreScopeFocus).toHaveBeenCalledTimes(1);
+  });
+
+  it("is a pick-exactly-one radiogroup, one tab stop for the whole group", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    const rows = within(scopeSheet()).getAllByRole("radio");
+    expect(rows.map((row) => row.getAttribute("tabindex"))).toEqual([
+      "-1",
+      "-1",
+      "0",
+      "-1",
+    ]);
+    expect(rows[2]).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("focuses the current row the instant the sheet opens", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    expect(
+      within(scopeSheet()).getByRole("radio", { name: /^Beta/ }),
+    ).toHaveFocus();
+  });
+
+  it("moves focus between rows with the arrow keys", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    const allVaultsRow = within(scopeSheet()).getByRole("radio", {
+      name: /^All Vaults/,
+    });
+    fireEvent.keyDown(allVaultsRow, { key: "ArrowDown" });
+
+    expect(
+      within(scopeSheet()).getByRole("radio", { name: /^Alpha/ }),
+    ).toHaveFocus();
+  });
+
+  it("closes and restores focus on Escape", () => {
+    const onCloseScopeSheet = vi.fn();
+    const onRestoreScopeFocus = vi.fn();
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+      onCloseScopeSheet,
+      onRestoreScopeFocus,
+    });
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(onCloseScopeSheet).toHaveBeenCalledTimes(1);
+    expect(onRestoreScopeFocus).toHaveBeenCalledTimes(1);
+  });
+
+  it("focuses the topbar trigger after picking a row, not the shortcut origin", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    fireEvent.click(within(scopeSheet()).getByText("Beta"));
+
+    expect(scopeTrigger()).toHaveFocus();
+  });
+
+  it("traps Tab within the sheet", () => {
+    renderTopbar({
+      vaults: THREE_VAULTS,
+      scope: "all",
+      isMobile: true,
+      scopeSheetOpen: true,
+    });
+
+    const rows = within(scopeSheet()).getAllByRole("radio");
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+    last.focus();
+
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(first).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
   });
 });

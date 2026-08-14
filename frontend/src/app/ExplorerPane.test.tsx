@@ -88,6 +88,8 @@ function defaultPaneProps(): Parameters<typeof ExplorerPane>[0] {
     vaultNoteCounts: {},
     scopeZoneCollapsed: false,
     onScopeZoneCollapsedChange: vi.fn(),
+    scopeFocusRequestId: 0,
+    onRestoreScopeFocus: vi.fn(),
   };
 }
 
@@ -275,7 +277,7 @@ describe("ExplorerPane Scope zone", () => {
     renderPane({ vaults: THREE_VAULTS });
 
     const rows = screen
-      .getAllByRole("button")
+      .getAllByRole("radio")
       .filter((button) => button.className.includes("scope-row"));
     expect(
       rows.map((row) => row.querySelector(".scope-row-label")?.textContent),
@@ -285,10 +287,10 @@ describe("ExplorerPane Scope zone", () => {
   it("gives the current scope the active treatment", () => {
     renderPane({ vaults: THREE_VAULTS, scope: THREE_VAULTS[1].vault_id });
 
-    const selected = screen.getByRole("button", { name: /^Beta/ });
+    const selected = screen.getByRole("radio", { name: /^Beta/ });
     expect(selected).toHaveClass("is-selected");
     expect(
-      screen.getByRole("button", { name: /^All Vaults/ }),
+      screen.getByRole("radio", { name: /^All Vaults/ }),
     ).not.toHaveClass("is-selected");
   });
 
@@ -296,7 +298,7 @@ describe("ExplorerPane Scope zone", () => {
     const onScopeChange = vi.fn();
     renderPane({ vaults: THREE_VAULTS, onScopeChange });
 
-    fireEvent.click(scopeZone().getByRole("button", { name: /^Beta/ }));
+    fireEvent.click(scopeZone().getByRole("radio", { name: /^Beta/ }));
 
     expect(onScopeChange).toHaveBeenCalledExactlyOnceWith(
       THREE_VAULTS[1].vault_id,
@@ -319,7 +321,7 @@ describe("ExplorerPane Scope zone", () => {
       screen.getByRole("button", { name: /Scope/ }),
     ).toHaveAttribute("aria-expanded", "true");
     expect(
-      screen.getByRole("button", { name: /^All Vaults/ }),
+      screen.getByRole("radio", { name: /^All Vaults/ }),
     ).toBeVisible();
   });
 
@@ -333,7 +335,7 @@ describe("ExplorerPane Scope zone", () => {
     const head = screen.getByRole("button", { name: /Scope/ });
     expect(head).toHaveTextContent("Beta");
     expect(
-      screen.queryByRole("button", { name: "All Vaults" }),
+      screen.queryByRole("radio", { name: "All Vaults" }),
     ).not.toBeInTheDocument();
   });
 
@@ -344,7 +346,7 @@ describe("ExplorerPane Scope zone", () => {
       viewingVaultId: THREE_VAULTS[2].vault_id,
     });
 
-    const row = scopeZone().getByRole("button", { name: /Gamma/ });
+    const row = scopeZone().getByRole("radio", { name: /Gamma/ });
     expect(within(row).getByText("Viewing")).toBeInTheDocument();
   });
 
@@ -377,7 +379,7 @@ describe("ExplorerPane Scope zone", () => {
       vaultNoteCounts: { [THREE_VAULTS[0].vault_id]: 42 },
     });
 
-    const row = scopeZone().getByRole("button", { name: /^Alpha/ });
+    const row = scopeZone().getByRole("radio", { name: /^Alpha/ });
     expect(within(row).getByText("42")).toBeInTheDocument();
   });
 
@@ -390,7 +392,7 @@ describe("ExplorerPane Scope zone", () => {
       ],
     });
 
-    const row = scopeZone().getByRole("button", { name: /^Beta/ });
+    const row = scopeZone().getByRole("radio", { name: /^Beta/ });
     expect(within(row).getByText("unavailable")).toHaveClass(
       "vault-tier-error",
     );
@@ -411,6 +413,92 @@ describe("ExplorerPane Scope zone", () => {
       "vault-tier-error",
     );
     expect(within(head).getByText("1 of 3")).toBeInTheDocument();
+  });
+
+  it("carries a `V` keycap after the label, hidden from the accessibility tree", () => {
+    renderPane({ vaults: THREE_VAULTS });
+
+    const keycap = document.querySelector(".scope-zone-keycap");
+    expect(keycap).toHaveTextContent("V");
+    expect(keycap).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("is a pick-exactly-one radiogroup — one tab stop for the whole group", () => {
+    renderPane({ vaults: THREE_VAULTS, scope: THREE_VAULTS[1].vault_id });
+
+    const rows = scopeZone().getAllByRole("radio");
+    expect(rows.map((row) => row.getAttribute("tabindex"))).toEqual([
+      "-1",
+      "-1",
+      "0",
+      "-1",
+    ]);
+    expect(rows[2]).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("moves focus between rows with the arrow keys", () => {
+    renderPane({ vaults: THREE_VAULTS });
+
+    const allVaultsRow = scopeZone().getByRole("radio", {
+      name: /^All Vaults/,
+    });
+    allVaultsRow.focus();
+
+    fireEvent.keyDown(allVaultsRow, { key: "ArrowDown" });
+    const alphaRow = scopeZone().getByRole("radio", { name: /^Alpha/ });
+    expect(alphaRow).toHaveFocus();
+
+    fireEvent.keyDown(alphaRow, { key: "ArrowUp" });
+    expect(allVaultsRow).toHaveFocus();
+  });
+
+  it("wraps from the last row back to the first", () => {
+    renderPane({ vaults: THREE_VAULTS });
+
+    const gammaRow = scopeZone().getByRole("radio", { name: /^Gamma/ });
+    gammaRow.focus();
+
+    fireEvent.keyDown(gammaRow, { key: "ArrowDown" });
+    expect(
+      scopeZone().getByRole("radio", { name: /^All Vaults/ }),
+    ).toHaveFocus();
+  });
+
+  it("Escape on a row asks the shell to restore focus to where `v` was pressed", () => {
+    const onRestoreScopeFocus = vi.fn();
+    renderPane({ vaults: THREE_VAULTS, onRestoreScopeFocus });
+
+    const allVaultsRow = scopeZone().getByRole("radio", {
+      name: /^All Vaults/,
+    });
+    allVaultsRow.focus();
+    fireEvent.keyDown(allVaultsRow, { key: "Escape" });
+
+    expect(onRestoreScopeFocus).toHaveBeenCalledTimes(1);
+  });
+
+  it("a bumped scopeFocusRequestId focuses the current row", () => {
+    const props = {
+      ...defaultPaneProps(),
+      vaults: THREE_VAULTS,
+      scope: THREE_VAULTS[1].vault_id,
+      scopeFocusRequestId: 0,
+    };
+    const { rerender } = render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <ExplorerPane {...props} />
+      </MemoryRouter>,
+    );
+
+    rerender(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <ExplorerPane {...props} scopeFocusRequestId={1} />
+      </MemoryRouter>,
+    );
+
+    expect(
+      scopeZone().getByRole("radio", { name: /^Beta/ }),
+    ).toHaveFocus();
   });
 });
 
@@ -783,7 +871,7 @@ describe("ExplorerPane accordion (#142)", () => {
       locationPathname: "/",
     });
 
-    fireEvent.click(scopeZone().getByRole("button", { name: /^All Vaults/ }));
+    fireEvent.click(scopeZone().getByRole("radio", { name: /^All Vaults/ }));
 
     expect(headFor("Gamma")).toHaveAttribute("data-open", "true");
   });
