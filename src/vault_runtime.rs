@@ -1761,6 +1761,22 @@ pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
     request: VaultWorkRequest,
 ) -> Result<(), VaultWorkError> {
     let vault_id = request.vault_id();
+
+    // Lifecycle reconstruction queues Index work the moment a Vault activates,
+    // which can be well before first-run model setup has downloaded and
+    // installed the embedder. Running the turn against an empty embedder slot
+    // compares the cache's stored identity against a placeholder — wiping a
+    // valid cache and forcing a full reindex on every restart — and then panics
+    // in the chunker's tokenizer. Defer instead; the model-load path re-requests
+    // every active Vault once the embedder is installed.
+    if !embedder.is_ready() {
+        return Err(VaultWorkError::new(
+            "embedder_not_ready",
+            "The search model is still being set up; indexing resumes when setup completes.",
+            true,
+        ));
+    }
+
     let Some(control_block) = collection.runtime(vault_id) else {
         return Ok(());
     };
