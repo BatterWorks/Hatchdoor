@@ -623,10 +623,24 @@ backend checks.
 
 **Owned paths:** `src/vault_read.rs`.
 
-**Public contract:** `VaultReadCore`, explicit `VaultScope`, the common
-`VaultReadProjection` envelope, participant state/error types, and
+**Public contract:** `VaultReadCore`, `BrowseSurface`, explicit `VaultScope`,
+the common `VaultReadProjection` envelope, participant state/error types, and
 Vault-qualified exact-note, tree, statistics, graph, and recent-note
-projections. `statistics_detail` (#137) is the exact-read counterpart to the
+projections. `BrowseSurface` names which layer surface a caller may read.
+`Everything` is the established behavior and stays the default: a layer demotes
+a Note from the default *search* surface only, and an operator still reaches it
+by slug, in the explorer, and on the graph. `DefaultOnly` is demo mode's clamp
+(#109), selected through `BrowseSurface::for_demo_mode` and applied by both
+`VaultReadCore::on_surface` and `search::vault_scoped::VaultSearchCore::on_surface`:
+a demo has no operator and no layer toggle, so a demoted Note is withheld from
+exact reads, links, resolve, and download (as an ordinary not-found, so
+withheld is indistinguishable from absent), and `BrowseSurface::restrict` drops
+its rows from a published snapshot before any projection reads it, covering
+tree, graph, recent, statistics, and a surviving search hit's outbound links. A
+link is dropped when either endpoint is withheld, since a surviving edge would
+name the hidden Note. `handlers/vault_collection_reads.rs` additionally clamps
+the request's own `LayerSelection` so the `layers=` query is not an escape
+hatch. `statistics_detail` (#137) is the exact-read counterpart to the
 lean collection `statistics` projection: it returns `VaultQualifiedStats`
 directly (never wrapped in `VaultReadProjection`, like `exact_note`), scoped
 to exactly one Vault via `collection`'s `VaultScope::One` gating, computing
@@ -1175,7 +1189,17 @@ trigger covers every path that can write `https_credentials`.
 Discovery and the event stream are pure reads and stay reachable in demo mode
 (#109: demo mode publishes every enabled Vault in the instance as a public
 read-only collection, unlike `settings.rs`'s operator-controls posture, which
-remains absent). Collection management, manual Git sync/retry, and one-Vault
+remains absent). Because that read is unauthenticated, discovery forks its
+projection: demo mode lists only *enabled* definitions and builds each through
+`public_vault_summary`, which withholds `source`, `exclude_patterns`,
+`archive_folder`, `commit_identity`, and the four `*_error` details — the
+deployment's absolute paths, tracked remotes, and operator configuration —
+while keeping identity, the four independent statuses, `capabilities`, and
+`credential_configured` (#133's designated credential signal). `source` is
+therefore `Option` on the wire, always present on an authenticated read and
+always absent on a demo one. Per-Vault `capabilities` are deliberately
+unchanged in demo mode: #133 settles that the browser branches on the
+instance-level `demo_mode` flag, not on a rewritten per-Vault capability. Collection management, manual Git sync/retry, and one-Vault
 Index refresh are Vault-control operations, so `src/server.rs` wraps each of their routes —
 individually, since some share a path with a read (`POST /api/v1/vaults`
 alongside `GET`) — in `reject_demo_mutation`, which calls this file's

@@ -12,8 +12,8 @@ use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
 use crate::embed::Embedder;
 use crate::vault::NoteSummary;
 use crate::vault_read::{
-    VaultParticipant, VaultParticipantState, VaultReadError, VaultReadProjection, VaultScope,
-    selected_vaults,
+    BrowseSurface, VaultParticipant, VaultParticipantState, VaultReadError, VaultReadProjection,
+    VaultScope, selected_vaults,
 };
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultCollectionRuntime;
@@ -62,6 +62,7 @@ pub struct VaultSearchCore<'a> {
     cache: &'a SqliteCache,
     vaults: &'a VaultCollectionRuntime,
     embedder: &'a dyn Embedder,
+    surface: BrowseSurface,
     #[cfg(test)]
     after_snapshot_read_hook: Option<SnapshotReadHook>,
 }
@@ -76,9 +77,19 @@ impl<'a> VaultSearchCore<'a> {
             cache,
             vaults,
             embedder,
+            surface: BrowseSurface::Everything,
             #[cfg(test)]
             after_snapshot_read_hook: None,
         }
+    }
+
+    /// Restrict this search to the default surface. The caller also clamps the
+    /// request's own [`LayerSelection`], which keeps demoted chunks out of the
+    /// hits; this additionally keeps them out of a surviving hit's outbound
+    /// links, where a demoted Note would otherwise still be named (#109).
+    pub fn on_surface(mut self, surface: BrowseSurface) -> Self {
+        self.surface = surface;
+        self
     }
 
     #[cfg(test)]
@@ -125,7 +136,7 @@ impl<'a> VaultSearchCore<'a> {
                         state,
                         error: None,
                     });
-                    snapshots.insert(vault.vault_id, snapshot.read);
+                    snapshots.insert(vault.vault_id, self.surface.restrict(snapshot.read));
                 }
                 Ok(None) => self.push_unavailable(
                     request.scope,

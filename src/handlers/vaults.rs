@@ -58,7 +58,12 @@ pub struct VaultSummary {
     pub vault_id: VaultId,
     pub name: String,
     pub enabled: bool,
-    pub source: VaultSource,
+    /// Absent on a public read-only demo (#109): the source names an absolute
+    /// path on the operator's disk, or the remote a Vault tracks, and a demo
+    /// visitor is not an operator. Always present on an authenticated read,
+    /// where it is the Settings page's own input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<VaultSource>,
     pub exclude_patterns: Vec<String>,
     pub credential_configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -423,7 +428,7 @@ fn vault_summary(definition: &VaultDefinition, snapshot: &CollectionVaultSnapsho
         vault_id: snapshot.vault_id,
         name: snapshot.name.clone(),
         enabled: snapshot.enabled,
-        source: definition.source().clone(),
+        source: Some(definition.source().clone()),
         exclude_patterns: definition.exclude_patterns().to_vec(),
         credential_configured: definition.credential_configured(),
         archive_folder: definition.archive_folder().map(str::to_string),
@@ -438,6 +443,46 @@ fn vault_summary(definition: &VaultDefinition, snapshot: &CollectionVaultSnapsho
         search_error: snapshot.search_error.clone(),
         git_error: snapshot.git_error.clone(),
         watcher_error: snapshot.watcher_error.clone(),
+    }
+}
+
+/// The public-safe projection of one enabled Vault for a read-only demo (#109).
+///
+/// Keeps everything a visitor browses with — identity, name, and the four
+/// independent status fields plus capabilities, so partial/stale/unavailable
+/// participation stays honest (#109's fourth criterion, and #116's slot
+/// vocabulary) — and withholds everything that describes the operator's
+/// deployment rather than the content: the source's absolute path or remote,
+/// the exclusion list, the archive folder, the commit author's name and email,
+/// and the runtime error details, whose messages embed absolute paths. The
+/// browser already falls back to its own sentence for every absent error, which
+/// is what #124 asks a demo to show anyway.
+///
+/// `credential_configured` survives deliberately: #133 designates it the only
+/// credential signal, and it names no path, URL, or secret.
+fn public_vault_summary(
+    definition: &VaultDefinition,
+    snapshot: &CollectionVaultSnapshot,
+) -> VaultSummary {
+    VaultSummary {
+        vault_id: snapshot.vault_id,
+        name: snapshot.name.clone(),
+        enabled: snapshot.enabled,
+        source: None,
+        exclude_patterns: Vec::new(),
+        credential_configured: definition.credential_configured(),
+        archive_folder: None,
+        commit_identity: None,
+        activation: snapshot.activation,
+        local_content: snapshot.local_content,
+        search: snapshot.search,
+        git: snapshot.git,
+        watcher: snapshot.watcher,
+        capabilities: snapshot.capabilities,
+        activation_error: None,
+        search_error: None,
+        git_error: None,
+        watcher_error: None,
     }
 }
 
@@ -504,22 +549,34 @@ fn mutation_response(
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /api/v1/vaults` — authenticated discovery. Reachable at zero enabled
-/// Vaults and while the registry is in an explicit recovery state; never
-/// returns credentials, only `credential_configured`.
+/// `GET /api/v1/vaults` — discovery. Reachable at zero enabled Vaults and while
+/// the registry is in an explicit recovery state; never returns credentials,
+/// only `credential_configured`.
+///
+/// Reachable unauthenticated in demo mode (#109), which is why the projection
+/// forks here: a demo publishes only its *enabled* Vaults, through
+/// `public_vault_summary`. A disabled definition is an operator's own bookkeeping
+/// about an instance a visitor cannot administer, and listing it would name a
+/// Vault the demo does not serve.
 pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
     match state.vault_registry.load() {
         Ok(VaultRegistryState::Ready(registry_snapshot)) => {
             let collection_snapshot = state.vaults.snapshot();
+            let demo_mode = state.demo_mode;
             let vaults = registry_snapshot
                 .definitions()
+                .filter(|definition| !demo_mode || definition.enabled())
                 .map(|definition| {
                     let runtime_snapshot = collection_snapshot
                         .vaults
                         .get(&definition.vault_id())
                         .cloned()
                         .unwrap_or_else(|| unreconciled_snapshot(&definition));
-                    vault_summary(&definition, &runtime_snapshot)
+                    if demo_mode {
+                        public_vault_summary(&definition, &runtime_snapshot)
+                    } else {
+                        vault_summary(&definition, &runtime_snapshot)
+                    }
                 })
                 .collect();
             Json(VaultDiscoveryResponse {

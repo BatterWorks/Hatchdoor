@@ -33,7 +33,7 @@ use crate::handlers::vaults::{
     VaultApiError, internal_error_response, json_rejection_response, parse_vault_id,
     query_rejection_response,
 };
-use crate::vault_read::{VaultReadCore, VaultReadError};
+use crate::vault_read::{BrowseSurface, VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
 
 // ---------------------------------------------------------------------------
@@ -124,9 +124,10 @@ pub async fn vault_scoped_note_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_slug = slug.clone();
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.exact_note(vault_id, &lookup_slug))
     })
     .await;
@@ -149,9 +150,10 @@ pub async fn vault_scoped_note_links_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_slug = slug.clone();
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.exact_note_links(vault_id, &lookup_slug))
     })
     .await;
@@ -179,8 +181,9 @@ pub async fn vault_scoped_stats_detail_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.statistics_detail(vault_id))
     })
     .await;
@@ -209,9 +212,10 @@ pub async fn vault_scoped_note_download_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_slug = slug.clone();
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         // Note content and its containing directory must come from the same
         // Vault control-block fetch: a concurrent edit reconciles a
         // *replacement* control block rather than mutating the current one in
@@ -258,8 +262,9 @@ pub async fn vault_scoped_resolve_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.resolve_wikilink(vault_id, &query.target))
     })
     .await;
@@ -303,6 +308,7 @@ pub async fn vault_scoped_resolve_batch_handler(
 
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let snapshot = state.runtime_snapshot();
     let control = vaults.runtime(vault_id);
     let archive_prefix = match AppState::vault_archive_prefix(
@@ -314,7 +320,7 @@ pub async fn vault_scoped_resolve_batch_handler(
     };
 
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         // One authoritative-index build for the whole batch: `resolve_wikilinks`
         // resolves every target against it, rather than paying a full Vault
         // scan per target the way looping `resolve_wikilink` would.
@@ -370,12 +376,13 @@ pub async fn vault_scoped_asset_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_path = path.clone();
     // Directory lookup, canonicalize-and-contain path resolution, and the
     // file read are all blocking filesystem work; do all three in one
     // `run_blocking` trip rather than only the final read.
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         let vault_root = match core.vault_directory(vault_id) {
             Ok(root) => root,
             Err(error) => return Ok(AssetOutcome::VaultError(error)),
