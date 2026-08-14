@@ -4360,6 +4360,347 @@ mod tests {
         assert!(!on_disk.contains("tampered"));
     }
 
+    /// Register `vaults` directly and reconcile them, for demo-mode tests:
+    /// `POST /api/v1/vaults` is refused in demo mode, so the collection cannot
+    /// be built through the API the way `create_vault_with_files` does.
+    async fn register_vaults_directly(
+        state: &AppState,
+        vaults: &[(&str, &std::path::Path, bool)],
+    ) -> Vec<crate::vault_registry::VaultId> {
+        let mut revision = 0;
+        let mut ids = Vec::new();
+        for (name, path, enabled) in vaults {
+            let snapshot = state
+                .vault_registry
+                .add(
+                    revision,
+                    crate::vault_registry::NewVaultDefinition {
+                        name: (*name).to_string(),
+                        enabled: *enabled,
+                        source: crate::vault_registry::VaultSource::Local {
+                            path: (*path).to_path_buf(),
+                        },
+                        exclude_patterns: Vec::new(),
+                        https_credentials: None,
+                        archive_folder: None,
+                        commit_identity: None,
+                    },
+                )
+                .expect("add vault to registry");
+            revision = snapshot.revision();
+            let id = snapshot
+                .definitions()
+                .find(|definition| definition.name() == *name)
+                .expect("added definition")
+                .vault_id();
+            ids.push(id);
+            state
+                .vaults
+                .reconcile_and_reconstruct(
+                    &state.vault_registry,
+                    &snapshot,
+                    &state.vault_work,
+                    &state.managed_git,
+                )
+                .await;
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn demo_mode_discovery_withholds_deployment_detail_and_disabled_vaults() {
+        // #109's second criterion. Discovery is reachable unauthenticated in
+        // demo mode, so the operator's deployment must not travel with it: no
+        // absolute path, no exclusion list, no archive folder, no commit
+        // author, no runtime error text (whose messages embed paths), and no
+        // disabled definition. Everything a visitor browses with stays.
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let published_root = tmp.path().join("published-vault");
+        let withheld_root = tmp.path().join("withheld-vault");
+        for root in [&published_root, &withheld_root] {
+            std::fs::create_dir_all(root).expect("create vault directory");
+            std::fs::write(root.join("Home.md"), "# Home\n").expect("write note");
+        }
+        let ids = register_vaults_directly(
+            &state,
+            &[
+                ("Published", published_root.as_path(), true),
+                ("Withheld", withheld_root.as_path(), false),
+            ],
+        )
+        .await;
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+
+        let vaults = body["vaults"].as_array().expect("vaults array");
+        assert_eq!(vaults.len(), 1, "only the enabled Vault is published");
+        assert_eq!(vaults[0]["vault_id"], ids[0].to_string());
+        assert_eq!(vaults[0]["name"], "Published");
+
+        // Withheld: everything that describes the deployment.
+        assert!(vaults[0].get("source").is_none(), "source must be absent");
+        assert_eq!(
+            vaults[0]["exclude_patterns"]
+                .as_array()
+                .expect("exclude_patterns array")
+                .len(),
+            0
+        );
+        for absent in [
+            "archive_folder",
+            "commit_identity",
+            "activation_error",
+            "search_error",
+            "git_error",
+            "watcher_error",
+        ] {
+            assert!(
+                vaults[0].get(absent).is_none(),
+                "{absent} must be absent in demo mode"
+            );
+        }
+
+        // Kept: identity, the four independent statuses, and capabilities, so
+        // honest participation reporting still works.
+        for present in [
+            "activation",
+            "local_content",
+            "search",
+            "git",
+            "watcher",
+            "capabilities",
+            "credential_configured",
+        ] {
+            assert!(
+                vaults[0].get(present).is_some(),
+                "{present} must survive the public projection"
+            );
+        }
+
+        // No path from either Vault appears anywhere in the payload, including
+        // the disabled one's name.
+        let serialized = body.to_string();
+        for leaked in [
+            published_root.to_string_lossy().to_string(),
+            withheld_root.to_string_lossy().to_string(),
+            "Withheld".to_string(),
+        ] {
+            assert!(
+                !serialized.contains(&leaked),
+                "demo discovery leaked {leaked}: {serialized}"
+            );
+        }
+
+        // The authenticated projection is unchanged: an ordinary instance still
+        // states the source its Settings page edits, and still lists a disabled
+        // definition.
+        let (ordinary_app, ordinary_tmp, ordinary_state) =
+            app_for_tests_with_web_auth_and_demo_mode(None, false);
+        let ordinary_root = ordinary_tmp.path().join("ordinary-vault");
+        let disabled_root = ordinary_tmp.path().join("disabled-vault");
+        for root in [&ordinary_root, &disabled_root] {
+            std::fs::create_dir_all(root).expect("create vault directory");
+            std::fs::write(root.join("Home.md"), "# Home\n").expect("write note");
+        }
+        register_vaults_directly(
+            &ordinary_state,
+            &[
+                ("Ordinary", ordinary_root.as_path(), true),
+                ("Disabled", disabled_root.as_path(), false),
+            ],
+        )
+        .await;
+        let ordinary = ordinary_app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let ordinary_body = json_body(ordinary).await;
+        let ordinary_vaults = ordinary_body["vaults"].as_array().expect("vaults array");
+        assert_eq!(
+            ordinary_vaults.len(),
+            2,
+            "disabled definitions still listed"
+        );
+        // Discovery orders by immutable Vault ID, not insertion, so find the
+        // Vault by name rather than assuming a position.
+        let ordinary_entry = ordinary_vaults
+            .iter()
+            .find(|vault| vault["name"] == "Ordinary")
+            .expect("the enabled Vault is listed");
+        assert_eq!(ordinary_entry["source"]["type"], "local");
+        assert_eq!(
+            ordinary_entry["source"]["path"],
+            ordinary_root.to_string_lossy().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_withholds_demoted_notes_from_every_read_surface() {
+        // #109's seventh criterion. A demo has no operator and no layer
+        // toggle, so a demoted Note is not reachable by fetch, links, resolve,
+        // download, or any layer selector, and its existence cannot be
+        // inferred from the tree, graph, recent list, or statistics.
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("layered-vault");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::write(
+            vault_root.join("Home.md"),
+            "# Home\n\nbasalt weathering\n\n[[Clipping]]\n",
+        )
+        .expect("write default note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(
+            vault_root.join("sources/Clipping.md"),
+            "# Clipping\n\nbasalt weathering clipped article\n",
+        )
+        .expect("write demoted note");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        publish_vault_snapshot(&state, &vault_id, &vault_root);
+
+        let get = async |uri: String| {
+            app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+        };
+
+        // Fetched, linked, downloaded: not found, exactly as a Note that does
+        // not exist, so nothing distinguishes withheld from absent.
+        for uri in [
+            format!("/api/v1/vaults/{vault_id}/notes/clipping"),
+            format!("/api/v1/vaults/{vault_id}/notes/clipping/links"),
+            format!("/api/v1/vaults/{vault_id}/notes/clipping/download"),
+        ] {
+            let response = get(uri.clone()).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+
+        // Resolved: the wikilink from the default Note does not resolve.
+        let resolved = get(format!("/api/v1/vaults/{vault_id}/resolve?target=Clipping")).await;
+        assert_eq!(resolved.status(), StatusCode::OK);
+        assert!(json_body(resolved).await["slug"].is_null());
+
+        // The default Note is still fully readable, and its outgoing link to
+        // the demoted Note is dropped rather than dangling.
+        let home = get(format!("/api/v1/vaults/{vault_id}/notes/home")).await;
+        assert_eq!(home.status(), StatusCode::OK);
+        let links = get(format!("/api/v1/vaults/{vault_id}/notes/home/links")).await;
+        assert_eq!(links.status(), StatusCode::OK);
+        let links_body = json_body(links).await;
+        assert!(
+            !links_body.to_string().contains("clipping"),
+            "a link to a demoted Note names it: {links_body}"
+        );
+
+        // Searched, including through the layer selector.
+        for query in ["", "&layers=all", "&layers=sources", "&layers=default"] {
+            let uri = format!(
+                "/api/v1/vaults/{vault_id}/search?q=basalt%20weathering&mode=keyword{query}"
+            );
+            let response = get(uri.clone()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = json_body(response).await;
+            assert!(
+                !body.to_string().contains("clipping"),
+                "search leaked the demoted Note for '{query}': {body}"
+            );
+        }
+
+        // Inferred from a collection projection.
+        for surface in ["tree", "graph", "recent", "stats"] {
+            let uri = format!("/api/v1/vaults/{vault_id}/{surface}");
+            let response = get(uri.clone()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = json_body(response).await;
+            assert!(
+                !body.to_string().to_lowercase().contains("clipping"),
+                "{surface} leaked the demoted Note: {body}"
+            );
+        }
+        let stats = get(format!("/api/v1/vaults/{vault_id}/stats")).await;
+        let stats_body = json_body(stats).await;
+        assert_eq!(
+            stats_body["data"][0]["note_count"], 1,
+            "a demoted Note is not counted on a demo"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_instance_still_reaches_demoted_notes() {
+        // The other half of the #109 clamp: an authenticated operator's
+        // instance keeps the established layer semantics, where demoting
+        // removes a Note from the default *search* surface only.
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, false);
+        let vault_root = tmp.path().join("layered-vault");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n\nbasalt weathering\n")
+            .expect("write default note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(
+            vault_root.join("sources/Clipping.md"),
+            "# Clipping\n\nbasalt weathering clipped article\n",
+        )
+        .expect("write demoted note");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        publish_vault_snapshot(&state, &vault_id, &vault_root);
+
+        let note = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/notes/clipping"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(note.status(), StatusCode::OK);
+
+        let tree = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/tree"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let tree_body = json_body(tree).await;
+        assert!(
+            tree_body.to_string().contains("clipping"),
+            "an ordinary instance still browses a demoted Note: {tree_body}"
+        );
+    }
+
     #[tokio::test]
     async fn demo_mode_with_web_token_configured_reads_stay_open_and_mutations_stay_403_not_401() {
         // #109 finding 2: a `HATCHDOOR_WEB_BEARER_TOKEN` configured alongside

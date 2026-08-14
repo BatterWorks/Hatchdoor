@@ -35,7 +35,7 @@ use crate::handlers::vault_content::vault_read_error_response;
 use crate::handlers::vaults::{VaultApiError, query_rejection_response};
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::search::{LayerSelection, NoteFilters, SearchMode};
-use crate::vault_read::{VaultReadCore, VaultScope};
+use crate::vault_read::{BrowseSurface, VaultReadCore, VaultScope};
 use crate::vault_registry::VaultId;
 
 // ---------------------------------------------------------------------------
@@ -140,8 +140,9 @@ pub async fn vault_scope_tree_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.trees(scope))
     })
     .await;
@@ -163,8 +164,9 @@ pub async fn vault_scope_stats_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.statistics(scope))
     })
     .await;
@@ -187,8 +189,9 @@ pub async fn vault_scope_graph_handler(
     };
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.graphs(scope))
     })
     .await;
@@ -217,8 +220,9 @@ pub async fn vault_scope_recent_handler(
     let limit = query.limit.unwrap_or(5).clamp(1, 25);
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults);
+        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
         Ok(core.recently_modified(scope, limit))
     })
     .await;
@@ -251,10 +255,19 @@ pub async fn vault_scope_search_handler(
     let limit = query.limit.unwrap_or(10).clamp(1, 50);
     let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
     let mode = query.mode.unwrap_or_default();
-    let layers = parse_layer_selection(query.layers.as_deref());
 
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
+    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
+    // #109: a demo has no operator and no layer toggle, so the selector is not
+    // an escape hatch out of the default surface. Clamping here rather than
+    // rejecting the query keeps a saved link with `?layers=` working and
+    // returning the same results an unadorned search would, so the demoted
+    // Notes' existence cannot be inferred from a differing error either.
+    let layers = match surface {
+        BrowseSurface::Everything => parse_layer_selection(query.layers.as_deref()),
+        BrowseSurface::DefaultOnly => LayerSelection::default_surface(),
+    };
     let embedder = state.embedder.clone();
     let request = VaultSearchRequest {
         scope,
@@ -269,7 +282,7 @@ pub async fn vault_scope_search_handler(
     // Query embedding (semantic mode) and SQLite work both run off the async
     // runtime, mirroring the legacy `search_handler`.
     let result = run_blocking(move || {
-        let core = VaultSearchCore::new(&cache, &vaults, embedder.as_ref());
+        let core = VaultSearchCore::new(&cache, &vaults, embedder.as_ref()).on_surface(surface);
         Ok(core.search(request))
     })
     .await;

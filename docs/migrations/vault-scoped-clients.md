@@ -231,5 +231,23 @@ reads, contained assets/downloads, and one-or-all tree/recent/stats/graph/
 search remain reachable with no token. MCP and Git writeback remain
 unavailable in demo mode regardless.
 
+A demo serves a narrower projection of the same shapes, because those reads are
+unauthenticated:
+
+- `GET /api/v1/vaults` lists only *enabled* Vaults, and each entry omits
+  `source`, `archive_folder`, `commit_identity`, and the `*_error` details, and
+  reports an empty `exclude_patterns`. Identity, `enabled`, the four status
+  fields, `capabilities`, and `credential_configured` are unchanged. Treat
+  `source` as optional: it is always present on an authenticated instance and
+  always absent on a demo. Branch on the envelope's `demo_mode` boolean rather
+  than inferring the posture from a missing field.
+- Demoted Notes (those in a `.hatchdoor-layer` directory) do not exist as far as
+  a demo is concerned. They are absent from search under every `layers=` value,
+  from trees, graphs, recent lists, and statistics counts, and from the outbound
+  links of results that do return. Fetching, resolving, or downloading one
+  answers the ordinary not-found, the same as a Note that was never there. The
+  `layers=` parameter is accepted and ignored rather than rejected, so an
+  existing link keeps working.
+
 MCP returns the same domain details in an error tool result. Messages are for
 people and may change; automation must branch on `code`.

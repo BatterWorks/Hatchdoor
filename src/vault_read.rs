@@ -171,17 +171,111 @@ pub struct VaultRecentNote {
     pub mtime_ns: i64,
 }
 
+/// Which layer surface a [`VaultReadCore`] is allowed to see.
+///
+/// An ordinary instance browses `Everything`: layers demote a Note from the
+/// default *search* surface, but the operator still reaches it by slug, in the
+/// explorer, and on the graph. A public read-only demo (#109) has no operator
+/// and no layer toggle, so demoted Notes are withheld from every read instead:
+/// they cannot be fetched, searched, resolved, downloaded, or inferred from a
+/// tree, graph, recent list, or statistic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowseSurface {
+    /// Every Note, demoted or not. The ordinary authenticated instance.
+    Everything,
+    /// Only Notes on the default surface (`layer IS NULL`).
+    DefaultOnly,
+}
+
+impl BrowseSurface {
+    /// The surface a request to this instance may browse. Demo mode is the
+    /// only thing that narrows it: #109 makes a demo a browsing product with
+    /// no operator and no layer toggle.
+    pub fn for_demo_mode(demo_mode: bool) -> Self {
+        if demo_mode {
+            Self::DefaultOnly
+        } else {
+            Self::Everything
+        }
+    }
+
+    /// Whether a Note carrying `layer` is withheld from this surface.
+    fn hides(self, layer: Option<&str>) -> bool {
+        self == Self::DefaultOnly && layer.is_some()
+    }
+
+    /// Drop every demoted row from one published snapshot before anything
+    /// projects it, so a restricted surface (#109's demo mode) cannot reveal a
+    /// demoted Note through a tree, graph, recent list, statistic, or a search
+    /// result's outbound links. Links are dropped when *either* endpoint is
+    /// withheld: a surviving edge would name the hidden Note's slug.
+    pub(crate) fn restrict(self, read: VaultSnapshotRead) -> VaultSnapshotRead {
+        if self == Self::Everything {
+            return read;
+        }
+        let VaultSnapshotRead {
+            notes,
+            links,
+            mut tags_by_note,
+            chunks,
+            ..
+        } = read;
+        let notes: Vec<_> = notes
+            .into_iter()
+            .filter(|note| !self.hides(note.layer.as_deref()))
+            .collect();
+        let visible: BTreeSet<&str> = notes.iter().map(|note| note.slug.as_str()).collect();
+        let links = links
+            .into_iter()
+            .filter(|link| {
+                visible.contains(link.source_slug.as_str())
+                    && visible.contains(link.target_slug.as_str())
+            })
+            .collect();
+        let chunks = chunks
+            .into_iter()
+            .filter(|chunk| {
+                !self.hides(chunk.layer.as_deref()) && visible.contains(chunk.note_slug.as_str())
+            })
+            .collect();
+        tags_by_note.retain(|slug, _| visible.contains(slug.as_str()));
+        // A restricted surface can select no layer, so it publishes no
+        // catalogue: an empty catalogue is also what a Vault with no markers
+        // reports, keeping the two indistinguishable.
+        VaultSnapshotRead {
+            notes,
+            links,
+            tags_by_note,
+            chunks,
+            layer_catalog: Vec::new(),
+        }
+    }
+}
+
 /// The shared-core facade. Exact reads use the targeted Vault's current
 /// Markdown directory; collection projections use only already-published
 /// cache snapshots and report their freshness honestly.
 pub struct VaultReadCore<'a> {
     cache: &'a SqliteCache,
     vaults: &'a VaultCollectionRuntime,
+    surface: BrowseSurface,
 }
 
 impl<'a> VaultReadCore<'a> {
     pub fn new(cache: &'a SqliteCache, vaults: &'a VaultCollectionRuntime) -> Self {
-        Self { cache, vaults }
+        Self {
+            cache,
+            vaults,
+            surface: BrowseSurface::Everything,
+        }
+    }
+
+    /// Restrict every read to the default surface. Demo mode (#109) is the only
+    /// production caller: a visitor has no way to reveal a demoted Note, so the
+    /// server must not serve one through any surface.
+    pub fn on_surface(mut self, surface: BrowseSurface) -> Self {
+        self.surface = surface;
+        self
     }
 
     pub fn exact_note(
@@ -192,7 +286,10 @@ impl<'a> VaultReadCore<'a> {
         let index = self.authoritative_index(vault_id)?;
         index
             .read_note_by_slug(slug)
-            .map(|note| note.map(|note| VaultQualifiedNote { vault_id, note }))
+            .map(|note| {
+                note.filter(|note| !self.surface.hides(note.layer.as_deref()))
+                    .map(|note| VaultQualifiedNote { vault_id, note })
+            })
             .map_err(|error| {
                 unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
             })
@@ -204,9 +301,20 @@ impl<'a> VaultReadCore<'a> {
         slug: &str,
     ) -> Result<Option<VaultQualifiedLinks>, VaultReadError> {
         let index = self.authoritative_index(vault_id)?;
-        Ok(index
-            .note_links(slug)
-            .map(|links| qualify_links(vault_id, links)))
+        if self.hidden_slug(&index, slug) {
+            return Ok(None);
+        }
+        Ok(index.note_links(slug).map(|mut links| {
+            if self.surface == BrowseSurface::DefaultOnly {
+                links
+                    .outgoing
+                    .retain(|link| !self.surface.hides(link.layer.as_deref()));
+                links
+                    .backlinks
+                    .retain(|link| !self.surface.hides(link.layer.as_deref()));
+            }
+            qualify_links(vault_id, links)
+        }))
     }
 
     pub fn resolve_wikilink(
@@ -217,6 +325,7 @@ impl<'a> VaultReadCore<'a> {
         let index = self.authoritative_index(vault_id)?;
         Ok(index
             .resolve_wikilink(raw_target)
+            .filter(|note| !self.surface.hides(note.layer.as_deref()))
             .map(|note| ResolvedVaultNote {
                 vault_id,
                 slug: note.slug.clone(),
@@ -239,6 +348,7 @@ impl<'a> VaultReadCore<'a> {
             .map(|raw_target| {
                 index
                     .resolve_wikilink(raw_target)
+                    .filter(|note| !self.surface.hides(note.layer.as_deref()))
                     .map(|note| ResolvedVaultNote {
                         vault_id,
                         slug: note.slug.clone(),
@@ -246,6 +356,16 @@ impl<'a> VaultReadCore<'a> {
                     })
             })
             .collect())
+    }
+
+    /// Whether this surface withholds `slug` entirely, so a caller answers the
+    /// same not-found it would give a Note that does not exist. Keeping the
+    /// two indistinguishable is the point: a demo visitor must not be able to
+    /// infer a demoted Note's existence from a different error.
+    fn hidden_slug(&self, index: &crate::vault::VaultIndex, slug: &str) -> bool {
+        index
+            .find_by_slug(slug)
+            .is_some_and(|entry| self.surface.hides(entry.layer.as_deref()))
     }
 
     pub fn trees(
@@ -409,12 +529,13 @@ impl<'a> VaultReadCore<'a> {
         index
             .read_note_by_slug(slug)
             .map(|note| {
-                note.map(|note| {
-                    (
-                        VaultQualifiedNote { vault_id, note },
-                        control.vault_path().to_path_buf(),
-                    )
-                })
+                note.filter(|note| !self.surface.hides(note.layer.as_deref()))
+                    .map(|note| {
+                        (
+                            VaultQualifiedNote { vault_id, note },
+                            control.vault_path().to_path_buf(),
+                        )
+                    })
             })
             .map_err(|error| {
                 unavailable(vault_id, "vault_read_unavailable", error.to_string(), true)
@@ -511,11 +632,8 @@ impl<'a> VaultReadCore<'a> {
                             VaultParticipantState::Stale
                         }
                     };
-                    data.push(map(
-                        selected.vault_id,
-                        &selected.vault_name,
-                        &published.read,
-                    ));
+                    let read = self.surface.restrict(published.read);
+                    data.push(map(selected.vault_id, &selected.vault_name, &read));
                     VaultParticipant {
                         vault_id: selected.vault_id,
                         vault_name: selected.vault_name,
