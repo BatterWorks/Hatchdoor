@@ -803,3 +803,39 @@
     gap: 0.6rem;
   }
 }
+
+/* ── unsaved drafts (#151) ──────────────────────────────────────────────── */
+
+.settings-drafts-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-draft-row {
+  margin: 0;
+}
+
+.settings-draft-preview {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 0.8rem;
+}
+
+.settings-draft-destination {
+  padding: 0;
+  border: none;
+}
+
+.settings-draft-no-note {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0.6rem 0;
+}
+
+.settings-draft-actions {
+  justify-content: flex-end;
+  margin: 0.8rem 0 0;
+}

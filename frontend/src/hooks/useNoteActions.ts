@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import type { NoteActionDialogKind } from "../components/NoteActionsDialog";
-import type { ActiveNoteMeta, VaultSummary } from "../types";
+import type { ActiveNoteMeta, VaultId, VaultSummary } from "../types";
 import { clearCreateDraft } from "../lib/writeDrafts";
 import { validateNotePath } from "../lib/writePaths";
 import { resolvePrimaryVaultId } from "./useVaultScope";
@@ -41,12 +41,21 @@ export function useNoteActions({
     useState<NoteActionDialogKind | null>(null);
   const [noteActionError, setNoteActionError] = useState<string | null>(null);
   const [noteActionInitialFolder, setNoteActionInitialFolder] = useState("");
+  // Set only when a caller (draft recovery, #151) needs the note created in a
+  // specific Vault rather than whichever one `resolvePrimaryVaultId` would
+  // otherwise infer from the currently open note.
+  const [createTargetVaultId, setCreateTargetVaultId] =
+    useState<VaultId | null>(null);
 
-  const openCreateDialog = useCallback((folder: string) => {
-    setNoteActionError(null);
-    setNoteActionInitialFolder(folder);
-    setNoteActionDialog("create");
-  }, []);
+  const openCreateDialog = useCallback(
+    (folder: string, targetVaultId?: VaultId) => {
+      setNoteActionError(null);
+      setNoteActionInitialFolder(folder);
+      setCreateTargetVaultId(targetVaultId ?? null);
+      setNoteActionDialog("create");
+    },
+    [],
+  );
 
   const openActionDialog = useCallback((kind: NoteActionDialogKind) => {
     setNoteActionError(null);
@@ -57,6 +66,7 @@ export function useNoteActions({
     setNoteActionDialog(null);
     setNoteActionError(null);
     setNoteActionInitialFolder("");
+    setCreateTargetVaultId(null);
   }, []);
 
   const requireActiveNoteHash = useCallback(() => {
@@ -78,7 +88,9 @@ export function useNoteActions({
         setNoteActionError(pathError);
         return;
       }
-      const targetVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
+      const targetVaultId =
+        createTargetVaultId ??
+        resolvePrimaryVaultId(activeNote?.vaultId, vaults);
       if (!targetVaultId) {
         setNoteActionError("No Vault is available to create a note in.");
         return;
@@ -100,7 +112,7 @@ export function useNoteActions({
         );
       }
     },
-    [activeNote, navigate, refreshVault, setWriteNotice, vaults],
+    [activeNote, createTargetVaultId, navigate, refreshVault, setWriteNotice, vaults],
   );
 
   const handleRenameNote = useCallback(

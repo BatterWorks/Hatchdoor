@@ -1,8 +1,15 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NOTE_PROPERTIES_COLLAPSED_KEY } from "../app/constants";
+import { saveNoteDraft } from "../lib/writeDrafts";
 import { staleVault, syncStoppedVault } from "../test/fixtures/vaults";
 import { NotePage } from "./NotePage";
 
@@ -211,5 +218,112 @@ describe("NotePage read escalation (#141)", () => {
       expect(screen.getByText("Note Unavailable")).toBeInTheDocument();
     });
     expect(container.querySelector(".state-block.error")).not.toBeNull();
+  });
+});
+
+describe("NotePage held-draft recovery (#151)", () => {
+  it("shows a dismissible notice above the note body when a held draft exists", async () => {
+    window.localStorage.setItem(
+      "hatchdoor:heldDraft:note:orphaned",
+      JSON.stringify({
+        id: "note:orphaned",
+        kind: "note",
+        slug: "orphaned",
+        content: "unsaved",
+        baseContentHash: "abc",
+        savedAt: Date.now(),
+      }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "Body",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: "vault-1", results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    renderNote("vault-1", { vaults: [] });
+
+    const notice = await screen.findByText(/find them in Settings/);
+    expect(notice.closest("a")).toHaveAttribute("href", "/settings");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByText(/find them in Settings/)).not.toBeInTheDocument();
+  });
+
+  it("opens the editor with a recovered draft on ?restoreEdit=1 and strips the marker", async () => {
+    const vaultId = "vault-1";
+    saveNoteDraft(vaultId, "home", {
+      vaultId,
+      slug: "home",
+      content: "recovered draft text",
+      baseContentHash: "hash",
+      savedAt: Date.now(),
+    });
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vaultId,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "Body on disk",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: vaultId, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    render(
+      <MemoryRouter
+        initialEntries={[`/v/${vaultId}/n/home?restoreEdit=1`]}
+      >
+        <Routes>
+          <Route
+            path="/v/:vaultId/n/:slug"
+            element={
+              <NotePage
+                onActiveNoteChange={vi.fn()}
+                onTagSelect={vi.fn()}
+                propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
+                vaultRevision={0}
+                writeEnabled={true}
+                editRequestId={0}
+                vaults={[]}
+              />
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByDisplayValue("recovered draft text"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Body on disk")).not.toBeInTheDocument();
   });
 });

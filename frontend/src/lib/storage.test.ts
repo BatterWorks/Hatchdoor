@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   clampSidebarWidth,
+  clearLegacyNoteScopedBrowserState,
   getStoredExpandedFolders,
   getStoredNumber,
   getStoredRecentNotes,
@@ -77,6 +78,33 @@ describe("storage helpers", () => {
     expect(clampSidebarWidth(150)).toBe(220);
     expect(clampSidebarWidth(333)).toBe(333);
     expect(clampSidebarWidth(500)).toBe(420);
+  });
+
+  it("clearLegacyNoteScopedBrowserState clears note-scoped keys once and leaves the rest", () => {
+    window.localStorage.setItem("hatchdoor.recentNotes", "[]");
+    window.localStorage.setItem("hatchdoor.lastNote", "{}");
+    window.localStorage.setItem("hatchdoor.expandedFolders", "{}");
+    window.localStorage.setItem("hatchdoor.explorerScrollTop", "40");
+    window.localStorage.setItem("hatchdoor.theme", "dark");
+    window.localStorage.setItem("hatchdoor.sidebarWidth", "300");
+
+    expect(clearLegacyNoteScopedBrowserState()).toBe(true);
+    expect(window.localStorage.getItem("hatchdoor.recentNotes")).toBeNull();
+    expect(window.localStorage.getItem("hatchdoor.lastNote")).toBeNull();
+    expect(
+      window.localStorage.getItem("hatchdoor.expandedFolders"),
+    ).toBeNull();
+    expect(
+      window.localStorage.getItem("hatchdoor.explorerScrollTop"),
+    ).toBeNull();
+    expect(window.localStorage.getItem("hatchdoor.theme")).toBe("dark");
+    expect(window.localStorage.getItem("hatchdoor.sidebarWidth")).toBe("300");
+
+    // A second call, and state a returning user has legitimately rebuilt
+    // since, must both be left alone.
+    window.localStorage.setItem("hatchdoor.recentNotes", "[1]");
+    expect(clearLegacyNoteScopedBrowserState()).toBe(false);
+    expect(window.localStorage.getItem("hatchdoor.recentNotes")).toBe("[1]");
   });
 
   it("isEditableTarget detects editable controls", () => {

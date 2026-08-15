@@ -8,7 +8,7 @@ import {
 } from "react";
 
 import ReactMarkdown from "react-markdown";
-import { useLocation, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
 import rehypeKatex from "rehype-katex";
@@ -53,6 +53,7 @@ import {
 } from "../api/writeApi";
 import {
   clearNoteDraft,
+  listHeldDrafts,
   loadNoteDraft,
   saveNoteDraft,
 } from "../lib/writeDrafts";
@@ -125,6 +126,7 @@ export function NotePage({
 }) {
   const params = useParams<{ vaultId: string; slug: string }>();
   const location = useLocation();
+  const navigate = useNavigate();
   const vaultId = params.vaultId ?? "";
   const slug = params.slug ?? "";
   // Exact reads show provenance whenever more than one Vault is enabled
@@ -183,6 +185,12 @@ export function NotePage({
   const [touchEditHintSeen, setTouchEditHintSeen] = useState<boolean>(() => {
     return window.localStorage.getItem(TOUCH_EDIT_HINT_KEY) === "1";
   });
+  // Pre-#137 drafts recovered into Settings (#151): named here, not silently
+  // acted on. Dismissing is per view, not persisted — it returns on every
+  // load until the last held draft is dealt with.
+  const [heldDraftsPresent] = useState(() => listHeldDrafts().length > 0);
+  const [heldDraftsBannerDismissed, setHeldDraftsBannerDismissed] =
+    useState(false);
   const [searchHitCount, setSearchHitCount] = useState(0);
   const [activeSearchHit, setActiveSearchHit] = useState(0);
   const noteBodyRef = useRef<HTMLDivElement | null>(null);
@@ -355,6 +363,26 @@ export function NotePage({
     lastEditRequestIdRef.current = editRequestId;
     startEditing();
   }, [editRequestId, startEditing]);
+
+  // A recovered draft (#151): Settings already seeded this note's ordinary
+  // draft slot and navigated here with the content unsaved. Open the editor
+  // the same way the Edit button would, then drop the marker so a refresh
+  // does not reopen it.
+  useEffect(() => {
+    if (!note || isEditing) {
+      return;
+    }
+    const queryParams = new URLSearchParams(location.search);
+    if (queryParams.get("restoreEdit") !== "1") {
+      return;
+    }
+    queryParams.delete("restoreEdit");
+    const suffix = queryParams.toString();
+    navigate(`${location.pathname}${suffix ? `?${suffix}` : ""}`, {
+      replace: true,
+    });
+    startEditing();
+  }, [note, isEditing, location.pathname, location.search, navigate, startEditing]);
 
   useEffect(() => {
     if (!isEditing || !note) {
@@ -1033,6 +1061,24 @@ export function NotePage({
         />
         <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
         <NoteTocMobile headings={tocHeadings} />
+        {heldDraftsPresent && !heldDraftsBannerDismissed ? (
+          <div className="write-notice" role="status">
+            <div className="write-notice-messages">
+              <span>
+                Unsaved drafts from before the move to multiple Vaults are
+                being held — <Link to="/settings">find them in Settings</Link>.
+              </span>
+            </div>
+            <button
+              type="button"
+              className="write-notice-dismiss"
+              aria-label="Dismiss notice"
+              onClick={() => setHeldDraftsBannerDismissed(true)}
+            >
+              ×
+            </button>
+          </div>
+        ) : null}
         {isEditing ? (
           <NoteEditor
             content={draftContent}

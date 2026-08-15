@@ -15,3 +15,8 @@ export const VAULT_SCOPE_KEY = "hatchdoor.vaultScope";
 // The explorer accordion's last-unfolded Vault under `all` (#142), persisted
 // per browser the same way VAULT_SCOPE_KEY is.
 export const LAST_UNFOLDED_VAULT_KEY = "hatchdoor.lastUnfoldedVault";
+// Set once the one-time post-#137 browser-state cleanup
+// (clearLegacyNoteScopedBrowserState) has run, so it never repeats and wipe
+// state a returning user has legitimately rebuilt since (#151).
+export const LEGACY_BROWSER_STATE_CLEARED_KEY =
+  "hatchdoor.legacyBrowserStateCleared";
