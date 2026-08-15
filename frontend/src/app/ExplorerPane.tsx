@@ -212,7 +212,7 @@ function ScopeZone({
       </button>
 
       {collapsed && viewingVault ? (
-        <p className="scope-zone-viewing-line">Viewing: {viewingVault.name}</p>
+        <p className="scope-zone-viewing-line">viewing {viewingVault.name}</p>
       ) : null}
 
       {collapsed ? null : (
@@ -263,7 +263,7 @@ function ScopeZone({
               >
                 <span className="scope-row-label">{vault.name}</span>
                 {viewingVaultId === vault.vault_id ? (
-                  <span className="scope-row-viewing">Viewing</span>
+                  <span className="scope-row-viewing">viewing</span>
                 ) : null}
                 <VaultSlot
                   vault={vault}

@@ -91,9 +91,7 @@ describe("storage helpers", () => {
     expect(clearLegacyNoteScopedBrowserState()).toBe(true);
     expect(window.localStorage.getItem("hatchdoor.recentNotes")).toBeNull();
     expect(window.localStorage.getItem("hatchdoor.lastNote")).toBeNull();
-    expect(
-      window.localStorage.getItem("hatchdoor.expandedFolders"),
-    ).toBeNull();
+    expect(window.localStorage.getItem("hatchdoor.expandedFolders")).toBeNull();
     expect(
       window.localStorage.getItem("hatchdoor.explorerScrollTop"),
     ).toBeNull();

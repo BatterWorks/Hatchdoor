@@ -163,7 +163,7 @@
 /* Vault provenance prefix (#140) — a marked path root, never eliding.
    Sized and weighted from the surrounding row; only color and the middot
    separator are its own. */
-.vault-prefix {
+.path-vault {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: baseline;
@@ -173,7 +173,7 @@
     "wght" 500;
 }
 
-.vault-prefix-dot {
+.path-sep {
   margin-left: 0.3rem;
   color: var(--hot);
 }

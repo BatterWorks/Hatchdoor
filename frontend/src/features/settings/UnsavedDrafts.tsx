@@ -134,7 +134,9 @@ function DraftRow({
         </span>
       </div>
       <p className="settings-row-help">{draftLocation(draft)}</p>
-      <pre className="settings-draft-preview">{draftPreview(draft.content)}</pre>
+      <pre className="settings-draft-preview">
+        {draftPreview(draft.content)}
+      </pre>
       <div className="settings-row settings-draft-destination">
         <span>
           <span className="settings-row-label">Destination Vault</span>
@@ -159,8 +161,8 @@ function DraftRow({
       </div>
       {noSuchNote ? (
         <p className="settings-warn settings-draft-no-note">
-          This Vault has no note at {draft.kind === "note" ? draft.slug : ""}
-          . Choose a different Vault, or{" "}
+          This Vault has no note at {draft.kind === "note" ? draft.slug : ""}.
+          Choose a different Vault, or{" "}
           {onOpenCreateDraft ? (
             <button
               type="button"
@@ -176,11 +178,7 @@ function DraftRow({
       ) : null}
       {message ? <p className="settings-error">{message}</p> : null}
       <div className="settings-sec-actions settings-draft-actions">
-        <button
-          type="button"
-          className="settings-btn"
-          onClick={handleDiscard}
-        >
+        <button type="button" className="settings-btn" onClick={handleDiscard}>
           Discard
         </button>
         <button
@@ -214,9 +212,8 @@ export function UnsavedDrafts({
           <h2 className="settings-sec-title">Unsaved drafts</h2>
           <p className="settings-sec-blurb">
             Recently viewed notes and open folders were reset for the move to
-            multiple Vaults. These drafts, typed before that, were kept
-            exactly as you left them — restore each into a Vault, or discard
-            it.
+            multiple Vaults. These drafts, typed before that, were kept exactly
+            as you left them — restore each into a Vault, or discard it.
           </p>
         </div>
       </div>

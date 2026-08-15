@@ -188,11 +188,11 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     renderApp();
 
     expect(await screen.findByText("No Vaults Yet")).toBeVisible();
+    expect(screen.getByText("This demo has no Vaults loaded.")).toBeVisible();
     expect(
-      screen.getByText("This demo has no Vaults loaded."),
-    ).toBeVisible();
-    expect(
-      screen.queryByText("Add a Vault to start browsing and searching your notes."),
+      screen.queryByText(
+        "Add a Vault to start browsing and searching your notes.",
+      ),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Add a Vault" }),

@@ -44,9 +44,9 @@ export function UiToolbar({
  */
 export function VaultPrefix({ name }: { name: string }) {
   return (
-    <span className="vault-prefix">
+    <span className="path-vault">
       {name}
-      <span className="vault-prefix-dot" aria-hidden="true">
+      <span className="path-sep" aria-hidden="true">
         ·
       </span>
     </span>

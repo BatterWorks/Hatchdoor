@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -72,13 +78,13 @@ describe("UnsavedDrafts (#151)", () => {
     );
 
     // A single Vault pre-fills the destination.
-    expect(screen.getByLabelText("Destination Vault")).toHaveValue(
-      "vault-1",
-    );
+    expect(screen.getByLabelText("Destination Vault")).toHaveValue("vault-1");
 
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
 
-    await waitFor(() => expect(onDiscard).toHaveBeenCalledWith("note:orphaned"));
+    await waitFor(() =>
+      expect(onDiscard).toHaveBeenCalledWith("note:orphaned"),
+    );
     const stored = window.localStorage.getItem(
       "hatchdoor:draft:note:vault-1:orphaned",
     );

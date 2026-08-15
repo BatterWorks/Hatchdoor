@@ -125,7 +125,9 @@ export function VaultCreationDialog({
     setSubmitting(true);
     const revision = await fetchRegistryRevision();
     if (revision === null) {
-      setError("Could not reach the server. Check the connection and try again.");
+      setError(
+        "Could not reach the server. Check the connection and try again.",
+      );
       submittingRef.current = false;
       setSubmitting(false);
       return;
@@ -179,7 +181,11 @@ export function VaultCreationDialog({
           <span>
             <span className="settings-row-label">Where is this Vault?</span>
           </span>
-          <div className="settings-segmented" role="group" aria-label="Where is this Vault?">
+          <div
+            className="settings-segmented"
+            role="group"
+            aria-label="Where is this Vault?"
+          >
             {(Object.keys(KIND_LABEL) as CreateVaultKind[]).map((item) => (
               <button
                 key={item}
@@ -214,7 +220,11 @@ export function VaultCreationDialog({
           <span>
             <span className="settings-row-label">Git behaviour</span>
           </span>
-          <div className="settings-segmented" role="group" aria-label="Git behaviour">
+          <div
+            className="settings-segmented"
+            role="group"
+            aria-label="Git behaviour"
+          >
             {behaviorOpts.map((item) => (
               <button
                 key={item.id}

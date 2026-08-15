@@ -151,9 +151,7 @@ export function clampSidebarWidth(value: number): number {
  */
 export function clearLegacyNoteScopedBrowserState(): boolean {
   try {
-    if (
-      window.localStorage.getItem(LEGACY_BROWSER_STATE_CLEARED_KEY) === "1"
-    ) {
+    if (window.localStorage.getItem(LEGACY_BROWSER_STATE_CLEARED_KEY) === "1") {
       return false;
     }
     window.localStorage.removeItem(RECENT_NOTES_KEY);

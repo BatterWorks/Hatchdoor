@@ -109,11 +109,7 @@ function statusFallbackText(res: Response): string {
   }
 }
 
-function makeWriteError(
-  message: string,
-  status: number,
-  code?: string,
-): Error {
+function makeWriteError(message: string, status: number, code?: string): Error {
   const error = new Error(message) as Error & { code?: string };
   error.name = status === 409 ? "ConflictError" : "WriteApiError";
   error.code = code;
