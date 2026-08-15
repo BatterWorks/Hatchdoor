@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiFetch } from "../../api/api";
 import { SettingsPage } from "./SettingsPage";
@@ -155,6 +155,7 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   vi.clearAllMocks();
+  window.localStorage.clear();
 });
 
 describe("SettingsPage", () => {
@@ -198,5 +199,43 @@ describe("SettingsPage", () => {
     expect(
       screen.queryByRole("button", { name: "Versioning" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a held draft under This server and withdraws once it is discarded", async () => {
+    window.localStorage.setItem(
+      "hatchdoor:heldDraft:note:orphaned",
+      JSON.stringify({
+        id: "note:orphaned",
+        kind: "note",
+        slug: "orphaned",
+        content: "unsaved",
+        baseContentHash: "abc",
+        savedAt: Date.now(),
+      }),
+    );
+    mockPage();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    renderSettingsPage();
+
+    const draftsNav = await screen.findByRole("button", {
+      name: /Unsaved drafts/,
+    });
+    expect(draftsNav).toHaveTextContent("1");
+
+    fireEvent.click(draftsNav);
+    expect(
+      await screen.findByRole("heading", { name: "Unsaved drafts" }),
+    ).toBeVisible();
+    expect(screen.getByText("orphaned")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+    // The section is a migration artefact: gone for good once dealt with.
+    expect(
+      screen.queryByRole("button", { name: /Unsaved drafts/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      window.localStorage.getItem("hatchdoor:heldDraft:note:orphaned"),
+    ).toBeNull();
   });
 });

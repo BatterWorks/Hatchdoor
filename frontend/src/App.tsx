@@ -53,7 +53,7 @@ import {
 } from "./hooks/useVaultScope";
 import { describeScopeSlot, scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
-import { pruneNoteDrafts } from "./lib/writeDrafts";
+import { pruneNoteDrafts, saveCreateDraft } from "./lib/writeDrafts";
 import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
 import {
@@ -791,7 +791,21 @@ function VaultWorkspace({
             <Route path="/graph" element={<GraphPage />} />
             <Route
               path="/settings"
-              element={<SettingsPage onVaultDiscoveryRefresh={loadVaults} />}
+              element={
+                <SettingsPage
+                  vaults={vaults}
+                  onVaultDiscoveryRefresh={loadVaults}
+                  onOpenCreateDraft={(targetVaultId, folder, name, content) => {
+                    saveCreateDraft({
+                      folder,
+                      name,
+                      content,
+                      savedAt: Date.now(),
+                    });
+                    openCreateDialog(folder, targetVaultId);
+                  }}
+                />
+              }
             />
             <Route
               path="/v/:vaultId/n/:slug"

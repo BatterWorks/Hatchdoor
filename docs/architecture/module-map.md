@@ -1463,7 +1463,20 @@ boundaries are currently documentation-enforced.
 
 **Contract and responsibility:** bootstraps React/router/PWA, composes feature
 hooks and routes, owns responsive shell state, navigation, persistent shell
-preferences, topbar actions, and explorer placement. `useVaultScope.ts` owns
+preferences, topbar actions, and explorer placement. Before the tree ever
+renders, `main.tsx` calls `lib/writeDrafts.ts`'s `collectLegacyHeldDrafts`
+and `lib/storage.ts`'s `clearLegacyNoteScopedBrowserState` (#151) once,
+synchronously — the one-time post-#137 sweep and browser-state cleanup, so
+every component's first render already reflects them regardless of which
+route mounts first. `clearLegacyNoteScopedBrowserState` removes Recent
+notes, the last note opened, unfolded explorer folders, and explorer scroll
+position — state that named a note or folder before Vault qualification and
+cannot be trusted to mean the same one after — guarded by the persisted
+`LEGACY_BROWSER_STATE_CLEARED_KEY` marker so it never repeats over state a
+returning user has legitimately rebuilt since; six Vault-agnostic
+preferences (theme, sidebar width, drawer open state, Recent notes'
+collapsed state, the touch-edit hint, the stored bearer token) are untouched.
+`useVaultScope.ts` owns
 the selected Vault scope (state/storage, per #137), Vault discovery
 (`useVaultDiscovery`), and the Vault-less-action default
 (`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) calls
@@ -1787,15 +1800,26 @@ open note's — raises nothing here. `NotePage`'s `onTagSelect` prop is
 onTagSelect(tag, vaultId)}` when calling `<NoteProperties>`, handing Search
 this note's own Vault id so a tag tap pre-selects it in the dialog's filter
 — tags are per-Vault vocabularies. `NoteProperties`'s own prop to
-`TagChips` is untouched.
+`TagChips` is untouched. `NotePage` also reads a `?restoreEdit=1` query
+param (#151): held-draft recovery in Settings seeds this note's ordinary
+`lib/writeDrafts.ts` draft slot, navigates here with the marker, and
+`NotePage` opens the editor the same way its own Edit button would (calling
+the same `startEditing`, which reads that draft), then strips the marker via
+a `replace` navigation so a refresh does not reopen it. Independently, a
+dismissible (per view, not persisted — it returns on every load until the
+last held draft is dealt with) notice above the note body names any drafts
+`lib/writeDrafts.ts`'s `listHeldDrafts` reports and links to Settings;
+ordinary post-#137 per-note draft recovery is unaffected.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
-libraries, shared types/UI, note editing, and `app/vaultSlotLogic.ts`'s
-`deriveVaultSlot` (Application shell and navigation).
+libraries, shared types/UI, note editing (including its held-draft recovery
+model, #151), and `app/vaultSlotLogic.ts`'s `deriveVaultSlot` (Application
+shell and navigation).
 
 **Coordination paths:** `App.tsx`, `types.ts`, `app/vaultSlotLogic.ts`,
-note/link/resolve/download handlers, `NoteEditor.tsx`, Search query
-navigation, shared and responsive CSS.
+note/link/resolve/download handlers, `NoteEditor.tsx`,
+`features/settings/UnsavedDrafts.tsx` (the `?restoreEdit=1` contract), Search
+query navigation, shared and responsive CSS.
 
 **Invariants:** vault Markdown remains the rendered source; vault content is
 data rather than trusted executable instructions; asset URLs retain auth and
@@ -1854,14 +1878,24 @@ per-block wrapper, the CodeMirror block input and its markdown syntax
 highlighting, click-to-write in the space between blocks, structural block
 operations, document-level undo, autosave scheduling and save state), line
 mapping between rendered nodes and file lines, and attachment acceptance and
-insertion.
+insertion. `lib/writeDrafts.ts`'s `HeldDraft`/`listHeldDrafts`/
+`discardHeldDraft`/`collectLegacyHeldDrafts` (#151) are the recovery model
+for drafts that predate Vault qualification, consumed by Settings'
+`UnsavedDrafts.tsx`; ordinary per-note and create drafts
+(`saveNoteDraft`/`loadNoteDraft`/`clearNoteDraft`/`saveCreateDraft`/
+`loadCreateDraft`/`clearCreateDraft`/`pruneNoteDrafts`) are unchanged.
+`hooks/useNoteActions.ts`'s `openCreateDialog` takes an optional second
+`targetVaultId` parameter (#151) so a caller outside the currently open note
+— draft recovery — can pin which Vault a note is created in, overriding
+`resolvePrimaryVaultId`'s inference for that one dialog session.
 
 **Consumed dependencies:** shared API/types/UI, router navigation, vault tree
 note candidates, and backend HTTP write endpoints.
 
 **Coordination paths:** `App.tsx`, `NotePage.tsx`, `types.ts`,
-`noteEnhancements.css`, backend `handlers/vault_write.rs`, and
-`vault/write/**`.
+`noteEnhancements.css`, `features/settings/UnsavedDrafts.tsx` (consumes the
+held-draft model and `openCreateDialog`'s target-Vault override), backend
+`handlers/vault_write.rs`, and `vault/write/**`.
 
 **Invariants:** expected content hashes remain part of update concurrency;
 delete stays recoverable; client validation does not replace backend path
@@ -1942,6 +1976,9 @@ route tests, and full frontend checks.
 - `frontend/src/features/settings/VaultCreation.tsx`
 - `frontend/src/features/settings/VaultCreation.test.tsx`
 - `frontend/src/features/settings/vaultCreation.ts`
+- `frontend/src/features/settings/UnsavedDrafts.tsx`
+- `frontend/src/features/settings/UnsavedDrafts.test.tsx`
+- `frontend/src/features/settings/relativeTime.ts`
 - `frontend/src/features/settings/settings.css`
 - `frontend/src/features/settings/SettingsPage.test.tsx`
 
@@ -2051,6 +2088,46 @@ passing its `demoMode` down as `ZeroVaultState`'s `demoMode` prop) — belt and
 suspenders alongside the invariant below, since the zero-Vault state renders
 on a route demo visitors can otherwise reach.
 
+`UnsavedDrafts.tsx` (#151) is a second "This server" nav entry, shown only
+while `lib/writeDrafts.ts`'s `listHeldDrafts()` returns at least one draft
+recovered from before Vault qualification (#137): a pre-#137 note draft was
+keyed by slug alone, and the standalone create draft has never carried a
+Vault. Each row lets the operator pick a destination Vault (pre-filled only
+at exactly one enabled Vault), then Restore or Discard independently — no
+batch action, since drafts need not share a Vault. Restoring a note draft
+checks the destination Vault for a note at that slug before acting: found,
+it seeds that Vault's ordinary `lib/writeDrafts.ts` per-note draft slot and
+navigates to `NotePage` with `?restoreEdit=1`, which `NotePage.tsx` (#151)
+reads once to open the editor the same way its own Edit button would, then
+strips the marker; not found, the row offers a different Vault or restoring
+the text as a new note (preserving the standalone create draft's own
+`folder`, or an empty folder for a recovered note draft, which carries only
+a slug) through `OpenCreateDraft`, a typed callback `UnsavedDrafts.tsx`
+exports and `App.tsx` supplies: it seeds the standalone create draft and
+calls `hooks/useNoteActions.ts`'s `openCreateDialog` with an explicit target
+Vault ID (its second, optional parameter, added for this ticket) rather than
+the Vault `resolvePrimaryVaultId` would otherwise infer from the currently
+open note. A restored note draft keeps its own `baseContentHash` — the
+version it was actually typed against — rather than the destination note's
+current hash, so `NotePage.tsx`'s existing stale-draft comparison still
+fires correctly. `relativeTime.ts`'s `formatWhen` (accepting either an ISO
+string or an epoch-ms number) is the one relative-age ladder both this
+section's draft rows and the Git/index status console share. The section is
+a migration artefact, not a standing feature: it withdraws for good once the
+last held draft is discarded or restored. `NotePage.tsx` separately shows a
+dismissible (per view, not persisted) notice above the note body — naming
+only that drafts are held and linking to this section, not repeating this
+section's own explanation of what was cleared — whenever any held draft
+exists; ordinary post-#137 per-note draft recovery (returning to a note and
+clicking Edit) is unchanged. The one-time sweep that populates held drafts
+(`collectLegacyHeldDrafts`) and the one-time removal of note- or
+folder-naming browser state it cannot trust across Vault qualification
+(`lib/storage.ts`'s `clearLegacyNoteScopedBrowserState` — Recent notes, the
+last note opened, unfolded explorer folders, explorer scroll position; six
+Vault-agnostic preferences are left untouched) both run once, synchronously,
+in `main.tsx` before the app ever renders, so every component's first read
+already reflects them.
+
 Out of this page's scope: giving a Vault a source it did not start with (its
 first repository, i.e. a Local Vault becoming `managed_git`, or a bare
 first-run Vault) is the separate first-run flow (#122), not a field this page
@@ -2060,28 +2137,36 @@ and has diverged from `development`'s own (also incomplete) copy; treated as
 separate, pre-existing design-system documentation debt rather than in scope
 here.
 
-**Consumed dependencies:** authenticated `apiFetch` and the settings HTTP
-contract.
+**Consumed dependencies:** authenticated `apiFetch`, the settings HTTP
+contract, and (for `UnsavedDrafts.tsx`) `lib/writeDrafts.ts`'s held-draft
+functions.
 
-**Coordination paths:** `frontend/src/App.tsx` (route),
-`frontend/src/app/ExplorerPane.tsx` (normal-deployment navigation),
-`frontend/src/App.css` (stylesheet aggregation), `src/server.rs` (SPA/API
-routes), `src/handlers/settings.rs` (settings, index-status, and git-status
-wire producer), and `frontend/src/types.ts` (`VaultSource`/`VaultGitMode`,
-mirroring `src/vault_registry.rs`'s same-named types, and `VaultSummary`'s
-`source` field, now typed rather than `unknown`; consumed by this section and
-by `frontend/src/app/vaultSlotLogic.ts`, already listed under Vault chrome's
+**Coordination paths:** `frontend/src/App.tsx` (route; also supplies
+`vaults` and `onOpenCreateDraft` to `SettingsPage`, and seeds the standalone
+create draft before opening the dialog), `frontend/src/app/ExplorerPane.tsx`
+(normal-deployment navigation), `frontend/src/App.css` (stylesheet
+aggregation), `frontend/src/components/NotePage.tsx` (`?restoreEdit=1`
+handling and the held-drafts notice), `frontend/src/hooks/useNoteActions.ts`
+(`openCreateDialog`'s target-Vault override), `frontend/src/main.tsx` (runs
+the one-time legacy sweep and browser-state cleanup before rendering),
+`src/server.rs` (SPA/API routes), `src/handlers/settings.rs` (settings,
+index-status, and git-status wire producer), and `frontend/src/types.ts`
+(`VaultSource`/`VaultGitMode`, mirroring `src/vault_registry.rs`'s
+same-named types, and `VaultSummary`'s `source` field, now typed rather than
+`unknown`; consumed by this section and by
+`frontend/src/app/vaultSlotLogic.ts`, already listed under Vault chrome's
 own `types.ts` coordination entry).
 
 **Invariants:** demo mode exposes no Settings navigation or endpoints;
 environment-managed and permanently unavailable values are records rather than
 disabled form controls; secret values are never rendered from the settings
-document.
+document; a held draft is deleted only through an explicit Restore or
+Discard, never aged out.
 
 **Validation:** `SettingsPage.test.tsx`, `VaultSettingsIndex.test.tsx`,
-`VaultCreation.test.tsx`, affected shell tests (`App.startup-workspace-states.test.tsx`
-covers the zero-Vault entry point), frontend typecheck, then full frontend
-checks.
+`VaultCreation.test.tsx`, `UnsavedDrafts.test.tsx`, affected shell tests
+(`App.startup-workspace-states.test.tsx` covers the zero-Vault entry point),
+frontend typecheck, then full frontend checks.
 
 ### Shared UI and styling
 

@@ -10,6 +10,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
+import type { VaultSummary } from "../../types";
+import { discardHeldDraft, listHeldDrafts, type HeldDraft } from "../../lib/writeDrafts";
+import { formatWhen } from "./relativeTime";
+import { UnsavedDrafts, type OpenCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
 type SettingKind = "switch" | "number" | "text" | "secret" | "mode";
@@ -306,27 +310,19 @@ function formatEta(seconds: number | undefined): string {
   return `about ${Math.round(seconds / 60)} minutes left`;
 }
 
-function formatWhen(timestamp: string | null | undefined): string | null {
-  if (!timestamp) return null;
-  const then = Date.parse(timestamp);
-  if (!Number.isFinite(then)) return null;
-  const minutes = Math.round((Date.now() - then) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes === 1) return "1 minute ago";
-  if (minutes < 60) return `${minutes} minutes ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours === 1) return "1 hour ago";
-  if (hours < 24) return `${hours} hours ago`;
-  const days = Math.round(hours / 24);
-  return days === 1 ? "1 day ago" : `${days} days ago`;
-}
 
 export function SettingsPage({
+  vaults = [],
   onVaultDiscoveryRefresh,
+  onOpenCreateDraft,
 }: {
+  /** Enabled Vaults, for the held-draft destination picker (#151). */
+  vaults?: VaultSummary[];
   /** Refreshes the app-wide Vault discovery `App.tsx` drives the sidebar and
    * scope zone from, on top of this page's own Vault list (issue #153). */
   onVaultDiscoveryRefresh?: () => void;
+  /** Held drafts that need a new note stay unrecoverable without it. */
+  onOpenCreateDraft?: OpenCreateDraft;
 } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -348,6 +344,10 @@ export function SettingsPage({
   }, []);
   const [settings, setSettings] = useState<Setting[]>([]);
   const [active, setActive] = useState<SectionId>("notes");
+  const [showDrafts, setShowDrafts] = useState(false);
+  const [heldDrafts, setHeldDrafts] = useState<HeldDraft[]>(() =>
+    listHeldDrafts(),
+  );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(null);
@@ -362,6 +362,17 @@ export function SettingsPage({
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [selectedVaultId, setSelectedVaultId] = useState<string | null>(null);
+
+  const handleDiscardHeldDraft = (id: string) => {
+    discardHeldDraft(id);
+    const next = listHeldDrafts();
+    setHeldDrafts(next);
+    // Recovery is a migration artefact, not a standing feature: once the
+    // last held draft is dealt with, the section withdraws for good.
+    if (next.length === 0) {
+      setShowDrafts(false);
+    }
+  };
 
   const load = async () => {
     const response = await apiFetch("/api/settings");
@@ -791,12 +802,31 @@ export function SettingsPage({
         <aside className="settings-index">
           <VaultSettingsIndex
             selectedVaultId={selectedVaultId}
-            onSelectVault={setSelectedVaultId}
+            onSelectVault={(vaultId) => {
+              setShowDrafts(false);
+              setSelectedVaultId(vaultId);
+            }}
             autoOpenCreation={autoOpenCreation}
             onVaultCreated={onVaultDiscoveryRefresh}
           />
           <p className="settings-index-group">This server</p>
           <nav aria-label="Settings sections">
+            {heldDrafts.length > 0 ? (
+              <button
+                type="button"
+                className="settings-index-item"
+                data-active={showDrafts}
+                onClick={() => {
+                  setSelectedVaultId(null);
+                  setShowDrafts(true);
+                }}
+              >
+                <span className="settings-index-title">Unsaved drafts</span>
+                <span className="settings-index-count">
+                  {heldDrafts.length}
+                </span>
+              </button>
+            ) : null}
             {SECTIONS.map((item) => {
               const rows = inSection(item.id);
               const dirty = rows.some(
@@ -807,8 +837,11 @@ export function SettingsPage({
                   key={item.id}
                   type="button"
                   className="settings-index-item"
-                  data-active={item.id === active}
-                  onClick={() => setActive(item.id)}
+                  data-active={!showDrafts && item.id === active}
+                  onClick={() => {
+                    setShowDrafts(false);
+                    setActive(item.id);
+                  }}
                 >
                   <span className="settings-index-num">{item.number}</span>
                   <span className="settings-index-title">{item.title}</span>
@@ -862,6 +895,13 @@ export function SettingsPage({
                 )?.value ?? "",
             }}
             onDisconnect={() => setSelectedVaultId(null)}
+          />
+        ) : showDrafts ? (
+          <UnsavedDrafts
+            drafts={heldDrafts}
+            vaults={vaults}
+            onOpenCreateDraft={onOpenCreateDraft}
+            onDiscard={handleDiscardHeldDraft}
           />
         ) : (
           <div className="settings-main">

@@ -1,6 +1,8 @@
 import {
   EXPANDED_FOLDERS_KEY,
+  EXPLORER_SCROLL_TOP_KEY,
   LAST_NOTE_KEY,
+  LEGACY_BROWSER_STATE_CLEARED_KEY,
   RECENT_NOTES_KEY,
   VAULT_SCOPE_KEY,
 } from "../app/constants";
@@ -134,4 +136,33 @@ function clamp(value: number, min: number, max: number): number {
 
 export function clampSidebarWidth(value: number): number {
   return clamp(value, 220, 420);
+}
+
+/**
+ * One-time removal of browser state that named a note or folder from before
+ * Vault qualification (#137): a bare slug or folder path cannot be trusted to
+ * mean the same note or folder once notes are addressed by Vault + slug
+ * rather than slug alone. Six Vault-agnostic preferences — theme, sidebar
+ * width, the drawer's open state, Recent notes' collapsed state, the
+ * touch-edit hint, and the stored bearer token — name neither and are left
+ * untouched. Guarded by a persisted marker so a returning user's freshly
+ * rebuilt state is never wiped again. Returns whether this call cleared
+ * anything.
+ */
+export function clearLegacyNoteScopedBrowserState(): boolean {
+  try {
+    if (
+      window.localStorage.getItem(LEGACY_BROWSER_STATE_CLEARED_KEY) === "1"
+    ) {
+      return false;
+    }
+    window.localStorage.removeItem(RECENT_NOTES_KEY);
+    window.localStorage.removeItem(LAST_NOTE_KEY);
+    window.localStorage.removeItem(EXPANDED_FOLDERS_KEY);
+    window.localStorage.removeItem(EXPLORER_SCROLL_TOP_KEY);
+    window.localStorage.setItem(LEGACY_BROWSER_STATE_CLEARED_KEY, "1");
+    return true;
+  } catch {
+    return false;
+  }
 }
