@@ -524,7 +524,7 @@ export function AppTopbar({
             </span>
             {showViewingMarker ? (
               <span className="topbar-scope-viewing">
-                Viewing: {viewingVault?.name}
+                viewing {viewingVault?.name}
               </span>
             ) : null}
             <span className="topbar-scope-slot">{scopeSlot}</span>

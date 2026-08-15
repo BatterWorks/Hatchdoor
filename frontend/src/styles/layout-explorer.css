@@ -142,7 +142,7 @@
   font-size: 0.62rem;
   font-weight: 600;
   letter-spacing: 0.04em;
-  text-transform: uppercase;
+  text-transform: lowercase;
   color: var(--muted);
   border: 1px solid var(--rule-strong);
   padding: 0.05rem 0.4rem;

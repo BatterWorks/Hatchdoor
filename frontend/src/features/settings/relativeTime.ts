@@ -5,7 +5,8 @@ export function formatWhen(
   timestamp: string | number | null | undefined,
 ): string | null {
   if (!timestamp) return null;
-  const then = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
+  const then =
+    typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
   if (!Number.isFinite(then)) return null;
   const minutes = Math.round((Date.now() - then) / 60_000);
   if (minutes < 1) return "just now";

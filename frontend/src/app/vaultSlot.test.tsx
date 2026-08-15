@@ -138,9 +138,9 @@ describe("deriveVaultSlot", () => {
       });
     }
     // Already amber outside demo mode — stays amber, unaffected.
-    expect(
-      deriveVaultSlot(staleVault("Delta"), undefined, true),
-    ).toMatchObject({ tier: "warn" });
+    expect(deriveVaultSlot(staleVault("Delta"), undefined, true)).toMatchObject(
+      { tier: "warn" },
+    );
   });
 
   it("shows the instruction-free fallback sentence, not the Vault's own runtime message, in demo mode (#152)", () => {
@@ -266,9 +266,7 @@ describe("deriveVaultAggregate", () => {
 
   it("never reports the error tier in demo mode, even with an unavailable Vault present (#152)", () => {
     const unavailable = unavailableVault("Gamma");
-    expect(
-      deriveVaultAggregate([alpha, unavailable], {}, true),
-    ).toEqual({
+    expect(deriveVaultAggregate([alpha, unavailable], {}, true)).toEqual({
       kind: "shortfall",
       participating: 1,
       total: 2,

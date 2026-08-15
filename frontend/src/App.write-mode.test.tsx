@@ -1266,7 +1266,9 @@ describe("touch editing hint", () => {
       "This is a public read-only demo, so that change was not saved.",
     );
     expect(
-      screen.queryByText("Edits aren't saving. Hatchdoor could not reach the vault."),
+      screen.queryByText(
+        "Edits aren't saving. Hatchdoor could not reach the vault.",
+      ),
     ).not.toBeInTheDocument();
   });
 });

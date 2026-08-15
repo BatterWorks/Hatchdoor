@@ -7,6 +7,26 @@
   margin-bottom: 1.8rem;
 }
 
+/* Per-Vault sections, drawn only when scope genuinely spans more than one
+   Vault (#102). A single-Vault answer is byte-identical to the page before. */
+.stats-vault-section + .stats-vault-section {
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--rule-strong);
+}
+
+.stats-vault-heading {
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 85,
+    "wght" 700;
+  font-size: 1.15rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--hot);
+  margin: 0 0 1.1rem;
+}
+
 .stats-eyebrow {
   font-family: var(--font-mono);
   font-size: 0.68rem;

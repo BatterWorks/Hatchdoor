@@ -3,10 +3,7 @@ import { Link } from "react-router-dom";
 
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
-import {
-  resolvePrimaryVaultId,
-  useVaultDiscovery,
-} from "../hooks/useVaultScope";
+import { useVaultDiscovery, useVaultScope } from "../hooks/useVaultScope";
 
 import { StateBlock } from "./ui";
 import type {
@@ -18,7 +15,9 @@ import type {
   TagStat,
   VaultId,
   VaultQualifiedStats,
+  VaultScope,
   VaultStats,
+  VaultSummary,
 } from "../types";
 
 function fmtNum(n: number): string {
@@ -232,10 +231,40 @@ function RecentList({
   );
 }
 
+/** One Vault's answer: its numbers, or the reason it could not give them. */
+interface VaultStatsResult {
+  vault: VaultSummary;
+  stats: VaultStats | null;
+  error: string | null;
+}
+
+/**
+ * Every Vault the current scope covers, in Vault-management order: the one
+ * named Vault when scope is narrowed, every enabled Vault under `"all"`.
+ * A narrowed scope naming a Vault that discovery no longer returns (it was
+ * disabled or removed in another tab) covers nothing, which the caller states
+ * rather than silently falling back to a Vault the reader did not ask for.
+ */
+function vaultsInScope(
+  scope: VaultScope,
+  vaults: VaultSummary[],
+): VaultSummary[] {
+  if (scope === "all") {
+    return vaults;
+  }
+  const narrowed = vaults.find((vault) => vault.vault_id === scope);
+  return narrowed ? [narrowed] : [];
+}
+
 export function StatsPage() {
+  const [scope] = useVaultScope();
   const { vaults, loading: loadingVaults } = useVaultDiscovery();
-  const vaultId = resolvePrimaryVaultId(undefined, vaults);
-  const [stats, setStats] = useState<VaultStats | null>(null);
+  const targets = vaultsInScope(scope, vaults);
+  // Statistics stay grouped per Vault (#62) and `stats/detail` is an exact
+  // single-Vault read, so `all` is N reads presented as N sections rather
+  // than one merged total that would silently add unlike Vaults together.
+  const targetIds = targets.map((vault) => vault.vault_id).join(",");
+  const [results, setResults] = useState<VaultStatsResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -243,8 +272,8 @@ export function StatsPage() {
     if (loadingVaults) {
       return;
     }
-    if (!vaultId) {
-      setStats(null);
+    if (targets.length === 0) {
+      setResults([]);
       setError(null);
       setLoading(false);
       return;
@@ -255,13 +284,30 @@ export function StatsPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await apiFetch(
-          `/api/v1/vaults/${encodeURIComponent(vaultId)}/stats/detail`,
+        const loaded = await Promise.all(
+          targets.map(async (vault): Promise<VaultStatsResult> => {
+            try {
+              const res = await apiFetch(
+                `/api/v1/vaults/${encodeURIComponent(vault.vault_id)}/stats/detail`,
+              );
+              if (!res.ok) {
+                throw new Error(await readErrorMessage(res, "Stats failed"));
+              }
+              const projection = (await res.json()) as VaultQualifiedStats;
+              return { vault, stats: projection.stats, error: null };
+            } catch (err) {
+              return {
+                vault,
+                stats: null,
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : "Failed to load stats for this Vault.",
+              };
+            }
+          }),
         );
-        if (!res.ok)
-          throw new Error(await readErrorMessage(res, "Stats failed"));
-        const projection = (await res.json()) as VaultQualifiedStats;
-        if (!cancelled) setStats(projection.stats);
+        if (!cancelled) setResults(loaded);
       } catch (err) {
         if (!cancelled)
           setError(err instanceof Error ? err.message : "Failed to load stats");
@@ -272,7 +318,9 @@ export function StatsPage() {
     return () => {
       cancelled = true;
     };
-  }, [loadingVaults, vaultId]);
+    // `targetIds` stands in for `targets`, which is a fresh array each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingVaults, targetIds]);
 
   if (loadingVaults || loading) {
     return (
@@ -284,23 +332,26 @@ export function StatsPage() {
     );
   }
 
-  if (!vaultId) {
+  if (targets.length === 0) {
     return (
       <StateBlock
         title="Stats Unavailable"
-        description="No Vault is available to show statistics for."
+        description={
+          scope === "all"
+            ? "No Vault is available to show statistics for."
+            : "The Vault this page is scoped to is no longer available."
+        }
       />
     );
   }
 
-  if (error || !stats) {
-    return (
-      <StateBlock
-        title="Stats Unavailable"
-        description={error ?? "Could not load vault stats."}
-      />
-    );
+  if (error) {
+    return <StateBlock title="Stats Unavailable" description={error} />;
   }
+
+  // A single-Vault answer keeps the page it has always had; only a scope that
+  // genuinely spans more than one Vault earns the per-Vault section heading.
+  const grouped = results.length > 1;
 
   return (
     <div className="stats-page">
@@ -316,6 +367,40 @@ export function StatsPage() {
         </p>
       </div>
 
+      {results.map((result) => (
+        <section
+          key={result.vault.vault_id}
+          className={grouped ? "stats-vault-section" : undefined}
+        >
+          {grouped ? (
+            <h2 className="stats-vault-heading">{result.vault.name}</h2>
+          ) : null}
+          {result.stats ? (
+            <VaultStatsReport
+              vaultId={result.vault.vault_id}
+              stats={result.stats}
+            />
+          ) : (
+            <StateBlock
+              title="Stats Unavailable"
+              description={result.error ?? "Could not load vault stats."}
+            />
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function VaultStatsReport({
+  vaultId,
+  stats,
+}: {
+  vaultId: VaultId;
+  stats: VaultStats;
+}) {
+  return (
+    <>
       {/* Metric strip */}
       <div className="stats-metric-strip">
         <div className="stats-metric-cell">
@@ -459,6 +544,6 @@ export function StatsPage() {
           <PillList vaultId={vaultId} notes={stats.no_tag_notes} />
         </div>
       </div>
-    </div>
+    </>
   );
 }

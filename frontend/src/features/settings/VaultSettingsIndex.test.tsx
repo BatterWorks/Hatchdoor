@@ -1045,9 +1045,7 @@ describe("VaultSettingsIndex — the creation flow entry point (#153)", () => {
     // `demoMode` starts `false`, so the button renders before discovery
     // resolves — exactly the window a demo visitor could click through.
     fireEvent.click(screen.getByRole("button", { name: "Add a Vault" }));
-    expect(
-      screen.getByRole("dialog", { name: "Add a Vault" }),
-    ).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Add a Vault" })).toBeVisible();
 
     resolveDiscovery(
       json({

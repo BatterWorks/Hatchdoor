@@ -1379,6 +1379,11 @@
   .vault-tier-error { color: var(--err-fg); }
   .vault-slot-condition.vault-tier-error, .vault-slot-shortfall.vault-tier-error { background: var(--err-bg); border: 1px solid var(--err-border); font-weight: 600; padding: 0.05rem 0.4rem; border-radius: var(--radius-pill); }
 
+  /* Marked path root (#115, implemented by #140). Sized and weighted from the
+     surrounding row; only colour and the middot separator are its own. */
+  .path-vault { flex: 0 0 auto; display: inline-flex; align-items: baseline; color: var(--hot); font-variation-settings: "wdth" 100, "wght" 500; }
+  .path-sep { margin-left: 0.3rem; margin-right: 0.3rem; color: var(--hot); }
+
   /* Island caption + enclosure (#143). Canvas furniture — no DOM class backs
      these in the app; this demo approximates the canvas draw with inline SVG. */
   .island-demo { display: flex; align-items: flex-end; justify-content: center; gap: 3rem; flex-wrap: wrap; }
@@ -2839,6 +2844,33 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">app/AppTopbar.tsx</span><span class="key">app/vaultSlotLogic.ts <i>(scopeName)</i></span>
         <span class="key">.topbar-scope-trigger</span><span class="key">.topbar-scope-name</span><span class="key">.topbar-scope-rule</span><span class="key">.topbar-scope-viewing</span><span class="key">.topbar-scope-slot</span>
         <span class="key">.scope-sheet</span><span class="key">.scope-sheet-backdrop</span><span class="key">.scope-sheet-list</span>
+      </div>
+    </section>
+
+    <!-- ───────── MARKED PATH ROOT ───────── -->
+    <section class="doc-section" id="path-vault">
+      <div class="doc-section-num">§31</div>
+      <h2>Marked path root</h2>
+      <p class="blurb">On a flattened surface &mdash; search results, recent items, metadata queries
+      &mdash; a note says which Vault it came from by declaring a marked path root: the Vault name in
+      hot ink at medium weight, followed by a middot rather than the <code>/</code> a folder path
+      would use, so it reads as visibly not a folder segment. Provenance leads the most specific
+      location line the surface has: the path line where one exists, the title line where none does.
+      It renders on collection surfaces when the set <em>can</em> span (scope is <code>all</code> and
+      more than one Vault is enabled), and on exact reads whenever more than one Vault is enabled
+      &mdash; a single-Vault instance is byte-identical to an instance that never knew about Vaults.
+      The prefix is <strong>inert</strong>, a plain span inside the row's own button or link and never
+      a second click target, and it <strong>never elides</strong>: the folder path takes the loss,
+      eliding head-first (#115, implemented by #140).</p>
+
+      <div class="stage">
+        <div class="vslot-row"><span class="vslot-name"><span class="path-vault">Notes<span class="path-sep">&middot;</span></span>10-topics/finance</span></div>
+        <div class="vslot-row"><span class="vslot-name"><span class="path-vault">Archive<span class="path-sep">&middot;</span></span>clippings/2026</span></div>
+      </div>
+
+      <div class="tag-row">
+        <span class="key">components/ui.tsx <i>(VaultPrefix)</i></span>
+        <span class="key">.path-vault</span><span class="key">.path-sep</span>
       </div>
     </section>
 

@@ -11,7 +11,11 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
 import type { VaultSummary } from "../../types";
-import { discardHeldDraft, listHeldDrafts, type HeldDraft } from "../../lib/writeDrafts";
+import {
+  discardHeldDraft,
+  listHeldDrafts,
+  type HeldDraft,
+} from "../../lib/writeDrafts";
 import { formatWhen } from "./relativeTime";
 import { UnsavedDrafts, type OpenCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
@@ -310,7 +314,6 @@ function formatEta(seconds: number | undefined): string {
   return `about ${Math.round(seconds / 60)} minutes left`;
 }
 
-
 export function SettingsPage({
   vaults = [],
   onVaultDiscoveryRefresh,
@@ -329,9 +332,11 @@ export function SettingsPage({
   // Set once by the zero-Vault workspace state's `Add a Vault` button
   // (#150) navigating here; consumed on this first render only so a later
   // back/forward visit to `/settings` does not reopen the flow on its own.
-  const [autoOpenCreation] = useState(
-    () => Boolean((location.state as { openVaultCreation?: boolean } | null)
-      ?.openVaultCreation),
+  const [autoOpenCreation] = useState(() =>
+    Boolean(
+      (location.state as { openVaultCreation?: boolean } | null)
+        ?.openVaultCreation,
+    ),
   );
   useEffect(() => {
     if (autoOpenCreation) {

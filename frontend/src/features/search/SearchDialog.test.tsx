@@ -158,7 +158,7 @@ describe("SearchDialog Vault provenance (#140)", () => {
       scope: "all",
     });
 
-    const prefix = screen.getByText("Beta").closest(".vault-prefix");
+    const prefix = screen.getByText("Beta").closest(".path-vault");
     expect(prefix?.tagName).toBe("SPAN");
     expect(prefix?.closest("button")).not.toBeNull();
     expect(prefix?.querySelector("button, a")).toBeNull();
@@ -174,7 +174,7 @@ describe("SearchDialog Vault provenance (#140)", () => {
     const pathText = container.querySelector(".result-path-text");
     expect(pathText).toBeInTheDocument();
     expect(pathText?.textContent).toBe("Projects/Plan.md");
-    expect(pathText?.closest(".vault-prefix")).toBeNull();
+    expect(pathText?.closest(".path-vault")).toBeNull();
   });
 });
 

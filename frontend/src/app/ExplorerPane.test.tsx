@@ -432,7 +432,7 @@ describe("ExplorerPane Scope zone", () => {
     });
 
     const row = scopeZone().getByRole("radio", { name: /Gamma/ });
-    expect(within(row).getByText("Viewing")).toBeInTheDocument();
+    expect(within(row).getByText("viewing")).toBeInTheDocument();
   });
 
   it("names the viewed Vault on a second line when collapsed, even when it is also the selected scope", () => {
@@ -443,7 +443,7 @@ describe("ExplorerPane Scope zone", () => {
       scopeZoneCollapsed: true,
     });
 
-    expect(screen.getByText("Viewing: Gamma")).toBeInTheDocument();
+    expect(screen.getByText("viewing Gamma")).toBeInTheDocument();
   });
 
   it("does not show a viewing line when no note is open", () => {
@@ -453,7 +453,7 @@ describe("ExplorerPane Scope zone", () => {
       viewingVaultId: undefined,
     });
 
-    expect(screen.queryByText(/^Viewing:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^viewing /)).not.toBeInTheDocument();
   });
 
   it("wires each row's note count from vaultNoteCounts (#139)", () => {

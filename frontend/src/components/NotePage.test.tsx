@@ -392,9 +392,7 @@ describe("NotePage held-draft recovery (#151)", () => {
     );
 
     render(
-      <MemoryRouter
-        initialEntries={[`/v/${vaultId}/n/home?restoreEdit=1`]}
-      >
+      <MemoryRouter initialEntries={[`/v/${vaultId}/n/home?restoreEdit=1`]}>
         <Routes>
           <Route
             path="/v/:vaultId/n/:slug"

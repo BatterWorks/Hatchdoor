@@ -70,7 +70,11 @@ function mockDemoInstance() {
         return collectionEnvelope([]);
       }
       if (url.includes("/notes/home/links")) {
-        return jsonResponse({ vault_id: VAULT_ID, outgoing: [], backlinks: [] });
+        return jsonResponse({
+          vault_id: VAULT_ID,
+          outgoing: [],
+          backlinks: [],
+        });
       }
       if (url.includes("/notes/home") && !url.includes("?")) {
         return jsonResponse({
@@ -195,7 +199,9 @@ describe("Demo mode (#152)", () => {
     resolveDiscovery(jsonResponse(discoveryResponse([VAULT], true)));
 
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Notes Explorer" })).toBeVisible();
+      expect(
+        screen.getByRole("heading", { name: "Notes Explorer" }),
+      ).toBeVisible();
     });
     expect(
       screen.queryByRole("link", { name: "Settings" }),

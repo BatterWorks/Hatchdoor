@@ -402,7 +402,14 @@ export function NotePage({
       replace: true,
     });
     startEditing();
-  }, [note, isEditing, location.pathname, location.search, navigate, startEditing]);
+  }, [
+    note,
+    isEditing,
+    location.pathname,
+    location.search,
+    navigate,
+    startEditing,
+  ]);
 
   useEffect(() => {
     if (!isEditing || !note) {
@@ -929,7 +936,10 @@ export function NotePage({
       if (onDemoRefusal?.(saveError)) {
         setIsEditing(false);
         setInlineDirty(false);
-      } else if (saveError instanceof Error && saveError.name === "ConflictError") {
+      } else if (
+        saveError instanceof Error &&
+        saveError.name === "ConflictError"
+      ) {
         setConflict(true);
         try {
           const res = await apiFetch(notePath);
@@ -1104,8 +1114,8 @@ export function NotePage({
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               <span>
-                Unsaved drafts from before the move to multiple Vaults are
-                being held — <Link to="/settings">find them in Settings</Link>.
+                Unsaved drafts from before the move to multiple Vaults are being
+                held — <Link to="/settings">find them in Settings</Link>.
               </span>
             </div>
             <button

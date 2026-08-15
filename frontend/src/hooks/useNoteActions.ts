@@ -175,7 +175,13 @@ export function useNoteActions({
         );
       }
     },
-    [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice],
+    [
+      handleDemoRefusal,
+      navigate,
+      refreshVault,
+      requireActiveNoteHash,
+      setWriteNotice,
+    ],
   );
 
   const handleMoveNote = useCallback(
@@ -214,7 +220,13 @@ export function useNoteActions({
         );
       }
     },
-    [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice],
+    [
+      handleDemoRefusal,
+      navigate,
+      refreshVault,
+      requireActiveNoteHash,
+      setWriteNotice,
+    ],
   );
 
   const handleArchiveNote = useCallback(async () => {
@@ -238,7 +250,13 @@ export function useNoteActions({
         error instanceof Error ? error.message : "Archive failed",
       );
     }
-  }, [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice]);
+  }, [
+    handleDemoRefusal,
+    navigate,
+    refreshVault,
+    requireActiveNoteHash,
+    setWriteNotice,
+  ]);
 
   const handleDeleteNote = useCallback(async () => {
     setNoteActionError(null);
@@ -257,7 +275,13 @@ export function useNoteActions({
         error instanceof Error ? error.message : "Delete failed",
       );
     }
-  }, [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice]);
+  }, [
+    handleDemoRefusal,
+    navigate,
+    refreshVault,
+    requireActiveNoteHash,
+    setWriteNotice,
+  ]);
 
   return {
     noteActionDialog,

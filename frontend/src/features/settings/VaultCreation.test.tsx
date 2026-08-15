@@ -66,9 +66,7 @@ describe("VaultCreationDialog — opening", () => {
   it("renders the name field, source-kind toggle and the four own-folder behaviours", () => {
     render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
 
-    expect(
-      screen.getByRole("dialog", { name: "Add a Vault" }),
-    ).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Add a Vault" })).toBeVisible();
     expect(screen.getByLabelText("Vault name")).toBeVisible();
     expect(screen.getByLabelText("Folder path")).toBeVisible();
     for (const label of ["No Git", "Local history", "Pull-only", "Two-way"]) {
@@ -82,10 +80,22 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     let postedBody: Record<string, unknown> | null = null;
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": (init) => {
         postedBody = JSON.parse(init!.body as string);
-        return json({ vault: CREATED_VAULT, registry_revision: 6, collection_revision: 6 }, { status: 201 });
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
       },
     });
     const onCreated = vi.fn();
@@ -100,7 +110,9 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
 
-    await vi.waitFor(() => expect(onCreated).toHaveBeenCalledWith(CREATED_VAULT));
+    await vi.waitFor(() =>
+      expect(onCreated).toHaveBeenCalledWith(CREATED_VAULT),
+    );
     expect(postedBody).toEqual({
       expected_registry_revision: 5,
       name: "Field notes",
@@ -112,10 +124,22 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     let postedBody: Record<string, unknown> | null = null;
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": (init) => {
         postedBody = JSON.parse(init!.body as string);
-        return json({ vault: CREATED_VAULT, registry_revision: 6, collection_revision: 6 }, { status: 201 });
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
       },
     });
 
@@ -130,9 +154,9 @@ describe("VaultCreationDialog — a successful local-Vault create", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
 
     await vi.waitFor(() => expect(postedBody).not.toBeNull());
-    expect((postedBody as unknown as { source: { path: string } }).source.path).toBe(
-      "/notes",
-    );
+    expect(
+      (postedBody as unknown as { source: { path: string } }).source.path,
+    ).toBe("/notes");
   });
 });
 
@@ -141,10 +165,22 @@ describe("VaultCreationDialog — a managed Git create", () => {
     let postedBody: Record<string, unknown> | null = null;
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 1, collection_revision: 1, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 1,
+          collection_revision: 1,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": (init) => {
         postedBody = JSON.parse(init!.body as string);
-        return json({ vault: CREATED_VAULT, registry_revision: 2, collection_revision: 2 }, { status: 201 });
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 2,
+            collection_revision: 2,
+          },
+          { status: 201 },
+        );
       },
     });
 
@@ -177,10 +213,18 @@ describe("VaultCreationDialog — an API failure", () => {
   it("shows the server's message and keeps the entered fields", async () => {
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": () =>
         json(
-          { code: "duplicate_vault_name", message: "A Vault named this already exists." },
+          {
+            code: "duplicate_vault_name",
+            message: "A Vault named this already exists.",
+          },
           { status: 409 },
         ),
     });
@@ -209,7 +253,12 @@ describe("VaultCreationDialog — an API failure", () => {
   it("gives a plain-language message for a registry revision conflict", async () => {
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": () =>
         json(
           {
@@ -241,11 +290,20 @@ describe("VaultCreationDialog — double-submit", () => {
     let postCount = 0;
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": () => {
         postCount += 1;
         return json(
-          { vault: CREATED_VAULT, registry_revision: 6, collection_revision: 6 },
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
           { status: 201 },
         );
       },
@@ -273,7 +331,12 @@ describe("VaultCreationDialog — sign-in validation", () => {
   it("requires an access token once Access token sign-in is chosen, without contacting the server", async () => {
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
     });
 
     render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
@@ -304,7 +367,12 @@ describe("VaultCreationDialog — an own-folder remote behaviour", () => {
   it("requires a repository URL for Pull-only, same as the edit flow", async () => {
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
     });
 
     render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
@@ -331,11 +399,20 @@ describe("VaultCreationDialog — an own-folder remote behaviour", () => {
     let postedBody: Record<string, unknown> | null = null;
     mockRoutes({
       "/api/v1/vaults GET": () =>
-        json({ registry_revision: 5, collection_revision: 5, vaults: [], demo_mode: false }),
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
       "/api/v1/vaults POST": (init) => {
         postedBody = JSON.parse(init!.body as string);
         return json(
-          { vault: CREATED_VAULT, registry_revision: 6, collection_revision: 6 },
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
           { status: 201 },
         );
       },
@@ -385,10 +462,10 @@ describe("VaultCreationDialog — an own-folder remote behaviour", () => {
       target: { value: "https://example.test/abandoned.git" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "A folder on this server" }));
-    expect(
-      screen.queryByLabelText("Repository URL"),
-    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "A folder on this server" }),
+    );
+    expect(screen.queryByLabelText("Repository URL")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Pull-only" }));
     expect(screen.getByLabelText("Repository URL")).toHaveValue("");
