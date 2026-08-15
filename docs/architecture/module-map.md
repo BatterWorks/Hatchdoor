@@ -2164,8 +2164,14 @@ room for the flow itself and instead navigates to `/settings` carrying
 `{state: {openVaultCreation: true}}`, consumed once by `SettingsPage.tsx` (via
 `useLocation`, cleared with `navigate(..., {replace: true})` so a later
 back/forward visit does not reopen it) and threaded down as
-`VaultSettingsIndex`'s `autoOpenCreation` prop. The dialog collects a name and
-one source configuration, reusing `vaultGitBehavior.ts`'s
+`VaultSettingsIndex`'s `autoOpenCreation` prop. The dialog collects a name,
+one source configuration, and an `exclude_patterns` list (issue #157) via
+`vaultGitBehavior.ts`'s shared `parseExcludePatterns` — also now used by the
+edit flow's own field instead of a second inline `split(",")` normalizer —
+sent in the initial `POST` (omitted when empty, relying on the server's
+default, the same convention `credentials` already used) so the first
+admitted Index turn observes it rather than waiting on a later edit-flow
+`PATCH`. It also reuses `vaultGitBehavior.ts`'s
 `behaviorOptions`/`buildSourceForBehavior`/`withIdentityFields` unchanged —
 the same two-step composition the edit flow already uses, starting from an
 empty `local` or `managed_git` source instead of an existing Vault's — so a
