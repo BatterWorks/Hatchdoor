@@ -126,7 +126,7 @@ interface RenderIsland extends GraphIsland {
 export function GraphPage() {
   const navigate = useNavigate();
   const [scope] = useVaultScope();
-  const { vaults, loading: loadingVaults } = useVaultDiscovery();
+  const { vaults, demoMode, loading: loadingVaults } = useVaultDiscovery();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -754,7 +754,7 @@ export function GraphPage() {
     islandsRef.current = islands.map((island) => {
       const vault = vaultById.get(island.vaultId);
       const slot: VaultSlotState = vault
-        ? deriveVaultSlot(vault, island.nodeCount)
+        ? deriveVaultSlot(vault, island.nodeCount, demoMode)
         : { kind: "count", count: island.nodeCount };
       return { ...island, slot };
     });
@@ -765,7 +765,15 @@ export function GraphPage() {
     return () => {
       sim.stop();
     };
-  }, [vaultGraphs, vaults, loadingVaults, participants, scope, requestRender]);
+  }, [
+    vaultGraphs,
+    vaults,
+    demoMode,
+    loadingVaults,
+    participants,
+    scope,
+    requestRender,
+  ]);
 
   // ── canvas resize ───────────────────────────────────────────────────────────
 

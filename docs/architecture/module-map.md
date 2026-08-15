@@ -1522,7 +1522,10 @@ Vaults (a neutral `Add a Vault` empty state; the action itself is Settings'
 `VaultCreationDialog` (#153) — this route has no room for the flow, so
 `ZeroVaultState`'s `onAddVault` navigates to `/settings` with
 `{state: {openVaultCreation: true}}` instead, absent entirely in demo mode via
-the `demoMode` prop threaded down from this hook) versus a broken start:
+the `demoMode` prop threaded down from this hook — a demo instance's own
+description reads "This demo has no Vaults loaded." in that state (#152),
+never the ordinary "Add a Vault…" sentence with nothing left to act on it)
+versus a broken start:
 `useVaultScope.ts`'s `useVaultDiscovery`
 now also exposes `recovery` (the persisted registry file is unreadable) and
 `legacyMigrationRecovery` (the registry loaded fine but a failed safe
@@ -1532,12 +1535,52 @@ documented error block with a `Try again` action (a plain re-fetch), and
 once-confirmed `Start with no Vaults` action against the new
 `POST /api/v1/vaults/start-with-no-vaults` endpoint.
 
+A demo instance is a faithful Hatchdoor with the operator removed, not one
+with its controls greyed out (#152): `App.tsx`'s `"/settings"` route renders
+`<Navigate to="/" replace>` instead of `SettingsPage` whenever `demoMode` is
+true — silently, like every other withheld operator affordance, rather than
+disabled-and-explained — which is what makes Vault management, `Add a
+Vault`, Git behaviour/credential controls, `Sync now`, and `Unsaved drafts`
+disappear together in one place instead of needing separate gates inside
+`features/settings/**` (whose own vault-scoped reads stay reachable at the
+API layer per #109, but are never rendered for a demo visitor). The route
+first checks `vaultsLoading` (the same guard the `"/"` route already applies
+below): `demoMode` starts `false` until Vault discovery's fetch resolves, so
+without that guard a demo visitor opening `/settings` directly — a bookmark,
+a shared link, a reload on that route — would see `SettingsPage` begin
+mounting for one frame before flipping to the redirect. The sidebar footer's
+own Settings link (`settingsEnabled`, passed to `app/ExplorerPane.tsx`) takes
+the identical `!vaultsLoading && !demoMode` guard for the same reason: gating
+on `!demoMode` alone would leave that link live and clickable for the whole
+discovery fetch, not just one frame, since nothing else in the shell blocks
+on `vaultsLoading` the way the `"/"` route's own content does. Everywhere a
+Vault's
+condition slot renders — the Scope zone, its collapsed head, the mobile
+scope row/sheet (`AppTopbar.tsx`), the explorer accordion, and each graph
+island caption (`GraphPage.tsx`, below) — `vaultSlotLogic.ts`'s
+`deriveVaultSlot`/`deriveVaultAggregate`/`describeScopeSlot` take an optional
+trailing `demoMode` parameter (default `false`) that clamps every condition
+to the amber tier and swaps the Vault's own runtime message for the
+instruction-free fallback sentence: nobody browsing a public demo is the one
+who would act on an operator diagnostic, and the red tier's bordered ground
+is reserved for something the app is not already handling. `VaultSlot`/
+`VaultAggregateSlot` (`vaultSlot.tsx`) take the same optional `demoMode` prop
+and thread it straight through, as does `App.tsx`'s own `describeScopeSlot`
+call for the shell's scope live region. The one write-blocking use of
+`deriveVaultSlot` outside a rendered slot — `NotePage.tsx`'s
+`writeBlockReason` escalation (Note reading and rendering, below) — also
+takes `demoMode`: the escalation banner itself still renders in demo mode
+(an honest signal, same as every other Vault condition staying visible), but
+never repeats the Vault's own operator-facing Git diagnostic to a visitor
+who was never going to attempt the save it warns about.
+
 **Coordination rule:** feature work may touch `App.tsx` only when the work
 packet names the route, callback, shortcut, or state integration. A large prop
 surface is a coordination seam, not permission to move feature behavior into
 the shell.
 
-**Validation:** the applicable `App.*.test.tsx`, `app/ExplorerPane.test.tsx`,
+**Validation:** the applicable `App.*.test.tsx` (including
+`App.demo-mode.test.tsx`, #152), `app/ExplorerPane.test.tsx`,
 `app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
 `useTheme.test.tsx`, storage tests, then full frontend checks. Layout changes to
 the explorer pane need a browser as well as the suite: its zone structure
@@ -1809,7 +1852,24 @@ a `replace` navigation so a refresh does not reopen it. Independently, a
 dismissible (per view, not persisted — it returns on every load until the
 last held draft is dealt with) notice above the note body names any drafts
 `lib/writeDrafts.ts`'s `listHeldDrafts` reports and links to Settings;
-ordinary post-#137 per-note draft recovery is unaffected.
+ordinary post-#137 per-note draft recovery is unaffected. That notice is
+additionally suppressed whenever `demoMode` is true (#152), regardless of
+`listHeldDrafts`: it names and links to a Settings surface withheld from a
+demo visitor entirely, and a pre-#137 held draft could in principle exist in
+any browser profile a demo instance happens to be served from. `NotePage`'s
+`Vault` property row (`NoteProperties`'s `vaultName`, above) is a name only
+— it carries no condition slot, so #152's demo-mode amber clamp on
+`deriveVaultSlot` has nothing to touch there; the one other `deriveVaultSlot`
+call here, `writeBlockReason`'s write-blocking Git escalation, takes an
+optional `demoMode` prop (#152) for the same instruction-free-sentence clamp
+(Application shell and navigation, above) — the escalation banner itself
+still renders, since it stays honest about Vault trouble independent of
+whether editing is offered, but never repeats the Vault's own operator
+diagnostic. `handleSave`'s catch and `handleBodyDrop`'s attachment-upload
+catch both take the optional `onDemoRefusal` prop (#152, Note editing and
+vault actions), checked first — `handleSave` falls back to its existing
+`ConflictError`/generic-error branches on a miss, `handleBodyDrop` to its
+existing generic `onWriteNotice` fallback.
 
 **Consumed dependencies:** API/auth helpers, router state, Markdown/rendering
 libraries, shared types/UI, note editing (including its held-draft recovery
@@ -1889,6 +1949,44 @@ for drafts that predate Vault qualification, consumed by Settings'
 — draft recovery — can pin which Vault a note is created in, overriding
 `resolvePrimaryVaultId`'s inference for that one dialog session.
 
+`hooks/useWriteMode.ts` needs no demo-mode branch of its own (#152):
+`GET .../write-capabilities` carries the same `demo_guard` layer every
+mutation route does (`src/server.rs`'s route registration, grouped with
+mutations "since it is write-capability discovery, not content browsing;
+gated the same as the mutations it describes"), so the request 403s with
+`demo_read_only` in demo mode before the handler's own `enabled` field is
+ever computed, and this hook's existing catch already resolves
+`writeEnabled` to `false` — every affordance it gates (New note, Edit,
+attachment drop) is already absent with no client-side clamp needed.
+`writeApi.ts` exports `DEMO_READ_ONLY_CODE`/`isDemoReadOnlyError`, reading
+the `code` every write error now carries (`parseError` returns `{message,
+code}` rather than a bare string) so a demo refusal can be told apart from
+every other write failure. `App.tsx`'s `handleDemoRefusal` is the
+defense-in-depth backstop for a write that reaches the server anyway: one
+app-authored sentence into the shared `.write-notice` strip (never the
+server's own message, and never the generic inline failure state a note
+action's dialog or the editor would otherwise show), plus a fresh
+`loadVaults()` call — "the app re-asks the server what it is permitted to
+do" — and no retry affordance. It is threaded into `useNoteActions.ts`'s
+five write handlers through one shared `handleDemoRefusal` closure local to
+that hook (checked first in each catch block via `if (handleDemoRefusal(error))
+return;`; closes the action dialog on a hit rather than leaving it open —
+extracted rather than repeated five times once the fifth call site made the
+duplication real, not premature); into `NotePage.tsx`'s `handleSave` catch
+(exits editing rather than showing `ConflictError`'s or a generic error's
+inline banner); into its `handleBodyDrop` attachment-upload catch (Note
+reading and rendering, above); into `NoteEditor.tsx`'s own `uploadEditorFile`
+catch via a new `onDemoRefusal` prop `NotePage.tsx` passes straight through,
+so a demo refusal on an in-editor attachment drop or paste clears the
+editor's own inline `attachmentNotice` rather than showing it there; and into
+the block-editor autosave `save` callback `useNoteAutosave` wraps (`NotePage.tsx`
+sets a local `autosaveDemoRefusal` flag on a hit, rethrows so the hook still
+halts autosave for the rest of this note session the same as any other
+failure, and that flag suppresses only the generic "could not reach the
+vault" banner the hook's own `"error"` status would otherwise show —
+`SaveState`'s terse "Not saving" pill is untouched, since it names no
+message and carries no instruction either way).
+
 **Consumed dependencies:** shared API/types/UI, router navigation, vault tree
 note candidates, and backend HTTP write endpoints.
 
@@ -1905,11 +2003,13 @@ reproduce the file's own line endings; **block operations refuse rather than
 guess** when a range no block owns lies between them, or when the rendered tree
 is still settling behind a wikilink resolve.
 
-**Validation:** write API, editor, action dialog, upload, draft, path,
+**Validation:** write API (`writeApi.test.ts`, including the demo_read_only
+code-carrying cases), editor, action dialog, upload, draft, path,
 frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
 `caretMap`, `editHistory`, `linePrefix`, `useNoteAutosave`, `attachmentDrop`,
-`inlineEditing`, and `properties` tests; plus `App.write-mode.test.tsx`
-and full frontend checks.
+`inlineEditing`, and `properties` tests; `useNoteActions.test.tsx` (#152);
+plus `App.write-mode.test.tsx`, `App.demo-mode.test.tsx` (#152), and full
+frontend checks.
 
 ### Graph
 
@@ -1931,9 +2031,11 @@ component — including a single-enabled-Vault instance under `all` — the page
 is byte-identical to the narrowed single-Vault graph (#118's resolution).
 
 **Consumed dependencies:** shared API/error/types/UI, router navigation,
-`d3-force`, `useVaultDiscovery` (Vault-management order and per-Vault
-condition, reused via `deriveVaultSlot` for each island's caption), and
-`describeVaultsNotDrawn` from `lib/vaultParticipants.ts`.
+`d3-force`, `useVaultDiscovery` (Vault-management order, `demoMode`, and
+per-Vault condition, reused via `deriveVaultSlot(vault, count, demoMode)` for
+each island's caption so a demo instance's islands clamp to the amber tier
+the same as every other Vault chrome, #152), and `describeVaultsNotDrawn`
+from `lib/vaultParticipants.ts`.
 
 **Coordination paths:** `App.tsx`, `types.ts`, backend graph wire types/handler,
 `app/vaultSlotLogic.ts`, `lib/vaultParticipants.ts`, `hooks/useVaultScope.ts`,

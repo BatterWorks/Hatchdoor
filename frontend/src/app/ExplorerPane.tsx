@@ -99,6 +99,7 @@ function ScopeZone({
   scopeFocusRequestId,
   onRestoreScopeFocus,
   startupProgress,
+  demoMode = false,
 }: {
   vaults: VaultSummary[];
   scope: VaultScope;
@@ -112,6 +113,8 @@ function ScopeZone({
   /** The first-run model-setup/indexing progress the startup gate no longer
    * blocks on (#150), surfaced here in the zone's own slot instead. */
   startupProgress?: StartupProgress;
+  /** Clamps every condition slot to the amber tier (#152). */
+  demoMode?: boolean;
 }) {
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const rowIds: VaultScope[] = [
@@ -166,7 +169,7 @@ function ScopeZone({
   // The collapsed head names the scope in the worst ink present across every
   // enabled Vault, not just the selected one, so narrowing scope never hides
   // trouble elsewhere (#116, amended by #117).
-  const aggregate = deriveVaultAggregate(vaults, noteCounts);
+  const aggregate = deriveVaultAggregate(vaults, noteCounts, demoMode);
   const worstTierClass =
     aggregate.kind === "shortfall" ? ` vault-tier-${aggregate.tier}` : "";
 
@@ -194,7 +197,11 @@ function ScopeZone({
             {startupProgress ? (
               <StartupProgressSlot progress={startupProgress} />
             ) : (
-              <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+              <VaultAggregateSlot
+                vaults={vaults}
+                counts={noteCounts}
+                demoMode={demoMode}
+              />
             )}
           </>
         ) : (
@@ -232,7 +239,11 @@ function ScopeZone({
               {startupProgress ? (
                 <StartupProgressSlot progress={startupProgress} />
               ) : (
-                <VaultAggregateSlot vaults={vaults} counts={noteCounts} />
+                <VaultAggregateSlot
+                  vaults={vaults}
+                  counts={noteCounts}
+                  demoMode={demoMode}
+                />
               )}
             </button>
           </li>
@@ -257,6 +268,7 @@ function ScopeZone({
                 <VaultSlot
                   vault={vault}
                   noteCount={noteCounts[vault.vault_id]}
+                  demoMode={demoMode}
                 />
               </button>
             </li>
@@ -286,6 +298,7 @@ function VaultAccordion({
   onExpandedFoldersChange,
   writeEnabled,
   onCreateNoteInFolder,
+  demoMode = false,
 }: {
   vaults: VaultSummary[];
   vaultTrees: VaultTree[];
@@ -297,6 +310,7 @@ function VaultAccordion({
   onExpandedFoldersChange: (next: Record<string, boolean>) => void;
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
+  demoMode?: boolean;
 }) {
   const treesByVault = new Map(
     vaultTrees.map((entry) => [entry.vault_id, entry.tree]),
@@ -317,6 +331,7 @@ function VaultAccordion({
                 <VaultSlot
                   vault={vault}
                   noteCount={noteCounts[vault.vault_id]}
+                  demoMode={demoMode}
                 />
               }
               collapsible
@@ -450,6 +465,8 @@ type ExplorerPaneProps = {
   scopeFocusRequestId: number;
   onRestoreScopeFocus: () => void;
   startupProgress?: StartupProgress;
+  /** Clamps every condition slot to the amber tier (#152). */
+  demoMode?: boolean;
 };
 
 export function ExplorerPane({
@@ -485,6 +502,7 @@ export function ExplorerPane({
   scopeFocusRequestId,
   onRestoreScopeFocus,
   startupProgress,
+  demoMode = false,
 }: ExplorerPaneProps) {
   // Local, not lifted: the shell already carries a large prop surface, and the
   // module map is explicit that this is a coordination seam rather than an
@@ -603,6 +621,7 @@ export function ExplorerPane({
           scopeFocusRequestId={scopeFocusRequestId}
           onRestoreScopeFocus={onRestoreScopeFocus}
           startupProgress={startupProgress}
+          demoMode={demoMode}
         />
       )}
       <ExplorerRail
@@ -660,6 +679,7 @@ export function ExplorerPane({
             onExpandedFoldersChange={onExpandedFoldersChange}
             writeEnabled={writeEnabled}
             onCreateNoteInFolder={onCreateNoteInFolder}
+            demoMode={demoMode}
           />
         ) : (
           <>
@@ -672,6 +692,7 @@ export function ExplorerPane({
                     <VaultSlot
                       vault={narrowedVault}
                       noteCount={vaultNoteCounts[narrowedVault.vault_id]}
+                      demoMode={demoMode}
                     />
                   ) : undefined
                 }

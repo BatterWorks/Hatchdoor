@@ -127,6 +127,56 @@ describe("NotePage write escalation (#141)", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the instruction-free fallback sentence, not the Vault's own operator diagnostic, in demo mode (#152)", async () => {
+    const vault = {
+      ...staleVault("Ignored"),
+      vault_id: "conflict-vault-demo",
+      git: "unavailable" as const,
+      git_error: {
+        code: "git_content_conflict",
+        message: "Run `hatchdoor vault repair` on the operator console.",
+        retryable: false,
+      },
+    };
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: vault.vault_id,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "Body",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: vault.vault_id, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    renderNote(vault.vault_id, {
+      vaults: [vault],
+      writeEnabled: false,
+      demoMode: true,
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          /A content conflict is blocking Git sync for this Vault\./,
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/operator console/)).not.toBeInTheDocument();
+  });
+
   it("raises nothing beyond the sidebar slot for a non-blocking condition (stale)", async () => {
     const vault = staleVault("Gamma");
     vi.spyOn(globalThis, "fetch").mockImplementation(
@@ -263,6 +313,49 @@ describe("NotePage held-draft recovery (#151)", () => {
     expect(notice.closest("a")).toHaveAttribute("href", "/settings");
 
     fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
+    expect(screen.queryByText(/find them in Settings/)).not.toBeInTheDocument();
+  });
+
+  it("never shows the held-drafts notice in demo mode, even with a held draft present (#152)", async () => {
+    window.localStorage.setItem(
+      "hatchdoor:heldDraft:note:orphaned",
+      JSON.stringify({
+        id: "note:orphaned",
+        kind: "note",
+        slug: "orphaned",
+        content: "unsaved",
+        baseContentHash: "abc",
+        savedAt: Date.now(),
+      }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: "vault-1",
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "Body",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: "vault-1", results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    renderNote("vault-1", { vaults: [], demoMode: true });
+
+    await waitFor(() => {
+      expect(screen.getByText("Body")).toBeInTheDocument();
+    });
     expect(screen.queryByText(/find them in Settings/)).not.toBeInTheDocument();
   });
 

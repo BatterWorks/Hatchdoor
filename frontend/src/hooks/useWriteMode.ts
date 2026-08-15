@@ -12,6 +12,12 @@ import type { VaultId } from "../types";
  * visibility no longer comes from here (`write-capabilities` dropped
  * `settings_enabled` in #101); the shell derives it from Vault discovery's
  * `demo_mode` instead.
+ *
+ * In demo mode `getWriteCapabilities` itself already fails closed: the
+ * server wraps `GET .../write-capabilities` in the same `demo_guard` every
+ * mutation route carries, so the request 403s with `demo_read_only` before
+ * this hook's `enabled` field is ever read, and the catch below already
+ * resolves `writeEnabled` to `false`. No demo-mode branch belongs here.
  */
 export function useWriteMode(vaultId: VaultId | undefined) {
   const [writeEnabled, setWriteEnabled] = useState(false);

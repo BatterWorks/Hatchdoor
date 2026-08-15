@@ -126,6 +126,38 @@ describe("deriveVaultSlot", () => {
       word: "conflict",
     });
   });
+
+  it("clamps every condition to the amber tier in demo mode (#152)", () => {
+    for (const vault of [
+      unavailableVault("Alpha"),
+      conflictVault("Beta"),
+      syncStoppedVault("Gamma"),
+    ]) {
+      expect(deriveVaultSlot(vault, undefined, true)).toMatchObject({
+        tier: "warn",
+      });
+    }
+    // Already amber outside demo mode — stays amber, unaffected.
+    expect(
+      deriveVaultSlot(staleVault("Delta"), undefined, true),
+    ).toMatchObject({ tier: "warn" });
+  });
+
+  it("shows the instruction-free fallback sentence, not the Vault's own runtime message, in demo mode (#152)", () => {
+    const vault: VaultSummary = {
+      ...unavailableVault("Alpha"),
+      activation_error: {
+        code: "vault_unavailable",
+        message: "Run `hatchdoor vault repair` on the operator console.",
+        retryable: true,
+      },
+    };
+    const result = deriveVaultSlot(vault, undefined, true);
+    expect(result).toMatchObject({
+      tier: "warn",
+      sentence: "This Vault should be answering and is not.",
+    });
+  });
 });
 
 describe("VaultSlot", () => {
@@ -175,6 +207,20 @@ describe("VaultSlot", () => {
       "Local edits in this Vault halted Git integration.",
     );
   });
+
+  it("renders a red-tier condition in the amber tier in demo mode, never bordered-ground red (#152)", () => {
+    render(
+      <VaultSlot
+        vault={conflictVault("Alpha")}
+        noteCount={undefined}
+        demoMode
+      />,
+    );
+
+    const slot = screen.getByText("conflict");
+    expect(slot).toHaveClass("vault-tier-warn");
+    expect(slot).not.toHaveClass("vault-tier-error");
+  });
 });
 
 describe("deriveVaultAggregate", () => {
@@ -215,6 +261,18 @@ describe("deriveVaultAggregate", () => {
       participating: 1,
       total: 3,
       tier: "error",
+    });
+  });
+
+  it("never reports the error tier in demo mode, even with an unavailable Vault present (#152)", () => {
+    const unavailable = unavailableVault("Gamma");
+    expect(
+      deriveVaultAggregate([alpha, unavailable], {}, true),
+    ).toEqual({
+      kind: "shortfall",
+      participating: 1,
+      total: 2,
+      tier: "warn",
     });
   });
 });
@@ -284,5 +342,19 @@ describe("VaultAggregateSlot", () => {
     const shortfall = screen.getByText("1 of 2");
     expect(shortfall).toHaveClass("vault-slot-shortfall");
     expect(shortfall).toHaveClass("vault-tier-error");
+  });
+
+  it("clamps the shortfall reading to amber in demo mode (#152)", () => {
+    render(
+      <VaultAggregateSlot
+        vaults={[healthyVault("Alpha"), unavailableVault("Beta")]}
+        counts={{}}
+        demoMode
+      />,
+    );
+
+    const shortfall = screen.getByText("1 of 2");
+    expect(shortfall).toHaveClass("vault-tier-warn");
+    expect(shortfall).not.toHaveClass("vault-tier-error");
   });
 });

@@ -109,6 +109,8 @@ export function NotePage({
   writeEnabled,
   editRequestId,
   onWriteNotice,
+  onDemoRefusal,
+  demoMode = false,
   noteCandidates = [],
   vaults,
 }: {
@@ -121,6 +123,18 @@ export function NotePage({
   writeEnabled: boolean;
   editRequestId: number;
   onWriteNotice?: (message: string | null) => void;
+  /** A demo_read_only refusal on save takes over entirely (#152): the app's
+   * own sentence lands in the notice strip instead of the inline editor
+   * error, and editing closes rather than inviting a retry. Returns whether
+   * the error was a demo refusal. */
+  onDemoRefusal?: (error: unknown) => boolean;
+  /** #152: clamps the write-block escalation's sentence to the
+   * instruction-free fallback (the banner itself still renders — an honest
+   * signal that survives read-only-ness, same as every other Vault
+   * condition — but never repeats the Vault's own operator-facing
+   * diagnostic to a demo visitor), and suppresses the held-drafts banner
+   * entirely, since it names and links to the withheld Settings surface. */
+  demoMode?: boolean;
   noteCandidates?: ExplorerNote[];
   vaults: VaultSummary[];
 }) {
@@ -147,7 +161,7 @@ export function NotePage({
     if (!activeVault) {
       return null;
     }
-    const slot = deriveVaultSlot(activeVault, undefined);
+    const slot = deriveVaultSlot(activeVault, undefined, demoMode);
     if (
       slot.kind === "condition" &&
       (slot.word === "sync stopped" || slot.word === "conflict")
@@ -165,6 +179,12 @@ export function NotePage({
   const [editBaseHash, setEditBaseHash] = useState("");
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const [draftStale, setDraftStale] = useState(false);
+  // True once a block-editor autosave hits demo_read_only (#152): the app's
+  // notice-strip sentence already covers it, so the generic autosave-error
+  // banner below stays suppressed for the rest of this note session — the
+  // same permanent-for-this-session lifetime `useNoteAutosave` itself gives
+  // its own stopped state once a save fails.
+  const [autosaveDemoRefusal, setAutosaveDemoRefusal] = useState(false);
   const [conflict, setConflict] = useState(false);
   const [conflictNote, setConflictNote] = useState<Note | null>(null);
   const [noteChangedOnDisk, setNoteChangedOnDisk] = useState(false);
@@ -540,8 +560,20 @@ export function NotePage({
     // edit (#141). Editing itself stays on: escalation blocks the save, not
     // the attempt.
     enabled: inlineEditingEnabled && !writeBlockReason,
-    save: async (nextContent, expectedHash) =>
-      updateNote(vaultId, slug, nextContent, expectedHash),
+    save: async (nextContent, expectedHash) => {
+      try {
+        return await updateNote(vaultId, slug, nextContent, expectedHash);
+      } catch (error) {
+        // Same defense-in-depth backstop as every other write path (#152):
+        // the hook's own catch still stops autosave for this session either
+        // way, but the notice shown for it must be the app's one sentence,
+        // not the generic "could not reach the vault" banner below.
+        if (onDemoRefusal?.(error)) {
+          setAutosaveDemoRefusal(true);
+        }
+        throw error;
+      }
+    },
     onSaved: (result) => {
       setNote((prev) =>
         prev && result.content_hash
@@ -692,6 +724,9 @@ export function NotePage({
         insertEmbedAt(latestContentRef.current, line, result.embedPath),
       );
     } catch (uploadError) {
+      if (onDemoRefusal?.(uploadError)) {
+        return;
+      }
       onWriteNotice?.(
         uploadError instanceof Error ? uploadError.message : "Upload failed.",
       );
@@ -891,7 +926,10 @@ export function NotePage({
       await loadNote(false);
       await loadNoteLinks();
     } catch (saveError) {
-      if (saveError instanceof Error && saveError.name === "ConflictError") {
+      if (onDemoRefusal?.(saveError)) {
+        setIsEditing(false);
+        setInlineDirty(false);
+      } else if (saveError instanceof Error && saveError.name === "ConflictError") {
         setConflict(true);
         try {
           const res = await apiFetch(notePath);
@@ -998,7 +1036,8 @@ export function NotePage({
               Edits aren&rsquo;t saving. {writeBlockReason}
             </div>
           </div>
-        ) : autosave.status === "conflict" || autosave.status === "error" ? (
+        ) : autosave.status === "conflict" ||
+          (autosave.status === "error" && !autosaveDemoRefusal) ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               {autosave.status === "conflict"
@@ -1061,7 +1100,7 @@ export function NotePage({
         />
         <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
         <NoteTocMobile headings={tocHeadings} />
-        {heldDraftsPresent && !heldDraftsBannerDismissed ? (
+        {heldDraftsPresent && !heldDraftsBannerDismissed && !demoMode ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
               <span>
@@ -1106,6 +1145,7 @@ export function NotePage({
             onReload={handleReloadLatest}
             onCancel={handleCancelEditing}
             onUploadAttachment={handleUploadAttachment}
+            onDemoRefusal={onDemoRefusal}
             renderPreview={(value) => (
               <NotePreview
                 vaultId={vaultId}

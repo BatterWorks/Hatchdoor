@@ -1167,4 +1167,106 @@ describe("touch editing hint", () => {
       expect(latest).toContain("Original edited");
     });
   });
+
+  it("shows the app's own notice, not the generic autosave-error banner, when a block-editor autosave hits demo_read_only (#152)", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/write-capabilities")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            enabled: true,
+            warnings: [],
+          });
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
+        }
+        if (url.endsWith("/notes/home") && method === "PUT") {
+          return jsonResponse(
+            {
+              code: "demo_read_only",
+              message:
+                "This is a public read-only demo instance; mutations and Vault-control operations are disabled.",
+              retryable: false,
+            },
+            403,
+          );
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home\nOriginal",
+              content_hash: "hash-1",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole("button", { name: "Edit" });
+    const block = screen.getByText("Original");
+    fireEvent.click(block);
+    const input = await screen.findByRole("textbox");
+    const view = EditorView.findFromDOM(input as HTMLElement)!;
+    act(() => {
+      view.dispatch({
+        changes: {
+          from: 0,
+          to: view.state.doc.length,
+          insert: "Original edited",
+        },
+      });
+    });
+    await act(async () => {
+      fireEvent.blur(input);
+    });
+
+    await screen.findByText(
+      "This is a public read-only demo, so that change was not saved.",
+    );
+    expect(
+      screen.queryByText("Edits aren't saving. Hatchdoor could not reach the vault."),
+    ).not.toBeInTheDocument();
+  });
 });
