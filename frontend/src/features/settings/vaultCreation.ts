@@ -64,11 +64,16 @@ export type CreateVaultResult =
 /** `POST /api/v1/vaults` — the existing frozen contract (issue #101),
  * unmodified. `credentials` is omitted entirely rather than sent empty, so a
  * Vault created with no sign-in has `credential_configured: false` rather
- * than a stored blank token. */
+ * than a stored blank token. `exclude_patterns` is likewise omitted when
+ * empty, relying on the server's own empty default (issue #157), so the
+ * first admitted Index turn already observes any patterns entered here
+ * instead of waiting on a later edit-flow `PATCH` to replace the
+ * definition. */
 export async function createVault(params: {
   expectedRegistryRevision: number;
   name: string;
   source: VaultSource;
+  excludePatterns: string[];
   credentials?: { token: string };
 }): Promise<CreateVaultResult> {
   const body: Record<string, unknown> = {
@@ -76,6 +81,8 @@ export async function createVault(params: {
     name: params.name,
     source: params.source,
   };
+  if (params.excludePatterns.length > 0)
+    body.exclude_patterns = params.excludePatterns;
   if (params.credentials) body.https_credentials = params.credentials;
   const { ok, payload } = await requestJson("/api/v1/vaults", {
     method: "POST",

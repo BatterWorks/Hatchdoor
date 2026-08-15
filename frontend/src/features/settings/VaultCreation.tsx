@@ -10,6 +10,7 @@ import {
   isRemoteBacked,
   MAX_POLL_MINUTES,
   MIN_POLL_MINUTES,
+  parseExcludePatterns,
   withIdentityFields,
 } from "./vaultGitBehavior";
 import type { CreateVaultKind } from "./vaultCreation";
@@ -42,6 +43,7 @@ export function VaultCreationDialog({
   onCreated: (vault: VaultSummary) => void;
 }) {
   const [name, setName] = useState("");
+  const [excludeDraft, setExcludeDraft] = useState("");
   const [kind, setKind] = useState<CreateVaultKind>("own");
   const [pathDraft, setPathDraft] = useState("");
   const [behavior, setBehavior] = useState<GitBehavior>(
@@ -140,6 +142,7 @@ export function VaultCreationDialog({
       expectedRegistryRevision: revision,
       name: trimmedName,
       source: finalSource,
+      excludePatterns: parseExcludePatterns(excludeDraft),
       credentials,
     });
     submittingRef.current = false;
@@ -174,6 +177,23 @@ export function VaultCreationDialog({
             aria-label="Vault name"
             value={name}
             onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+
+        <label className="settings-row">
+          <span>
+            <span className="settings-row-label">
+              Ignore these files and folders
+            </span>
+            <span className="settings-row-help">
+              Comma-separated patterns left out of this Vault’s search.
+            </span>
+          </span>
+          <input
+            className="settings-input"
+            aria-label="Ignore these files and folders"
+            value={excludeDraft}
+            onChange={(event) => setExcludeDraft(event.target.value)}
           />
         </label>
 
