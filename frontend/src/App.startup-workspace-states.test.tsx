@@ -178,7 +178,7 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     ).toBeVisible();
   });
 
-  it("renders no Add a Vault action in the zero-Vault demo state", async () => {
+  it("renders no Add a Vault action in the zero-Vault demo state, with its own sentence in its place (#152)", async () => {
     mockDiscovery({
       registry_revision: 0,
       collection_revision: 0,
@@ -188,6 +188,12 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     renderApp();
 
     expect(await screen.findByText("No Vaults Yet")).toBeVisible();
+    expect(
+      screen.getByText("This demo has no Vaults loaded."),
+    ).toBeVisible();
+    expect(
+      screen.queryByText("Add a Vault to start browsing and searching your notes."),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Add a Vault" }),
     ).not.toBeInTheDocument();

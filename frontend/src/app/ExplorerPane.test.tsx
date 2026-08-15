@@ -483,6 +483,22 @@ describe("ExplorerPane Scope zone", () => {
     );
   });
 
+  it("clamps a Vault row's condition to the amber tier in demo mode (#152)", () => {
+    renderPane({
+      vaults: [
+        THREE_VAULTS[0],
+        { ...THREE_VAULTS[1], activation: "unavailable" as const },
+        THREE_VAULTS[2],
+      ],
+      demoMode: true,
+    });
+
+    const row = scopeZone().getByRole("radio", { name: /^Beta/ });
+    const slot = within(row).getByText("unavailable");
+    expect(slot).toHaveClass("vault-tier-warn");
+    expect(slot).not.toHaveClass("vault-tier-error");
+  });
+
   it("gives the collapsed head the worst ink present and the same aggregate as the All Vaults row", () => {
     renderPane({
       vaults: [
@@ -498,6 +514,23 @@ describe("ExplorerPane Scope zone", () => {
       "vault-tier-error",
     );
     expect(within(head).getByText("1 of 3")).toBeInTheDocument();
+  });
+
+  it("clamps the collapsed head's aggregate to the amber tier in demo mode (#152)", () => {
+    renderPane({
+      vaults: [
+        THREE_VAULTS[0],
+        { ...THREE_VAULTS[1], activation: "unavailable" as const },
+        THREE_VAULTS[2],
+      ],
+      scopeZoneCollapsed: true,
+      demoMode: true,
+    });
+
+    const head = screen.getByRole("button", { name: /Scope/ });
+    const current = within(head).getByText("All Vaults");
+    expect(current).toHaveClass("vault-tier-warn");
+    expect(current).not.toHaveClass("vault-tier-error");
   });
 
   it("carries a `V` keycap after the label, hidden from the accessibility tree", () => {

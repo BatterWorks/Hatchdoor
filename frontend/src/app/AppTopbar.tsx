@@ -72,6 +72,8 @@ type TopbarProps = {
   onCloseScopeSheet: () => void;
   scopeFocusRequestId: number;
   onRestoreScopeFocus: () => void;
+  /** Clamps every condition slot to the amber tier (#152). */
+  demoMode?: boolean;
 };
 
 export function AppTopbar({
@@ -106,6 +108,7 @@ export function AppTopbar({
   onCloseScopeSheet,
   scopeFocusRequestId,
   onRestoreScopeFocus,
+  demoMode = false,
 }: TopbarProps) {
   const actionsMenuRef = useRef<HTMLDivElement>(null);
   const scopeHostRef = useRef<HTMLDivElement>(null);
@@ -144,11 +147,16 @@ export function AppTopbar({
       : vaults.find((vault) => vault.vault_id === scope);
   const scopeSlot =
     scope === "all" ? (
-      <VaultAggregateSlot vaults={vaults} counts={vaultNoteCounts} />
+      <VaultAggregateSlot
+        vaults={vaults}
+        counts={vaultNoteCounts}
+        demoMode={demoMode}
+      />
     ) : narrowedScopeVault ? (
       <VaultSlot
         vault={narrowedScopeVault}
         noteCount={vaultNoteCounts[narrowedScopeVault.vault_id]}
+        demoMode={demoMode}
       />
     ) : null;
   // The slot above always names the browsing scope, never the open note's
@@ -568,6 +576,7 @@ export function AppTopbar({
                   <VaultAggregateSlot
                     vaults={vaults}
                     counts={vaultNoteCounts}
+                    demoMode={demoMode}
                   />
                 </button>
               </li>
@@ -597,6 +606,7 @@ export function AppTopbar({
                     <VaultSlot
                       vault={vault}
                       noteCount={vaultNoteCounts[vault.vault_id]}
+                      demoMode={demoMode}
                     />
                   </button>
                 </li>

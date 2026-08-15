@@ -20,6 +20,12 @@ interface UseNoteActionsParams {
   vaults: VaultSummary[];
   refreshVault: () => Promise<void>;
   setWriteNotice: (notice: string | null) => void;
+  /** A demo_read_only refusal takes over entirely (#152): the dialog closes
+   * with no retry and the shell's own sentence lands in the notice strip
+   * instead of this dialog's inline error. Returns whether the error was a
+   * demo refusal (and so already handled) so each catch block can fall back
+   * to its ordinary inline-error path otherwise. */
+  onDemoRefusal?: (error: unknown) => boolean;
 }
 
 /**
@@ -35,6 +41,7 @@ export function useNoteActions({
   vaults,
   refreshVault,
   setWriteNotice,
+  onDemoRefusal,
 }: UseNoteActionsParams) {
   const navigate = useNavigate();
   const [noteActionDialog, setNoteActionDialog] =
@@ -68,6 +75,20 @@ export function useNoteActions({
     setNoteActionInitialFolder("");
     setCreateTargetVaultId(null);
   }, []);
+
+  // Shared by every write handler's catch block below: a demo_read_only
+  // refusal closes the dialog with no retry and defers to the shell's own
+  // notice-strip sentence, rather than this dialog's inline error (#152).
+  const handleDemoRefusal = useCallback(
+    (error: unknown): boolean => {
+      if (!onDemoRefusal?.(error)) {
+        return false;
+      }
+      setNoteActionDialog(null);
+      return true;
+    },
+    [onDemoRefusal],
+  );
 
   const requireActiveNoteHash = useCallback(() => {
     if (!activeNote?.slug || !activeNote.contentHash) {
@@ -107,12 +128,23 @@ export function useNoteActions({
           );
         }
       } catch (error) {
+        if (handleDemoRefusal(error)) {
+          return;
+        }
         setNoteActionError(
           error instanceof Error ? error.message : "Create failed",
         );
       }
     },
-    [activeNote, createTargetVaultId, navigate, refreshVault, setWriteNotice, vaults],
+    [
+      activeNote,
+      createTargetVaultId,
+      handleDemoRefusal,
+      navigate,
+      refreshVault,
+      setWriteNotice,
+      vaults,
+    ],
   );
 
   const handleRenameNote = useCallback(
@@ -135,12 +167,15 @@ export function useNoteActions({
           );
         }
       } catch (error) {
+        if (handleDemoRefusal(error)) {
+          return;
+        }
         setNoteActionError(
           error instanceof Error ? error.message : "Rename failed",
         );
       }
     },
-    [navigate, refreshVault, requireActiveNoteHash, setWriteNotice],
+    [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice],
   );
 
   const handleMoveNote = useCallback(
@@ -171,12 +206,15 @@ export function useNoteActions({
           );
         }
       } catch (error) {
+        if (handleDemoRefusal(error)) {
+          return;
+        }
         setNoteActionError(
           error instanceof Error ? error.message : "Move failed",
         );
       }
     },
-    [navigate, refreshVault, requireActiveNoteHash, setWriteNotice],
+    [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice],
   );
 
   const handleArchiveNote = useCallback(async () => {
@@ -193,11 +231,14 @@ export function useNoteActions({
         );
       }
     } catch (error) {
+      if (handleDemoRefusal(error)) {
+        return;
+      }
       setNoteActionError(
         error instanceof Error ? error.message : "Archive failed",
       );
     }
-  }, [navigate, refreshVault, requireActiveNoteHash, setWriteNotice]);
+  }, [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice]);
 
   const handleDeleteNote = useCallback(async () => {
     setNoteActionError(null);
@@ -209,11 +250,14 @@ export function useNoteActions({
       await refreshVault();
       navigate("/");
     } catch (error) {
+      if (handleDemoRefusal(error)) {
+        return;
+      }
       setNoteActionError(
         error instanceof Error ? error.message : "Delete failed",
       );
     }
-  }, [navigate, refreshVault, requireActiveNoteHash, setWriteNotice]);
+  }, [handleDemoRefusal, navigate, refreshVault, requireActiveNoteHash, setWriteNotice]);
 
   return {
     noteActionDialog,

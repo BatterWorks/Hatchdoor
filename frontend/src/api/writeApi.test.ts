@@ -7,6 +7,7 @@ import {
   deleteNote,
   describeWriteOutcome,
   getWriteCapabilities,
+  isDemoReadOnlyError,
   moveNote,
   renameNote,
   MUTATION_FETCH_TIMEOUT_MS,
@@ -247,6 +248,30 @@ describe("writeApi", () => {
       name: "WriteApiError",
       message: "boom",
     });
+  });
+
+  it("carries the demo_read_only code on the thrown error so callers can detect it (#152)", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "demo_read_only",
+          message:
+            "This is a public read-only demo instance; mutations and Vault-control operations are disabled.",
+          retryable: false,
+        },
+        403,
+      ),
+    );
+
+    let caught: unknown;
+    try {
+      await createNote(VAULT_ID, "Home", "# Home");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isDemoReadOnlyError(caught)).toBe(true);
+    expect(isDemoReadOnlyError(new Error("unrelated"))).toBe(false);
   });
 
   it("explains common non-JSON infrastructure errors without relying on statusText", async () => {

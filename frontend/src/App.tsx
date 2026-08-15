@@ -6,7 +6,13 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 
 import "./App.css";
 import "./noteEnhancements.css";
@@ -54,6 +60,7 @@ import {
 import { describeScopeSlot, scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts, saveCreateDraft } from "./lib/writeDrafts";
+import { isDemoReadOnlyError } from "./api/writeApi";
 import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
 import {
@@ -135,7 +142,33 @@ function VaultWorkspace({
     writeNotice,
     setWriteNotice,
   } = useWriteMode(primaryVaultId);
-  const settingsEnabled = !demoMode;
+  // `demoMode` defaults to `false` until Vault discovery's fetch resolves
+  // (#152) — the same gap the "/settings" route itself guards below.
+  // Without `!vaultsLoading` here, the sidebar footer's Settings link would
+  // render and stay clickable for that entire fetch on a demo instance.
+  const settingsEnabled = !vaultsLoading && !demoMode;
+  // A demo_read_only refusal is the one write error rendered in the app's
+  // own words rather than the server's (#152). `writeEnabled` already stays
+  // false in demo mode — `write-capabilities` itself 403s under the same
+  // `demo_guard` every mutation route carries — so every write affordance
+  // this flag gates (New note, Edit, attachment drop) is already absent.
+  // This handler is the defense-in-depth backstop for any write attempt
+  // that reaches the server anyway: one sentence in the shared notice
+  // strip, no retry, and a fresh discovery fetch — "the app re-asks the
+  // server what it is permitted to do."
+  const handleDemoRefusal = useCallback(
+    (error: unknown): boolean => {
+      if (!isDemoReadOnlyError(error)) {
+        return false;
+      }
+      setWriteNotice(
+        "This is a public read-only demo, so that change was not saved.",
+      );
+      void loadVaults();
+      return true;
+    },
+    [loadVaults, setWriteNotice],
+  );
   const {
     searchOpen,
     setSearchOpen,
@@ -165,7 +198,13 @@ function VaultWorkspace({
     handleMoveNote,
     handleArchiveNote,
     handleDeleteNote,
-  } = useNoteActions({ activeNote, vaults, refreshVault, setWriteNotice });
+  } = useNoteActions({
+    activeNote,
+    vaults,
+    refreshVault,
+    setWriteNotice,
+    onDemoRefusal: handleDemoRefusal,
+  });
 
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
@@ -460,6 +499,7 @@ function VaultWorkspace({
     scope,
     vaults,
     vaultNoteCounts,
+    demoMode,
   );
 
   useEffect(() => {
@@ -641,6 +681,7 @@ function VaultWorkspace({
         onCloseScopeSheet={() => setScopeSheetOpen(false)}
         scopeFocusRequestId={scopeFocusRequestId}
         onRestoreScopeFocus={restoreScopeFocusOrigin}
+        demoMode={demoMode}
       />
 
       <div className="visually-hidden" aria-live="polite" aria-atomic="true">
@@ -717,6 +758,7 @@ function VaultWorkspace({
               String(current),
             );
           }}
+          demoMode={demoMode}
         />
 
         {!isMobile ? (
@@ -792,19 +834,40 @@ function VaultWorkspace({
             <Route
               path="/settings"
               element={
-                <SettingsPage
-                  vaults={vaults}
-                  onVaultDiscoveryRefresh={loadVaults}
-                  onOpenCreateDraft={(targetVaultId, folder, name, content) => {
-                    saveCreateDraft({
+                // `demoMode` defaults to `false` until Vault discovery's
+                // fetch resolves — same transient gap the "/" route below
+                // already guards against zero-Vault vs. broken-registry.
+                // Rendering `null` through that gap keeps a demo visitor who
+                // opens this route directly (bookmark, shared link, reload)
+                // from ever seeing SettingsPage begin its own mount, even
+                // for one frame (#152).
+                vaultsLoading ? null : demoMode ? (
+                  // Settings is an operator surface, absent rather than
+                  // disabled in demo mode (#152) — same posture the backend
+                  // already takes by not registering these routes at all.
+                  // Silent, like every other withheld operator affordance:
+                  // no explanation, just back to the ordinary workspace.
+                  <Navigate to="/" replace />
+                ) : (
+                  <SettingsPage
+                    vaults={vaults}
+                    onVaultDiscoveryRefresh={loadVaults}
+                    onOpenCreateDraft={(
+                      targetVaultId,
                       folder,
                       name,
                       content,
-                      savedAt: Date.now(),
-                    });
-                    openCreateDialog(folder, targetVaultId);
-                  }}
-                />
+                    ) => {
+                      saveCreateDraft({
+                        folder,
+                        name,
+                        content,
+                        savedAt: Date.now(),
+                      });
+                      openCreateDialog(folder, targetVaultId);
+                    }}
+                  />
+                )
               }
             />
             <Route
@@ -818,6 +881,8 @@ function VaultWorkspace({
                   writeEnabled={writeEnabled}
                   editRequestId={editRequestId}
                   onWriteNotice={setWriteNotice}
+                  onDemoRefusal={handleDemoRefusal}
+                  demoMode={demoMode}
                   noteCandidates={noteCandidates}
                   vaults={vaults}
                 />
@@ -1019,7 +1084,11 @@ function ZeroVaultState({
   return (
     <StateBlock
       title="No Vaults Yet"
-      description="Add a Vault to start browsing and searching your notes."
+      description={
+        demoMode
+          ? "This demo has no Vaults loaded."
+          : "Add a Vault to start browsing and searching your notes."
+      }
       actionLabel={demoMode ? undefined : "Add a Vault"}
       onAction={demoMode ? undefined : onAddVault}
     />

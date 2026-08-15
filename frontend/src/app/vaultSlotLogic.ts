@@ -29,6 +29,25 @@ export function scopeName(scope: VaultScope, vaults: VaultSummary[]): string {
   return vaults.find((vault) => vault.vault_id === scope)?.name ?? "All Vaults";
 }
 
+/** In demo mode a condition's sentence is always this fallback, never the
+ * Vault's own runtime message — nobody reading it is in a position to act on
+ * an operator-facing diagnostic, so the generic, instruction-free sentence is
+ * the only one shown (#152). */
+function slotSentence(
+  demoMode: boolean,
+  serverMessage: string | undefined,
+  fallback: string,
+): string {
+  return demoMode ? fallback : (serverMessage ?? fallback);
+}
+
+/** In demo mode nobody is waiting on the read-only visitor, so the red tier
+ * — reserved for something the app is not already handling — never appears;
+ * everything clamps to amber (#152). */
+function slotTier(demoMode: boolean, tier: "warn" | "error"): "warn" | "error" {
+  return demoMode ? "warn" : tier;
+}
+
 /**
  * Each Vault's single trailing slot: its note count when healthy, a
  * shimmering placeholder while indexing, or one condition word otherwise —
@@ -43,19 +62,26 @@ export function scopeName(scope: VaultScope, vaults: VaultSummary[]): string {
  * regardless of whether it has indexed yet). Checking `activation` first is
  * what tells "first index" apart from "lost it" without reopening the
  * frozen contract, exactly as #116's resolution describes.
+ *
+ * `demoMode` clamps every condition to the amber tier with an
+ * instruction-free sentence (#152) — nobody browsing a public demo is the
+ * one who would act on it.
  */
 export function deriveVaultSlot(
   vault: VaultSummary,
   noteCount: number | undefined,
+  demoMode = false,
 ): VaultSlotState {
   if (vault.activation === "unavailable") {
     return {
       kind: "condition",
       word: "unavailable",
-      tier: "error",
-      sentence:
-        vault.activation_error?.message ??
+      tier: slotTier(demoMode, "error"),
+      sentence: slotSentence(
+        demoMode,
+        vault.activation_error?.message,
         "This Vault should be answering and is not.",
+      ),
     };
   }
   if (vault.git === "unavailable") {
@@ -63,29 +89,35 @@ export function deriveVaultSlot(
       return {
         kind: "condition",
         word: "conflict",
-        tier: "error",
-        sentence:
-          vault.git_error.message ??
+        tier: slotTier(demoMode, "error"),
+        sentence: slotSentence(
+          demoMode,
+          vault.git_error.message,
           "A content conflict is blocking Git sync for this Vault.",
+        ),
       };
     }
     if (vault.git_error?.code === "dirty_working_copy") {
       return {
         kind: "condition",
         word: "sync stopped",
-        tier: "error",
-        sentence:
-          vault.git_error.message ??
+        tier: slotTier(demoMode, "error"),
+        sentence: slotSentence(
+          demoMode,
+          vault.git_error.message,
           "Local edits in this Vault halted Git sync.",
+        ),
       };
     }
     return {
       kind: "condition",
       word: "sync failed",
       tier: "warn",
-      sentence:
-        vault.git_error?.message ??
+      sentence: slotSentence(
+        demoMode,
+        vault.git_error?.message,
         "The last Git sync for this Vault did not succeed.",
+      ),
     };
   }
   if (vault.search === "stale") {
@@ -93,9 +125,11 @@ export function deriveVaultSlot(
       kind: "condition",
       word: "stale",
       tier: "warn",
-      sentence:
-        vault.search_error?.message ??
+      sentence: slotSentence(
+        demoMode,
+        vault.search_error?.message,
         "The last index build for this Vault failed.",
+      ),
     };
   }
   if (vault.search === "indexing" || vault.search === "unavailable") {
@@ -114,9 +148,10 @@ export function describeScopeSlot(
   scope: VaultScope,
   vaults: VaultSummary[],
   counts: Record<VaultId, number | undefined>,
+  demoMode = false,
 ): string | null {
   if (scope === "all") {
-    const aggregate = deriveVaultAggregate(vaults, counts);
+    const aggregate = deriveVaultAggregate(vaults, counts, demoMode);
     if (aggregate.kind === "count") {
       return `${aggregate.count} Vault${aggregate.count === 1 ? "" : "s"}`;
     }
@@ -126,7 +161,7 @@ export function describeScopeSlot(
   if (!vault) {
     return null;
   }
-  const slot = deriveVaultSlot(vault, counts[vault.vault_id]);
+  const slot = deriveVaultSlot(vault, counts[vault.vault_id], demoMode);
   if (slot.kind === "indexing") {
     return null;
   }
@@ -146,11 +181,12 @@ export function describeScopeSlot(
 export function deriveVaultAggregate(
   vaults: VaultSummary[],
   counts: Record<VaultId, number | undefined>,
+  demoMode = false,
 ): VaultAggregate {
   let worstTier: "warn" | "error" | null = null;
   let participating = 0;
   for (const vault of vaults) {
-    const slot = deriveVaultSlot(vault, counts[vault.vault_id]);
+    const slot = deriveVaultSlot(vault, counts[vault.vault_id], demoMode);
     if (slot.kind === "condition") {
       worstTier = slot.tier === "error" ? "error" : (worstTier ?? "warn");
     } else {

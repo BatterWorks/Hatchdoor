@@ -47,16 +47,36 @@ export function describeWriteOutcome(outcome: WriteOutcome): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-async function parseError(res: Response): Promise<string> {
+async function parseError(
+  res: Response,
+): Promise<{ message: string; code?: string }> {
   try {
-    const json = (await res.json()) as { message?: unknown };
-    if (typeof json.message === "string" && json.message.trim().length > 0) {
-      return json.message;
-    }
+    const json = (await res.json()) as { message?: unknown; code?: unknown };
+    const message =
+      typeof json.message === "string" && json.message.trim().length > 0
+        ? json.message
+        : `${res.status} ${statusFallbackText(res)}`.trim();
+    return {
+      message,
+      code: typeof json.code === "string" ? json.code : undefined,
+    };
   } catch {
-    // Fall back to status text below.
+    return { message: `${res.status} ${statusFallbackText(res)}`.trim() };
   }
-  return `${res.status} ${statusFallbackText(res)}`.trim();
+}
+
+/** The stable code the server sends for every mutation and Vault-control
+ * refusal in demo mode (`src/handlers/vaults.rs`'s `demo_read_only_response`). */
+export const DEMO_READ_ONLY_CODE = "demo_read_only";
+
+/** True for any write-API error carrying the demo-read-only code — the one
+ * refusal the shell renders in its own words rather than the server's
+ * (#152). */
+export function isDemoReadOnlyError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as Error & { code?: string }).code === DEMO_READ_ONLY_CODE
+  );
 }
 
 function statusFallbackText(res: Response): string {
@@ -89,9 +109,14 @@ function statusFallbackText(res: Response): string {
   }
 }
 
-function makeWriteError(message: string, status: number): Error {
-  const error = new Error(message);
+function makeWriteError(
+  message: string,
+  status: number,
+  code?: string,
+): Error {
+  const error = new Error(message) as Error & { code?: string };
   error.name = status === 409 ? "ConflictError" : "WriteApiError";
+  error.code = code;
   return error;
 }
 
@@ -105,7 +130,8 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
     },
   });
   if (!res.ok) {
-    throw makeWriteError(await parseError(res), res.status);
+    const { message, code } = await parseError(res);
+    throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as T;
 }
@@ -125,7 +151,8 @@ export async function getWriteCapabilities(
     `/api/v1/vaults/${encodeURIComponent(vaultId)}/write-capabilities`,
   );
   if (!res.ok) {
-    throw makeWriteError(await parseError(res), res.status);
+    const { message, code } = await parseError(res);
+    throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as WriteCapabilities;
 }
@@ -158,7 +185,8 @@ export async function uploadAttachment(
     },
   );
   if (!res.ok) {
-    throw makeWriteError(await parseError(res), res.status);
+    const { message, code } = await parseError(res);
+    throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as AttachmentOutcome;
 }
