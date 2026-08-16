@@ -60,6 +60,14 @@ pub enum UpsertOutcome {
         content: String,
     },
     Unchanged,
+    /// The file could not be read as text: non-UTF-8 bytes, a permission
+    /// change, or a delete racing the scan that listed it. Reported rather
+    /// than returned as `Err` so one unreadable file cannot abort indexing
+    /// for the whole Vault — the same tradeoff the per-note embedding
+    /// failure path below already makes.
+    Unreadable {
+        reason: String,
+    },
 }
 
 const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
@@ -250,6 +258,8 @@ impl SqliteCache {
         let mut chunks_embedded: usize = 0;
         let mut chunks_reused: usize = 0;
         let mut per_note_failures: usize = 0;
+        let mut unreadable_notes: usize = 0;
+        let mut last_unreadable_reason: Option<String> = None;
         let mut notes_changed: usize = 0;
         let mut notes_unchanged: usize = 0;
         let mut metrics = IndexingMetrics::default();
@@ -288,7 +298,32 @@ impl SqliteCache {
                     }
                 }
                 UpsertOutcome::Unchanged => notes_unchanged += 1,
+                UpsertOutcome::Unreadable { reason } => {
+                    per_note_failures += 1;
+                    unreadable_notes += 1;
+                    last_unreadable_reason = Some(reason);
+                    tracing::warn!(
+                        path = %entry.relative_path,
+                        "Skipping unreadable note; the rest of the Vault still indexes"
+                    );
+                }
             }
+        }
+
+        // Tolerating individual unreadable files must not extend to a Vault
+        // that has become unreadable as a whole — an unmounted volume or a
+        // revoked permission would otherwise publish an empty index over a
+        // good one. Losing every note the scan just listed is that case, so it
+        // stays fatal and the prior snapshot is retained as stale. A Vault
+        // that legitimately holds no notes has nothing to lose and succeeds.
+        if !entries.is_empty() && unreadable_notes == entries.len() {
+            return Err(format!(
+                "every note in the Vault became unreadable during indexing ({} of {}); \
+                 the previous index is kept. Last error: {}",
+                unreadable_notes,
+                entries.len(),
+                last_unreadable_reason.unwrap_or_else(|| "unknown".to_string())
+            ));
         }
 
         let total_chunks_to_embed: usize = prepared_notes
@@ -1091,11 +1126,20 @@ fn upsert_note_if_changed(
     indexed_at: i64,
     force_layer_refresh: bool,
 ) -> Result<UpsertOutcome, String> {
-    let snapshot = file_snapshot(&entry.path)?;
+    let snapshot = match file_snapshot(&entry.path) {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return Ok(UpsertOutcome::Unreadable { reason }),
+    };
     let cached = cached_note_state(tx, &entry.relative_path)?;
 
-    let content = fs::read_to_string(&entry.path)
-        .map_err(|error| format!("failed reading note '{}': {error}", entry.path.display()))?;
+    let content = match fs::read_to_string(&entry.path) {
+        Ok(content) => content,
+        Err(error) => {
+            return Ok(UpsertOutcome::Unreadable {
+                reason: format!("failed reading note '{}': {error}", entry.path.display()),
+            });
+        }
+    };
     let hash = content_hash(&content);
 
     // When the marker set changed, the note's `layer` may differ even though its
@@ -2695,6 +2739,29 @@ mod chunk_integration_tests {
             .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
             .expect("count");
         assert_eq!(vector_count, chunk_count);
+    }
+
+    #[test]
+    fn non_utf8_note_is_skipped_without_failing_the_vault() {
+        // A single unreadable file used to abort the whole indexing turn, so a
+        // Vault holding one binary `.md` had no search index at all.
+        let dir = make_vault(&[("a.md", "# A\n\nbody A"), ("b.md", "# B\n\nbody B")]);
+        std::fs::write(dir.path().join("binary.md"), [0xff_u8, 0xfe, 0x00, 0x9c])
+            .expect("write binary note");
+
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("indexing must succeed despite the unreadable note");
+
+        let conn = cache.connection().expect("conn");
+        let note_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(note_count, 2, "the two readable notes still index");
     }
 
     #[test]

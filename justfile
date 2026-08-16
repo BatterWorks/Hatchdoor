@@ -12,6 +12,11 @@ frontend_port := "5173"
 dev_dir := ".dev"
 target_warn_gb := "20"
 
+# Dev-only Vault collection registry. The deployed default (/data/state) does
+# not exist outside the container, so local dev keeps its own alongside the
+# pid/log files. See scripts/dev-vaults.sh for the fixture profiles.
+export HATCHDOOR_VAULT_REGISTRY_PATH := justfile_directory() + "/" + dev_dir + "/state/vaults.json"
+
 # Export the resolved values so recipes behave consistently even when the
 # invoking shell does not set Cargo paths. TMPDIR stays off small tmpfs mounts.
 export CARGO_TARGET_DIR := cargo_target_dir
@@ -24,10 +29,20 @@ default:
 # Start the backend (cargo run) and frontend (vite, hot reload) in the
 # background. Always safe to re-run: kills any previous instance first, so
 # you never end up with two copies fighting over the same port.
-dev-start: _prepare-cargo _kill-stale
+dev-start profile="": _prepare-cargo _kill-stale
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p {{dev_dir}}
+
+    # An explicit profile reprovisions; otherwise reuse whatever is already
+    # there, and provision 'clean' on a first run so there is always a registry.
+    if [ -n "{{profile}}" ]; then
+        scripts/dev-vaults.sh "{{profile}}"
+    elif [ ! -f "$HATCHDOOR_VAULT_REGISTRY_PATH" ]; then
+        scripts/dev-vaults.sh clean
+    else
+        echo "vault profile: $(cat {{dev_dir}}/vaults-profile 2>/dev/null || echo unknown) (just dev-vaults <profile> to switch)"
+    fi
 
     if [ -d "$CARGO_TARGET_DIR" ]; then
         size_kb=$(du -sk "$CARGO_TARGET_DIR" 2>/dev/null | cut -f1)
@@ -52,6 +67,18 @@ dev-start: _prepare-cargo _kill-stale
     echo "backend log:  {{dev_dir}}/backend.log   (http://127.0.0.1:{{backend_port}}, compiling takes a bit)"
     echo "frontend log: {{dev_dir}}/frontend.log  (http://0.0.0.0:{{frontend_port}})"
     echo "'just dev-status' to check, 'just dev-stop' to stop"
+
+# Rebuild the dev Vault fixtures under .dev/vaults and rewrite the registry.
+# Profiles: clean (one healthy Vault), messy (healthy + pathological content +
+# every degraded state), broken (degraded states only). Destroys and recreates
+# the fixture tree, so never point this at a Vault you care about.
+dev-vaults profile="clean":
+    @scripts/dev-vaults.sh "{{profile}}"
+
+# Reprovision the profile currently in use, discarding any local edits made to
+# the fixtures while poking at them.
+dev-vaults-reset:
+    @scripts/dev-vaults.sh "$(cat {{dev_dir}}/vaults-profile 2>/dev/null || echo clean)"
 
 # Stop the tracked backend/frontend, whole process group (catches vite's
 # npm -> sh -> node child chain, not just the top PID).
