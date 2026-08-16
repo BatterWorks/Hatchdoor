@@ -309,7 +309,7 @@ function VaultAccordion({
   expandedFolders: Record<string, boolean>;
   onExpandedFoldersChange: (next: Record<string, boolean>) => void;
   writeEnabled: boolean;
-  onCreateNoteInFolder: (folderPath: string) => void;
+  onCreateNoteInFolder: (folderPath: string, vaultId: VaultId) => void;
   demoMode?: boolean;
 }) {
   const treesByVault = new Map(
@@ -358,7 +358,14 @@ function VaultAccordion({
                   )
                 }
                 writeEnabled={writeEnabled}
-                onCreateNoteInFolder={onCreateNoteInFolder}
+                // The tree knows folders, not which Vault they belong to. The
+                // Vault is bound here, where the accordion still knows whose
+                // tree this is, so a new note lands in the Vault it was
+                // started from rather than in whichever one was inferred
+                // elsewhere.
+                onCreateNoteInFolder={(folderPath) =>
+                  onCreateNoteInFolder(folderPath, vault.vault_id)
+                }
               />
             ) : null}
           </Fragment>
@@ -438,7 +445,7 @@ type ExplorerPaneProps = {
   isMobile: boolean;
   writeEnabled: boolean;
   settingsEnabled?: boolean;
-  onCreateNoteInFolder: (folderPath: string) => void;
+  onCreateNoteInFolder: (folderPath: string, vaultId?: VaultId) => void;
   locationPathname: string;
   recentNotes: RecentNote[];
   modifiedNotes: ModifiedNote[];
@@ -711,7 +718,9 @@ export function ExplorerPane({
                 expandedFolders={expandedFolders}
                 onExpandedFoldersChange={onExpandedFoldersChange}
                 writeEnabled={writeEnabled}
-                onCreateNoteInFolder={onCreateNoteInFolder}
+                onCreateNoteInFolder={(folderPath) =>
+                  onCreateNoteInFolder(folderPath, narrowedVault?.vault_id)
+                }
               />
             ) : null}
           </>

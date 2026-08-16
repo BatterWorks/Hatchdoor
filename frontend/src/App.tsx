@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useMemo,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -60,7 +61,7 @@ import {
 } from "./hooks/useVaultScope";
 import { describeScopeSlot, scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
-import { pruneNoteDrafts, saveCreateDraft } from "./lib/writeDrafts";
+import { pruneNoteDrafts } from "./lib/writeDrafts";
 import { isDemoReadOnlyError } from "./api/writeApi";
 import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
@@ -126,12 +127,22 @@ function VaultWorkspace({
     modifiedNotesPartial,
     modifiedNotesMissingVaults,
     vaultRevision,
-    folderPaths,
+    folderPathsByVault,
     noteCandidates,
     loadTree,
     loadModifiedNotes,
   } = useVaultTree(scope);
   const vaultNoteCounts = useVaultNoteCounts(vaults.length > 1, vaultRevision);
+  // Every enabled Vault, whatever the browsing scope: a note can be created in
+  // a Vault that is not currently being browsed, and the picker says so.
+  const dialogVaults = useMemo(
+    () =>
+      vaults.map((vault) => ({
+        vaultId: vault.vault_id,
+        name: vault.name,
+      })),
+    [vaults],
+  );
   const refreshVault = useCallback(async () => {
     await loadTree();
     await loadModifiedNotes();
@@ -191,10 +202,12 @@ function VaultWorkspace({
     noteActionDialog,
     noteActionError,
     noteActionInitialFolder,
+    noteActionInitialVaultId,
     openCreateDialog,
     openActionDialog,
     closeNoteActionDialog,
     handleCreateNote,
+    restoreCreateDraft,
     handleRenameNote,
     handleMoveNote,
     handleArchiveNote,
@@ -867,20 +880,18 @@ function VaultWorkspace({
                   <SettingsPage
                     vaults={vaults}
                     onVaultDiscoveryRefresh={loadVaults}
-                    onOpenCreateDraft={(
+                    onRestoreCreateDraft={(
                       targetVaultId,
                       folder,
                       name,
                       content,
-                    ) => {
-                      saveCreateDraft({
-                        folder,
-                        name,
+                    ) =>
+                      restoreCreateDraft(
+                        targetVaultId,
+                        folder ? `${folder}/${name}` : name,
                         content,
-                        savedAt: Date.now(),
-                      });
-                      openCreateDialog(folder, targetVaultId);
-                    }}
+                      )
+                    }
                   />
                 )
               }
@@ -956,11 +967,13 @@ function VaultWorkspace({
         <NoteActionsDialog
           kind={noteActionDialog}
           error={noteActionError}
-          folderPaths={folderPaths}
+          vaults={dialogVaults}
+          folderPathsByVault={folderPathsByVault}
+          initialVaultId={noteActionInitialVaultId}
           initialFolder={noteActionInitialFolder}
           onClose={closeNoteActionDialog}
-          onCreate={(relativePath, content) =>
-            void handleCreateNote(relativePath, content)
+          onCreate={(targetVaultId, relativePath) =>
+            void handleCreateNote(targetVaultId, relativePath)
           }
           onRename={(newTitle) => void handleRenameNote(newTitle)}
           onMove={(targetFolder) => void handleMoveNote(targetFolder)}

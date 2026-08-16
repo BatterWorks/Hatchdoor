@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import appCss from "./App.css?raw";
-import noteActionsSource from "./components/NoteActionsDialog.tsx?raw";
 import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
 import noteEditorSource from "./components/NoteEditor.tsx?raw";
@@ -59,7 +58,6 @@ describe("client audit launch contracts", () => {
     expect(noteEditorSource).toMatch(
       /className="note-editor-textarea"[^>]*dir="auto"/s,
     );
-    expect(noteActionsSource).toMatch(/<textarea[^>]*dir="auto"/s);
   });
 
   it("lets KaTeX display equations scroll horizontally in read view", () => {

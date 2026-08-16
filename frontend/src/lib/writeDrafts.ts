@@ -18,10 +18,14 @@ export function createDraftKey(): string {
   return "hatchdoor:draft:create";
 }
 
+/** A create dialog left half-filled. It carries no body: a note is created
+ * empty and written in place, so the only thing a reload can lose is where the
+ * note was going to go. `vaultId` is optional because a draft written before
+ * the dialog picked a Vault has none. */
 export type CreateDraft = {
+  vaultId?: string;
   folder: string;
   name: string;
-  content: string;
   savedAt: number;
 };
 
@@ -33,15 +37,14 @@ export function loadCreateDraft(): CreateDraft | null {
     if (
       typeof parsed.folder !== "string" ||
       typeof parsed.name !== "string" ||
-      typeof parsed.content !== "string" ||
       typeof parsed.savedAt !== "number"
     ) {
       return null;
     }
     return {
+      vaultId: typeof parsed.vaultId === "string" ? parsed.vaultId : undefined,
       folder: parsed.folder,
       name: parsed.name,
-      content: parsed.content,
       savedAt: parsed.savedAt,
     };
   } catch {
@@ -327,7 +330,28 @@ export function collectLegacyHeldDrafts(): HeldDraft[] {
 
     const legacyCreateDraft = loadCreateDraft();
     if (legacyCreateDraft) {
-      saveHeldDraft({ id: "create", kind: "create", ...legacyCreateDraft });
+      // A create draft written before the dialog dropped its content box may
+      // still hold a typed body. `loadCreateDraft` no longer returns one, so
+      // it is read straight off the stored entry rather than lost on the way
+      // into the held store.
+      let content = "";
+      try {
+        const raw = window.localStorage.getItem(createDraftKey());
+        const parsed = raw ? (JSON.parse(raw) as { content?: unknown }) : null;
+        if (typeof parsed?.content === "string") {
+          content = parsed.content;
+        }
+      } catch {
+        // Keep the folder and name; an unreadable body holds as empty.
+      }
+      saveHeldDraft({
+        id: "create",
+        kind: "create",
+        folder: legacyCreateDraft.folder,
+        name: legacyCreateDraft.name,
+        content,
+        savedAt: legacyCreateDraft.savedAt,
+      });
       window.localStorage.removeItem(createDraftKey());
     }
   } catch {

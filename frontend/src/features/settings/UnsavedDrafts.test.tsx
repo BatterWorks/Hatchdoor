@@ -98,7 +98,7 @@ describe("UnsavedDrafts (#151)", () => {
   it("offers a different Vault or a new note when the destination has no such note", async () => {
     const v = vault("vault-1", "Alpha");
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({}, 404));
-    const onOpenCreateDraft = vi.fn();
+    const onRestoreCreateDraft = vi.fn().mockResolvedValue(true);
     const onDiscard = vi.fn();
 
     render(
@@ -106,7 +106,7 @@ describe("UnsavedDrafts (#151)", () => {
         <UnsavedDrafts
           drafts={[noteDraft]}
           vaults={[v]}
-          onOpenCreateDraft={onOpenCreateDraft}
+          onRestoreCreateDraft={onRestoreCreateDraft}
           onDiscard={onDiscard}
         />
       </MemoryRouter>,
@@ -119,19 +119,21 @@ describe("UnsavedDrafts (#151)", () => {
       screen.getByRole("button", { name: "restore it as a new note here" }),
     );
 
-    expect(onOpenCreateDraft).toHaveBeenCalledWith(
+    expect(onRestoreCreateDraft).toHaveBeenCalledWith(
       "vault-1",
       "",
       "orphaned",
       "some unsaved text",
     );
-    expect(onDiscard).toHaveBeenCalledWith("note:orphaned");
+    await waitFor(() =>
+      expect(onDiscard).toHaveBeenCalledWith("note:orphaned"),
+    );
   });
 
   it("restores a create draft directly without checking for an existing note", async () => {
     const v = vault("vault-1", "Alpha");
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    const onOpenCreateDraft = vi.fn();
+    const onRestoreCreateDraft = vi.fn().mockResolvedValue(true);
     const onDiscard = vi.fn();
 
     render(
@@ -139,7 +141,7 @@ describe("UnsavedDrafts (#151)", () => {
         <UnsavedDrafts
           drafts={[createDraft]}
           vaults={[v]}
-          onOpenCreateDraft={onOpenCreateDraft}
+          onRestoreCreateDraft={onRestoreCreateDraft}
           onDiscard={onDiscard}
         />
       </MemoryRouter>,
@@ -148,13 +150,13 @@ describe("UnsavedDrafts (#151)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(onOpenCreateDraft).toHaveBeenCalledWith(
+    await waitFor(() => expect(onDiscard).toHaveBeenCalledWith("create"));
+    expect(onRestoreCreateDraft).toHaveBeenCalledWith(
       "vault-1",
       "10-topics",
       "In Progress",
       "half-written note",
     );
-    expect(onDiscard).toHaveBeenCalledWith("create");
   });
 
   it("discards only after confirmation", () => {

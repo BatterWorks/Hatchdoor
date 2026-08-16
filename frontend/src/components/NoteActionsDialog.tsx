@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 
 import { UiButton } from "./ui";
+import type { VaultId } from "../types";
 import {
   clearCreateDraft,
   loadCreateDraft,
   saveCreateDraft,
 } from "../lib/writeDrafts";
+
+/** The Vaults a note can be created in, in the order the picker lists them. */
+export type DialogVault = { vaultId: VaultId; name: string };
 
 export type NoteActionDialogKind =
   "create" | "rename" | "move" | "archive" | "delete";
@@ -24,7 +28,9 @@ const FOCUSABLE_SELECTOR =
 export function NoteActionsDialog({
   kind,
   error,
-  folderPaths = [],
+  vaults = [],
+  folderPathsByVault = {},
+  initialVaultId,
   initialFolder = "",
   onClose,
   onCreate,
@@ -35,10 +41,17 @@ export function NoteActionsDialog({
 }: {
   kind: NoteActionDialogKind;
   error: string | null;
-  folderPaths?: string[];
+  vaults?: DialogVault[];
+  /** Each Vault's own folders. A Vault whose tree has not loaded is absent
+   * rather than empty-listed; both offer the root and a new folder. */
+  folderPathsByVault?: Record<VaultId, string[]>;
+  /** Create: the Vault to start on — the one the writer clicked in, or the one
+   * holding the open note. Move: the Vault the note already lives in, which is
+   * the only one it can move within. */
+  initialVaultId?: VaultId;
   initialFolder?: string;
   onClose: () => void;
-  onCreate: (relativePath: string, content: string) => void;
+  onCreate: (vaultId: VaultId, relativePath: string) => void;
   onRename: (newTitle: string) => void;
   onMove: (targetFolder: string) => void;
   onArchive: () => void;
@@ -105,7 +118,9 @@ export function NoteActionsDialog({
         {kind === "create" ? (
           <CreateForm
             error={error}
-            folderPaths={folderPaths}
+            vaults={vaults}
+            folderPathsByVault={folderPathsByVault}
+            initialVaultId={initialVaultId}
             initialFolder={initialFolder}
             onClose={onClose}
             onCreate={onCreate}
@@ -117,7 +132,9 @@ export function NoteActionsDialog({
         {kind === "move" ? (
           <MoveForm
             error={error}
-            folderPaths={folderPaths}
+            folderPaths={
+              initialVaultId ? (folderPathsByVault[initialVaultId] ?? []) : []
+            }
             onClose={onClose}
             onMove={onMove}
           />
@@ -207,52 +224,112 @@ function FolderPicker({
 
 function CreateForm({
   error,
-  folderPaths,
+  vaults,
+  folderPathsByVault,
+  initialVaultId,
   initialFolder,
   onClose,
   onCreate,
 }: {
   error: string | null;
-  folderPaths: string[];
+  vaults: DialogVault[];
+  folderPathsByVault: Record<VaultId, string[]>;
+  initialVaultId?: VaultId;
   initialFolder: string;
   onClose: () => void;
-  onCreate: (relativePath: string, content: string) => void;
+  onCreate: (vaultId: VaultId, relativePath: string) => void;
 }) {
-  // Restore any draft persisted from a previous session (e.g. an in-progress
-  // note wiped by a service-worker autoUpdate reload). Fall back to props.
+  // Restore any draft persisted from a previous session (e.g. a half-typed
+  // name wiped by a service-worker autoUpdate reload). Fall back to props.
+  // A drafted Vault that has since been disabled is dropped rather than
+  // preselected, since it can no longer be written to.
   const [draft] = useState(() => loadCreateDraft());
+  const draftVaultId =
+    draft?.vaultId && vaults.some((vault) => vault.vaultId === draft.vaultId)
+      ? draft.vaultId
+      : undefined;
+  const [vaultId, setVaultId] = useState<VaultId | "">(
+    draftVaultId ?? initialVaultId ?? vaults[0]?.vaultId ?? "",
+  );
   const [folder, setFolder] = useState(draft?.folder ?? initialFolder);
   const [name, setName] = useState(draft?.name ?? "");
-  const [content, setContent] = useState(draft?.content ?? "");
 
-  const persist = (next: { folder: string; name: string; content: string }) => {
-    if (!next.folder && !next.name && !next.content) {
+  const vaultName = vaults.find((vault) => vault.vaultId === vaultId)?.name;
+  const folderPaths = vaultId ? (folderPathsByVault[vaultId] ?? []) : [];
+
+  const persist = (next: {
+    vaultId: VaultId | "";
+    folder: string;
+    name: string;
+  }) => {
+    if (!next.folder && !next.name) {
       clearCreateDraft();
       return;
     }
-    saveCreateDraft({ ...next, savedAt: Date.now() });
+    saveCreateDraft({
+      vaultId: next.vaultId || undefined,
+      folder: next.folder,
+      name: next.name,
+      savedAt: Date.now(),
+    });
   };
 
   return (
     <form
       onSubmit={(event) => {
         event.preventDefault();
+        if (!vaultId) {
+          return;
+        }
         const trimmedFolder = folder.trim();
         const trimmedName = name.trim();
         const relativePath = trimmedFolder
           ? `${trimmedFolder}/${trimmedName}`
           : trimmedName;
-        onCreate(relativePath, content);
+        onCreate(vaultId, relativePath);
       }}
     >
       <h2>Create note</h2>
+      {/* One Vault means no choice to make, so the field is absent rather than
+          a select with a single option. */}
+      {vaults.length > 1 ? (
+        <div className="field">
+          <label className="field-label" htmlFor="create-note-vault">
+            Vault
+          </label>
+          <select
+            id="create-note-vault"
+            className="field-input"
+            aria-label="Vault"
+            value={vaultId}
+            onChange={(event) => {
+              const nextVaultId = event.target.value;
+              setVaultId(nextVaultId);
+              // Folders belong to one Vault. Carrying the chosen path across
+              // would silently create a folder in the new Vault that only
+              // looked like the one that was picked.
+              setFolder("");
+              persist({ vaultId: nextVaultId, folder: "", name });
+            }}
+          >
+            {vaults.map((vault) => (
+              <option key={vault.vaultId} value={vault.vaultId}>
+                {vault.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
       <FolderPicker
+        // Remounts with the Vault so the picker's own "new folder" state does
+        // not outlive the folder list it was opened against.
+        key={vaultId}
         label="Folder"
         folderPaths={folderPaths}
         value={folder}
         onChange={(next) => {
           setFolder(next);
-          persist({ folder: next, name, content });
+          persist({ vaultId, folder: next, name });
         }}
       />
       <div className="field">
@@ -267,37 +344,22 @@ function CreateForm({
           value={name}
           onChange={(event) => {
             setName(event.target.value);
-            persist({ folder, name: event.target.value, content });
+            persist({ vaultId, folder, name: event.target.value });
           }}
           placeholder="My Note"
         />
       </div>
       {/* Nothing previously said what you were about to make or where. This
-          also surfaces the numeric folder prefixes at the moment they matter. */}
+          also surfaces the numeric folder prefixes at the moment they matter,
+          and names the Vault even when there is only one field above it. */}
       <p className="field-path">
+        {vaultName ? `${vaultName} / ` : ""}
         {folder.trim() ? `${folder.trim()} / ` : ""}
         {name.trim() || "Untitled"}.md
       </p>
-      <div className="field">
-        <label className="field-label" htmlFor="create-note-content">
-          Content
-        </label>
-        <textarea
-          id="create-note-content"
-          className="field-input"
-          name="content"
-          aria-label="Markdown content"
-          dir="auto"
-          value={content}
-          onChange={(event) => {
-            setContent(event.target.value);
-            persist({ folder, name, content: event.target.value });
-          }}
-        />
-      </div>
       {error ? <p className="note-editor-error">{error}</p> : null}
       <div className="modal-actions">
-        <UiButton type="submit">Create</UiButton>
+        <UiButton type="submit">Create and open</UiButton>
         <UiButton type="button" className="close-note" onClick={onClose}>
           Cancel
         </UiButton>

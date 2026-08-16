@@ -10,6 +10,7 @@ import type {
   ExplorerFolder,
   ModifiedNote,
   VaultReadProjection,
+  VaultId,
   VaultScope,
   VaultTree,
 } from "../types";
@@ -149,7 +150,17 @@ export function useVaultTree(scope: VaultScope) {
     void loadModifiedNotes();
   }, [loadModifiedNotes, loadTree, vaultRevision]);
 
-  const folderPaths = useMemo(() => collectFolderPaths(tree), [tree]);
+  // Folder lists stay separated by Vault. Flattening the merged tree instead
+  // produced one list in which "Projects" could mean a different Vault's
+  // folder than the one the writer was looking at, while the target Vault was
+  // being decided somewhere else entirely.
+  const folderPathsByVault = useMemo(() => {
+    const byVault: Record<VaultId, string[]> = {};
+    for (const vaultTree of vaultTrees) {
+      byVault[vaultTree.vault_id] = collectFolderPaths(vaultTree.tree);
+    }
+    return byVault;
+  }, [vaultTrees]);
   const noteCandidates = useMemo(() => flattenNoteCandidates(tree), [tree]);
 
   return {
@@ -162,7 +173,7 @@ export function useVaultTree(scope: VaultScope) {
     modifiedNotesPartial,
     modifiedNotesMissingVaults,
     vaultRevision,
-    folderPaths,
+    folderPathsByVault,
     noteCandidates,
     loadTree,
     loadModifiedNotes,

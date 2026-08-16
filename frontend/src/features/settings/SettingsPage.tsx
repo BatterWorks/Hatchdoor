@@ -17,7 +17,7 @@ import {
   type HeldDraft,
 } from "../../lib/writeDrafts";
 import { formatWhen } from "./relativeTime";
-import { UnsavedDrafts, type OpenCreateDraft } from "./UnsavedDrafts";
+import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
 type SettingKind = "switch" | "number" | "text" | "secret" | "mode";
@@ -317,7 +317,7 @@ function formatEta(seconds: number | undefined): string {
 export function SettingsPage({
   vaults = [],
   onVaultDiscoveryRefresh,
-  onOpenCreateDraft,
+  onRestoreCreateDraft,
 }: {
   /** Enabled Vaults, for the held-draft destination picker (#151). */
   vaults?: VaultSummary[];
@@ -325,7 +325,7 @@ export function SettingsPage({
    * scope zone from, on top of this page's own Vault list (issue #153). */
   onVaultDiscoveryRefresh?: () => void;
   /** Held drafts that need a new note stay unrecoverable without it. */
-  onOpenCreateDraft?: OpenCreateDraft;
+  onRestoreCreateDraft?: RestoreCreateDraft;
 } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -906,7 +906,7 @@ export function SettingsPage({
           <UnsavedDrafts
             drafts={heldDrafts}
             vaults={vaults}
-            onOpenCreateDraft={onOpenCreateDraft}
+            onRestoreCreateDraft={onRestoreCreateDraft}
             onDiscard={handleDiscardHeldDraft}
           />
         ) : (
