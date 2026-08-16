@@ -55,7 +55,6 @@ use crate::vault_runtime::{
     VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
     dispatch_vault_index_turn_with_embed_layers,
 };
-use crate::vault_watcher::spawn_vault_watcher;
 use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
 
 /// Hosts that only accept connections from the local machine. Binding to any
@@ -831,17 +830,11 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                             *active_git_sync = Some(handle);
                             info!("Git sync enabled");
                         }
-                        spawn_vault_watcher(
-                            state.clone(),
-                            vault_path.clone(),
-                            state.cache_db_path.clone(),
-                        );
                     }
                     Ok(Err(error)) => {
                         state.model_setup_started.store(false, Ordering::Release);
                         tracker.set_failed();
                         error!("Failed to index vault after model setup: {error}");
-                        spawn_vault_watcher(state.clone(), vault_path, state.cache_db_path.clone());
                     }
                     Err(error) => {
                         state.model_setup_started.store(false, Ordering::Release);
@@ -1293,12 +1286,12 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
-    // UNRESOLVED (audit R05 / findings C01-F02, C01-F03, X-F02): the audit made
-    // the watcher one-per-process, spawned here before model setup, to stop
-    // detached replacement watchers accumulating. PR #106 spawns one per Vault
-    // after cache publication instead. PR #106's shape is taken provisionally;
-    // R05's invariant has not been re-established for multi-Vault and its
-    // failure-injection proof has not been re-run.
+    // Filesystem watching belongs to each Vault's own runtime
+    // (`vault_runtime.rs` spawns one cancellable `VaultWatcherHandle` per
+    // active Vault, forwarded through `VaultWorkCoordinator`, which coalesces).
+    // Startup deliberately spawns no watcher of its own: audit findings
+    // C01-F02/C01-F03 were detached replacement watchers accumulating from
+    // exactly that, with no handle to cancel.
     match config.vault_source {
         VaultSource::Local { .. } if selected_model != SelectedModel::TermsRequired => {
             spawn_model_startup(state.clone(), selected_model);
