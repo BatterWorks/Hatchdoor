@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import appCss from "./App.css?raw";
 import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
+import noteContentCss from "./styles/note-content.css?raw";
 import noteEditorSource from "./components/NoteEditor.tsx?raw";
 import wikilinksSource from "./components/note-page/wikilinks.ts?raw";
 import mainSource from "./main.tsx?raw";
@@ -57,6 +58,18 @@ describe("client audit launch contracts", () => {
     expect(notePageSource).toMatch(/className="note-body"[^>]*dir="auto"/s);
     expect(noteEditorSource).toMatch(
       /className="note-editor-textarea"[^>]*dir="auto"/s,
+    );
+  });
+
+  it("gives trailing scroll space only to notes long enough to scroll", () => {
+    // A screenful of empty scroll below every note, however short, is what
+    // this replaced: the space is for reaching an end-of-note heading, which
+    // a note that does not scroll has no need of.
+    expect(noteContentCss).toMatch(
+      /\.note-content\s*{[^}]*padding-bottom:\s*3rem/s,
+    );
+    expect(noteContentCss).toMatch(
+      /\.note-content\[data-tail="true"\]\s*{[^}]*padding-bottom:\s*max\(3rem,\s*calc\(100dvh/s,
     );
   });
 

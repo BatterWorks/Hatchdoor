@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { normalizeTags, type FrontmatterValue } from "../../lib/markdown";
@@ -22,6 +22,7 @@ export function NoteProperties({
   onToggleCollapsed,
   onTagSelect,
   onChange,
+  actions,
 }: {
   properties: Record<string, FrontmatterValue>;
   /** The open note's own Vault, shown as a leading synthetic row (#140).
@@ -35,6 +36,9 @@ export function NoteProperties({
   onToggleCollapsed: () => void;
   onTagSelect: (tag: string) => void;
   onChange?: (next: string) => void;
+  /** The page's own controls (save state, Edit), shown at the end of this
+   * section's heading line. */
+  actions?: ReactNode;
 }) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
 
@@ -63,7 +67,8 @@ export function NoteProperties({
 
   const canEdit = editable && !!content && !!onChange;
   const entries = Object.entries(properties);
-  if (entries.length === 0 && !vaultName) {
+  const hasRows = entries.length > 0 || !!vaultName;
+  if (!hasRows && !actions) {
     return null;
   }
 
@@ -77,27 +82,43 @@ export function NoteProperties({
        *
        * The caret is the same affordance as the sidebar folder rows, so a
        * collapsible thing reads the same way wherever it appears.
+       *
+       * The page's own actions ride on this line rather than beside the title:
+       * up there they took width from it, and a long title wrapped around
+       * them. This line already runs the full measure and has room to spare.
        */}
-      <h3 className="note-properties-head">
-        <button
-          type="button"
-          className="note-properties-toggle"
-          data-open={!collapsed}
-          onClick={onToggleCollapsed}
-          aria-expanded={!collapsed}
-          aria-controls="note-properties-grid"
-        >
-          <span className="note-properties-caret" aria-hidden="true" />
-          Properties
-        </button>
-      </h3>
+      <div className="note-properties-head">
+        {hasRows ? (
+          <h3 className="note-properties-head-title">
+            <button
+              type="button"
+              className="note-properties-toggle"
+              data-open={!collapsed}
+              onClick={onToggleCollapsed}
+              aria-expanded={!collapsed}
+              aria-controls="note-properties-grid"
+            >
+              <span className="note-properties-caret" aria-hidden="true" />
+              Properties
+            </button>
+          </h3>
+        ) : (
+          // Nothing to disclose, but the actions still need their line — and a
+          // dead "Properties" toggle that opens on to nothing is worse than no
+          // label at all.
+          <span className="note-properties-head-title" />
+        )}
+        {actions ? (
+          <div className="note-properties-actions">{actions}</div>
+        ) : null}
+      </div>
 
       {/* Rendered even when collapsed, and hidden: `aria-controls` pointing at
           an element that does not exist is worse than a hidden one. */}
       <dl
         id="note-properties-grid"
         className="note-properties-grid"
-        hidden={collapsed}
+        hidden={collapsed || !hasRows}
       >
         {vaultName ? (
           <div className="note-property-row">

@@ -78,6 +78,7 @@ import {
   NoteTocMobile,
   SearchHitNavigator,
 } from "./note-page/sections";
+import { useTailSpace } from "./note-page/useTailSpace";
 import { useResolvedWikilinks } from "./note-page/wikilinks";
 
 const TOUCH_EDIT_HINT_KEY = "hatchdoor.touchEditHintSeen";
@@ -426,6 +427,11 @@ export function NotePage({
   }, [draftContent, editBaseHash, isEditing, note, vaultId]);
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
+
+  // Short notes end where their text ends; only a note long enough to scroll
+  // carries the trailing space that lets a heading near its end reach the top
+  // of the pane.
+  const { needsTail, contentRef: noteContentRef } = useTailSpace();
 
   useEffect(() => {
     if (!note) {
@@ -1021,23 +1027,13 @@ export function NotePage({
 
   return (
     <div className="note-page-layout">
-      <article className="note-content">
+      <article
+        className="note-content"
+        ref={noteContentRef}
+        data-tail={needsTail}
+      >
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>
-          {writeEnabled && !isEditing ? (
-            <div className="note-inline-actions">
-              <SaveState
-                status={writeBlockReason ? "error" : autosave.status}
-                savedAt={autosave.savedAt}
-              />
-              <UiButton
-                className="close-note note-edit-button"
-                onClick={startEditing}
-              >
-                Edit
-              </UiButton>
-            </div>
-          ) : null}
         </div>
         {error ? <StatusBadge tone="warn" text="Showing cached note" /> : null}
         {writeBlockReason ? (
@@ -1099,6 +1095,24 @@ export function NotePage({
           />
         ) : null}
         <NoteProperties
+          // Sharing the title's line cost the title width, and a long one
+          // wrapped around them.
+          actions={
+            writeEnabled && !isEditing ? (
+              <div className="note-inline-actions">
+                <SaveState
+                  status={writeBlockReason ? "error" : autosave.status}
+                  savedAt={autosave.savedAt}
+                />
+                <UiButton
+                  className="close-note note-edit-button"
+                  onClick={startEditing}
+                >
+                  Edit
+                </UiButton>
+              </div>
+            ) : null
+          }
           properties={parsed.properties}
           vaultName={vaultName}
           content={note.content}
