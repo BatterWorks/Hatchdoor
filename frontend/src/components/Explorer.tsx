@@ -87,10 +87,21 @@ export function RecentNotesList({
   vaults: VaultSummary[];
   scope: VaultScope;
 }) {
-  if (notes.length === 0) {
+  // A note whose Vault has left the collection cannot be opened — its link
+  // resolves to "Vault definition was not found" — and it has no name to show
+  // but its own raw UUID. Drop those rather than offer a dead row. Discovery
+  // in flight leaves `vaults` a temporary `[]`, which would empty the list on
+  // every load, so filter only once the real collection has arrived.
+  const known =
+    vaults.length === 0
+      ? notes
+      : notes.filter((note) =>
+          vaults.some((vault) => vault.vault_id === note.vaultId),
+        );
+  if (known.length === 0) {
     return null;
   }
-  const recent = notes.slice(0, 5);
+  const recent = known.slice(0, 5);
   // Provenance only where the list can actually span Vaults (#140).
   const showVaultPrefix = scope === "all" && vaults.length > 1;
 

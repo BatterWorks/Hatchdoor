@@ -263,6 +263,51 @@ describe("App enhancements", () => {
     ).toBeInTheDocument();
   });
 
+  it("forgets a last opened note whose Vault has left the collection", async () => {
+    // Restoring it would pin the reader to "Vault definition was not found" on
+    // every visit to root, with no way back but editing the URL by hand.
+    window.localStorage.setItem(
+      "hatchdoor.lastNote",
+      JSON.stringify({ vaultId: "departed-vault", slug: "gone" }),
+    );
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/"]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(window.localStorage.getItem("hatchdoor.lastNote")).toBeNull(),
+    );
+  });
+
   it("highlights in-note matches after opening a search result", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {

@@ -107,6 +107,18 @@ export function getStoredLastNote(): { vaultId: string; slug: string } | null {
   }
 }
 
+/** Forget the stored landing note. Used when its Vault has left the
+ * collection: restoring it would land the reader on "Vault definition was not
+ * found" on every visit, with no way back to a working page but editing the
+ * URL by hand. */
+export function clearStoredLastNote(): void {
+  try {
+    window.localStorage.removeItem(LAST_NOTE_KEY);
+  } catch {
+    // Ignore storage failures (private mode, disabled storage).
+  }
+}
+
 export function getStoredString(key: string): string | null {
   const raw = window.localStorage.getItem(key);
   if (!raw) {
