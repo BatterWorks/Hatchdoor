@@ -27,6 +27,7 @@ import {
   MAX_POLL_MINUTES,
   MIN_POLL_MINUTES,
   missingRequiredRepositoryUrl,
+  parseExcludePatterns,
   recoverPausedVault,
   REPOSITORY_URL_REQUIRED_MESSAGE,
   requestJson,
@@ -392,10 +393,7 @@ export function VaultSettingsDetail({
     expected_registry_revision: expectedRevision,
     name,
     source: source ?? vault.source,
-    exclude_patterns: exclude
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean),
+    exclude_patterns: parseExcludePatterns(exclude),
     https_credentials: credentialsPatch(),
     ...(confirmIdentityChange ? { confirm_identity_change: true } : {}),
     archive_folder: archive || null,
