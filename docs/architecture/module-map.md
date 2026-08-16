@@ -1423,6 +1423,15 @@ the same shared collection shapes as HTTP; `create_vault` is the only zero-ID
 exception because the registry atomically generates its immutable ID. MCP
 returns shared domain failures as structured error tool results. No
 scope-less/default/sole-Vault tool remains reachable.
+`get_attachment_import_config` names one Vault and answers under every write
+posture, reporting the instance-wide write switch and that Vault's own
+mutation capability as separate fields rather than refusing the call.
+`list_note_attachments` is a read tool on the read catalogue, reachable without
+MCP write permission and without the mutation capability. `create_vault` and
+`edit_vault` advertise the `VaultSource` and credential contracts as
+per-variant schemas rather than opaque objects; `edit_vault` replaces a
+definition wholesale, and only its credential patch preserves a stored value
+across an edit.
 
 Each MCP request validates its live configuration, token, and Origin before
 the body is collected. Read-only MCP accepts only the small ordinary JSON-RPC

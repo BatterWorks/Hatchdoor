@@ -76,6 +76,20 @@ pub async fn handle_tools_call(
         "get_stats" => read::get_stats_tool(state, arguments).await,
         "get_graph" => read::get_graph_tool(state, arguments).await,
         "recently_modified" => read::recently_modified_tool(state, arguments).await,
+        // Not gated on `write_enabled`: the tool reports the write posture
+        // rather than exercising it, and an agent that cannot upload still
+        // needs to be told so, with the reason.
+        "get_attachment_import_config" => {
+            read::attachment_import_config_tool(&state, config, arguments)
+        }
+        // Reading which attachments a Note references is a read, and is
+        // answered under the same permission as reading the Note itself. It
+        // lived behind the write gate only because it was catalogued next to
+        // the attachment mutations.
+        "list_note_attachments" => {
+            let vault = write::readable_vault(&state, &arguments)?;
+            write::list_note_attachments_tool(state, &vault, arguments).await
+        }
         "create_vault" if config.write_enabled => read::create_vault_tool(state, arguments).await,
         "edit_vault" if config.write_enabled => read::edit_vault_tool(state, arguments).await,
         "enable_vault" if config.write_enabled => read::enable_vault_tool(state, arguments).await,
@@ -119,27 +133,13 @@ pub async fn handle_tools_call(
                 _ => unreachable!(),
             }
         }
-        "list_note_attachments" if config.write_enabled => {
-            let vault = write::scoped_vault(&state, &arguments)?;
-            write::list_note_attachments_tool(state, &vault, arguments).await
+        "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
+        | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
+        | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment" => {
+            Err(JsonRpcFailure::invalid_params(
+                "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
+            ))
         }
-        "create_note"
-        | "update_note"
-        | "append_to_note"
-        | "edit_note"
-        | "replace_section"
-        | "rename_note"
-        | "move_note"
-        | "move_rename_note"
-        | "archive_note"
-        | "delete_note"
-        | "import_attachment"
-        | "move_attachment"
-        | "rename_attachment"
-        | "delete_attachment"
-        | "list_note_attachments" => Err(JsonRpcFailure::invalid_params(
-            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
-        )),
         "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
         | "sync_vault" | "retry_vault" => Err(JsonRpcFailure::invalid_params(
             "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
