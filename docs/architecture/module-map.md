@@ -1868,6 +1868,7 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/components/note-page/renderers.tsx`
 - `frontend/src/components/note-page/sections.tsx`
 - `frontend/src/components/note-page/text.ts`
+- `frontend/src/components/note-page/useTailSpace.ts`
 - `frontend/src/components/note-page/wikilinks.ts`
 - `frontend/src/lib/markdown.ts`
 - `frontend/src/lib/noteHeadings.ts`
@@ -1881,6 +1882,12 @@ note navigation/rendering behavior, the editable-block component map produced by
 `createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one
 source line per rendered line for the two unit types addressed per line.
+`useTailSpace` (`note-page/useTailSpace.ts`) decides whether a note is long
+enough to earn the trailing scroll space and hands back the callback ref that
+measures it; `NotePage` spends it as `data-tail`, which
+`styles/note-content.css` reads. The measurement subtracts the space already
+applied, so adding it can never be what makes the note look long enough to
+need it.
 `NoteProperties` (`note-page/sections.tsx`) takes an optional `vaultName`
 (#140): a synthetic, non-editable leading `Vault` row, shown whenever more than
 one Vault is enabled regardless of scope — an exact read is never ambiguous
