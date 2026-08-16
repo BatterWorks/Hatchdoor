@@ -2,6 +2,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  browsableVault,
   conflictVault,
   healthyVault,
   indexingVault,
@@ -34,6 +35,50 @@ describe("deriveVaultSlot", () => {
       kind: "count",
       count: 12,
     });
+  });
+
+  it("shows the note count, not a placeholder, for a browsable Vault still building search", () => {
+    expect(deriveVaultSlot(browsableVault("Alpha"), 126)).toEqual({
+      kind: "count-pending-search",
+      count: 126,
+      sentence: "Browsing is ready. Search for this Vault is still building.",
+    });
+  });
+
+  it("reports a failed embedding pass instead of claiming search is still building", () => {
+    const vault = browsableVault("Alpha");
+    expect(
+      deriveVaultSlot(
+        {
+          ...vault,
+          search_error: {
+            code: "vault_index_failed",
+            message: "Embedding ran out of memory.",
+            retryable: true,
+          },
+        },
+        126,
+      ),
+    ).toEqual({
+      kind: "condition",
+      word: "search failed",
+      tier: "warn",
+      sentence: "Embedding ran out of memory.",
+    });
+  });
+
+  it("counts a browsable Vault as participating — it has published Notes to read", () => {
+    const vault = browsableVault("Alpha");
+    expect(
+      deriveVaultAggregate([vault], { [vault.vault_id]: 126 }),
+    ).toEqual({ kind: "count", count: 1 });
+  });
+
+  it("announces a browsable Vault's count and its pending search", () => {
+    const vault = browsableVault("Alpha");
+    expect(
+      describeScopeSlot(vault.vault_id, [vault], { [vault.vault_id]: 126 }),
+    ).toBe("126 notes, search still building");
   });
 
   it("shows indexing for a Vault mid-index", () => {

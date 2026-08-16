@@ -15,7 +15,14 @@ export type VaultApiError = {
   retryable: boolean;
 };
 
-export type VaultParticipantState = "fresh" | "stale" | "unavailable";
+export type VaultParticipantState =
+  | "fresh"
+  | "stale"
+  /** Rows are current but carry no vectors yet, so this Vault contributed
+   * nothing to a semantic search. Browsing, keyword and tag search are
+   * unaffected and report `fresh`. */
+  | "not_searchable"
+  | "unavailable";
 
 export type VaultReadError = {
   code: string;
@@ -104,7 +111,7 @@ export type VaultSummary = {
   commit_identity?: { name: string; email: string };
   activation: "active" | "disabled" | "unavailable";
   local_content: "read_write" | "read_only" | "unavailable";
-  search: "unavailable" | "indexing" | "ready" | "stale";
+  search: "unavailable" | "indexing" | "browsable" | "ready" | "stale";
   git: "disabled" | "pending" | "ready" | "unavailable";
   watcher: "running" | "disabled" | "unavailable";
   capabilities: VaultCapabilities;

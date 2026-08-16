@@ -382,6 +382,7 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
         Some(VaultSnapshotStatus {
             participating: true,
             freshness: VaultSnapshotFreshness::Stale,
+            searchable: true,
         })
     );
 
@@ -769,6 +770,7 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
         Some(VaultSnapshotStatus {
             participating: true,
             freshness: VaultSnapshotFreshness::Fresh,
+            searchable: true,
         }),
         "initial publish is fresh"
     );
@@ -830,6 +832,7 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
             Some(VaultSnapshotStatus {
                 participating: true,
                 freshness: VaultSnapshotFreshness::Stale,
+                searchable: true,
             }),
             "the retained snapshot must not read as fresh while its replacement is being built"
         );
@@ -867,6 +870,7 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
         Some(VaultSnapshotStatus {
             participating: true,
             freshness: VaultSnapshotFreshness::Fresh,
+            searchable: true,
         }),
         "a successful rebuild republishes fresh"
     );
@@ -2355,6 +2359,7 @@ async fn lifecycle_retirement_updates_only_the_target_published_snapshot() {
         Some(VaultSnapshotStatus {
             participating: false,
             freshness: VaultSnapshotFreshness::Fresh,
+            searchable: true,
         })
     );
     assert!(
@@ -2687,6 +2692,117 @@ async fn restart_reports_retained_cache_freshness_while_reconstructing_index_wor
     let mut expected = vec![fresh_id, stale_id, absent_id];
     expected.sort();
     assert_eq!(reconstructed, expected);
+}
+
+/// A restart landing between a Vault's structure pass and its embedding pass
+/// finds a participating, fresh, vectorless generation. Reading freshness alone
+/// would reconstruct it as `Ready`, advertising a search capability that would
+/// answer every query with nothing.
+#[tokio::test]
+async fn restart_reconstructs_a_structure_only_snapshot_as_browsable_not_ready() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("browsable");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    let added = add_local_vault(&registry, &empty, "Browsable", vault_path.clone());
+    let browsable_id = vault_id_named(&added, "Browsable");
+
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let embedder = StubEmbedder::new(384);
+    let published = cache
+        .publish_vault_structure_snapshot(
+            browsable_id,
+            &crate::vault::VaultIndex::build(&vault_path).expect("build index"),
+            &embedder,
+            true,
+        )
+        .expect("publish structure-only snapshot");
+    assert!(published);
+
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache,
+    );
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &added, &coordinator, &managed_git)
+        .await;
+
+    let runtime = collection.snapshot();
+    assert_eq!(
+        runtime.vaults[&browsable_id].search,
+        VaultSearchStatus::Browsable
+    );
+    assert!(
+        !runtime.vaults[&browsable_id].capabilities.search,
+        "a Vault with no vectors must not advertise search"
+    );
+    assert!(
+        runtime.vaults[&browsable_id].capabilities.browse,
+        "its Notes are published and readable"
+    );
+}
+
+/// A structure pass that lands before its embedding pass fails leaves a
+/// participating generation with no vectors. Reporting that `Stale` would
+/// grant it the `search` capability, and semantic search would then answer
+/// every query with nothing while claiming to be a working stale snapshot.
+#[tokio::test]
+async fn a_vectorless_generation_never_advertises_search_even_when_stale() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let vault_path = directory.path().join("browsable");
+    std::fs::create_dir_all(&vault_path).expect("Vault directory");
+    std::fs::write(vault_path.join("Home.md"), "# Home\n\ncontent").expect("Vault note");
+    let added = add_local_vault(&registry, &empty, "Browsable", vault_path.clone());
+    let browsable_id = vault_id_named(&added, "Browsable");
+
+    let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+    let embedder = StubEmbedder::new(384);
+    cache
+        .publish_vault_structure_snapshot(
+            browsable_id,
+            &crate::vault::VaultIndex::build(&vault_path).expect("build index"),
+            &embedder,
+            true,
+        )
+        .expect("publish structure-only snapshot");
+    // What a failed embedding pass leaves behind.
+    cache
+        .mark_vault_snapshot_stale(browsable_id)
+        .expect("mark the vectorless generation stale");
+
+    let collection = VaultCollectionRuntime::with_watching_and_cache(
+        directory.path().join("cache.sqlite3"),
+        cache,
+    );
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &added, &coordinator, &managed_git)
+        .await;
+
+    let runtime = collection.snapshot();
+    assert_eq!(
+        runtime.vaults[&browsable_id].search,
+        VaultSearchStatus::Browsable,
+        "vectorless outranks stale: a generation with no vectors is not a searchable one"
+    );
+    assert!(
+        !runtime.vaults[&browsable_id].capabilities.search,
+        "a Vault with no vectors must never advertise search"
+    );
+    assert!(runtime.vaults[&browsable_id].capabilities.browse);
 }
 
 #[tokio::test]

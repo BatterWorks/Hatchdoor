@@ -8,7 +8,7 @@ use crate::embed::{Embedder, PENDING_IDENTITY};
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
-const SCHEMA_VERSION: &str = "10";
+const SCHEMA_VERSION: &str = "11";
 
 /// Identify a cache written by a supported single-Vault Hatchdoor release
 /// without creating, migrating, or otherwise mutating the database.
@@ -379,7 +379,8 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
         CREATE TABLE IF NOT EXISTS vault_snapshots (
             vault_id TEXT PRIMARY KEY,
             participating INTEGER NOT NULL CHECK (participating IN (0, 1)),
-            freshness TEXT NOT NULL CHECK (freshness IN ('fresh', 'stale'))
+            freshness TEXT NOT NULL CHECK (freshness IN ('fresh', 'stale')),
+            searchable INTEGER NOT NULL CHECK (searchable IN (0, 1))
         );
 
         CREATE TABLE IF NOT EXISTS vault_snapshot_metadata (

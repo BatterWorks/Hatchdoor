@@ -115,7 +115,11 @@ that production inventory are still checked for stale paths and duplicates.
   second execution lane. The same loop dispatches each Index turn through the
   Vault-qualified Markdown scan and disposable snapshot publisher; the
   runtime's watcher intents re-enter that coordinator rather than creating a
-  separate indexing path.
+  separate indexing path. An Index turn publishes in two passes: a Vault's
+  structural rows first (`VaultSearchStatus::Browsable`), then the same Vault
+  again once its vectors exist (`Ready`), so browsing does not wait on
+  embedding. The structure pass is skipped for a Vault that already has a
+  searchable generation, which keeps search answering across a rebuild.
   `AppState::index_status` separately tracks setting-triggered rebuild drift,
   progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
@@ -699,6 +703,11 @@ and `src/vault_runtime.rs` for the authoritative exact-read index boundary.
 - One-Vault snapshots are explicit about stale availability, unavailable
   snapshots never become empty data, and all-Vault reads preserve participant
   status and Vault grouping.
+- A Vault whose generation carries no vectors reads as
+  `VaultParticipantState::NotSearchable` in semantic search only; browsing,
+  keyword and tag reads use the same structural rows and report `Fresh`. It is
+  never reported `Unavailable`, which would claim its Notes are missing rather
+  than merely unembedded.
 - Trees, statistics, and graphs remain grouped by Vault; graph edges never
   cross a Vault boundary.
 

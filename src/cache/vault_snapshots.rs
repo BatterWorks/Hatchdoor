@@ -20,6 +20,17 @@ pub(crate) enum VaultSnapshotFreshness {
 pub(crate) struct VaultSnapshotStatus {
     pub(crate) participating: bool,
     pub(crate) freshness: VaultSnapshotFreshness,
+    /// Whether this generation carries vectors, and so can answer semantic
+    /// search. A Vault's first Index turn publishes its structural rows before
+    /// embedding starts, so browsing does not wait on the embedder; that
+    /// generation is `participating` and `Fresh` (its notes/links/tags do
+    /// describe current Markdown) but not yet `searchable`.
+    ///
+    /// Deliberately a separate axis from [`VaultSnapshotFreshness`]: a
+    /// structure-only generation can itself go stale while a later Index turn
+    /// rebuilds it, so folding the two into one enum would produce states no
+    /// caller could represent.
+    pub(crate) searchable: bool,
 }
 
 /// One Vault's complete published read snapshot. This is intentionally a
@@ -150,12 +161,84 @@ impl SqliteCache {
                 embed_layers,
                 &BuildOptions::default(),
             )?;
-            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity())
+            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity(), true)
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
         }
         result
+    }
+
+    /// Publish this Vault's structural rows (notes, links, tags, headings,
+    /// chunk text) ahead of any embedding work, so browsing a Vault does not
+    /// wait on the minutes of vector building that searching it does.
+    ///
+    /// Returns whether a generation was published. This is a no-op for a Vault
+    /// that already has a searchable snapshot: replacing one with a
+    /// structure-only generation would take working search away for the length
+    /// of a rebuild, which is strictly worse than serving the prior generation
+    /// marked stale. So this only ever fires on a Vault's first successful
+    /// index (or its first after a model change wiped the cache).
+    ///
+    /// The chunker needs the embedder's tokenizer, so this still waits for the
+    /// model to load. It does not wait for the model to *run*, which is the
+    /// part measured in minutes.
+    pub(crate) fn publish_vault_structure_snapshot(
+        &self,
+        vault_id: VaultId,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        embed_layers: bool,
+    ) -> Result<bool, String> {
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reset_if_embedder_changed(embedder)?;
+        if self.has_searchable_snapshot(vault_id)? {
+            return Ok(false);
+        }
+        let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
+        let result = (|| {
+            let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
+            // No seeding: by the check above there is no searchable generation
+            // to reuse vectors from, which is all seeding exists for.
+            candidate.replace_with_options(
+                index,
+                embedder,
+                None,
+                embed_layers,
+                &BuildOptions {
+                    embed: false,
+                    ..BuildOptions::default()
+                },
+            )?;
+            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity(), false)
+        })();
+        if result.is_err() {
+            self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
+        }
+        result.map(|()| true)
+    }
+
+    /// Deliberately does not filter on `participating`. Retirement keeps a
+    /// disabled Vault's rows and only clears participation, so a disabled
+    /// Vault sits at `(participating = 0, searchable = 1)` with every vector
+    /// intact. Treating that as "no searchable generation" would fire the
+    /// structure pass on re-enable, whose publication deletes those vectors
+    /// and forces a full re-embed of the whole Vault — twice wrong, because
+    /// seeding would then find nothing to reuse either.
+    fn has_searchable_snapshot(&self, vault_id: VaultId) -> Result<bool, String> {
+        let conn = self.read()?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM vault_snapshots WHERE vault_id = ?1 AND searchable = 1",
+                params![vault_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| format!("look up searchable Vault snapshot {vault_id}: {error}"))?
+            .is_some())
     }
 
     /// Mark a retained Vault snapshot stale: for the duration of an active
@@ -300,15 +383,16 @@ impl SqliteCache {
         conn: &rusqlite::Connection,
         vault_id: VaultId,
     ) -> Result<Option<VaultSnapshotStatus>, String> {
-        let row: Option<(i64, String)> = conn
+        let row: Option<(i64, String, i64)> = conn
             .query_row(
-                "SELECT participating, freshness FROM vault_snapshots WHERE vault_id = ?1",
+                "SELECT participating, freshness, searchable FROM vault_snapshots \
+                 WHERE vault_id = ?1",
                 params![vault_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(|error| format!("read Vault snapshot status {vault_id}: {error}"))?;
-        row.map(|(participating, freshness)| {
+        row.map(|(participating, freshness, searchable)| {
             let freshness = match freshness.as_str() {
                 "fresh" => VaultSnapshotFreshness::Fresh,
                 "stale" => VaultSnapshotFreshness::Stale,
@@ -321,6 +405,7 @@ impl SqliteCache {
             Ok(VaultSnapshotStatus {
                 participating: participating != 0,
                 freshness,
+                searchable: searchable != 0,
             })
         })
         .transpose()
@@ -545,9 +630,14 @@ impl SqliteCache {
     ) -> Result<(), String> {
         let vault_id = vault_id.to_string();
         let source = self.connection()?;
+        // Only a searchable generation is worth seeding. A structure-only one
+        // has no vectors to reuse, and seeding it would be actively harmful:
+        // its note rows carry current hashes/mtimes, so `upsert_note_if_changed`
+        // would report every note `Unchanged`, skip chunking, and leave the
+        // Vault permanently without vectors.
         if source
             .query_row(
-                "SELECT 1 FROM vault_snapshots WHERE vault_id = ?1",
+                "SELECT 1 FROM vault_snapshots WHERE vault_id = ?1 AND searchable = 1",
                 params![vault_id],
                 |row| row.get::<_, i64>(0),
             )
@@ -588,12 +678,16 @@ impl SqliteCache {
             .map_err(|error| format!("commit candidate seeding: {error}"))
     }
 
+    /// `searchable` records whether this generation carries vectors. A
+    /// structure-only generation publishes with `false`; the embedding pass
+    /// that follows republishes the same Vault with `true`.
     fn publish_vault_candidate(
         &self,
         vault_id: VaultId,
         attempt: u64,
         candidate: &SqliteCache,
         embedder_identity: &str,
+        searchable: bool,
     ) -> Result<(), String> {
         let source = candidate.read()?;
         let attempts = self
@@ -611,8 +705,9 @@ impl SqliteCache {
 
         delete_vault_snapshot(&tx, &vault_id)?;
         tx.execute(
-            "INSERT INTO vault_snapshots(vault_id, participating, freshness) VALUES (?1, 1, 'fresh')",
-            params![vault_id],
+            "INSERT INTO vault_snapshots(vault_id, participating, freshness, searchable) \
+             VALUES (?1, 1, 'fresh', ?2)",
+            params![vault_id, i64::from(searchable)],
         )
         .map_err(|error| format!("create Vault snapshot: {error}"))?;
 
@@ -1290,6 +1385,185 @@ mod tests {
         (directory, index)
     }
 
+    /// How many of a published generation's chunks carry a vector. Zero is the
+    /// structure-only signature; search skips vectorless chunks, so this is
+    /// exactly what separates a browsable Vault from a searchable one.
+    fn vectored_chunks(cache: &SqliteCache, vault_id: VaultId) -> usize {
+        cache
+            .read_vault_snapshot(vault_id)
+            .expect("read published snapshot")
+            .expect("snapshot participates")
+            .read
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.embedding.is_some())
+            .count()
+    }
+
+    #[test]
+    fn structure_pass_publishes_browsable_rows_with_no_vectors() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[
+            ("Home.md", "# Home\n\nhome body\n\n[[Shared]]"),
+            ("Shared.md", "# Shared\n\nshared body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+
+        let published = cache
+            .publish_vault_structure_snapshot(id, &index, &embedder, true)
+            .expect("publish structure-only snapshot");
+
+        assert!(published, "a Vault with no prior generation publishes one");
+        assert_eq!(
+            embedder.embedded(),
+            0,
+            "the structure pass must not embed anything: that is the wait it exists to remove"
+        );
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: false,
+            }),
+            "structural rows are current, so the generation is fresh but not searchable"
+        );
+        let read = cache
+            .read_vault_snapshot(id)
+            .expect("read snapshot")
+            .expect("snapshot participates")
+            .read;
+        assert_eq!(read.notes.len(), 2, "browsing has every Note");
+        assert_eq!(read.links.len(), 1, "and the links between them");
+        assert_eq!(vectored_chunks(&cache, id), 0);
+    }
+
+    /// The trap this design has to clear: the structure pass writes note rows
+    /// carrying current hashes and mtimes. If the embedding pass seeded its
+    /// candidate from them, every note would report `Unchanged`, chunking would
+    /// be skipped, and the Vault would stay unsearchable forever.
+    #[test]
+    fn embedding_pass_after_a_structure_pass_still_vectors_every_chunk() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[
+            ("Home.md", "# Home\n\nhome body\n\n[[Shared]]"),
+            ("Shared.md", "# Shared\n\nshared body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+
+        cache
+            .publish_vault_structure_snapshot(id, &index, &embedder, true)
+            .expect("publish structure-only snapshot");
+        assert_eq!(vectored_chunks(&cache, id), 0);
+
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("publish the searchable generation");
+
+        assert!(
+            embedder.embedded() > 0,
+            "the embedding pass must not be short-circuited by the structure pass's note rows"
+        );
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
+            })
+        );
+        assert_eq!(
+            vectored_chunks(&cache, id),
+            2,
+            "every chunk carries a vector once the embedding pass has run"
+        );
+    }
+
+    /// Publishing structure over an already-searchable Vault would take working
+    /// search away for the length of every rebuild. Serving the prior
+    /// generation marked stale is strictly better, so the structure pass only
+    /// ever fires on a Vault's first index.
+    #[test]
+    fn structure_pass_is_a_no_op_once_a_vault_is_searchable() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[("Home.md", "# Home\n\nhome body")]);
+        let embedder = CountingEmbedder::new();
+
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("publish the searchable generation");
+        let vectored = vectored_chunks(&cache, id);
+        assert!(vectored > 0);
+
+        let published = cache
+            .publish_vault_structure_snapshot(id, &index, &embedder, true)
+            .expect("structure pass runs without error");
+
+        assert!(!published, "an already-searchable Vault publishes nothing");
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
+            }),
+            "search stays available across a rebuild"
+        );
+        assert_eq!(vectored_chunks(&cache, id), vectored);
+    }
+
+    /// Regression: retirement keeps a disabled Vault's rows and only clears
+    /// participation, so its vectors survive. Re-enabling must not fire the
+    /// structure pass over them — that publication deletes every retained
+    /// vector, and the embedding pass that follows then has nothing to seed
+    /// from, turning a row copy into a full re-embed of the whole Vault.
+    #[test]
+    fn re_enabling_a_disabled_vault_reuses_its_retained_vectors() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (_directory, index) = index(&[
+            ("Home.md", "# Home\n\nhome body"),
+            ("Shared.md", "# Shared\n\nshared body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("publish the searchable generation");
+        assert!(embedder.embedded() > 0);
+        cache
+            .disable_vault_snapshot(id)
+            .expect("retire the Vault without deleting its rows");
+
+        // Re-enable: reconciliation clears participation again, then queues an
+        // Index turn, which runs both passes.
+        cache
+            .disable_vault_snapshot(id)
+            .expect("re-enable clears participation first");
+        embedder.reset();
+        let published = cache
+            .publish_vault_structure_snapshot(id, &index, &embedder, true)
+            .expect("structure pass runs without error");
+        assert!(
+            !published,
+            "a disabled Vault's retained generation is still searchable, so the \
+             structure pass must not replace it"
+        );
+        cache
+            .replace_vault_snapshot(id, &index, &embedder)
+            .expect("republish on re-enable");
+
+        assert_eq!(
+            embedder.embedded(),
+            0,
+            "re-enabling an unchanged Vault must reuse its retained vectors, not re-embed it"
+        );
+        assert_eq!(vectored_chunks(&cache, id), 2);
+    }
+
     /// Regression: every Index turn built its candidate in a fresh empty cache,
     /// so the build's content-hash reuse lookup could never hit and an
     /// unchanged Vault re-embedded itself in full — on every edit and every
@@ -1475,6 +1749,7 @@ mod tests {
             Some(VaultSnapshotStatus {
                 participating: true,
                 freshness: VaultSnapshotFreshness::Stale,
+                searchable: true,
             })
         );
 
@@ -1488,6 +1763,7 @@ mod tests {
             Some(VaultSnapshotStatus {
                 participating: false,
                 freshness: VaultSnapshotFreshness::Stale,
+                searchable: true,
             })
         );
 
@@ -1501,6 +1777,7 @@ mod tests {
             Some(VaultSnapshotStatus {
                 participating: true,
                 freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
             })
         );
         assert_eq!(
@@ -1613,6 +1890,7 @@ mod tests {
             Some(VaultSnapshotStatus {
                 participating: true,
                 freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
             })
         );
     }

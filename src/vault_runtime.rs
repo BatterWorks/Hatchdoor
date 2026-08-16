@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use serde::Serialize;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::VaultSnapshotFreshness;
@@ -411,6 +411,12 @@ pub enum LocalContentStatus {
 pub enum VaultSearchStatus {
     Unavailable,
     Indexing,
+    /// Structural rows are published and current, but this generation has no
+    /// vectors yet: the Vault can be browsed and its Notes opened, and it
+    /// answers no semantic search. Reached only on a Vault's first successful
+    /// index, between its structure pass and its embedding pass; a rebuild of
+    /// an already-searchable Vault keeps serving the prior generation instead.
+    Browsable,
     Ready,
     Stale,
 }
@@ -1556,14 +1562,23 @@ fn activation_snapshot(
 /// A retained participating snapshot is immediately searchable after process
 /// reconstruction, even while the coordinator has queued a fresh Index turn.
 /// Cache read failure and nonparticipation remain conservatively unavailable.
+///
+/// A structure-only generation is the exception: it is participating and
+/// fresh, but has no vectors, so reconstruction must report it `Browsable`
+/// rather than `Ready`. Reading freshness alone would have a restart mid-first-
+/// index claim search works and then answer every query with nothing.
 fn retained_snapshot_search_status(
     snapshot_cache: Option<&SqliteCache>,
     vault_id: VaultId,
 ) -> VaultSearchStatus {
     match snapshot_cache.and_then(|cache| cache.snapshot_status(vault_id).ok().flatten()) {
-        Some(status) if status.participating => match status.freshness {
-            VaultSnapshotFreshness::Fresh => VaultSearchStatus::Ready,
-            VaultSnapshotFreshness::Stale => VaultSearchStatus::Stale,
+        Some(status) if status.participating => match (status.freshness, status.searchable) {
+            (VaultSnapshotFreshness::Fresh, true) => VaultSearchStatus::Ready,
+            (VaultSnapshotFreshness::Stale, true) => VaultSearchStatus::Stale,
+            // Vectorless outranks stale. `Stale` grants the search capability
+            // (a stale generation still answers from its retained vectors),
+            // which a generation with no vectors at all must never do.
+            (_, false) => VaultSearchStatus::Browsable,
         },
         Some(_) | None => VaultSearchStatus::Unavailable,
     }
@@ -1812,6 +1827,29 @@ pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
             let index = indexing_control
                 .authoritative_index()
                 .map_err(|error| (vault_index_error(error), true))?;
+            // Publish this Vault's structural rows before its vectors, so a
+            // first index makes it browsable in seconds instead of holding
+            // every read behind the embedding pass. A no-op for a Vault that
+            // already has a searchable generation to keep serving.
+            match indexing_cache.publish_vault_structure_snapshot(
+                vault_id,
+                &index,
+                embedder.as_ref(),
+                embed_layers,
+            ) {
+                Ok(true) => {
+                    let _ = indexing_control.set_search_status(VaultSearchStatus::Browsable, None);
+                }
+                Ok(false) => {}
+                // Browsing early is an improvement, not a precondition: a
+                // failed structure pass falls through to the full build
+                // rather than failing the turn.
+                Err(message) => warn!(
+                    %vault_id,
+                    %message,
+                    "could not publish the structure-only Vault snapshot; browsing waits for the full index"
+                ),
+            }
             indexing_cache
                 .replace_vault_snapshot_with_embed_layers(
                     vault_id,
@@ -1850,8 +1888,17 @@ pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
                 .then(|| cache.mark_vault_snapshot_stale(vault_id))
                 .transpose()
                 .err();
+            // A structure pass that succeeded before the embedding pass failed
+            // leaves a participating generation with no vectors. Reporting it
+            // `Stale` would grant the search capability to a Vault that can
+            // only ever answer with nothing, so the vectorless axis wins here
+            // exactly as it does in `retained_snapshot_search_status`. The
+            // failure is not lost: it rides along as this status's error.
             let status = match cache.snapshot_status(vault_id) {
-                Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Stale,
+                Ok(Some(snapshot)) if snapshot.participating && snapshot.searchable => {
+                    VaultSearchStatus::Stale
+                }
+                Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
                 Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
             };
             let message = match stale_mark_error {

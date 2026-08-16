@@ -23,6 +23,23 @@ export function VaultSlot({
       </span>
     );
   }
+  // The count leads, because it is the part the reader can act on. The
+  // shimmer follows it at the same size as the indexing slot's, so a Vault
+  // moving from indexing to browsable to ready reads as one bar resolving
+  // rather than three unrelated states.
+  if (state.kind === "count-pending-search") {
+    return (
+      <span
+        className="vault-slot-pending-search"
+        role="status"
+        title={state.sentence}
+        aria-label={`${state.count} notes. ${state.sentence}`}
+      >
+        <span className="side-count">{state.count}</span>
+        <span className="vault-slot-indexing-bar" aria-hidden="true" />
+      </span>
+    );
+  }
   return (
     <span
       className={`vault-slot-condition vault-tier-${state.tier}`}

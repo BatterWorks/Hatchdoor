@@ -3,6 +3,10 @@ import type { VaultId, VaultScope, VaultSummary } from "../types";
 export type VaultSlotState =
   | { kind: "count"; count: number }
   | { kind: "indexing" }
+  /** Browsable but not yet searchable: a real note count, plus a marker that
+   * search is still building. Its own kind rather than a `condition` because
+   * nothing is wrong — the Vault is usable, just not by search yet. */
+  | { kind: "count-pending-search"; count: number; sentence: string }
   | {
       kind: "condition";
       word: string;
@@ -132,6 +136,32 @@ export function deriveVaultSlot(
       ),
     };
   }
+  // Browsable outranks indexing: the Vault has published its notes and is
+  // usable now, so it shows what it has rather than a placeholder. The
+  // embedding pass that follows is reported alongside the count, not instead
+  // of it.
+  if (vault.search === "browsable") {
+    // A browsable Vault carrying an error is one whose embedding pass failed
+    // after its notes were published. It is still browsable, but "search is
+    // still building" would be a lie — nothing is building until a retry.
+    if (vault.search_error) {
+      return {
+        kind: "condition",
+        word: "search failed",
+        tier: slotTier(demoMode, "warn"),
+        sentence: slotSentence(
+          demoMode,
+          vault.search_error.message,
+          "This Vault can be browsed, but building its search failed.",
+        ),
+      };
+    }
+    return {
+      kind: "count-pending-search",
+      count: noteCount ?? 0,
+      sentence: "Browsing is ready. Search for this Vault is still building.",
+    };
+  }
   if (vault.search === "indexing" || vault.search === "unavailable") {
     return { kind: "indexing" };
   }
@@ -168,7 +198,10 @@ export function describeScopeSlot(
   if (slot.kind === "condition") {
     return slot.word;
   }
-  return `${slot.count} note${slot.count === 1 ? "" : "s"}`;
+  const notes = `${slot.count} note${slot.count === 1 ? "" : "s"}`;
+  return slot.kind === "count-pending-search"
+    ? `${notes}, search still building`
+    : notes;
 }
 
 /**

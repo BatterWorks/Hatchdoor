@@ -119,6 +119,11 @@ impl<'a> VaultSearchCore<'a> {
             .map_err(|message| error(None, "search_unavailable", &message, true))?;
         let mut snapshots = BTreeMap::new();
         let mut participants = Vec::with_capacity(selected.len());
+        // Resolved before the participant loop because it decides whether this
+        // query needs vectors at all: a tag query is answered from structural
+        // rows, so a Vault without vectors is a full participant in it.
+        let tag_query = tag_prefix_query(&request.query);
+        let needs_vectors = tag_query.is_none() && request.mode == SearchMode::Semantic;
         for vault in selected {
             match SqliteCache::read_vault_snapshot_on(&cache_snapshot, vault.vault_id) {
                 Ok(Some(snapshot)) => {
@@ -129,6 +134,19 @@ impl<'a> VaultSearchCore<'a> {
                         crate::cache::vault_snapshots::VaultSnapshotFreshness::Stale => {
                             VaultParticipantState::Stale
                         }
+                    };
+                    // A structure-only generation has chunk text but no
+                    // vectors, so it answers keyword and tag queries in full
+                    // and contributes nothing semantic. Say so rather than
+                    // letting the per-chunk vector check drop it silently,
+                    // which reads to a caller as "no matches here".
+                    let state = if needs_vectors
+                        && !snapshot.status.searchable
+                        && state == VaultParticipantState::Fresh
+                    {
+                        VaultParticipantState::NotSearchable
+                    } else {
+                        state
                     };
                     participants.push(VaultParticipant {
                         vault_id: vault.vault_id,
@@ -161,7 +179,7 @@ impl<'a> VaultSearchCore<'a> {
         }
 
         validate_named_layers(&request.layers, snapshots.values())?;
-        let results = if let Some(tag) = tag_prefix_query(&request.query) {
+        let results = if let Some(tag) = tag_query {
             tag_results(&request, &snapshots, &tag)
         } else {
             let raw = match request.mode {
@@ -674,6 +692,57 @@ mod tests {
             include_properties: Vec::new(),
             layers: LayerSelection::default_surface(),
         }
+    }
+
+    /// A structure-only Vault has chunk text but no vectors. Semantic search
+    /// must name it rather than let the per-chunk vector check drop it in
+    /// silence, which a caller reads as "this Vault has no matches" instead of
+    /// "this Vault has not been embedded yet".
+    #[test]
+    fn semantic_search_reports_a_vectorless_vault_instead_of_dropping_it_silently() {
+        let workspace = workspace(&[("Alpha", &[("Home.md", "# Home\n\nneedle body")])]);
+        let embedder = StubEmbedder::new(384);
+        let vault_id = workspace.vault_ids[0];
+        // Re-publish as structure-only, the state between a first index's two
+        // passes.
+        workspace
+            .cache
+            .disconnect_vault_snapshot(vault_id)
+            .expect("drop the searchable generation");
+        workspace
+            .cache
+            .publish_vault_structure_snapshot(
+                vault_id,
+                &VaultIndex::build(&workspace.vault_paths[0]).expect("index"),
+                &embedder,
+                true,
+            )
+            .expect("publish structure-only snapshot");
+
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let semantic = core
+            .search(VaultSearchRequest {
+                mode: SearchMode::Semantic,
+                ..request(VaultScope::All, "needle")
+            })
+            .expect("semantic search");
+
+        assert_eq!(
+            semantic.participants[0].state,
+            VaultParticipantState::NotSearchable
+        );
+        assert!(
+            semantic.partial,
+            "a projection missing a Vault's semantic contribution is partial"
+        );
+
+        // Keyword search reads the same structural rows and is unaffected.
+        let keyword = core
+            .search(request(VaultScope::All, "needle"))
+            .expect("keyword search");
+        assert_eq!(keyword.participants[0].state, VaultParticipantState::Fresh);
+        assert!(!keyword.partial);
+        assert_eq!(keyword.data.results.len(), 1);
     }
 
     #[test]

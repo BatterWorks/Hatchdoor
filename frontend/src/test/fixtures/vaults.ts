@@ -75,6 +75,12 @@ export function indexingVault(name = "Indexing Vault"): VaultSummary {
   return healthyVault(name, { search: "indexing" });
 }
 
+/** `browsable`: a first index has published its Notes but not yet its vectors,
+ * so the Vault can be browsed and read while search is still building. */
+export function browsableVault(name = "Browsable Vault"): VaultSummary {
+  return healthyVault(name, { search: "browsable" });
+}
+
 /** `stale`: indexing failed: the snapshot is frozen behind the Markdown. */
 export function staleVault(name = "Stale Vault"): VaultSummary {
   return healthyVault(name, {
