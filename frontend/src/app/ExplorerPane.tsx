@@ -545,7 +545,13 @@ export function ExplorerPane({
   }, [scope, vaults, locationPathname]);
 
   const handleUnfoldVault = (vaultId: VaultId) => {
+    // Clicking the unfolded Vault folds it, leaving nothing unfolded — the
+    // same plain list of names §29 already documents for an instance with no
+    // history. A head that ignores every click after the first reads as
+    // broken, and there is no other way back to that state by hand.
     if (vaultId === unfoldedVaultId) {
+      setUnfoldedVaultId(undefined);
+      setStoredUnfoldedVault(null);
       return;
     }
     setUnfoldedVaultId(vaultId);

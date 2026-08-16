@@ -185,6 +185,24 @@ describe("SettingsPage", () => {
     ).toBeVisible();
   });
 
+  it("returns to a This server section from an open Vault page", async () => {
+    mockPage();
+    renderSettingsPage();
+    fireEvent.click(await screen.findByRole("button", { name: /Field notes/ }));
+    expect(
+      await screen.findByRole("heading", { name: "Field notes" }),
+    ).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: /Notes handling/ }));
+
+    expect(
+      screen.queryByRole("heading", { name: "Field notes" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: /Notes handling/ }),
+    ).toBeVisible();
+  });
+
   it("keeps a paused Vault in Settings and nowhere in the server section", async () => {
     mockPage([vault("Field notes"), vault("Archive", false)]);
     renderSettingsPage();

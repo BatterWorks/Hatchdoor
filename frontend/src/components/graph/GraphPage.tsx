@@ -114,8 +114,11 @@ function readThemeColors(): ThemeColors {
 }
 
 const ISLAND_ENCLOSURE_MARGIN = 40;
-const ISLAND_CAPTION_GAP = 14;
-const ISLAND_CAPTION_LINE_HEIGHT = 16;
+const ISLAND_CAPTION_GAP = 16;
+/** Leading for the caption stack, set for the 20px name line above the 13px
+ * count line. Mirrored as `ISLAND_CAPTION_HEADROOM` in graphSimulation, which
+ * reserves the row space these two lines need. */
+const ISLAND_CAPTION_LINE_HEIGHT = 24;
 
 interface RenderIsland extends GraphIsland {
   slot: VaultSlotState;
@@ -149,6 +152,14 @@ export function GraphPage() {
   const simLinksRef = useRef<SimLink[]>([]);
   const islandsRef = useRef<RenderIsland[]>([]);
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
+  // Island mode only: fit the whole field once the layout settles. Centring
+  // world (0,0) at a fixed zoom framed a single component fine, but a grid of
+  // islands is as wide as the grid, so the landing view cropped the field and
+  // "zoom out to see the rest" became a thing you had to guess at. Cleared the
+  // moment the reader touches the view — a fit that fights a deliberate pan is
+  // worse than no fit at all.
+  const pendingFitRef = useRef(false);
+  const viewInitialisedRef = useRef(false);
   const hoveredRef = useRef<SimNode | null>(null);
   const selectedRef = useRef<SimNode | null>(null);
   const activeTagsRef = useRef<Set<string>>(new Set());
@@ -631,20 +642,26 @@ export function GraphPage() {
         const countY = island.cy - radius - ISLAND_CAPTION_GAP;
         const nameY = countY - ISLAND_CAPTION_LINE_HEIGHT;
 
-        ctx.font = '700 15px "Bricolage Grotesque", system-ui, sans-serif';
+        ctx.font = '700 20px "Bricolage Grotesque", system-ui, sans-serif';
         ctx.fillStyle = inkColor;
         ctx.fillText(island.vaultName, island.cx, nameY);
 
+        // "49 notes", not a bare "49": the caption floats in open canvas with
+        // no column header or neighbouring label to say what the figure counts,
+        // unlike the sidebar slot this vocabulary came from, where the row it
+        // sits on supplies that. The condition word still replaces it outright.
         const slot = island.slot;
         const countLine =
-          slot.kind === "condition" ? slot.word : String(island.nodeCount);
+          slot.kind === "condition"
+            ? slot.word
+            : `${island.nodeCount} ${island.nodeCount === 1 ? "note" : "notes"}`;
         const countColor =
           slot.kind === "condition"
             ? slot.tier === "error"
               ? theme.err
               : theme.warn
             : mutedColor;
-        ctx.font = '500 11px "JetBrains Mono", "SF Mono", Menlo, monospace';
+        ctx.font = '500 13px "JetBrains Mono", "SF Mono", Menlo, monospace';
         ctx.fillStyle = countColor;
         ctx.fillText(countLine, island.cx, countY);
       }
@@ -661,6 +678,62 @@ export function GraphPage() {
   // (simulation still warm, an animated zoom, or an active drag/pan/pinch).
   // Once everything settles the rAF loop stops entirely instead of spinning a
   // core at 60fps forever; interaction handlers call requestRender() to wake it.
+  /**
+   * Frame every island: the union of each enclosure (settled radius plus its
+   * margin) and the caption stack above it, since a caption clipped by the
+   * viewport edge is exactly as unreadable as a missing island. Runs off live
+   * node positions, so it can only be called once the layout has settled —
+   * the enclosure radius does not exist until then.
+   */
+  const fitIslandsToView = useCallback(() => {
+    const islands = islandsRef.current;
+    const canvas = canvasRef.current;
+    if (islands.length === 0 || !canvas) return;
+    const W = canvas.clientWidth;
+    const H = canvas.clientHeight;
+    if (W === 0 || H === 0) return;
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const island of islands) {
+      let maxDist = 0;
+      for (const node of island.nodes) {
+        const dist =
+          Math.hypot(node.x - island.cx, node.y - island.cy) +
+          nodeRadius(node.backlink_count);
+        if (dist > maxDist) maxDist = dist;
+      }
+      const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
+      const captionHeight =
+        ISLAND_CAPTION_GAP + ISLAND_CAPTION_LINE_HEIGHT * 2;
+      minX = Math.min(minX, island.cx - radius);
+      maxX = Math.max(maxX, island.cx + radius);
+      minY = Math.min(minY, island.cy - radius - captionHeight);
+      maxY = Math.max(maxY, island.cy + radius);
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+
+    const pad = 32;
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    // Never zoom *in* past the single-graph landing scale: a lone small Vault
+    // should not arrive magnified just because it is the only thing on screen.
+    const k = Math.max(
+      0.1,
+      Math.min(0.9, (W - pad * 2) / spanX, (H - pad * 2) / spanY),
+    );
+    transformRef.current = {
+      x: W / 2 - ((minX + maxX) / 2) * k,
+      y: H / 2 - ((minY + maxY) / 2) * k,
+      k,
+    };
+    // The canvas-resize effect is declared after the simulation effect, so its
+    // first pass would otherwise re-centre at a fixed zoom and undo this fit.
+    viewInitialisedRef.current = true;
+  }, []);
+
   const requestRender = useCallback(() => {
     if (runningRef.current) return;
     runningRef.current = true;
@@ -668,6 +741,17 @@ export function GraphPage() {
       render();
       const sim = simRef.current;
       const simActive = !!sim && sim.alpha() > sim.alphaMin();
+      // Keep the field framed for every frame of the settle rather than
+      // snapping once at the end: `alphaDecay(0.02)` leaves the layout warm for
+      // roughly six seconds, and a view that jumps that long after you arrive
+      // reads as the page glitching. Islands start grid-placed, so each re-fit
+      // is a small correction and the whole field stays on screen throughout.
+      // Stops the moment the layout settles or the reader takes the view.
+      if (pendingFitRef.current) {
+        fitIslandsToView();
+        if (!simActive) pendingFitRef.current = false;
+        render();
+      }
       const busy =
         simActive ||
         zoomAnimRef.current !== null ||
@@ -681,7 +765,7 @@ export function GraphPage() {
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [render]);
+  }, [render, fitIslandsToView]);
 
   // ── simulation setup ─────────────────────────────────────────────────────────
 
@@ -761,6 +845,13 @@ export function GraphPage() {
 
     const sim = createIslandSimulation(nodes, links);
     simRef.current = activateSimulation(sim);
+    pendingFitRef.current = true;
+    // Reduced motion settles synchronously, so the layout is already final and
+    // there is no later frame to fit on — frame it now and paint once.
+    if (sim.alpha() <= sim.alphaMin()) {
+      pendingFitRef.current = false;
+      fitIslandsToView();
+    }
     requestRender();
     return () => {
       sim.stop();
@@ -773,6 +864,7 @@ export function GraphPage() {
     participants,
     scope,
     requestRender,
+    fitIslandsToView,
   ]);
 
   // ── canvas resize ───────────────────────────────────────────────────────────
@@ -782,8 +874,6 @@ export function GraphPage() {
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
 
-    let centred = false;
-
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
       const rect = wrap.getBoundingClientRect();
@@ -792,10 +882,13 @@ export function GraphPage() {
       canvas.height = rect.height * dpr;
       canvas.style.width = `${rect.width}px`;
       canvas.style.height = `${rect.height}px`;
-      // Re-centre the world origin on first valid size so the graph
-      // is always visible regardless of when the sim initialised.
-      if (!centred) {
-        centred = true;
+      // Re-centre the world origin on first valid size so the graph is always
+      // visible regardless of when the sim initialised. Tracked in a ref, not a
+      // local: this effect re-runs whenever `requestRender` changes identity,
+      // and a local flag reset to false there, re-centring at a fixed zoom and
+      // discarding both the island fit and any view the reader had set.
+      if (!viewInitialisedRef.current) {
+        viewInitialisedRef.current = true;
         transformRef.current = {
           x: rect.width / 2,
           y: rect.height / 2,
@@ -896,6 +989,8 @@ export function GraphPage() {
     };
 
     const onMouseDown = (e: MouseEvent) => {
+      // The reader has taken the view; cancel any pending auto-fit.
+      pendingFitRef.current = false;
       if (e.button !== 0) return;
       const { cx, cy } = getPos(e);
       const hit = hitTest(cx, cy);
@@ -964,6 +1059,8 @@ export function GraphPage() {
     };
 
     const onWheel = (e: WheelEvent) => {
+      // The reader has taken the view; cancel any pending auto-fit.
+      pendingFitRef.current = false;
       e.preventDefault();
       const { cx, cy } = getPos(e);
       // Proportional factor: works naturally for both mouse wheels (~120/notch)
@@ -990,6 +1087,8 @@ export function GraphPage() {
     };
 
     const onTouchStart = (e: TouchEvent) => {
+      // The reader has taken the view; cancel any pending auto-fit.
+      pendingFitRef.current = false;
       e.preventDefault();
       requestRender();
 

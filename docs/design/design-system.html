@@ -583,10 +583,26 @@
 
   /* Sidebar zones */
   .sidebar-zoned { display: flex; flex-direction: column; height: 460px; width: 280px; background: var(--bg); border-right: 1px solid var(--rule); }
-  .side-rail { display: flex; align-items: center; gap: 0.15rem; flex: 0 0 auto; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--rule); }
+  /* Scope zone — the one sidebar zone with a ground of its own (#138). */
+  .side-scope { flex: 0 0 auto; padding: 0.6rem 0.5rem 0.7rem; border-bottom: 1px solid var(--rule); background: var(--paper); }
+  .side-scope .side-head { margin-bottom: 0.45rem; }
+  .side-scope[data-open="false"] .side-head { margin-bottom: 0; }
+  .side-scope-keycap {
+    flex: 0 0 auto; font-family: var(--font-mono); font-size: 0.6rem;
+    color: var(--muted); border: 1px solid var(--rule); padding: 0.02rem 0.32rem; border-radius: 999px;
+  }
+  .side-scope-row {
+    display: flex; align-items: center; gap: 0.5rem; width: 100%;
+    padding: 0.32rem 0.35rem; border: 0; background: transparent;
+    font-family: var(--font-display); font-size: 0.82rem; color: var(--ink-soft); text-align: left;
+  }
+  .side-scope-row.on { color: var(--ink); font-weight: 600; background: var(--hot-soft); box-shadow: inset 3px 0 0 var(--hot); }
+  .side-scope-row .grow { flex: 1 1 auto; }
+  .side-scope-viewing { margin: 0 0 0 1.05rem; padding-bottom: 0.15rem; font-family: var(--font-sans); font-size: 0.7rem; color: var(--muted); }
+  .side-rail { display: flex; align-items: center; gap: 0.15rem; flex: 0 0 auto; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--rule); }
   .side-rail-item {
     display: inline-flex; align-items: center; justify-content: center;
-    width: 2.1rem; height: 2.1rem;
+    width: 1.9rem; height: 1.9rem;
     border: 1px solid transparent; background: transparent;
     color: var(--ink-soft); font-size: 1.05rem; cursor: pointer;
   }
@@ -677,12 +693,20 @@
     width: 280px;
   }
   .side-section { margin-bottom: 1.5rem; }
+  /* The width/border/background reset matters: §29's heads are real buttons,
+     and without it the specimen shows UA button chrome the app does not have. */
   .side-head {
     display: flex;
     align-items: center;
     gap: 0.55rem;
+    width: 100%;
     margin-bottom: 0.7rem;
     padding: 0 0.3rem;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
   }
   .side-num {
     font-family: var(--font-mono);
@@ -698,22 +722,35 @@
     text-transform: uppercase;
     color: var(--ink);
   }
+  /* Vault accordion head (§29) — a Vault name keeps its own capitalisation,
+     and outranks its contents in both size and caret. */
+  .vault-accordion-head { margin-bottom: 0.5rem; }
+  .vault-accordion-head[data-open="true"] { margin-bottom: 0.2rem; }
+  .vault-accordion-head .side-label {
+    font-variation-settings: "wdth" 100, "wght" 700;
+    font-size: 0.95rem;
+    letter-spacing: 0.01em;
+    text-transform: none;
+  }
+  .vault-accordion-head .side-caret {
+    border-top-width: 5px; border-bottom-width: 5px; border-left-width: 6px;
+  }
   .side-rule { flex: 1; height: 1px; background: var(--rule); }
   .side-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
   .folder-item { display: block; }
   .folder-row {
     display: flex; align-items: center; gap: 0.55rem;
-    padding: 0.28rem 0.4rem;
+    padding: 0.16rem 0.4rem;
     font-family: var(--font-display);
     font-variation-settings: "wdth" 98, "wght" 500;
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     color: var(--ink-soft);
     cursor: pointer;
     text-decoration: none;
-    line-height: 1.4;
+    line-height: 1.35;
   }
   .folder-row .caret {
-    width: 8px; height: 8px;
+    width: 6px; height: 6px;
     background: var(--muted);
     clip-path: polygon(0 0, 100% 50%, 0 100%);
     transition: transform 180ms var(--ease);
@@ -724,13 +761,13 @@
   .children { padding-left: 0.95rem; margin-left: 0.4rem; border-left: 1px solid var(--rule); }
   .note-link {
     display: flex; align-items: center; gap: 0.55rem;
-    padding: 0.22rem 0.45rem;
+    padding: 0.14rem 0.45rem;
     font-family: var(--font-display);
     font-variation-settings: "wdth" 100, "wght" 400;
     font-size: 0.9rem;
     color: var(--ink-soft);
     text-decoration: none;
-    line-height: 1.4;
+    line-height: 1.35;
     position: relative;
   }
   .note-link .idx {
@@ -738,6 +775,7 @@
     font-size: 0.66rem;
     color: var(--tertiary);
     min-width: 1.8rem;
+    transform: translateY(0.1em);
   }
   .note-link:hover, .note-link.is-hover { color: var(--ink); background: var(--paper-2); }
   .note-link:focus-visible, .note-link.is-focus {
@@ -1388,8 +1426,8 @@
      these in the app; this demo approximates the canvas draw with inline SVG. */
   .island-demo { display: flex; align-items: flex-end; justify-content: center; gap: 3rem; flex-wrap: wrap; }
   .island-demo-item { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
-  .island-demo-name { font-family: var(--font-display); font-variation-settings: "wdth" 85, "wght" 700; font-size: 1rem; color: var(--ink); }
-  .island-demo-count { font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted); }
+  .island-demo-name { font-family: var(--font-display); font-variation-settings: "wdth" 85, "wght" 700; font-size: 1.25rem; color: var(--ink); }
+  .island-demo-count { font-family: var(--font-mono); font-size: 0.81rem; color: var(--muted); }
   .island-demo-count.vault-tier-warn { color: var(--warn-fg); }
   .island-demo-count.vault-tier-error { color: var(--err-fg); }
 
@@ -1850,12 +1888,39 @@
     <section class="doc-section" id="sidebar">
       <div class="doc-section-num">§05</div>
       <h2>Sidebar (Explorer)</h2>
-      <p class="blurb"><b>Three zones:</b> a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the middle scrolls</b> &mdash; the rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it.</p>
+      <p class="blurb"><b>Four zones:</b> the Scope zone (#138), a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the third scrolls</b> &mdash; scope, rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>).</p>
+
+      <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The rail below it stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
+
+      <p class="blurb"><b>Scope rows are set one step tighter than the tree below them:</b> <span class="key">0.82rem</span> against the tree&rsquo;s own size, <span class="key">0.32rem 0.35rem</span> padding, <span class="key">0.5rem</span> gap. The zone is a register of what exists, read once and then ignored; the tree is the thing under the cursor all day. Sizing them alike made the sidebar open with two equal claims on attention. Rows keep <span class="key">--font-display</span> with its <span class="key">wdth</span>/<span class="key">wght</span> axes rather than dropping to the sans face &mdash; a Vault name is a name, and the display face is what names are set in everywhere else in this app.</p>
+
+      <p class="blurb"><b>Collapsed, the zone is head plus viewing line and nothing else</b> &mdash; no residual gap where the rows were. <span class="key">.side-head</span> carries a <span class="key">0.7rem</span> bottom margin for its ordinary use in the tree, and is declared <i>after</i> <span class="key">.scope-zone-head</span> at equal specificity, so the collapsed head silently inherits a margin under nothing unless the override is parent-scoped as <span class="key">.scope-zone .scope-zone-head</span>. Any future rule on this head needs the same scoping or it will not apply at all.</p>
+      <p class="blurb"><b>Recency panels align to the Scope zone, not to the tree.</b> <span class="key">RECENTLY VIEWED</span> and <span class="key">CHANGED ON DISK</span> are lists Hatchdoor keeps, the same kind of thing <span class="key">SCOPE</span> is, so they sit at the zone&rsquo;s outer edge &mdash; negative margins cancelling <span class="key">.explorer-nav</span>&rsquo;s <span class="key">1rem</span> inset back to the zone&rsquo;s <span class="key">0.5rem</span>, giving one shared left edge and one rule width. The Vault accordion keeps the deeper inset. <b>Indent is the signal:</b> headings this app owns at the outer edge, the Vaults you named one step inside. Their heads also drop <span class="key">.side-head</span>&rsquo;s <span class="key">0.7rem</span> to <span class="key">0.35rem</span> &mdash; that margin is sized for the tree&rsquo;s taller sections, and a head sitting straight onto a five-row list does not need it.</p>
+
       <p class="blurb">Folders use a CSS-only chevron caret that rotates open. <b>Notes show a mono index</b> &mdash; that is what tells note rows apart from folder rows without changing size or weight. Active note: hot-orange left rail + hot-soft background + bolded, and it is <b>canonical in the tree only</b>. Applying it in the recency lists too is what made one note light up in three places at once.</p>
+
+      <p class="blurb"><b>The index is centred optically, not geometrically.</b> It is always lining digits &mdash; ascent only, no descender &mdash; while the title beside it hangs about two pixels below their shared baseline. <span class="key">align-items: center</span> lines the two <i>boxes</i> up exactly and still leaves the digits reading high by half that descender, so <span class="key">.idx</span> takes a <span class="key">translateY(0.1em)</span> correction, in em so it survives a resize. The residual is content-dependent &mdash; a title full of descenders sits lower than an all-caps one &mdash; so the target is the face&rsquo;s typical profile, never any single string&rsquo;s ink.</p>
+
+      <p class="blurb"><b>Depth is carried by two devices, and both descend.</b> Size separates a Vault from its contents: the accordion head is the only row in the tree set above reading size, at <span class="key">0.95rem</span>. Folders and notes both stay at <span class="key">0.9rem</span> and separate by weight and marker instead &mdash; <span class="key">wght 500</span> with a caret against <span class="key">wght 400</span> with the mono index &mdash; because they are what you actually read, and buying a third size step by shrinking them would cost legibility to say something weight already says. Carets shrink the same way: <span class="key">6&times;10</span> at a Vault head, <span class="key">6&times;6</span> at a folder. A child marker larger than its parent&rsquo;s reads as the child outranking it, which is what an <span class="key">8&times;8</span> folder caret under a <span class="key">5&times;8</span> head was doing.</p>
+
+      <p class="blurb"><b>Row rhythm descends with depth too:</b> <span class="key">26px</span> between Vault heads, <span class="key">24.5px</span> between folders, <span class="key">23.9px</span> between notes. Pitch alone is not what the eye reads &mdash; before this the three were within 2px of each other and the tree still felt slack, because a head fills its box with large bold type while a note puts small light type in the same box, and the emptier box reads as looser. Rows are sized by the ratio of ink to box, not by matching numbers.</p>
       <p class="blurb">Section heads take a label, a rule, and a mono count. A collapsible section adds the same caret the folder rows use, so a foldable thing reads the same way wherever it appears. Section numerals are optional &mdash; use them only where the order carries meaning.</p>
 
       <div class="stage" style="padding:0; display:flex; align-items: stretch;">
         <div class="sidebar-zoned">
+
+          <div class="side-scope" data-open="true">
+            <div class="side-head">
+              <span class="side-caret"></span>
+              <span class="side-label">Scope</span>
+              <span class="side-scope-keycap">V</span>
+              <span class="side-rule"></span>
+              <span class="side-count">03</span>
+            </div>
+            <button class="side-scope-row on"><span class="grow">All Vaults</span><span class="side-count">3</span></button>
+            <button class="side-scope-row"><span class="grow">Kitchen</span><span class="side-count">126</span></button>
+            <button class="side-scope-row"><span class="grow">Work</span><span class="side-count">412</span></button>
+          </div>
 
           <div class="side-rail">
             <span class="side-rail-item" title="Stats">
@@ -1924,15 +1989,18 @@
         </div>
       </div>
 
+      <p class="blurb"><b>The rail is sized to its icons, not to a touch target</b> &mdash; <span class="key">1.9rem</span> items in <span class="key">0.35rem 0.5rem</span> of padding. It is a desktop-only strip: below 920px these destinations are reached from the drawer and the topbar, so the 44px minimum that governs tapped controls does not apply here, and holding to it only bought vertical space away from the tree. Scope zone and rail together are the fixed cost the sidebar pays before showing a single note, and that cost is kept deliberately small.</p>
+
       <p class="blurb"><b>The footer holds one action.</b> Three things in it and it becomes the grab-bag the header used to be. Contextual creation stays on the folder rows as a <code>+</code>.</p>
       <p class="blurb">Settings now has a destination (<a href="#settings">§27</a>) and is a live link. It keeps its own slot at the far edge of the rail &mdash; <span class="key">margin-left: auto</span> &mdash; because it is the one rail item that leaves the vault rather than reframing it. <b>When the page is unavailable the item is not rendered at all</b>, rather than shown dimmed: the earlier reserved-and-disabled treatment was replaced once there was something to link to, since a permanently dead control reads as a bug no matter how well it is labelled.</p>
 
       <div class="tag-row">
         <span class="key">.explorer-pane</span><span class="key">.explorer-rail</span><span class="key">.explorer-rail-item</span><span class="key">.explorer-rail-item.active</span><span class="key">.explorer-rail-item.is-disabled</span><span class="key">.explorer-nav</span><span class="key">.explorer-footer</span>
+        <span class="key">.scope-zone</span><span class="key">.scope-zone .scope-zone-head</span><span class="key">.scope-zone-keycap</span><span class="key">.scope-zone-current</span><span class="key">.scope-zone-viewing-line</span><span class="key">.scope-zone-list</span><span class="key">.scope-row</span><span class="key">.scope-row.is-selected</span><span class="key">.scope-row-label</span><span class="key">.scope-row-viewing</span>
         <span class="key">.side-section</span><span class="key">.side-head</span><span class="key">.side-label</span><span class="key">.side-rule</span><span class="key">.side-count</span><span class="key">.side-caret</span>
         <span class="key">.folder-item[data-open]</span><span class="key">.folder-row</span><span class="key">.caret</span><span class="key">.children</span>
         <span class="key">.note-link</span><span class="key">.note-link.active-note</span><span class="key">.idx</span>
-        <span class="key">.explorer-changes</span><span class="key">.sidebar-resizer</span>
+        <span class="key">.recent-notes</span><span class="key">.recent-notes .side-head</span><span class="key">.explorer-changes</span><span class="key">.sidebar-resizer</span>
       </div>
     </section>
 
@@ -2717,10 +2785,34 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       not for the page to become something else. Narrowing to one Vault removes every caption and
       enclosure and restores today's single-Vault graph unchanged.</p>
 
+      <p class="blurb"><b>The count line names its unit here</b> &mdash; <code>42 notes</code>, not the
+      bare <code>42</code> §27 uses in the sidebar. The slot vocabulary is the same, but the sidebar
+      figure sits on a row that already says what it counts, and this one floats in open canvas with
+      nothing beside it. A caption is read alone, so it carries its own unit; the condition word still
+      replaces the line outright, and gets no unit because a word is not a quantity.</p>
+
+      <p class="blurb"><b>Each column is as wide as its own widest island, each row as tall as its own
+      tallest</b> &mdash; never one spacing derived from the largest Vault anywhere. That single figure
+      failed in both directions at once: a 49-note Vault outgrew the shared cell and overlapped its
+      neighbours by up to 120px, while 2-note Vaults sat in cells a third wider than they needed.
+      Grid order is untouched by this &mdash; it is still Vault-management order &mdash; only the cell
+      sizes vary. Because an island's true radius does not exist until the layout settles, the packing
+      estimates it from node count and deliberately <i>over</i>-estimates: spare space inside a cell
+      costs only zoom, since the view fits the whole field, whereas an underestimate overlaps two
+      Vaults and makes both illegible.</p>
+
+      <p class="blurb"><b>The landing view fits the whole field, captions included</b> &mdash; a caption
+      clipped at the viewport edge is exactly as unreadable as a missing island. The fit runs on every
+      frame while the layout settles rather than once at the end: <code>alphaDecay(0.02)</code> leaves
+      the simulation warm for about six seconds, and a view that jumps that long after you arrive reads
+      as the page glitching. It stops the moment the layout cools <i>or</i> the reader pans, zooms or
+      touches the canvas &mdash; an auto-fit that fights a deliberate pan is worse than none. Zoom is
+      capped at the single-graph landing scale, so a lone small Vault never arrives magnified.</p>
+
       <div class="stage island-demo">
         <div class="island-demo-item">
           <div class="island-demo-name">Alpha Vault</div>
-          <div class="island-demo-count">42</div>
+          <div class="island-demo-count">42 notes</div>
           <svg width="150" height="150" viewBox="0 0 150 150" aria-hidden="true">
             <circle cx="75" cy="75" r="58" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
             <line x1="55" y1="70" x2="92" y2="55" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
@@ -2754,7 +2846,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <table class="token-table">
         <thead><tr><th>primitive</th><th>drawn</th><th>reads</th></tr></thead>
         <tbody>
-          <tr><td class="name">Island caption</td><td class="val">canvas space, scaled with zoom (not screen-constant like a node label)</td><td class="val">Vault name in display ink, over a mono count line &mdash; the note count when healthy, or the §27 condition word and ink when not. Inert: it neither narrows scope nor zooms to fit</td></tr>
+          <tr><td class="name">Island caption</td><td class="val">canvas space, scaled with zoom (not screen-constant like a node label)</td><td class="val">Vault name in display ink at 20px, over a 13px mono count line &mdash; <code>42 notes</code> when healthy (singular <code>1 note</code>), or the §27 condition word and ink when not. Inert: it neither narrows scope nor zooms to fit</td></tr>
           <tr><td class="name">Island enclosure</td><td class="val">dashed circle, token rule colour</td><td class="val">the component's settled layout radius plus a margin &mdash; marks where one Vault ends without implying a container the data model doesn't have</td></tr>
           <tr><td class="name">Not-drawn line</td><td class="val">DOM, one line under the header</td><td class="val">names every Vault that contributed no island (it could not answer), always in warn ink regardless of that Vault's own condition tier: <code>Field Station could not be drawn.</code></td></tr>
         </tbody>
@@ -2768,7 +2860,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <div class="tag-row">
         <span class="key">components/graph/GraphPage.tsx</span><span class="key">components/graph/graphSimulation.ts</span>
-        <span class="key">computeIslandCenters</span><span class="key">buildIslandGraphs</span><span class="key">createIslandSimulation</span>
+        <span class="key">computeIslandCenters</span><span class="key">islandRadiusEstimate</span><span class="key">buildIslandGraphs</span><span class="key">createIslandSimulation</span>
         <span class="key">lib/vaultParticipants.ts</span><span class="key">describeVaultsNotDrawn</span><span class="key">.graph-not-drawn</span>
       </div>
     </section>
@@ -2783,7 +2875,29 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       plus N one-line heads whatever N is &mdash; bounded height is the whole argument. The head is
       the documented section head (§05) with the Vault name in the label slot and §27's own
       count-or-condition slot trailing; unfolded takes the active treatment, folded is plain. It is
-      one click target with one job &mdash; unfold this Vault. <b>It does not narrow scope.</b></p>
+      one click target with one job &mdash; unfold this Vault. <b>It does not narrow scope.</b>
+      Clicking the unfolded head folds it, leaving nothing unfolded &mdash; the same plain list of
+      names this section already documents for an instance with no history, and the only way back to
+      it by hand. A head that ignores every click after the first reads as broken.</p>
+
+      <p class="blurb"><b>The Vault name keeps the capitalisation it was given.</b> It is the
+      operator&rsquo;s own text, not a label this app wrote, so the head overrides
+      <span class="key">.side-label</span>&rsquo;s uppercase and tracking &mdash; the same reasoning
+      <a href="#editing">§20</a> applies to the inline editor, where an inherited
+      <code>text-transform</code> would show the typist a different string than the one on disk.
+      Uppercasing it also collapsed the one signal separating these heads from
+      <span class="key">SCOPE</span> and <span class="key">RECENTLY VIEWED</span> above them:
+      <b>caps mean a heading Hatchdoor owns, sentence case means your data</b>. The Scope zone and the
+      accordion name the same Vaults, and must name them identically.</p>
+
+      <p class="blurb"><b>The gap belongs to the group, not to every head.</b> An unfolded head owns
+      the tree directly beneath it and closes up to <span class="key">0.2rem</span>; the separating
+      <span class="key">0.5rem</span> moves below the tree, so one Vault is held off the next by the
+      same distance whether the group is a single line or a whole tree. Carried under every head
+      instead, it put a folder further from its own Vault than from the following one &mdash;
+      proximity claiming the opposite of the nesting. The closing margin is scoped
+      <span class="key">.explorer-nav &gt; .tree.root-tree</span> so it reaches accordion trees only
+      and never the recency lists, whose own root tree is nested inside its panel.</p>
 
       <div class="stage" style="padding:0; max-width: 300px;">
         <div style="padding: 1rem 1rem 1.2rem; background: var(--bg);">
@@ -2834,6 +2948,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row">
         <span class="key">app/vaultAccordion.ts</span><span class="key">app/ExplorerPane.tsx</span><span class="key">lib/notePath.ts</span>
         <span class="key">.vault-accordion-head</span><span class="key">.vault-accordion-head[data-open]</span><span class="key">.vault-accordion-head[aria-disabled]</span>
+        <span class="key">.vault-accordion-head .side-label</span><span class="key">.vault-accordion-head .side-caret</span><span class="key">.explorer-nav &gt; .tree.root-tree</span>
         <span class="key">SideHead <i>slot</i> / <i>disabled</i></span>
       </div>
     </section>

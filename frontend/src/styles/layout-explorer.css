@@ -36,17 +36,26 @@
    Absent entirely at one enabled Vault: the "imposes nothing" requirement. */
 .scope-zone {
   flex: 0 0 auto;
-  padding: 0.6rem 0.75rem 0.75rem;
+  padding: 0.6rem 0.5rem 0.7rem;
   border-bottom: 1px solid var(--rule);
+  /* One step lighter than the sidebar's own --bg, so the pinned zone lifts off
+     the scrolling navigation instead of running into it. Holds in both themes:
+     --paper is the lighter neighbour of --bg in light, and of the near-black
+     ground in dark. */
+  background: var(--paper);
 }
 
-.scope-zone-head {
+/* Scoped by the parent on purpose: `.side-head` is declared later in this file
+   at equal specificity, so a bare `.scope-zone-head` loses the cascade and the
+   head keeps side-head's 0.7rem bottom margin — which is what made the
+   collapsed zone taller than it reads. */
+.scope-zone .scope-zone-head {
   margin-bottom: 0;
   cursor: pointer;
 }
 
-.scope-zone-head[data-open="true"] {
-  margin-bottom: 0.5rem;
+.scope-zone .scope-zone-head[data-open="true"] {
+  margin-bottom: 0.45rem;
 }
 
 /* `v` keycap after the SCOPE label (#146) — wide screens only, since the
@@ -74,7 +83,8 @@
 }
 
 .scope-zone-viewing-line {
-  margin: -0.25rem 0 0.5rem 1.05rem;
+  margin: 0 0 0 1.05rem;
+  padding-bottom: 0.15rem;
   font-family: var(--font-sans);
   font-size: 0.7rem;
   color: var(--muted);
@@ -89,16 +99,16 @@
 .scope-row {
   display: flex;
   align-items: center;
-  gap: 0.55rem;
+  gap: 0.5rem;
   width: 100%;
-  padding: 0.3rem 0.45rem;
+  padding: 0.32rem 0.35rem;
   border: 0;
   background: transparent;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 100,
     "wght" 400;
-  font-size: 0.86rem;
+  font-size: 0.82rem;
   color: var(--ink-soft);
   text-align: left;
   cursor: pointer;
@@ -213,7 +223,7 @@
   align-items: center;
   gap: 0.15rem;
   flex: 0 0 auto;
-  padding: 0.6rem 0.75rem;
+  padding: 0.35rem 0.5rem;
   border-bottom: 1px solid var(--rule);
 }
 
@@ -221,8 +231,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.1rem;
-  height: 2.1rem;
+  width: 1.9rem;
+  height: 1.9rem;
   border: 1px solid transparent;
   border-radius: 0;
   background: transparent;
@@ -361,6 +371,56 @@ button.side-head[data-open="true"] .side-caret {
    `.note-link.active-note` use, folded stays plain. An unavailable Vault's
    head takes the same disabled-but-focusable precedent as
    `.explorer-rail-item.is-disabled` — dimmed, not removed. */
+/* A Vault name is the operator's own text, not a label this app wrote, so it
+   keeps the capitalisation it was given — the same reason §22's inline editor
+   resets `text-transform`. Uppercasing it also collapsed the one signal that
+   tells these heads apart from `RECENTLY VIEWED` and `SCOPE` above them: caps
+   mean a heading Hatchdoor owns, sentence case means your data. */
+.vault-accordion-head .side-label {
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+/* Depth is carried by exactly two devices, and both descend. Size separates a
+   Vault from its contents — the head is the only thing in the tree set above
+   reading size; folders and notes stay at 0.9rem because they are what you
+   actually read, and shrinking them to manufacture a third step would cost
+   legibility to say something weight already says. The caret shrinks with
+   depth for the same reason: a child marker larger than its parent's reads as
+   the child outranking it. Scoped to the accordion so §05's chrome heads
+   (`SCOPE`, `RECENTLY VIEWED`) keep the smaller shared caret. */
+.vault-accordion-head .side-caret {
+  border-top-width: 5px;
+  border-bottom-width: 5px;
+  border-left-width: 6px;
+}
+
+/* Row rhythm descends with depth: a Vault head is a group boundary and keeps
+   the most air, folders less, notes least. `.side-head`'s 0.7rem is sized for
+   the tree's standalone sections, and between stacked Vault heads it reads as
+   a gap rather than as separation. Parent-scoped for the usual cascade
+   reason. */
+.vault-accordion-head {
+  margin-bottom: 0.5rem;
+}
+
+/* The space belongs to the group, not to every head. An unfolded head owns the
+   tree directly beneath it, so it closes right up; the gap moves below the
+   tree instead, where it separates one Vault from the next. Carrying it under
+   every head put a folder further from its own Vault than from the following
+   one — proximity claiming the opposite of the nesting. */
+.vault-accordion-head[data-open="true"] {
+  margin-bottom: 0.2rem;
+}
+
+.explorer-nav > .tree.root-tree {
+  margin-bottom: 0.5rem;
+}
+
 .vault-accordion-head[data-open="true"] {
   background: var(--hot-soft);
   box-shadow: inset 3px 0 0 var(--hot);
@@ -387,18 +447,37 @@ button.side-head[data-open="true"] .side-caret {
   font-size: 0.62rem;
   color: var(--muted);
   flex: 0 0 auto;
+  /* Optical, not geometric. The index is always lining digits — ascent only,
+     no descender — while the title beside it hangs ~2px below the shared
+     baseline. Centring the boxes therefore leaves the digits sitting high by
+     half that descender. Nudged down by it so the two read as centred on each
+     other; in em so it holds if the row is ever resized. */
+  transform: translateY(0.1em);
 }
 
 .active-note .idx {
   color: var(--hot);
 }
 
-/* Recent notes panel */
+/* Recent notes panel. Hatchdoor's own standing list, so it lines up with the
+   Scope zone's head rather than with the Vault accordion — the negative
+   margins cancel `.explorer-nav`'s 1rem inset back to the zone's 0.5rem, so
+   `RECENTLY VIEWED` and `SCOPE` share one left edge and one rule width. The
+   accordion keeps the deeper inset: headings this app owns sit at the outer
+   edge, the Vaults you named sit one step in. */
 .recent-notes {
-  margin: 0 0 1.5rem;
+  margin: 0 -0.5rem 0.75rem;
   border: 0;
+  border-bottom: 1px solid var(--rule);
   background: transparent;
-  padding: 0;
+  padding: 0 0 0.5rem;
+}
+
+/* This head sits directly on its own short list, so it does not need the
+   0.7rem `.side-head` keeps for the tree's taller sections. Parent-scoped
+   because `.side-head` is declared later at equal specificity. */
+.recent-notes .side-head {
+  margin-bottom: 0.35rem;
 }
 
 /* Note links in sidebar */
@@ -406,7 +485,7 @@ button.side-head[data-open="true"] .side-caret {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.22rem 0.45rem;
+  padding: 0.14rem 0.45rem;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 100,
@@ -414,7 +493,7 @@ button.side-head[data-open="true"] .side-caret {
   font-size: 0.9rem;
   color: var(--ink-soft);
   text-decoration: none;
-  line-height: 1.4;
+  line-height: 1.35;
   position: relative;
   width: 100%;
 }
@@ -471,16 +550,16 @@ button.side-head[data-open="true"] .side-caret {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.28rem 0.4rem;
+  padding: 0.16rem 0.4rem;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 98,
     "wght" 500;
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   color: var(--ink-soft);
   cursor: pointer;
   text-decoration: none;
-  line-height: 1.4;
+  line-height: 1.35;
   list-style: none;
   min-height: unset;
   border-radius: 0;
@@ -498,8 +577,8 @@ button.side-head[data-open="true"] .side-caret {
 .folder-item summary::before {
   content: "";
   display: block;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   background: var(--muted);
   clip-path: polygon(0 0, 100% 50%, 0 100%);
   transition: transform 180ms var(--ease);
