@@ -487,7 +487,13 @@
     background: var(--bg);
     border-bottom: 1px solid var(--rule);
   }
-  .topbar-actions { display: flex; align-items: center; gap: 0.4rem; }
+  .topbar-actions { display: flex; align-items: center; gap: 0.95rem; }
+  .topbar-actions > * + * { position: relative; }
+  .topbar-actions > * + *::before {
+    content: ""; position: absolute; left: -0.5rem; top: 50%;
+    transform: translateY(-50%);
+    width: 1px; height: 1.15rem; background: var(--rule-strong);
+  }
   .search-trigger {
     display: inline-flex;
     align-items: center;
@@ -515,7 +521,9 @@
   }
   .icon-btn {
     width: 2.1rem; height: 2.1rem;
-    border: 1px solid var(--rule);
+    /* Transparent rather than absent: the box must not shift by a pixel when
+       hover or an open menu paints it. */
+    border: 1px solid transparent;
     background: transparent;
     color: var(--ink-soft);
     cursor: pointer;
@@ -527,6 +535,7 @@
     transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
   }
   .icon-btn:hover, .icon-btn.is-hover { background: var(--ink); color: var(--bg); }
+  .icon-btn[aria-expanded="true"], .icon-btn.is-open { background: var(--ink); color: var(--bg); }
   .icon-btn:focus-visible, .icon-btn.is-focus {
     outline: 2px solid var(--hot);
     outline-offset: 1px;
@@ -1843,6 +1852,7 @@
       <div class="doc-section-num">§03</div>
       <h2>Topbar — desktop</h2>
       <p class="blurb">A 3px hot rule sits above the topbar in every page. Three columns: brand, breadcrumb, actions. The search trigger is a click target that opens the search dialog.</p>
+      <p class="blurb">The actions are bare glyphs parted by hairlines (<a href="#buttons">§25</a>). <b>The search trigger keeps its border</b> — it reads as a field rather than a button, and that distinction is worth the one box. At the ends of the row each glyph is nudged outward by its own inset, so what aligns with the content below is the mark itself and not the hit area around it.</p>
 
       <div class="stage" style="padding: 0;">
         <div class="hotbar"></div>
@@ -1880,6 +1890,7 @@
       <div class="doc-section-num">§04</div>
       <h2>Topbar — mobile</h2>
       <p class="blurb">Two rows. Top row: brand + actions (drawer toggle, search icon, more). Bottom row: the current note's path as a button that opens the explorer drawer. 44px hit targets, safe-area insets respected.</p>
+      <p class="blurb">The hit target grows to 44px here but the glyph does not, so the end-of-row correction grows with it. The drawer toggle&rsquo;s glyph lines up with the row beneath it, not with the invisible box around itself.</p>
 
       <div class="stage" style="padding:0; max-width: 420px;">
         <div class="hotbar"></div>
@@ -2050,6 +2061,8 @@
       <div class="doc-section-num">§07</div>
       <h2>Note title block</h2>
       <p class="blurb">The opening of every note: super-row (pill + date + section), uppercase posterized title with a lowercase orange middle word, italic sans lede.</p>
+      <p class="blurb"><b>The title owns the full measure.</b> Nothing shares its line — the save state and <b>Edit</b> moved down to the Properties rule (<a href="#save-state">§21</a>) precisely so a long title wraps on its own terms.</p>
+      <p class="blurb"><b>Trailing scroll space is conditional.</b> A note long enough to scroll keeps a screenful below it, so a heading near its end can still be brought to the top of the pane. A note that does not scroll gets none: a short note that ended two lines in was offering a screenful of nothing to scroll through.</p>
       <div class="stage" style="padding: 2rem 1.5rem;">
         <div class="super-row">
           <span class="ty-super"><span class="pill">№ 012</span><span class="tick">/</span><span>13.05.2026 · 06:43</span><span class="tick">/</span><span>Observations</span></span>
@@ -2560,6 +2573,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <h2>Save state</h2>
       <p class="blurb">Autosave removed the Save button, and with it the only evidence a user had that their writing survived. In a vault with agent co-writers and git sync, that evidence is the trust surface of the whole feature, so it gets a permanent slot beside <b>Edit</b>.</p>
       <p class="blurb">It states what is true <i>now</i> rather than announcing an event: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. The failure state is a click target that opens the conflict review.</p>
+      <p class="blurb"><b>The slot sits at the end of the Properties heading line</b> (<a href="#meta">§08</a>), not beside the title. On the title&rsquo;s line the pair took width from it and a long title wrapped around them; the Properties rule already runs the full measure and has the room. Where a note has no properties and no Vault row, that line renders for the actions alone rather than showing a disclosure that opens on to nothing.</p>
       <div class="stage" style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">
         <span class="save-state">Saving…</span>
         <span class="save-state">Saved 14:32</span>
@@ -2649,6 +2663,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="doc-section-num">§25</div>
       <h2>Buttons</h2>
       <p class="blurb">Three variants: default (ink border), primary (hot fill), ghost (rule border). Icon buttons are 2.1rem square (or 44px on mobile). All states are shown — focus uses a 2px hot outline.</p>
+      <p class="blurb"><b>Icon buttons carry no resting border.</b> A box drawn around every glyph repeats structure the row already has — in this system rules separate <i>zones</i> (the topbar&rsquo;s underline, the meta row&rsquo;s, the sidebar&rsquo;s edge), and three boxes in a row is UI-kit habit rather than this language. The hit area is unchanged and the ink square still arrives, on hover and while a menu the button owns is open; it is simply not drawn at rest. The border is kept and made transparent so nothing shifts when it appears.</p>
 
       <h3 class="doc-sub">Default button — all states</h3>
       <div class="stage" style="display:flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;">
@@ -2672,11 +2687,23 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="stage" style="display:flex; gap: 0.6rem; align-items: center;">
         <button class="icon-btn">+</button>
         <button class="icon-btn is-hover">+</button>
+        <button class="icon-btn is-open">+</button>
         <button class="icon-btn is-focus">+</button>
         <button class="icon-btn is-disabled" disabled>+</button>
-        <span style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-left: 0.5rem;">2.1rem · square</span>
+        <span style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-left: 0.5rem;">rest · hover · menu open · focus · disabled</span>
       </div>
-      <div class="tag-row"><span class="key">.icon-btn</span><span class="key">.icon-btn.is-hover</span><span class="key">.icon-btn.is-focus</span></div>
+      <div class="tag-row"><span class="key">.icon-btn</span><span class="key">.icon-btn.is-hover</span><span class="key">.icon-btn.is-open</span><span class="key">.icon-btn.is-focus</span></div>
+
+      <h3 class="doc-sub">Separated by a hairline, not by a box</h3>
+      <p class="blurb">Where icon buttons sit together in the chrome, a 1px <span class="key">--rule-strong</span> hairline stands between them. It lives in the gap rather than on either control, so a pressed button&rsquo;s ink square never paints over it, and it is the same mark that separates every other zone in the app rather than a new one invented for buttons.</p>
+      <div class="stage" style="display:flex; align-items:center;">
+        <div class="topbar-actions">
+          <button class="icon-btn">&#9906;</button>
+          <button class="icon-btn">&#9681;</button>
+          <button class="icon-btn is-open">&ctdot;</button>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.topbar-actions</span><span class="key">.topbar-actions &gt; * + *::before</span></div>
 
       <h3 class="doc-sub">Floating actions (theme toggle, etc.)</h3>
       <div class="stage" style="display:flex; gap: 0.6rem; align-items: center;">
@@ -2688,7 +2715,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.float-actions</span></div>
     </section>
 
-    <p style="font-family: var(--font-sans); font-size: 0.8rem; color: var(--muted); margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);">End of design system · v2026.7 · all components used by the React app, with light + dark variants and every interaction state. Implementation: token block → component classes → wire to existing JSX.</p>
+    <p style="font-family: var(--font-sans); font-size: 0.8rem; color: var(--muted); margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);">End of design system · v2026.8 · all components used by the React app, with light + dark variants and every interaction state. Implementation: token block → component classes → wire to existing JSX.</p>
 
     <!-- ───────── ICONS ───────── -->
     <section class="doc-section" id="icons">
