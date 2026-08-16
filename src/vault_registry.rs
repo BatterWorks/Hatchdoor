@@ -41,6 +41,17 @@ pub(crate) const DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS: u64 = 24 * 60 * 60;
 /// `ManagedGitScheduler` and share its backoff bound.
 const MIN_MANAGED_GIT_POLL_INTERVAL_SECS: u64 = 60;
 
+/// Resolve the registry location, honoring the `HATCHDOOR_VAULT_REGISTRY_PATH`
+/// override. A blank value is treated as unset so an empty `.env` entry cannot
+/// silently point the registry at the process working directory.
+fn default_registry_path() -> PathBuf {
+    std::env::var("HATCHDOOR_VAULT_REGISTRY_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| PathBuf::from(DEFAULT_VAULT_REGISTRY_PATH), PathBuf::from)
+}
+
 fn default_managed_git_poll_interval_secs() -> u64 {
     DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
 }
@@ -650,8 +661,12 @@ pub struct VaultRegistryStore {
 }
 
 impl VaultRegistryStore {
+    /// The container layout owns `/data`, but a bare `cargo run` on a
+    /// developer host has no writable `/data`. `HATCHDOOR_VAULT_REGISTRY_PATH`
+    /// relocates the registry so local dev can exercise the Vault collection;
+    /// unset (the deployed case) keeps `DEFAULT_VAULT_REGISTRY_PATH`.
     pub fn at_default_path() -> Self {
-        Self::new(DEFAULT_VAULT_REGISTRY_PATH)
+        Self::new(default_registry_path())
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {
