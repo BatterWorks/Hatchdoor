@@ -42,6 +42,18 @@ Discovery remains authenticated and available when no Vault is ready. Returned
 definitions and status are safe to display: credentials are never returned;
 only `credential_configured` is exposed.
 
+A Git-sourced Vault is not writable in this slice. A Vault that clones cleanly
+reaches `activation: active`, `search: ready` and `git: ready`, and still
+reports `capabilities.mutate: false` and `capabilities.push: false` with
+`capabilities.pull: true`. Read it as read-and-pull: browse it, search it, pull
+into it, and do not offer a write affordance for it. This is the foundation
+slice's scope rather than a fault in the Vault, so nothing about it is
+retryable and no error is reported for it; the outbound half of managed Git,
+including push and the bidirectional bootstrap, is still unchecked work in
+[`docs/plans/managed-git-vault-foundation.md`](../plans/managed-git-vault-foundation.md).
+Do not infer the posture from the source type alone: read `capabilities`, which
+is the only field that tells you what this Vault permits right now.
+
 ## HTTP before and after
 
 Unscoped routes are removed:
