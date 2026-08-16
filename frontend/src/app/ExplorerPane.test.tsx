@@ -11,6 +11,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ExplorerPane } from "./ExplorerPane";
+import { getStoredUnfoldedVault } from "./vaultAccordion";
 import {
   EIGHT_VAULTS,
   THREE_VAULTS,
@@ -877,6 +878,29 @@ describe("ExplorerPane accordion (#142)", () => {
     expect(
       document.querySelectorAll(".explorer-nav > .tree.root-tree"),
     ).toHaveLength(1);
+  });
+
+  it("clicking the unfolded head folds it, leaving no Vault unfolded", () => {
+    const vaultTrees = THREE_VAULTS.map((vault) => vaultTreeFor(vault));
+    renderPane({
+      vaults: THREE_VAULTS,
+      vaultTrees,
+      scope: "all",
+      locationPathname: `/v/${THREE_VAULTS[0].vault_id}/n/x`,
+    });
+
+    expect(accordionHeads()[0]).toHaveAttribute("data-open", "true");
+
+    fireEvent.click(accordionHeads()[0]);
+
+    for (const head of accordionHeads()) {
+      expect(head).toHaveAttribute("data-open", "false");
+    }
+    expect(
+      document.querySelectorAll(".explorer-nav > .tree.root-tree"),
+    ).toHaveLength(0);
+    // The folded state is the remembered one, so a reload keeps it.
+    expect(getStoredUnfoldedVault()).toBeNull();
   });
 
   it("marks an unavailable Vault's head aria-disabled and refuses to unfold it", () => {

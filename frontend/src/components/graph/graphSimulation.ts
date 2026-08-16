@@ -146,16 +146,27 @@ export function createGraphSimulation(
 
 // ── all-Vault islands (#143) ────────────────────────────────────────────────
 
-const ISLAND_MIN_SPACING = 260;
-const ISLAND_SPACING_PER_NODE = 18;
+/** Matches `ISLAND_ENCLOSURE_MARGIN` in GraphPage, plus slack for the outermost
+ * node's own drawn radius, which the enclosure is measured past. */
+const ISLAND_ENCLOSURE_ALLOWANCE = 56;
+/** Floor for a tiny or empty Vault: two nodes still push apart under charge. */
+const ISLAND_MIN_RADIUS = 120;
+/** Calibrated against settled radii, then rounded up — a 49-node island
+ * measured 356px, which this estimates at 362px. */
+const ISLAND_RADIUS_PER_NODE = 46;
+/** Clear air between neighbouring enclosures. */
+const ISLAND_GUTTER = 48;
+/** Caption gap plus its two lines, mirrored from GraphPage's own constants. */
+const ISLAND_CAPTION_HEADROOM = 46;
 
 /**
  * Deterministic grid centers for N islands, in the given order (Vault-
  * management order — #118's resolution: never sorted by size, note count, or
- * condition). Cell spacing grows with the largest per-island node count so
- * a big component doesn't spill into its neighbours' cells; the grid itself
- * never reorders. The whole grid is centred on the origin so the existing
- * "transform centres world (0,0) on the canvas" initial view still frames it.
+ * condition). Each column takes the width its own widest island needs and each
+ * row the height its own tallest needs, so a big component never spills into
+ * its neighbours and small ones are not padded out to match it; the grid
+ * itself never reorders. The whole grid is centred on the origin, and
+ * `GraphPage` fits the view to it once the layout settles.
  */
 export function computeIslandCenters(
   nodeCounts: number[],
@@ -164,17 +175,62 @@ export function computeIslandCenters(
   if (n === 0) return [];
   const cols = Math.ceil(Math.sqrt(n));
   const rows = Math.ceil(n / cols);
-  const maxCount = Math.max(...nodeCounts, 1);
-  const spacing =
-    ISLAND_MIN_SPACING + ISLAND_SPACING_PER_NODE * Math.sqrt(maxCount);
-  const centers: { cx: number; cy: number }[] = [];
+
+  // Each column is as wide as its widest island and each row as tall as its
+  // tallest, rather than every cell taking the largest island's footprint.
+  // One uniform spacing keyed to `maxCount` did both things wrong at once: a
+  // 49-note Vault beside 2-note ones overlapped its neighbours by up to 120px
+  // (its own radius outgrew the shared cell), while those neighbours sat in
+  // cells a third wider than they needed. Sizing per column and row keeps the
+  // grid order intact and removes both faults.
+  const radii = nodeCounts.map(islandRadiusEstimate);
+  const colWidth = new Array<number>(cols).fill(0);
+  const rowHeight = new Array<number>(rows).fill(0);
   for (let i = 0; i < n; i++) {
     const col = i % cols;
     const row = Math.floor(i / cols);
+    colWidth[col] = Math.max(colWidth[col], radii[i] * 2 + ISLAND_GUTTER);
+    // Captions stack above the enclosure, so a row must clear them too.
+    rowHeight[row] = Math.max(
+      rowHeight[row],
+      radii[i] * 2 + ISLAND_CAPTION_HEADROOM + ISLAND_GUTTER,
+    );
+  }
+
+  const colCenters = runningCenters(colWidth);
+  const rowCenters = runningCenters(rowHeight);
+  const centers: { cx: number; cy: number }[] = [];
+  for (let i = 0; i < n; i++) {
     centers.push({
-      cx: (col - (cols - 1) / 2) * spacing,
-      cy: (row - (rows - 1) / 2) * spacing,
+      cx: colCenters[i % cols],
+      cy: rowCenters[Math.floor(i / cols)],
     });
+  }
+  return centers;
+}
+
+/**
+ * A generous upper bound on an island's settled enclosure radius, from node
+ * count alone — the true radius is only known once the layout settles, long
+ * after centers must be fixed. Deliberately over- rather than under-estimates:
+ * spare space inside a cell costs only zoom, since the view fits the whole
+ * field, whereas an underestimate overlaps two Vaults and makes both illegible.
+ */
+export function islandRadiusEstimate(nodeCount: number): number {
+  return (
+    ISLAND_ENCLOSURE_ALLOWANCE +
+    Math.max(ISLAND_MIN_RADIUS, ISLAND_RADIUS_PER_NODE * Math.sqrt(nodeCount))
+  );
+}
+
+/** Track centers for a run of sizes, with the whole run centered on zero. */
+function runningCenters(sizes: number[]): number[] {
+  const total = sizes.reduce((sum, size) => sum + size, 0);
+  const centers: number[] = [];
+  let edge = -total / 2;
+  for (const size of sizes) {
+    centers.push(edge + size / 2);
+    edge += size;
   }
   return centers;
 }

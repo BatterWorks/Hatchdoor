@@ -5,6 +5,7 @@ import {
   buildIslandGraphs,
   buildSimulationGraph,
   computeIslandCenters,
+  islandRadiusEstimate,
   createGraphSimulation,
   createIslandSimulation,
   hitTest,
@@ -232,6 +233,36 @@ describe("computeIslandCenters", () => {
     expect(computeIslandCenters([3, 5, 2])).toEqual(
       computeIslandCenters([3, 5, 2]),
     );
+  });
+
+  it("never overlaps two islands, however lopsided the Vault sizes", () => {
+    // The failing shape from #118's review: one large Vault beside several
+    // tiny ones overlapped its neighbours by up to 120px under one uniform
+    // spacing, so both captions and both enclosures became unreadable.
+    const counts = [2, 3, 2, 0, 2, 49];
+    const centers = computeIslandCenters(counts);
+    for (let i = 0; i < counts.length; i++) {
+      for (let j = i + 1; j < counts.length; j++) {
+        const distance = Math.hypot(
+          centers[i].cx - centers[j].cx,
+          centers[i].cy - centers[j].cy,
+        );
+        const needed =
+          islandRadiusEstimate(counts[i]) + islandRadiusEstimate(counts[j]);
+        expect(distance).toBeGreaterThanOrEqual(needed);
+      }
+    }
+  });
+
+  it("sizes each column to its own widest island, not to the largest anywhere", () => {
+    // 2x2: column 0 holds both 1-node Vaults, column 1 holds the 400-node one.
+    // The all-small column must stay narrow instead of inheriting its
+    // neighbour's width, which one uniform spacing gave it.
+    const centers = computeIslandCenters([1, 400, 1, 1]);
+    const totalWidth = 2 * (centers[1].cx - centers[0].cx);
+    const smallColumnWidth = 2 * (centers[0].cx + totalWidth / 2);
+    const largeColumnWidth = totalWidth - smallColumnWidth;
+    expect(smallColumnWidth).toBeLessThan(largeColumnWidth);
   });
 
   it("grows spacing with the largest island's node count", () => {

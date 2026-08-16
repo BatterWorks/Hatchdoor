@@ -844,6 +844,7 @@ export function SettingsPage({
                   className="settings-index-item"
                   data-active={!showDrafts && item.id === active}
                   onClick={() => {
+                    setSelectedVaultId(null);
                     setShowDrafts(false);
                     setActive(item.id);
                   }}
