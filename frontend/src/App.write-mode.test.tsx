@@ -335,19 +335,18 @@ describe("App write mode", () => {
     fireEvent.change(screen.getByLabelText("Note name"), {
       target: { value: "New Note" },
     });
-    fireEvent.change(screen.getByLabelText("Markdown content"), {
-      target: { value: "# New Note\n" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create and open" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         NOTES_URL,
         expect.objectContaining({
           method: "POST",
+          // Created empty: the note is written in place once it opens, so the
+          // dialog collects a destination and nothing else.
           body: JSON.stringify({
             relative_path: "Projects/New Note",
-            content: "# New Note\n",
+            content: "",
           }),
         }),
       );
@@ -681,7 +680,7 @@ describe("App write mode", () => {
     fireEvent.change(screen.getByLabelText("Note name"), {
       target: { value: "escape" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create and open" }));
 
     expect(
       await screen.findByText(/must not contain "\.\."/),

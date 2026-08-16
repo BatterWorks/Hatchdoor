@@ -16,15 +16,17 @@ import type { VaultId, VaultSummary } from "../../types";
 import { saveNoteDraft, type HeldDraft } from "../../lib/writeDrafts";
 import { formatWhen } from "./relativeTime";
 
-/** Opens the create-note dialog prefilled with a recovered draft, targeting a
- * specific Vault and folder rather than whatever the shell would otherwise
- * infer for the currently open note. */
-export type OpenCreateDraft = (
+/** Writes a recovered draft into a specific Vault as a new note and opens it.
+ * The create dialog no longer collects a body — a note is created empty and
+ * written in place — so a held draft's text is restored by creating the note
+ * with it directly. Resolves false when the note could not be written, so the
+ * held draft is kept rather than discarded. */
+export type RestoreCreateDraft = (
   vaultId: VaultId,
   folder: string,
   name: string,
   content: string,
-) => void;
+) => Promise<boolean>;
 
 function draftTitle(draft: HeldDraft): string {
   if (draft.kind === "note") return draft.slug;
@@ -45,12 +47,12 @@ function draftPreview(content: string): string {
 function DraftRow({
   draft,
   vaults,
-  onOpenCreateDraft,
+  onRestoreCreateDraft,
   onDiscard,
 }: {
   draft: HeldDraft;
   vaults: VaultSummary[];
-  onOpenCreateDraft?: OpenCreateDraft;
+  onRestoreCreateDraft?: RestoreCreateDraft;
   onDiscard: (id: string) => void;
 }) {
   const navigate = useNavigate();
@@ -61,15 +63,26 @@ function DraftRow({
   const [noSuchNote, setNoSuchNote] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  const restoreAsNewNote = () => {
-    if (!destination || !onOpenCreateDraft) return;
-    onOpenCreateDraft(
-      destination,
-      draft.kind === "create" ? draft.folder : "",
-      draft.kind === "note" ? draft.slug : draft.name,
-      draft.content,
-    );
-    onDiscard(draft.id);
+  const restoreAsNewNote = async () => {
+    if (!destination || !onRestoreCreateDraft) return;
+    setRestoring(true);
+    try {
+      const created = await onRestoreCreateDraft(
+        destination,
+        draft.kind === "create" ? draft.folder : "",
+        draft.kind === "note" ? draft.slug : draft.name,
+        draft.content,
+      );
+      // Discarded only once the text is on disk. A failed write that took the
+      // draft with it would lose the very thing this screen exists to save.
+      if (created) {
+        onDiscard(draft.id);
+      } else {
+        setMessage("This draft could not be written. It is still held here.");
+      }
+    } finally {
+      setRestoring(false);
+    }
   };
 
   const handleRestore = async () => {
@@ -78,7 +91,7 @@ function DraftRow({
     setNoSuchNote(false);
 
     if (draft.kind === "create") {
-      restoreAsNewNote();
+      await restoreAsNewNote();
       return;
     }
 
@@ -163,11 +176,11 @@ function DraftRow({
         <p className="settings-warn settings-draft-no-note">
           This Vault has no note at {draft.kind === "note" ? draft.slug : ""}.
           Choose a different Vault, or{" "}
-          {onOpenCreateDraft ? (
+          {onRestoreCreateDraft ? (
             <button
               type="button"
               className="settings-link"
-              onClick={restoreAsNewNote}
+              onClick={() => void restoreAsNewNote()}
             >
               restore it as a new note here
             </button>
@@ -197,12 +210,12 @@ function DraftRow({
 export function UnsavedDrafts({
   drafts,
   vaults,
-  onOpenCreateDraft,
+  onRestoreCreateDraft,
   onDiscard,
 }: {
   drafts: HeldDraft[];
   vaults: VaultSummary[];
-  onOpenCreateDraft?: OpenCreateDraft;
+  onRestoreCreateDraft?: RestoreCreateDraft;
   onDiscard: (id: string) => void;
 }) {
   return (
@@ -223,7 +236,7 @@ export function UnsavedDrafts({
             key={draft.id}
             draft={draft}
             vaults={vaults}
-            onOpenCreateDraft={onOpenCreateDraft}
+            onRestoreCreateDraft={onRestoreCreateDraft}
             onDiscard={onDiscard}
           />
         ))}

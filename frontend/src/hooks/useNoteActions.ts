@@ -102,22 +102,21 @@ export function useNoteActions({
   }, [activeNote]);
 
   const handleCreateNote = useCallback(
-    async (relativePath: string, content: string) => {
+    async (targetVaultId: VaultId, relativePath: string) => {
       setNoteActionError(null);
       const pathError = validateNotePath(relativePath, { label: "Note path" });
       if (pathError) {
         setNoteActionError(pathError);
         return;
       }
-      const targetVaultId =
-        createTargetVaultId ??
-        resolvePrimaryVaultId(activeNote?.vaultId, vaults);
       if (!targetVaultId) {
         setNoteActionError("No Vault is available to create a note in.");
         return;
       }
       try {
-        const outcome = await createNote(targetVaultId, relativePath, content);
+        // Empty: the note is written in place once it opens, so there is
+        // nothing for the dialog to collect first.
+        const outcome = await createNote(targetVaultId, relativePath, "");
         clearCreateDraft();
         setNoteActionDialog(null);
         setWriteNotice(describeWriteOutcome(outcome));
@@ -136,15 +135,47 @@ export function useNoteActions({
         );
       }
     },
-    [
-      activeNote,
-      createTargetVaultId,
-      handleDemoRefusal,
-      navigate,
-      refreshVault,
-      setWriteNotice,
-      vaults,
-    ],
+    [handleDemoRefusal, navigate, refreshVault, setWriteNotice],
+  );
+
+  /**
+   * Recovery for a held draft that still carries a body (Settings, #151).
+   * The create dialog has no content field to hand it back through, so the
+   * note is written with that body directly and opened. Reports success so
+   * the caller only discards the held draft once the text is safely on disk.
+   */
+  const restoreCreateDraft = useCallback(
+    async (
+      targetVaultId: VaultId,
+      relativePath: string,
+      content: string,
+    ): Promise<boolean> => {
+      const pathError = validateNotePath(relativePath, { label: "Note path" });
+      if (pathError) {
+        setWriteNotice(pathError);
+        return false;
+      }
+      try {
+        const outcome = await createNote(targetVaultId, relativePath, content);
+        setWriteNotice(describeWriteOutcome(outcome));
+        await refreshVault();
+        if (outcome.slug) {
+          navigate(
+            `/v/${encodeURIComponent(outcome.vault_id)}/n/${encodeURIComponent(outcome.slug)}`,
+          );
+        }
+        return true;
+      } catch (error) {
+        if (handleDemoRefusal(error)) {
+          return false;
+        }
+        setWriteNotice(
+          error instanceof Error ? error.message : "Create failed",
+        );
+        return false;
+      }
+    },
+    [handleDemoRefusal, navigate, refreshVault, setWriteNotice],
   );
 
   const handleRenameNote = useCallback(
@@ -283,14 +314,25 @@ export function useNoteActions({
     setWriteNotice,
   ]);
 
+  // Create starts on the Vault the writer clicked in, falling back to the one
+  // holding the open note. Every other action addresses the open note, so it
+  // can only concern that note's own Vault.
+  const noteActionInitialVaultId =
+    noteActionDialog === "create"
+      ? (createTargetVaultId ??
+        resolvePrimaryVaultId(activeNote?.vaultId, vaults))
+      : activeNote?.vaultId;
+
   return {
     noteActionDialog,
     noteActionError,
     noteActionInitialFolder,
+    noteActionInitialVaultId,
     openCreateDialog,
     openActionDialog,
     closeNoteActionDialog,
     handleCreateNote,
+    restoreCreateDraft,
     handleRenameNote,
     handleMoveNote,
     handleArchiveNote,
