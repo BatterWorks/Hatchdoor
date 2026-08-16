@@ -1707,6 +1707,7 @@
 
     <h3>Pages</h3>
     <a href="#settings">Settings</a>
+    <a href="#gate">Startup gate</a>
 
     <div class="doc-theme">
       <button data-set="light">Light</button>
@@ -2639,7 +2640,27 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.state-block</span><span class="key">.state-block.error</span><span class="key">.skeleton-list</span><span class="key">.skeleton-line</span><span class="key">@keyframes shimmer</span></div>
+      <h3 class="doc-sub">Announcement region</h3>
+      <p class="blurb">The shell keeps one polite live region, the only general one in the
+      application &mdash; the others belong to the startup gate (<a href="#gate">§33</a>) and the PDF
+      viewer. It earns its place because <strong>content snaps</strong>: a scope change rewrites the
+      tree and the slot without moving anything, so a person listening rather than looking gets
+      nothing for free. It is <code>.visually-hidden</code> carrying <code>aria-live="polite"</code>
+      and <code>aria-atomic="true"</code> &mdash; atomic because the sentence is replaced whole and
+      half of it read against the other half's remains would be worse than silence. It holds one
+      short sentence at a time.</p>
+      <div class="stage">
+        <div class="vslot-row"><span class="vslot-name">&lt;div class="visually-hidden" aria-live="polite" aria-atomic="true"&gt; &rarr; &ldquo;Work. 126 notes.&rdquo;</span></div>
+      </div>
+      <p class="blurb"><b>It mirrors the wait rule.</b> The fact the person just caused &mdash; the
+      Vault name they picked &mdash; is spoken the moment it lands, because that is the confirmation
+      the keystroke worked and it never waits on anything else. The count or condition joins it in
+      the same breath when the answer is already there, and follows as a short second sentence when
+      it was not, in <a href="#vault-slot">§27</a>'s exact slot words, so what is heard and what is
+      shown are one sentence. <strong>It never announces a value it does not have yet</strong>, for
+      the reason an unarrived answer is never drawn as an empty one. The scope the app opens with is
+      not a pick and is recorded silently: the first announcement is the first genuine change.</p>
+      <div class="tag-row"><span class="key">.state-block</span><span class="key">.state-block.error</span><span class="key">.skeleton-list</span><span class="key">.skeleton-line</span><span class="key">@keyframes shimmer</span><span class="key">.visually-hidden[aria-live]</span></div>
     </section>
 
     <!-- ───────── BADGES ───────── -->
@@ -3173,6 +3194,63 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb"><b>The toggle&rsquo;s travel is derived, not typed.</b> The track is 2.4rem with a 1px border each side and the knob is 1rem inset by 1px, so the on-position is <span class="key">calc(2.4rem - 1rem - 4px)</span>. Writing a rounded literal there leaves the knob fractionally past its resting inset, which on a 1px-bordered control reads as a wobble.</p>
 
       <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-index-group</span><span class="key">.settings-vault-index-item</span><span class="key">.settings-vault-index-add</span><span class="key">.settings-vault-disconnect-note</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
+    </section>
+
+    <!-- ───────── STARTUP GATE ───────── -->
+    <section class="doc-section" id="gate">
+      <div class="doc-section-num">§33</div>
+      <h2>Startup gate</h2>
+      <p class="blurb"><b>Only an unanswered licence question may lock a person out of Hatchdoor.</b>
+      This is the application's one full-screen surface and it survives for exactly two states,
+      <code>terms_required</code> and <code>downloading</code>. It never renders for scanning, for
+      indexing, for a failed download, for zero Vaults, or for any registry condition &mdash; those
+      all open the ordinary workspace with the missing piece named in place, because reading and
+      writing local Markdown never depended on the model. Discovery resolves before either model
+      state can gate, which is what keeps a broken registry out of it. The step-past is latched in
+      <code>localStorage</code> and the latch survives a reload: the gate is an <em>instance</em>
+      first-run surface, not a mount first-run one, so a later retry that sends the state back to
+      <code>downloading</code> can never re-block a client that has already reached the workspace.
+      In practice it is seen once in the life of an instance.</p>
+
+      <p class="blurb"><b>It is not the app shell.</b> The gate brings its own topbar &mdash; brand
+      mark, a crumb reading <code>Model setup</code> or <code>Preparing vault</code>, and the theme
+      cycler, which is here and nowhere else on this screen because someone meeting Hatchdoor for
+      the first time in the wrong theme should not have to accept a licence to fix it. No sidebar,
+      no rail, no search. Below it a single column of <code>min(780px, 100% - 2rem)</code>: the mono
+      kicker in hot ink, then a display <code>h1</code> at <code>clamp(2.6rem, 7vw, 5.2rem)</code>
+      &mdash; the largest type in the application, which this screen can afford because it holds one
+      idea.</p>
+
+      <p class="blurb"><b>The licence step states what accepting costs.</b> Two paragraphs and two
+      links, then two actions: <code>Accept terms and set up Gemma</code> and <code>Use Nomic
+      instead</code>. Both are real choices and neither is a dismissal, so the second is a
+      <code>.startup-secondary</code> outline rather than a ghost &mdash; declining is a
+      configuration decision, not a cancel. Under them a fallback note in muted small type gives the
+      trade in the terms a person can act on: English only, better search from Gemma, and the RAM
+      each one costs while indexing. <b>The second paragraph is load-bearing:</b> it says accepting
+      does not change ownership of the vault and that notes are never sent to Google. A licence
+      prompt that does not answer that question gets answered by the reader's worst guess.</p>
+
+      <p class="blurb"><b>The download step is a progress bar and one line, and it is honest about
+      what it does not know.</b> The bar is an 8px band ruled top and bottom, filled by a
+      <code>scaleX</code> transform so the fill animates without relayout. Where the backend reports
+      no percentage it takes <code>.is-indeterminate</code> and sweeps instead of pretending to a
+      position. The line beneath pairs a bold percentage with the byte count, in mono, and reads
+      <code>Connecting to model source</code> rather than a zero when there are no bytes yet. The
+      lede holds <code>min-height: 2.8em</code> so the column does not jump as the sentence changes
+      length under it, and a dropped connection swaps that sentence for <code>Waiting for Hatchdoor
+      to respond&hellip;</code> rather than blanking the screen. <b>This screen polls</b>, once a
+      second, because the work it waits on is the application's own; the ordinary workspace's
+      incomplete-start screens do not, because those wait on a person and re-reading retries
+      nothing.</p>
+
+      <div class="tag-row">
+        <span class="key">startup/StartupGate.tsx</span><span class="key">startup/useStartupStatus.ts</span>
+        <span class="key">.startup-shell</span><span class="key">.startup-topbar</span><span class="key">.startup-brand</span><span class="key">.startup-brand-mark</span><span class="key">.startup-crumb</span><span class="key">.startup-theme</span>
+        <span class="key">.startup-main</span><span class="key">.startup-kicker</span><span class="key">.startup-lede</span><span class="key">.startup-terms</span><span class="key">.startup-actions</span>
+        <span class="key">.startup-primary</span><span class="key">.startup-secondary</span><span class="key">.startup-fallback-note</span>
+        <span class="key">.startup-progress</span><span class="key">.startup-progress.is-indeterminate</span><span class="key">.startup-progress-line</span><span class="key">@keyframes startup-scan</span>
+      </div>
     </section>
 
   </main>
