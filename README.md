@@ -248,6 +248,11 @@ truth.
 
 - Markdown files live in `VAULT_PATH`.
 - Vault identities and source definitions live in `/data/state/vaults.json`.
+  A Vault's Git HTTPS credential is stored there too, so the file is created
+  with `0600` permissions on Unix and belongs in a backup you treat as secret.
+  The API never returns it: a Vault reports only `credential_configured`, and
+  an edit that means to keep a stored secret says so with `https_credentials:
+  {"action": "keep"}` rather than resending it.
 - SQLite is a generated cache and can be rebuilt.
 - The SQLite cache should live outside the vault.
 - Hatchdoor scans `.md` files under the vault while excluding built-in and
