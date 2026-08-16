@@ -659,6 +659,30 @@ describe("Vault provenance on Recently viewed and Changed on disk (#140)", () =>
     expect(within(recent).getByText("Beta")).toBeInTheDocument();
   });
 
+  it("drops a Recently viewed note whose Vault has left the collection", () => {
+    const departed: RecentNote[] = [
+      ...recentAcrossVaults,
+      {
+        vaultId: "11111111-1111-4111-8111-111111111111",
+        title: "Orphaned note",
+        slug: "orphaned-note",
+        relativePath: "Orphaned note",
+        viewedAt: 2,
+      },
+    ];
+
+    renderPane({ vaults: THREE_VAULTS, scope: "all", recentNotes: departed });
+
+    const recent = screen.getByTestId("recent-notes");
+    // Its link would resolve to "Vault definition was not found", and with no
+    // Vault to name it the prefix fell back to the raw UUID.
+    expect(within(recent).queryByText("Orphaned note")).not.toBeInTheDocument();
+    expect(
+      within(recent).queryByText(/11111111-1111-4111-8111-111111111111/),
+    ).not.toBeInTheDocument();
+    expect(within(recent).getByText("Beta note")).toBeInTheDocument();
+  });
+
   it("hides the Vault prefix on Recently viewed once scope is narrowed", () => {
     renderPane({
       vaults: THREE_VAULTS,

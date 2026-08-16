@@ -33,6 +33,7 @@ import {
   clampSidebarWidth,
   getStoredNumber,
   getStoredRecentNotes,
+  clearStoredLastNote,
   getStoredLastNote,
   getStoredExpandedFolders,
   isEditableTarget,
@@ -377,6 +378,12 @@ function VaultWorkspace({
     if (restoredLastNoteRef.current || location.pathname !== "/") {
       return;
     }
+    // Discovery still in flight means `vaults` is a temporary `[]`, which
+    // would read as "the stored Vault is gone" for every stored note. Wait for
+    // the real list before judging it.
+    if (vaultsLoading) {
+      return;
+    }
     restoredLastNoteRef.current = true;
     // Malformed or pre-#137 slug-only stored state resolves to null and is
     // ignored, same as before.
@@ -384,11 +391,19 @@ function VaultWorkspace({
     if (!last) {
       return;
     }
+    // A Vault that has left the collection cannot be restored into: the note
+    // route resolves to "Vault definition was not found", and because the
+    // landing redirect runs again on every visit, the reader is pinned to that
+    // error with no way back short of editing the URL. Forget it instead.
+    if (!vaults.some((vault) => vault.vault_id === last.vaultId)) {
+      clearStoredLastNote();
+      return;
+    }
     navigate(
       `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
       { replace: true },
     );
-  }, [location.pathname, navigate]);
+  }, [location.pathname, navigate, vaults, vaultsLoading]);
 
   const handleScopeZoneCollapsedChange = useCallback((next: boolean) => {
     setScopeZoneCollapsed(next);
