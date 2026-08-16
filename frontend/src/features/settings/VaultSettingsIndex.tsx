@@ -194,12 +194,16 @@ export function VaultSettingsIndex({
         );
       })}
       {demoMode ? null : (
+        // A row in the index, not a link under it: adding a Vault is the last
+        // entry in the collection this list is, and the underlined link made
+        // the one thing you cannot select the loudest thing in the list
+        // (#120).
         <button
-          className="settings-link"
+          className="settings-index-item settings-vault-index-add"
           type="button"
           onClick={() => setCreationOpen(true)}
         >
-          Add a Vault
+          <span className="settings-index-title">Add a Vault</span>
         </button>
       )}
       {creationOpen && !demoMode ? (
@@ -606,6 +610,18 @@ export function VaultSettingsDetail({
             {lastChanged(changed)}
           </p>
         </div>
+        {/* Save sits in the section head, where every instance section on this
+            page keeps it — a Vault is a section like any other (#120). */}
+        <div className="settings-sec-actions">
+          <button
+            className="settings-btn settings-btn-hot"
+            disabled={revision === null || busy}
+            onClick={handleSave}
+            type="button"
+          >
+            Save Vault
+          </button>
+        </div>
       </div>
       {recoveryPending ? (
         <div className="settings-recovery-line" role="alert">
@@ -967,16 +983,6 @@ export function VaultSettingsDetail({
           ) : null}
         </div>
       ) : null}
-      <div className="settings-sec-actions">
-        <button
-          className="settings-btn settings-btn-hot"
-          disabled={revision === null || busy}
-          onClick={handleSave}
-          type="button"
-        >
-          Save Vault
-        </button>
-      </div>
       <div className="settings-vault-actions">
         <button
           className="settings-btn"
@@ -1018,6 +1024,13 @@ export function VaultSettingsDetail({
           Disconnect Vault
         </button>
       </div>
+      {/* Said before the click, not after it: the word "disconnect" carries no
+          promise about the notes on disk, and this is the only place that can
+          make one (#120). */}
+      <p className="settings-vault-disconnect-note">
+        Disconnecting forgets this Vault. It never deletes your notes, the
+        folder, its history, or anything on the server.
+      </p>
       {confirmation ? (
         <div className="settings-modal-back">
           <div

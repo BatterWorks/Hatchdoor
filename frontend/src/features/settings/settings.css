@@ -57,8 +57,12 @@
   outline-offset: 1px;
 }
 
+/* Sized for what it holds: at most four digits (1440 minutes) plus the number
+   spinner. An 8rem field promised a value ten times longer than any it takes. */
 .settings-input-short {
-  width: 8rem;
+  width: 4.25rem;
+  /* A quantity, so it grows leftward from the unit that follows it. */
+  text-align: right;
 }
 
 .settings-unit {
@@ -171,7 +175,9 @@
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 15rem 1fr;
+  /* 17rem, not 15: the index carries Vault names now, and each one may end in
+     a condition pill wide enough to push an ordinary name onto three lines. */
+  grid-template-columns: 17rem 1fr;
   gap: 2rem;
   align-items: start;
   max-width: 1000px;
@@ -201,11 +207,25 @@
   color: var(--muted);
 }
 
-.settings-vault-index-item {
-  display: flex;
-  align-items: center;
+/* A Vault name is the operator's own text and can be any length, so the row
+   is a name column and a status column rather than a flex line. The status
+   hangs from the name's first line — centred, it floated halfway down a
+   wrapped name and the right-hand column read as scattered marks instead of a
+   column. Names still wrap in full: truncating these to `Git — …` would make
+   three different Vaults read identically. */
+.settings-index .settings-vault-index-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
   gap: 0.5rem;
   width: 100%;
+  min-height: 1.9rem;
+}
+
+.settings-index .settings-vault-index-item > :nth-child(2) {
+  /* The slot's ink is smaller than the name's, so matched tops read as the
+     slot sitting high. */
+  margin-top: 0.12rem;
 }
 .settings-vault-index-item[data-paused="true"] {
   color: var(--muted);
@@ -214,6 +234,17 @@
   color: var(--err-fg);
   box-shadow: inset 3px 0 0 var(--err-fg);
 }
+/* The `+` takes the numeral column the instance sections use, so the add row
+   lines up with the Vault names above it rather than sitting under them. */
+.settings-vault-index-add::before {
+  content: "+";
+  font-family: var(--font-mono);
+  color: var(--hot);
+}
+.settings-vault-index-add .settings-index-title {
+  color: var(--hot);
+}
+
 .settings-vault-paused {
   margin-left: auto;
   font-family: var(--font-mono);
@@ -244,6 +275,13 @@
   gap: 0.55rem;
   border-top: 1px solid var(--rule);
   padding-top: 1.2rem;
+}
+.settings-vault-disconnect-note {
+  margin: 0.6rem 0 0;
+  max-width: 34rem;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--muted);
 }
 .settings-btn-danger {
   color: var(--err-fg);
@@ -492,11 +530,32 @@
 
 .settings-row {
   display: grid;
-  grid-template-columns: 1fr 20rem;
+  /* The control column fits the widest control this page has: a four-option
+     segmented group on one line. At 20rem it overhung its own track. */
+  grid-template-columns: 1fr 21.5rem;
   gap: 1.4rem;
   padding: 0.9rem 0;
   border-bottom: 1px solid var(--rule);
-  align-items: start;
+  /* The control centres on the band its own row occupies, rather than hanging
+     from the label's first line: the label side is two or three lines of
+     prose, and a control pinned to the top of a tall row read as belonging to
+     the rule above it. */
+  align-items: center;
+}
+
+/* Every control hangs off the row's right edge, whatever its natural width.
+   Left-aligned in a 20rem column, a two-button segmented group and a four-
+   button one ended in different places and the column read as ragged rather
+   than as a column of controls. */
+.settings-row > :nth-child(2) {
+  justify-self: end;
+}
+
+/* A control that is itself a stack — a segmented group with a token field
+   under it — keeps its own layout and only its contents move right. */
+.settings-row > :nth-child(2) .settings-inline,
+.settings-row > :nth-child(2) .settings-segmented {
+  justify-content: flex-end;
 }
 
 .settings-row.has-error {
@@ -505,7 +564,11 @@
   padding-left: 0.7rem;
 }
 
+/* Both carry `display: block` because a Vault's rows build them from spans
+   inside a label element, where the instance sections use div and p — without
+   it the help ran on from the end of the label as one sentence. */
 .settings-row-label {
+  display: block;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 92,
@@ -514,6 +577,7 @@
 }
 
 .settings-row-help {
+  display: block;
   font-size: 0.8rem;
   color: var(--muted);
   line-height: 1.5;
@@ -616,7 +680,12 @@
   font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  padding: 0.4rem 0.6rem;
+  /* One line per option, always: a four-option group in a 20rem column broke
+     `LOCAL HISTORY` and `TWO-WAY` across two lines, and a segment that wraps
+     stops reading as one of a set of choices. The tighter side padding is
+     what buys the fourth option its room. */
+  white-space: nowrap;
+  padding: 0.4rem 0.5rem;
   border: none;
   border-right: 1px solid var(--rule);
   background: var(--paper);

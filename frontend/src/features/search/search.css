@@ -19,6 +19,13 @@
   padding: 1rem;
 }
 
+/* The rail is added beside the results, not carved out of them: the panel
+   grows by exactly the rail, its divider and its gap, so a result row is the
+   same width whether or not there is anything to filter across. */
+.search-panel--faceted {
+  width: min(calc(59rem + 0.75rem + 1px), 100%);
+}
+
 .search-header {
   display: flex;
   align-items: center;
@@ -96,11 +103,19 @@
 
 .search-facet-rail {
   flex: 0 0 auto;
-  width: 9rem;
+  /* 12rem, not 9: a Vault name sharing its row with the `no answer` slot has
+     only what the slot leaves behind, and at 9rem that was 56px — every
+     `Git — …` name truncated to the same stub. */
+  /* 12rem of rows, plus the rule and its breathing room — the rail is
+     border-box, so the divider must be added to the width rather than taken
+     out of the names. */
+  width: calc(12rem + 0.75rem + 1px);
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
   margin-top: 0.5rem;
+  padding-right: 0.75rem;
+  border-right: 1px solid var(--rule);
 }
 
 .search-facet-row {

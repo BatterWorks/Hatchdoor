@@ -246,8 +246,16 @@
   text-transform: uppercase;
 }
 
-.pdf-preview-open {
+/* Type-qualified to outweigh `.note-body a`, which otherwise wins on
+   specificity and leaves this button with 1px of bottom padding against its
+   own 0.45rem top — the label sitting high in its box. The link's hot rule is
+   kept. `line-height: 1` keeps the button the height it was: prose line-height
+   was leaking in and adding 5px of line box that the restored padding would
+   otherwise have paid for twice. */
+.note-body a.pdf-preview-open {
   flex: 0 0 auto;
+  padding-block: 0.45rem calc(0.45rem - 1px);
+  line-height: 1;
 }
 
 .pdf-preview canvas {

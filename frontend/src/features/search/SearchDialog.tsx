@@ -252,7 +252,7 @@ export function SearchDialog({
       }}
     >
       <UiPanel
-        className="search-panel"
+        className={`search-panel${showFacetRail ? " search-panel--faceted" : ""}`}
         onClick={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           if (event.key !== "Tab") return;
