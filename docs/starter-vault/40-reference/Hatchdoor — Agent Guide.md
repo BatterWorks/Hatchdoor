@@ -77,6 +77,10 @@ Avoid creating placeholder links unless the user explicitly wants stubs.
 
 Use Hatchdoor attachment tools for local files.
 
+Call `get_attachment_import_config` with the target Vault's `vault_id` before
+uploading. It reports whether uploads are possible for that Vault, the size
+limit in bytes for each method, and the allowed file extensions.
+
 Prefer Markdown image syntax:
 
 ```markdown

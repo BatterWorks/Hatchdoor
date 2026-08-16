@@ -718,6 +718,117 @@ mod tests {
         assert!(instructions.contains("no selected, sole, or default Vault"));
     }
 
+    /// With write mode on and the Vault accepting mutation, both upload
+    /// methods are reported, and the HTTP one is addressed to this exact
+    /// Vault rather than the retired instance-wide `/api/attachment`.
+    #[tokio::test]
+    async fn attachment_import_config_reports_both_methods_for_the_named_vault() {
+        let (state, _tmp) = test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .expect("registered test Vault");
+
+        let body = call_tool(
+            state,
+            "get_attachment_import_config",
+            json!({}),
+            write_config(),
+        )
+        .await;
+        let payload = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(payload["vault_id"], json!(vault_id));
+        assert_eq!(payload["enabled"], true);
+
+        let methods = payload["methods"].as_array().expect("methods array");
+        assert_eq!(methods.len(), 2);
+        assert_eq!(methods[0]["id"], "http_multipart");
+        assert_eq!(
+            methods[0]["path"],
+            format!("/api/v1/vaults/{vault_id}/attachments")
+        );
+        assert_eq!(methods[0]["max_bytes"], 10 * 1024 * 1024);
+        assert_eq!(methods[1]["id"], "mcp_base64");
+        assert_eq!(methods[1]["tool"], "import_attachment");
+        assert_eq!(methods[1]["max_bytes"], 5 * 1024 * 1024);
+
+        // The base64 limit is otherwise undiscoverable over MCP: there is no
+        // settings tool, so this is where an agent learns it without first
+        // failing an upload.
+        assert!(
+            payload["allowed_extensions"]
+                .as_array()
+                .expect("allowed extensions")
+                .contains(&json!("png"))
+        );
+
+        // The upload credential's per-request revocation (a read-only MCP
+        // token can no longer upload) has to reach the agent that would use
+        // it, since nothing else on the MCP surface says so.
+        let auth = methods[0]["auth"].as_str().expect("auth guidance");
+        assert!(
+            auth.contains(
+                "MCP token is accepted only while MCP and MCP write mode are both currently enabled"
+            ),
+            "auth guidance must state the live write-mode condition, got {auth}"
+        );
+    }
+
+    /// Listing a Note's attachments is a read. It was reachable only with
+    /// write mode on purely because it was catalogued beside the attachment
+    /// mutations, which left a read-only agent unable to see what a Note
+    /// references without fetching the Note's whole body.
+    #[tokio::test]
+    async fn listing_note_attachments_needs_no_write_permission() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            state,
+            "list_note_attachments",
+            json!({"slug": "home"}),
+            enabled_config(),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false);
+        assert!(
+            body["result"]["structuredContent"]["attachments"].is_array(),
+            "expected an attachments array, got {body}"
+        );
+    }
+
+    /// Read-only MCP still answers: "no, and here is which gate closed it".
+    /// Refusing the call would tell an agent nothing it could act on.
+    #[tokio::test]
+    async fn attachment_import_config_names_the_gate_that_disabled_upload() {
+        let (state, _tmp) = test_state();
+        let body = call_tool(
+            state,
+            "get_attachment_import_config",
+            json!({}),
+            enabled_config(),
+        )
+        .await;
+        let payload = &body["result"]["structuredContent"];
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(payload["enabled"], false);
+        assert_eq!(payload["write_mode_enabled"], false);
+        // The Vault itself is willing; only the instance-wide switch is off,
+        // and the two must stay separable so an agent does not report a
+        // healthy Vault as broken.
+        assert_eq!(payload["vault_accepts_mutation"], true);
+        assert!(payload["methods"].as_array().expect("methods").is_empty());
+        assert!(
+            payload["usage"]
+                .as_str()
+                .expect("usage")
+                .contains("HATCHDOOR_MCP_WRITE_ENABLED")
+        );
+    }
+
     #[tokio::test]
     async fn retired_scope_less_query_notes_is_unreachable() {
         let (state, _tmp) = layered_test_state();
@@ -1279,6 +1390,12 @@ mod tests {
                 "get_tree",
                 "get_stats",
                 "get_graph",
+                // Both are reads, and both are advertised under a read-only
+                // config on purpose: listing a Note's attachments is the same
+                // permission as reading the Note, and the import config
+                // reports the write posture rather than exercising it.
+                "list_note_attachments",
+                "get_attachment_import_config",
                 "recently_modified",
             ]
         );

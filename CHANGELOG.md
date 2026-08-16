@@ -88,6 +88,29 @@
   a live line shows the path you are about to create.
 
 ### Fixed
+- The MCP server told agents to call `get_attachment_import_config` before
+  uploading a file, but the Vault-scoping migration had removed the tool: an
+  agent following the server's own instructions got "Unknown MCP tool". It is
+  restored, now taking one `vault_id` and reporting the Vault-scoped upload
+  path. It also reports the instance-wide write switch and the Vault's own
+  mutation capability as separate fields, so an agent that cannot upload is
+  told which of the two closed the door instead of guessing.
+- An agent could not create its first Vault over MCP without guessing. The
+  `source` and credential arguments of `create_vault` and `edit_vault` were
+  advertised as bare objects described in a sentence, while the server rejects
+  unknown fields: every guess came back as a rejection with nothing to correct
+  against. Both now publish their real per-variant shapes, including which
+  `mode` each source accepts, the poll-interval floor, and the fact that a
+  managed Vault has no local-history mode.
+- `edit_vault` replaces a Vault definition wholesale, so omitting a field
+  cleared it. It said none of this; it now says to read the Vault from
+  `list_vaults` and send back what you are not changing, and explains what
+  `confirm_identity_change` consents to and that the Vault must be disabled
+  first.
+- `list_note_attachments` required MCP write mode, though it only reads. A
+  read-only agent could not see what a note referenced without fetching the
+  whole note. It is now a read tool, and works on Vaults that do not accept
+  writes at all.
 - Opening a note highlighted it in up to three sidebar lists at once. The
   highlight is now canonical in the folder tree only.
 - Browsing no longer waits on the search index. A Vault's structure is

@@ -66,6 +66,8 @@ For new notes:
 
 For attachments:
 
+- Call `get_attachment_import_config` with the target `vault_id` first: it
+  reports the available methods, their byte limits, and allowed extensions.
 - Use Hatchdoor attachment import tools.
 - Prefer local Markdown image syntax: `![Alt text](file-name.jpg)`.
 - Use safe lowercase ASCII filenames with hyphens.

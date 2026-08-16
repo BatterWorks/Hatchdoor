@@ -155,7 +155,11 @@ Fetch or update an exact Note:
 Collection-shaped MCP reads such as `search_notes`, `get_tree`, `get_stats`,
 `get_graph`, and `recently_modified` accept `scope`. Exact Note/link/resolve
 operations and every mutation or control operation on an existing Vault require
-`vault_id`. `create_vault` is the revisioned collection-creation exception: the
+`vault_id`. `get_attachment_import_config` survives the migration and now takes
+one `vault_id`: its HTTP method reports the Vault-scoped upload path, and its
+`enabled` field accounts for both instance-wide MCP write mode and that Vault's
+own mutation capability. `create_vault` is the revisioned collection-creation
+exception: the
 registry assigns its immutable ID after the successful create, which callers
 discover with `list_vaults`.
 
@@ -165,8 +169,8 @@ Every Note-bearing result includes `vault_id` and `slug`, even when the request
 already named one Vault. Duplicate slugs or overlapping information in different
 Vaults remain distinct results.
 
-Search, metadata-query, and recent-Note results are flattened across Vaults;
-every item retains its Vault ID. Trees, statistics, and graphs remain grouped by
+Search and recent-Note results are flattened across Vaults; every item retains
+its Vault ID. Trees, statistics, and graphs remain grouped by
 Vault, and graph edges never cross Vaults.
 
 ## Scoped responses and partial results

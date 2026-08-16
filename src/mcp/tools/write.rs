@@ -26,7 +26,7 @@ use crate::vault_runtime::VaultControlBlock;
 
 use super::super::config::McpConfig;
 use super::super::protocol::{JsonRpcFailure, tool_success};
-use super::{non_empty_argument, read_only_tool_annotations, write_tool_annotations};
+use super::{non_empty_argument, write_tool_annotations};
 
 /// A target resolved from the explicit MCP `vault_id`.  It is intentionally
 /// not recoverable from `AppState`'s legacy single-Vault fields.
@@ -46,7 +46,11 @@ impl McpVault {
     }
 }
 
-pub(super) fn scoped_vault(
+/// Resolve the explicit `vault_id` without asserting anything about the
+/// Vault's write posture.  Reading a Vault's notes and reading which
+/// attachments they reference are the same permission; a pull-only or
+/// otherwise non-mutating Vault answers both.
+pub(super) fn readable_vault(
     state: &AppState,
     arguments: &Value,
 ) -> Result<McpVault, JsonRpcFailure> {
@@ -58,7 +62,16 @@ pub(super) fn scoped_vault(
         .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))?;
     let core = VaultReadCore::new(&state.startup_sqlite, &state.vaults);
     let control = core.control_block(vault_id).map_err(vault_error)?;
-    if !control.snapshot().capabilities.mutate {
+    Ok(McpVault { vault_id, control })
+}
+
+pub(super) fn scoped_vault(
+    state: &AppState,
+    arguments: &Value,
+) -> Result<McpVault, JsonRpcFailure> {
+    let vault = readable_vault(state, arguments)?;
+    let vault_id = vault.vault_id;
+    if !vault.control.snapshot().capabilities.mutate {
         return Err(JsonRpcFailure::not_found(
             serde_json::json!({
                 "code": "capability_unavailable",
@@ -69,7 +82,7 @@ pub(super) fn scoped_vault(
             .to_string(),
         ));
     }
-    Ok(McpVault { vault_id, control })
+    Ok(vault)
 }
 
 pub(super) async fn acquire_mutation(
@@ -828,7 +841,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "import_attachment",
-            "description": "Upload an attachment into one Vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited by HATCHDOOR_MCP_MAX_BASE64_BYTES. Prefer the Vault-scoped HTTP upload endpoint (POST /api/v1/vaults/{vault_id}/attachments) when possible. Returns compact metadata for the imported file.",
+            "description": "Upload an attachment into one Vault by sending its bytes base64-encoded. This is the fallback for clients that cannot make an out-of-band HTTP request; it is size-limited (call get_attachment_import_config for this Vault to see the limit in bytes and the allowed extensions). Prefer the Vault-scoped HTTP upload endpoint (POST /api/v1/vaults/{vault_id}/attachments) when possible. Returns compact metadata for the imported file.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -885,19 +898,6 @@ pub(super) fn write_tools_list() -> Vec<Value> {
                 "additionalProperties": false
             },
             "annotations": write_tool_annotations(true, false)
-        }),
-        json!({
-            "name": "list_note_attachments",
-            "description": "List existing attachments referenced by a note without returning full note content.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": {"type": "string", "minLength": 1}
-                },
-                "required": ["slug"],
-                "additionalProperties": false
-            },
-            "annotations": read_only_tool_annotations()
         }),
     ];
     for tool in &mut tools {
