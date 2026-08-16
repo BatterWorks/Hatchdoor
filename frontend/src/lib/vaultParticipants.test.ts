@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import type { VaultParticipant } from "../types";
 import {
   describeMissingVaults,
+  describeNotSearchableVaults,
   describeVaultsNotDrawn,
   missingVaultNames,
+  notSearchableVaultNames,
 } from "./vaultParticipants";
 
 function participant(
@@ -35,6 +37,30 @@ describe("missingVaultNames", () => {
       participant("Personal", "fresh"),
     ];
     expect(missingVaultNames(participants)).toEqual([]);
+  });
+});
+
+describe("not-searchable participants", () => {
+  it("does not call a Vault that is still building search one that did not answer", () => {
+    const participants = [
+      participant("Work", "fresh"),
+      participant("Personal", "not_searchable"),
+      participant("Archive", "unavailable"),
+    ];
+    expect(missingVaultNames(participants)).toEqual(["Archive"]);
+    expect(notSearchableVaultNames(participants)).toEqual(["Personal"]);
+  });
+
+  it("says one Vault is still building search", () => {
+    expect(describeNotSearchableVaults(["Personal"])).toBe(
+      "Personal is still building search.",
+    );
+  });
+
+  it("says several Vaults are still building search", () => {
+    expect(describeNotSearchableVaults(["Personal", "Work"])).toBe(
+      "Personal and Work are still building search.",
+    );
   });
 });
 

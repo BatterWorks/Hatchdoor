@@ -6,7 +6,11 @@ import {
   UiPanel,
   VaultPrefix,
 } from "../../components/ui";
-import { describeMissingVaults } from "../../lib/vaultParticipants";
+import {
+  describeMissingVaults,
+  describeNotSearchableVaults,
+  notSearchableVaultNames,
+} from "../../lib/vaultParticipants";
 import type { StartupStatus } from "../../startup/useStartupStatus";
 import type {
   VaultId,
@@ -205,6 +209,21 @@ export function SearchDialog({
     () => initialVaultFilter ?? "all",
   );
   const facetRows = buildFacetRows(vaults, participants, groups);
+  // Two different reasons a semantic search came back partial, told apart
+  // because they ask different things of the reader: a Vault that did not
+  // answer may need attention, while one still building search only needs
+  // time. Both are named when both apply.
+  const pendingSearchNames = notSearchableVaultNames(participants);
+  const partialSentence = [
+    missingVaultNames.length > 0
+      ? describeMissingVaults(missingVaultNames)
+      : null,
+    pendingSearchNames.length > 0
+      ? describeNotSearchableVaults(pendingSearchNames)
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   const showFacetRail = scope === "all" && vaults.length > 1;
   const showScopeField = vaults.length > 1;
   const visibleGroups =
@@ -385,7 +404,7 @@ export function SearchDialog({
                 <StateBlock
                   tone="error"
                   title="Nothing Found"
-                  description={describeMissingVaults(missingVaultNames)}
+                  description={partialSentence}
                 />
               ) : (
                 <p>No matching notes.</p>
@@ -563,9 +582,7 @@ export function SearchDialog({
             {/* Ranking is unchanged by partiality; this trailing line below the
             last row is the only thing that changes (#141). */}
             {partial && results.length > 0 ? (
-              <p className="search-partial">
-                {describeMissingVaults(missingVaultNames)}
-              </p>
+              <p className="search-partial">{partialSentence}</p>
             ) : null}
           </div>
         </div>

@@ -48,6 +48,15 @@ pub struct VaultReadError {
 pub enum VaultParticipantState {
     Fresh,
     Stale,
+    /// The Vault's rows are current, but this generation carries no vectors,
+    /// so it contributed nothing to a semantic search. Only semantic search
+    /// reports it: browsing, keyword and tag search all read the same
+    /// structural rows and report `Fresh`.
+    ///
+    /// Distinct from `Unavailable`, which means there is nothing to read at
+    /// all. Collapsing the two would tell a caller its Notes are missing when
+    /// they are merely not yet embedded.
+    NotSearchable,
     Unavailable,
 }
 

@@ -9,8 +9,31 @@ import type { VaultParticipant } from "../types";
  */
 export function missingVaultNames(participants: VaultParticipant[]): string[] {
   return participants
-    .filter((participant) => participant.state !== "fresh")
+    .filter(
+      (participant) =>
+        participant.state !== "fresh" && participant.state !== "not_searchable",
+    )
     .map((participant) => participant.vault_name);
+}
+
+/**
+ * The Vaults that answered from current rows but have no vectors yet, so they
+ * contributed nothing to a *semantic* search. Kept apart from
+ * `missingVaultNames` on purpose: saying one "did not answer" is exactly the
+ * confusion the `not_searchable` state exists to remove — its Notes are
+ * present and browsable, they are simply not embedded yet.
+ */
+export function notSearchableVaultNames(
+  participants: VaultParticipant[],
+): string[] {
+  return participants
+    .filter((participant) => participant.state === "not_searchable")
+    .map((participant) => participant.vault_name);
+}
+
+/** "X is still building search." / "X and Y are still building search." */
+export function describeNotSearchableVaults(names: string[]): string {
+  return `${joinWithAnd(names)} ${names.length === 1 ? "is" : "are"} still building search.`;
 }
 
 /** "X did not answer." / "X and Y did not answer." / "X, Y, and Z did not

@@ -38,6 +38,11 @@ pub struct BuildOptions {
     /// Production keeps the conservative one-input default; eval can raise this
     /// to measure whether ONNX batching improves build throughput.
     pub embedding_batch_size: usize,
+    /// When false, build every structural row (notes, links, tags, headings,
+    /// chunk text) but embed nothing. This is the structure-only pass that
+    /// publishes a browsable Vault ahead of its vectors; it reuses the existing
+    /// per-note `embed` path rather than adding a second build.
+    pub embed: bool,
 }
 
 impl Default for BuildOptions {
@@ -46,6 +51,7 @@ impl Default for BuildOptions {
             chunk: ChunkOptions::default(),
             context: true,
             embedding_batch_size: 1,
+            embed: true,
         }
     }
 }
@@ -275,8 +281,9 @@ impl SqliteCache {
             let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
             metrics.note_sync += note_sync_started.elapsed();
             // A demoted note is embedded only when the flag allows it; a
-            // default-surface note is always embedded.
-            let embed_this_note = embed_layers || entry.layer.is_none();
+            // default-surface note is always embedded. A structure-only build
+            // (`opts.embed == false`) embeds neither.
+            let embed_this_note = opts.embed && (embed_layers || entry.layer.is_none());
             match upsert_outcome {
                 UpsertOutcome::Wrote { slug, content } => {
                     match prepare_note_for_embedding(
@@ -3064,6 +3071,7 @@ mod chunk_integration_tests {
             },
             context: true,
             embedding_batch_size: 1,
+            embed: true,
         };
         small_cache
             .replace_from_index_with_options(&index, &embedder, &opts)
@@ -3087,6 +3095,7 @@ mod chunk_integration_tests {
             chunk: ChunkOptions::default(),
             context: false,
             embedding_batch_size: 1,
+            embed: true,
         };
         cache
             .replace_from_index_with_options(&index, &embedder, &opts)

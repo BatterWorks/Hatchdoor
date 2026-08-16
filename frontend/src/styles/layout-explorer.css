@@ -217,6 +217,20 @@
   animation: shimmer 1.2s linear infinite;
 }
 
+/* Browsable but not yet searchable: the count the Vault already has, trailed
+   by the same shimmer the indexing slot uses at half width. Nothing is wrong,
+   so it takes no tier colour — it reads as the indexing slot resolving. */
+.vault-slot-pending-search {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.vault-slot-pending-search .vault-slot-indexing-bar {
+  width: 0.8rem;
+}
+
 /* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */
 .explorer-rail {
   display: flex;
