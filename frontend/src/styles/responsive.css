@@ -148,6 +148,16 @@ body.resizing {
     font-size: 1.4rem;
   }
 
+  /* The touch hit area is wider here, so the glyph sits further in and the
+     end-of-row correction has to grow with it. */
+  .topbar-brand > .icon-button:first-child {
+    margin-inline-start: -0.7rem;
+  }
+
+  .topbar-actions > *:last-child {
+    margin-inline-end: -0.7rem;
+  }
+
   .note-property-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.14rem;
