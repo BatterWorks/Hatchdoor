@@ -299,6 +299,19 @@ impl AppState {
         }))
     }
 
+    /// Derive every configuration value consumed by one cache build from the
+    /// same immutable snapshot. A settings save may publish a new snapshot at
+    /// any time, so a reindex must not call a live accessor after binding this
+    /// operation's generation.
+    pub(crate) fn runtime_index_options(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<(Arc<VaultScanConfig>, bool), String> {
+        let scan_config = Self::runtime_scan_config(snapshot)?;
+        let embed_layers =
+            crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_EMBED_LAYERS")?);
+        Ok((scan_config, embed_layers))
+    }
+
     /// Derive the noise-exclusion scan config from the *current* runtime
     /// snapshot. Every live consumer (the watcher, MCP/HTTP write refusals,
     /// reads, diagnostics) must call this instead of caching a boot-time copy,
@@ -480,6 +493,56 @@ pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<Error
     run_reindex(state, None).await.map_err(internal_error)
 }
 
+/// Refresh a watcher-dirty vault only when no completed refresh has already
+/// incorporated the generation observed with that dirty signal. The generation
+/// check intentionally happens *after* waiting for `refresh_lock`: an
+/// application write can hold that lock longer than the watcher debounce, and
+/// must not be followed by a duplicate watcher reindex once it completes.
+///
+/// Returns `Ok(true)` only when this call performed a full reindex.
+pub async fn refresh_if_changed_since(
+    state: &AppState,
+    observed_revision: u64,
+) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
+    let _refresh_guard = state.refresh_lock.lock().await;
+    let current_revision = state.vault_revision.load(Ordering::SeqCst);
+    if current_revision != observed_revision {
+        debug!(
+            observed_revision,
+            current_revision, "Watcher refresh already incorporated"
+        );
+        return Ok(false);
+    }
+    run_reindex(state, None).await.map_err(internal_error)?;
+    Ok(true)
+}
+
+/// Start the versioning task selected at startup if it is not already active.
+/// A watcher recovery calls this before it releases readiness, so recovering a
+/// broken initial index cannot leave the HTTP/MCP process ready without its
+/// configured background capability.
+pub(crate) async fn ensure_startup_git_sync(state: &AppState) {
+    let Some(config) = state.startup_git_config.as_ref().clone() else {
+        return;
+    };
+    let mut active_git_sync = state.git_sync.write().await;
+    if active_git_sync.is_some() {
+        return;
+    }
+    let handle = crate::git::spawn_sync_task(
+        config,
+        state.vault_write_lock.clone(),
+        crate::git::SyncOps {
+            commit: Box::new(crate::git::commit_local),
+            fetch: Box::new(crate::git::fetch_remote),
+            integrate: Box::new(crate::git::integrate_fetched),
+            push: Box::new(crate::git::push_branch),
+        },
+    );
+    *active_git_sync = Some(handle);
+    info!("Git sync enabled");
+}
+
 /// Spawn an index-settings rebuild after its new settings have been persisted.
 /// Each request receives a generation; queued requests run serially and the
 /// final completed generation always reflects the latest stored configuration.
@@ -524,11 +587,7 @@ async fn run_reindex(
     let logged_vault_path = vault_path.clone();
     let embedder = state.embedder.clone();
     let runtime_snapshot = state.runtime_snapshot();
-    let scan_config = state.live_scan_config()?;
-    let embed_layers = runtime_snapshot
-        .setting("HATCHDOOR_EMBED_LAYERS")
-        .map(|setting| crate::runtime_config::is_truthy(&setting.value))
-        .unwrap_or(true);
+    let (scan_config, embed_layers) = AppState::runtime_index_options(&runtime_snapshot)?;
 
     // The marker-set hash the last build persisted. Compared against the value
     // after this reindex to detect a runtime layer change (a marker added,
@@ -584,13 +643,13 @@ async fn run_reindex(
     }
 
     // A successful reindex after a failed startup — e.g. the watcher picking up a
-    // corrected `.hatchdoor-layer` marker — clears the failed state and brings
-    // the vault routes back online. When run_reindex is reached, startup is
-    // either Ready (normal writes/refresh) or Failed (recovery); the read routes
-    // are gated behind readiness, so a refresh can only arrive in those two
-    // states. Git sync, if configured, still requires a restart after a failed
-    // startup: it is started only on the clean-startup path.
+    // corrected `.hatchdoor-layer` marker — restores every configured background
+    // capability before it brings the vault routes back online. When run_reindex
+    // is reached, startup is either Ready (normal writes/refresh) or Failed
+    // (recovery); the read routes are gated behind readiness, so a refresh can
+    // only arrive in those two states.
     if !state.startup.is_ready() {
+        ensure_startup_git_sync(state).await;
         info!("Vault reindex succeeded; clearing failed startup state");
         state.startup.set_ready();
     }
@@ -613,7 +672,10 @@ pub fn test_embedder() -> Arc<dyn Embedder> {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    use crate::git::{GitConfig, GitMode};
 
     #[test]
     fn index_status_keeps_search_stale_until_the_latest_queued_rebuild_finishes() {
@@ -835,6 +897,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reindex_options_remain_on_one_bound_snapshot_after_settings_publish() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        let state = state_with_vault(vault_path);
+
+        let bound_snapshot = state.runtime_snapshot();
+        state
+            .runtime_config
+            .save([
+                ("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string()),
+                ("HATCHDOOR_EMBED_LAYERS".to_string(), "false".to_string()),
+            ])
+            .expect("publish newer settings between operation reads");
+
+        let (bound_scan, bound_embed_layers) =
+            AppState::runtime_index_options(&bound_snapshot).expect("bound index options");
+        assert!(
+            !bound_scan
+                .exclude
+                .is_excluded(Path::new("Ignored.md"), false),
+            "the scan config must remain on the operation's original generation"
+        );
+        assert!(
+            bound_embed_layers,
+            "all index options must remain on the operation's original generation"
+        );
+
+        let current_snapshot = state.runtime_snapshot();
+        let (current_scan, current_embed_layers) =
+            AppState::runtime_index_options(&current_snapshot).expect("current index options");
+        assert!(
+            current_scan
+                .exclude
+                .is_excluded(Path::new("Ignored.md"), false)
+        );
+        assert!(!current_embed_layers);
+    }
+
     #[tokio::test]
     async fn a_successful_reindex_clears_a_failed_startup_state() {
         // Mirrors E3's recovery path: a startup that failed (e.g. a malformed
@@ -844,7 +946,18 @@ mod tests {
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-        let state = state_with_vault(vault_path);
+        let mut state = state_with_vault(vault_path.clone());
+        state.startup_git_config = Arc::new(Some(GitConfig {
+            vault_path,
+            mode: GitMode::Local,
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            username: "hatchdoor".to_string(),
+            token: String::new(),
+            debounce_seconds: 60,
+            author_name: "Hatchdoor".to_string(),
+            author_email: "hatchdoor@localhost".to_string(),
+        }));
         state.startup.set_failed();
         assert!(!state.startup.is_ready(), "precondition: startup is failed");
 
@@ -853,6 +966,85 @@ mod tests {
         assert!(
             state.startup.is_ready(),
             "a successful reindex must clear the failed startup state"
+        );
+        let first_handle = state
+            .git_sync
+            .read()
+            .await
+            .clone()
+            .expect("recovery must restore configured Git before Ready");
+
+        refresh_now(&state)
+            .await
+            .expect("subsequent refresh after recovery");
+        let second_handle = state
+            .git_sync
+            .read()
+            .await
+            .clone()
+            .expect("configured Git remains active");
+        assert!(Arc::ptr_eq(&first_handle.status(), &second_handle.status()));
+        first_handle
+            .stop(std::time::Duration::from_secs(1))
+            .await
+            .expect("stop test Git task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watcher_signal_waiting_behind_an_application_refresh_does_not_reindex_twice() {
+        // An application write can emit its filesystem signal long before its
+        // guaranteed refresh releases `refresh_lock`. The watcher reaches its
+        // debounce deadline in that interval, then must re-check the generation
+        // *after* it acquires the lock rather than blindly running a second pass.
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
+        let state = state_with_vault(vault_path.clone());
+        std::fs::write(vault_path.join("Written.md"), "written").expect("application write");
+        let signal_revision = state.vault_revision.load(Ordering::SeqCst);
+        let refresh_started = Arc::new(tokio::sync::Notify::new());
+        let release_refresh = Arc::new(tokio::sync::Notify::new());
+        let application_state = state.clone();
+        let application_started = refresh_started.clone();
+        let application_release = release_refresh.clone();
+        let application_refresh = tokio::spawn(async move {
+            let _refresh_guard = application_state.refresh_lock.lock().await;
+            application_started.notify_one();
+            application_release.notified().await;
+            run_reindex(&application_state, None)
+                .await
+                .expect("application refresh");
+        });
+        refresh_started.notified().await;
+
+        tokio::time::advance(crate::vault_watcher::WATCH_DEBOUNCE + Duration::from_millis(1)).await;
+        let watcher_state = state.clone();
+        let watcher_refresh = tokio::spawn(async move {
+            refresh_if_changed_since(&watcher_state, signal_revision)
+                .await
+                .expect("watcher refresh")
+        });
+        tokio::task::yield_now().await;
+
+        release_refresh.notify_one();
+        application_refresh.await.expect("application task");
+        assert!(
+            !watcher_refresh.await.expect("watcher task"),
+            "the watcher signal was incorporated by the in-flight application refresh"
+        );
+        assert_eq!(state.vault_revision.load(Ordering::SeqCst), 1);
+        assert!(
+            state
+                .ready_vault()
+                .await
+                .expect("ready vault")
+                .cache
+                .sqlite
+                .read_note_by_slug("written")
+                .expect("read note")
+                .is_some(),
+            "the sole application refresh incorporated the write"
         );
     }
 

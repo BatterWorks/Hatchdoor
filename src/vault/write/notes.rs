@@ -6,13 +6,15 @@ use crate::vault::paths::{slugify, strip_md_extension};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::asset_move_plan;
-use super::fs_ops::{atomic_write, ensure_content_hash, move_assets};
+use super::fs_ops::{
+    MutationJournal, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
+};
 use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
 };
-use super::rewrites::{apply_rewrites, backlink_rewrite_plan, merge_rewrites, parse_fence_marker};
-use super::types::{WriteError, WriteOutcome};
+use super::rewrites::{backlink_rewrite_plan, merge_rewrites, parse_fence_marker};
+use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
 
 /// Where `replace_section` places the supplied content relative to the matched section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +207,7 @@ pub fn update_note(
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
     let prepared = prepare_note_content(content)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -235,7 +237,7 @@ pub fn append_note(
     }
     current.push_str(content);
     let prepared = prepare_note_content(&current)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -284,7 +286,7 @@ pub fn edit_note(
         current.replacen(old_string, new_string, 1)
     };
     let prepared = prepare_note_content(&updated)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -319,7 +321,7 @@ pub fn replace_section(
         SectionMode::After => splice(&current[..end], content, &current[end..]),
     };
     let prepared = prepare_note_content(&updated)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -432,6 +434,24 @@ pub fn move_or_rename_note(
     target_relative_path: &str,
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
+    move_or_rename_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        target_relative_path,
+        expected_content_hash,
+        |_| Ok(()),
+    )
+}
+
+fn move_or_rename_note_with_hook(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    target_relative_path: &str,
+    expected_content_hash: &str,
+    mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
     let target_path = resolve_new_note_path(vault_root, target_relative_path)?;
     if target_path.exists() {
@@ -454,22 +474,18 @@ pub fn move_or_rename_note(
         false,
         &backlink_rewrites,
     )?;
-    fs::rename(&entry.path, &target_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to move note '{}' to '{}': {error}",
-            entry.path.display(),
-            target_path.display()
-        ))
-    })?;
-    let moved_assets = move_assets(&asset_moves)?;
-    let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let mutation = execute_note_mutation(
+        vault_root,
+        entry,
+        &target_path,
+        expected_content_hash,
+        &asset_moves,
+        merge_rewrites(backlink_rewrites, asset_rewrites),
+        &mut after_phase,
+    )?;
+    let moved_assets = asset_moves.len();
+    let rewritten = mutation.rewritten;
     let rewritten_notes = rewritten.len();
-    let moved_content = fs::read_to_string(&target_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read moved note '{}': {error}",
-            target_path.display()
-        ))
-    })?;
 
     let mut affected_paths = rewritten;
     affected_paths.push(entry.path.clone());
@@ -482,7 +498,7 @@ pub fn move_or_rename_note(
     Ok(WriteOutcome {
         slug: Some(slug),
         relative_path: Some(target_without_ext),
-        content_hash: Some(content_hash(&moved_content)),
+        content_hash: Some(content_hash(&mutation.moved_content)),
         quality_warnings: Vec::new(),
         rewritten_notes,
         moved_assets,
@@ -547,6 +563,16 @@ pub fn delete_note(
     entry: &NoteEntry,
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
+    delete_note_with_hook(vault_root, index, entry, expected_content_hash, |_| Ok(()))
+}
+
+fn delete_note_with_hook(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    expected_content_hash: &str,
+    mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
     let trash_relative = unique_trash_relative_path(vault_root, &entry.relative_path)?;
     let trash_path = vault_root.join(format!("{trash_relative}.md"));
@@ -561,26 +587,17 @@ pub fn delete_note(
         true,
         &backlink_rewrites,
     )?;
-    // Trash the note FIRST, then move its assets (mirroring move_or_rename_note).
-    // Doing assets first meant a failed note rename left a live note pointing at
-    // attachments that had already been relocated into trash, with no rollback.
-    fs::rename(&entry.path, &trash_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to move note '{}' to trash '{}': {error}",
-            entry.path.display(),
-            trash_path.display()
-        ))
-    })?;
-    let moved_assets = match move_assets(&asset_moves) {
-        Ok(count) => count,
-        Err(error) => {
-            // move_assets is all-or-nothing, so no asset is stranded. Restore the
-            // note out of trash so the whole delete is a no-op on failure.
-            let _ = fs::rename(&trash_path, &entry.path);
-            return Err(error);
-        }
-    };
-    let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let mutation = execute_note_mutation(
+        vault_root,
+        entry,
+        &trash_path,
+        expected_content_hash,
+        &asset_moves,
+        merge_rewrites(backlink_rewrites, asset_rewrites),
+        &mut after_phase,
+    )?;
+    let moved_assets = asset_moves.len();
+    let rewritten = mutation.rewritten;
     let rewritten_notes = rewritten.len();
 
     let mut affected_paths = rewritten;
@@ -601,4 +618,95 @@ pub fn delete_note(
         trashed_path: Some(trash_relative),
         affected_paths,
     })
+}
+
+struct CompletedNoteMutation {
+    rewritten: Vec<std::path::PathBuf>,
+    moved_content: String,
+}
+
+fn execute_note_mutation(
+    vault_root: &Path,
+    entry: &NoteEntry,
+    target_path: &Path,
+    expected_content_hash: &str,
+    asset_moves: &[AssetMove],
+    rewrites: Vec<TextRewrite>,
+    after_phase: &mut impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<CompletedNoteMutation, WriteError> {
+    let mut journal = MutationJournal::new(vault_root);
+
+    if let Err(error) = journal.move_note(&entry.path, target_path, expected_content_hash) {
+        return Err(journal.rollback(error));
+    }
+    if let Err(error) = after_phase(MutationPhase::Note) {
+        return Err(journal.rollback(error));
+    }
+
+    for asset in asset_moves {
+        if let Err(error) =
+            journal.move_file(MutationPhase::Asset, &asset.source, &asset.destination)
+        {
+            return Err(journal.rollback(error));
+        }
+    }
+    if !asset_moves.is_empty()
+        && let Err(error) = after_phase(MutationPhase::Asset)
+    {
+        return Err(journal.rollback(error));
+    }
+
+    let had_rewrites = !rewrites.is_empty();
+    let rewritten = match journal.apply_rewrites(rewrites) {
+        Ok(rewritten) => rewritten,
+        Err(error) => return Err(journal.rollback(error)),
+    };
+    if had_rewrites && let Err(error) = after_phase(MutationPhase::Rewrite) {
+        return Err(journal.rollback(error));
+    }
+
+    let moved_content = match fs::read_to_string(target_path) {
+        Ok(content) => content,
+        Err(error) => {
+            return Err(journal.rollback(WriteError::Io(format!(
+                "failed to read moved note '{}': {error}",
+                target_path.display()
+            ))));
+        }
+    };
+
+    Ok(CompletedNoteMutation {
+        rewritten,
+        moved_content,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn move_or_rename_note_with_failure(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    target_relative_path: &str,
+    expected_content_hash: &str,
+    after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
+    move_or_rename_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        target_relative_path,
+        expected_content_hash,
+        after_phase,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn delete_note_with_failure(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    expected_content_hash: &str,
+    after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
+    delete_note_with_hook(vault_root, index, entry, expected_content_hash, after_phase)
 }

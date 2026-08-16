@@ -606,6 +606,18 @@ fn refuse_noise_write(
 }
 
 fn write_error_to_jsonrpc(vault_id: VaultId, error: WriteError) -> JsonRpcFailure {
+    // Keep a partially-applied multi-phase mutation distinguishable from an
+    // ordinary write failure: it needs operator action, and the HTTP surface
+    // reports it under the same code.
+    if let Some(message) = error.recovery_message() {
+        let error = crate::handlers::vaults::VaultApiError::new(
+            "write_recovery_required",
+            message.to_string(),
+            Some(vault_id),
+            false,
+        );
+        return JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message));
+    }
     let (code, message, retryable) = match error {
         WriteError::InvalidInput(message) => ("invalid_write_input", message, false),
         WriteError::Conflict(message) => ("write_conflict", message, true),
@@ -1121,6 +1133,23 @@ mod record_tests {
         };
         assert_eq!(record.target, "Projects/New");
         assert_eq!(record.affected_paths.len(), 1);
+    }
+
+    #[test]
+    fn recovery_required_write_errors_expose_bounded_guidance() {
+        let vault_id = crate::vault_registry::VaultId::generate().expect("generate Vault id");
+        let failure = write_error_to_jsonrpc(
+            vault_id,
+            WriteError::recovery_required(
+                "vault mutation rollback was incomplete: restore rewritten note [Backlink.md]"
+                    .to_string(),
+            ),
+        );
+
+        assert!(failure.message.contains("write_recovery_required"));
+        assert!(failure.message.contains("recovery required"));
+        assert!(failure.message.contains("Backlink.md"));
+        assert!(!failure.message.contains("/home/"));
     }
 }
 

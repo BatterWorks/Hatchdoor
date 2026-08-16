@@ -258,18 +258,6 @@
   margin-left: auto;
 }
 
-.explorer-rail-item.is-disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-
-@media (hover: hover) {
-  .explorer-rail-item.is-disabled:hover {
-    background: transparent;
-    color: var(--ink-soft);
-  }
-}
-
 /* Footer — the single global create action, and nothing else. */
 .explorer-footer {
   flex: 0 0 auto;

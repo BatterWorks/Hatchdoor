@@ -378,7 +378,7 @@ impl RuntimeConfig {
         &self,
         updates: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Arc<ConfigSnapshot>, String> {
-        self.validate_and_save(updates, |_current| Ok(()))
+        self.validate_and_save_then(updates, |_current| Ok(()), |_value, _saved| Ok(()))
             .map(|((), snapshot)| snapshot)
     }
 
@@ -432,6 +432,23 @@ impl RuntimeConfig {
     where
         E: From<String>,
     {
+        self.validate_and_save_then(updates, decide, |_value, _saved| Ok(()))
+    }
+
+    /// Persist a validated next configuration, complete a bounded setup action,
+    /// then publish the new snapshot. If setup fails, restore the prior durable
+    /// settings before returning the action failure. This is for setup whose
+    /// filesystem effects must never happen before the selected setting is
+    /// durable, such as initializing local Git versioning.
+    pub(crate) fn validate_and_save_then<T, E>(
+        &self,
+        updates: impl IntoIterator<Item = (String, String)>,
+        decide: impl FnOnce(&ConfigSnapshot) -> Result<T, E>,
+        after_persist: impl FnOnce(&T, &ConfigSnapshot) -> Result<(), E>,
+    ) -> Result<(T, Arc<ConfigSnapshot>), E>
+    where
+        E: From<String>,
+    {
         let mut stored_values = self
             .stored_values
             .lock()
@@ -443,6 +460,14 @@ impl RuntimeConfig {
         next_values.extend(updates);
         self.store.persist(&next_values).map_err(E::from)?;
         let next_snapshot = Arc::new(resolve(&self.environment, &next_values, &self.defaults));
+        if let Err(error) = after_persist(&value, &next_snapshot) {
+            self.store.persist(&stored_values).map_err(|restore_error| {
+                E::from(format!(
+                    "settings setup failed and Hatchdoor could not restore the previous settings: {restore_error}"
+                ))
+            })?;
+            return Err(error);
+        }
         self.snapshot.store(next_snapshot.clone());
         *stored_values = next_values;
         Ok((value, next_snapshot))
@@ -781,6 +806,52 @@ mod tests {
                 .expect("new setting")
                 .value,
             "archive/"
+        );
+    }
+
+    #[test]
+    fn setup_runs_only_after_the_next_settings_are_durable_and_a_failure_restores_them() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let config = RuntimeConfig::load(&path, Environment::empty(), defaults()).expect("load");
+        let updates = [(
+            "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+            "archive/".to_string(),
+        )];
+
+        let result: Result<_, String> = config.validate_and_save_then(
+            updates,
+            |_current| Ok(()),
+            |_value, _saved| {
+                let durable = RuntimeConfig::load(&path, Environment::empty(), defaults())
+                    .expect("read persisted setting during setup");
+                assert_eq!(
+                    durable
+                        .snapshot()
+                        .required("HATCHDOOR_ARCHIVE_PREFIX")
+                        .expect("stored setting"),
+                    "archive/"
+                );
+                Err("forced post-persist setup failure".to_string())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            config
+                .snapshot()
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("live setting remains old"),
+            "90-archive/"
+        );
+        let restarted = RuntimeConfig::load(&path, Environment::empty(), defaults())
+            .expect("restored durable setting");
+        assert_eq!(
+            restarted
+                .snapshot()
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("restored setting"),
+            "90-archive/"
         );
     }
 

@@ -1,5 +1,5 @@
-use axum::body::Bytes;
-use axum::extract::State;
+use axum::body::{Bytes, to_bytes};
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
@@ -22,17 +22,28 @@ pub async fn mcp_get_handler(State(state): State<AppState>, headers: HeaderMap) 
     handle_mcp_get(&headers, &config).await
 }
 
-pub async fn mcp_post_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+pub async fn mcp_post_handler(State(state): State<AppState>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
     let snapshot = state.runtime_snapshot();
     let config = match AppState::runtime_mcp_config(&snapshot) {
         Ok(config) => config,
         Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     };
-    handle_mcp_post(state.clone(), &headers, body, &config).await
+    if let Err(response) = validate_mcp_request(&parts.headers, &config) {
+        return *response;
+    }
+    let body = match to_bytes(body, config.request_body_limit()).await {
+        Ok(body) => body,
+        Err(_) => {
+            return jsonrpc_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Value::Null,
+                -32600,
+                "MCP request exceeds the configured request size limit".to_string(),
+            );
+        }
+    };
+    handle_authorized_mcp_post(state, body, &config).await
 }
 
 async fn handle_mcp_get(headers: &HeaderMap, config: &McpConfig) -> Response {
@@ -47,6 +58,7 @@ async fn handle_mcp_get(headers: &HeaderMap, config: &McpConfig) -> Response {
     response
 }
 
+#[cfg(test)]
 async fn handle_mcp_post(
     state: AppState,
     headers: &HeaderMap,
@@ -57,6 +69,19 @@ async fn handle_mcp_post(
         return *response;
     }
 
+    if body.len() > config.request_body_limit() {
+        return jsonrpc_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Value::Null,
+            -32600,
+            "MCP request exceeds the configured request size limit".to_string(),
+        );
+    }
+
+    handle_authorized_mcp_post(state, body, config).await
+}
+
+async fn handle_authorized_mcp_post(state: AppState, body: Bytes, config: &McpConfig) -> Response {
     let raw_request: Value = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(error) => {
@@ -1029,6 +1054,26 @@ mod tests {
             response.headers().get(header::ALLOW),
             Some(&HeaderValue::from_static("POST"))
         );
+    }
+
+    #[tokio::test]
+    async fn read_only_mcp_rejects_a_body_past_the_ordinary_request_limit() {
+        let (state, _tmp) = test_state();
+        let config = enabled_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let response = handle_mcp_post(
+            state,
+            &headers,
+            Bytes::from(vec![b' '; config.request_body_limit() + 1]),
+            &config,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

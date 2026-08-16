@@ -18,7 +18,8 @@ pub struct GitSyncStatus {
     /// Machine-readable category of the last error, so clients can distinguish a
     /// merge conflict (local commit kept, needs human resolution) from a
     /// transient remote error (retried on the next batch). One of
-    /// "validation" | "conflict" | "remote" | "other".
+    /// "validation" | "conflict" | "dirty_tree" | "manual_recovery" |
+    /// "remote" | "other".
     pub last_error_kind: Option<String>,
     /// Write records waiting for the next debounced sync.
     pub pending: usize,

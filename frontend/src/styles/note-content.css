@@ -438,6 +438,7 @@
      instead of colliding with the words. */
   width: calc(var(--li-inset) - 0.5rem);
   text-align: right;
+  white-space: nowrap;
   /* The marker's line box has to match the item's, or its baseline rides high:
      it is set in a smaller font, and a line box that is 4px shorter than the
      text's puts the number visibly above the words it numbers. 1.02rem/1.55

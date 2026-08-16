@@ -160,6 +160,11 @@
   --space-10: 2.5rem;
   --space-12: 3rem;
   --space-16: 4rem;
+  /* Forge is a zero-radius system, so the square corner is a named token and
+     not a bare 0: App.css states it 10 times, and a token says "this is the
+     house rule" where a literal only says "this one corner". --radius-pill is
+     the documented exception, for the kbd pill and status badges. */
+  --radius-none: 0;
   --radius-pill: 999px;
   --dur-fast: 120ms;
   --dur: 200ms;

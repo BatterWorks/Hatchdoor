@@ -444,6 +444,18 @@ impl SqliteCache {
         k: usize,
         selection: &LayerSelection,
     ) -> Result<Vec<SemanticHit>, String> {
+        let conn = self.read()?;
+        self.semantic_search_layered_on(&conn, embedder, query, k, selection)
+    }
+
+    pub(crate) fn semantic_search_layered_on(
+        &self,
+        conn: &Connection,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<SemanticHit>, String> {
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -455,7 +467,6 @@ impl SqliteCache {
             .ok_or("embedder returned no vectors")?;
         let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
 
-        let conn = self.read()?;
         let read_hit = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SemanticHit> {
             Ok(SemanticHit {
                 chunk_id: row.get(0)?,
@@ -521,6 +532,19 @@ impl SqliteCache {
         selection: &LayerSelection,
         eligible_slugs: &HashSet<String>,
     ) -> Result<Vec<SemanticHit>, String> {
+        let conn = self.read()?;
+        self.semantic_search_filtered_on(&conn, embedder, query, k, selection, eligible_slugs)
+    }
+
+    pub(crate) fn semantic_search_filtered_on(
+        &self,
+        conn: &Connection,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+        eligible_slugs: &HashSet<String>,
+    ) -> Result<Vec<SemanticHit>, String> {
         if k == 0 || eligible_slugs.is_empty() {
             return Ok(Vec::new());
         }
@@ -530,7 +554,6 @@ impl SqliteCache {
             .into_iter()
             .next()
             .ok_or("embedder returned no vectors")?;
-        let conn = self.read()?;
         let mut hits = Vec::new();
 
         // Each (sql, params) scan reads chunk_id, note_slug, heading_path,
@@ -701,13 +724,23 @@ impl SqliteCache {
         k: usize,
         selection: &LayerSelection,
     ) -> Result<Vec<ChunkFtsHit>, String> {
+        let conn = self.read()?;
+        self.fts_search_chunks_layered_on(&conn, query, k, selection)
+    }
+
+    pub(crate) fn fts_search_chunks_layered_on(
+        &self,
+        conn: &Connection,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 {
             return Ok(Vec::new());
         }
         let Some(fts_q) = build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.read()?;
         let sql = format!(
             r#"
             SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)
@@ -749,13 +782,24 @@ impl SqliteCache {
         selection: &LayerSelection,
         eligible_slugs: &HashSet<String>,
     ) -> Result<Vec<ChunkFtsHit>, String> {
+        let conn = self.read()?;
+        self.fts_search_chunks_filtered_on(&conn, query, k, selection, eligible_slugs)
+    }
+
+    pub(crate) fn fts_search_chunks_filtered_on(
+        &self,
+        conn: &Connection,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+        eligible_slugs: &HashSet<String>,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 || eligible_slugs.is_empty() {
             return Ok(Vec::new());
         }
         let Some(fts_q) = build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.read()?;
         let sql = format!(
             r#"
                 SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)

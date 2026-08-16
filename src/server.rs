@@ -249,15 +249,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     let attachment_body_limit = MAX_IN_MEMORY_UPLOAD_BYTES
         .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
         .min(usize::MAX as u64) as usize;
-    // The base64 import_attachment tool carries file bytes inside the JSON-RPC
-    // body, which base64 inflates by ~4/3. Size the /mcp body limit from the
-    // base64 cap plus that inflation so a legitimately-sized upload is not
-    // rejected before the tool's own decoded-size check runs.
-    let mcp_body_limit = MAX_IN_MEMORY_UPLOAD_BYTES
-        .saturating_mul(4)
-        .div_ceil(3)
-        .saturating_add(ATTACHMENT_MULTIPART_OVERHEAD)
-        .min(usize::MAX as u64) as usize;
+    // This is merely the largest process-safe MCP body. The handler validates
+    // token/origin, binds its live snapshot, and reapplies the method-aware
+    // limit before collecting a request.
+    let mcp_body_limit = McpConfig::maximum_request_body_limit();
 
     let model_setup = Router::new()
         .route("/api/model/accept-gemma", post(accept_gemma_handler))
@@ -597,30 +592,29 @@ async fn readiness_handler(State(state): State<AppState>) -> Response {
 }
 
 async fn accept_gemma_handler(State(state): State<AppState>) -> Response {
-    match state.model_setup.accept_gemma() {
-        Ok(()) => {
-            spawn_model_startup(state, SelectedModel::Gemma);
-            StatusCode::ACCEPTED.into_response()
-        }
-        Err(error) => model_setup_error(error),
+    match select_model_and_start(state, SelectedModel::Gemma) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(ModelChoiceError::AlreadyActive) => model_setup_conflict(),
+        Err(ModelChoiceError::Persist(error)) => model_setup_error(error),
     }
 }
 
 async fn decline_gemma_handler(State(state): State<AppState>) -> Response {
-    match state.model_setup.decline_gemma() {
-        Ok(()) => {
-            spawn_model_startup(state, SelectedModel::Nomic);
-            StatusCode::ACCEPTED.into_response()
-        }
-        Err(error) => model_setup_error(error),
+    match select_model_and_start(state, SelectedModel::Nomic) {
+        Ok(()) => StatusCode::ACCEPTED.into_response(),
+        Err(ModelChoiceError::AlreadyActive) => model_setup_conflict(),
+        Err(ModelChoiceError::Persist(error)) => model_setup_error(error),
     }
 }
 
 async fn retry_model_setup_handler(State(state): State<AppState>) -> Response {
     match state.model_setup.selected() {
         Ok(selected @ (SelectedModel::Gemma | SelectedModel::Nomic)) => {
-            spawn_model_startup(state, selected);
-            StatusCode::ACCEPTED.into_response()
+            if spawn_model_startup(state, selected) {
+                StatusCode::ACCEPTED.into_response()
+            } else {
+                model_setup_conflict()
+            }
         }
         Ok(SelectedModel::TermsRequired) => (
             StatusCode::CONFLICT,
@@ -640,10 +634,68 @@ fn model_setup_error(error: String) -> Response {
         .into_response()
 }
 
-pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
-    if state.model_setup_started.swap(true, Ordering::AcqRel) {
-        return;
+fn model_setup_conflict() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": "The running search model cannot be changed until Hatchdoor restarts."
+        })),
+    )
+        .into_response()
+}
+
+/// The only failures that can occur before the background model lifecycle is
+/// spawned. Kept crate-visible so the MCP setup tools can report the same
+/// persisted-choice/activation outcome as the HTTP setup endpoints.
+pub(crate) enum ModelChoiceError {
+    AlreadyActive,
+    Persist(String),
+}
+
+/// Persist a first-run model choice only after claiming the one model setup
+/// lifecycle. Both HTTP and MCP choices must use this function: a loser must
+/// leave `selection.json` untouched because the winning lifecycle owns the
+/// runtime embedder and ensuing index rebuild.
+pub(crate) fn select_model_and_start(
+    state: AppState,
+    selected: SelectedModel,
+) -> Result<(), ModelChoiceError> {
+    if !claim_model_setup(&state) {
+        return Err(ModelChoiceError::AlreadyActive);
     }
+
+    let persist = match selected {
+        SelectedModel::Gemma => state.model_setup.accept_gemma(),
+        SelectedModel::Nomic => state.model_setup.decline_gemma(),
+        SelectedModel::TermsRequired => Err("model terms have not been accepted".to_string()),
+    };
+    if let Err(error) = persist {
+        state.model_setup_started.store(false, Ordering::Release);
+        return Err(ModelChoiceError::Persist(error));
+    }
+
+    spawn_claimed_model_startup(state, selected);
+    Ok(())
+}
+
+/// Claim the sole model-setup lifecycle before a choice is persisted. This
+/// makes choice persistence and runtime activation one serialized operation.
+fn claim_model_setup(state: &AppState) -> bool {
+    state
+        .model_setup_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
+pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) -> bool {
+    if !claim_model_setup(&state) {
+        return false;
+    }
+    spawn_claimed_model_startup(state, selected);
+    true
+}
+
+fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
     let tracker = state.startup.clone();
     let model_name = selected.id().unwrap_or("search model");
     tracker.set_downloading(model_name, None, None);
@@ -734,11 +786,8 @@ pub(crate) fn spawn_model_startup(state: AppState, selected: SelectedModel) {
                 let index_state = state.clone();
                 let index_result = tokio::task::spawn_blocking(move || {
                     let runtime_snapshot = index_state.runtime_config.snapshot();
-                    let embed_layers = runtime_snapshot
-                        .setting("HATCHDOOR_EMBED_LAYERS")
-                        .map(|setting| crate::runtime_config::is_truthy(&setting.value))
-                        .unwrap_or(true);
-                    let scan_config = index_state.live_scan_config()?;
+                    let (scan_config, embed_layers) =
+                        AppState::runtime_index_options(&runtime_snapshot)?;
                     build_cache_with_sqlite_and_progress(
                         &indexing_vault_path,
                         indexing_sqlite,
@@ -1244,6 +1293,12 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
+    // UNRESOLVED (audit R05 / findings C01-F02, C01-F03, X-F02): the audit made
+    // the watcher one-per-process, spawned here before model setup, to stop
+    // detached replacement watchers accumulating. PR #106 spawns one per Vault
+    // after cache publication instead. PR #106's shape is taken provisionally;
+    // R05's invariant has not been re-established for multi-Vault and its
+    // failure-injection proof has not been re-run.
     match config.vault_source {
         VaultSource::Local { .. } if selected_model != SelectedModel::TermsRequired => {
             spawn_model_startup(state.clone(), selected_model);
@@ -1966,12 +2021,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attachment_route_accepts_mcp_token_with_mcp_write_disabled() {
-        // S9 regression: the attachment route's token check must not gate on
-        // `mcp.enabled && mcp.write_enabled` — issue #60 only asked to read the
-        // token per-request and mount the check unconditionally. A token that
-        // worked for the attachment route while MCP write mode is off must
-        // keep working.
+    async fn attachment_route_forbids_read_only_mcp_token_without_creating_file() {
+        // Supersedes the earlier #60 expectation that a read-only MCP token
+        // keeps working here: audit finding X-F01 made an MCP disable (or a
+        // write-mode disable) an immediate revocation of that credential's
+        // upload capability. The gate lives in `auth.rs`.
         let (app, tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
             Some(Arc::from("web-secret")),
             Some("mcp-secret".to_string()),
@@ -1988,6 +2042,7 @@ mod tests {
         .await;
 
         let response = app
+            .clone()
             .oneshot(attachment_upload_request(
                 &vault_id,
                 "Attachments/via-mcp-token.png",
@@ -1995,7 +2050,27 @@ mod tests {
             ))
             .await
             .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(
+            !tmp.path()
+                .join("attachments/Attachments/via-mcp-token.png")
+                .exists()
+        );
+
+        let web_response = app
+            .oneshot(attachment_upload_request(
+                &vault_id,
+                "Attachments/via-web-token.png",
+                Some("web-secret"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(web_response.status(), StatusCode::OK);
+        assert!(
+            tmp.path()
+                .join("attachments/Attachments/via-web-token.png")
+                .exists()
+        );
     }
 
     #[tokio::test]
@@ -2019,8 +2094,8 @@ mod tests {
     #[tokio::test]
     async fn mcp_settings_apply_atomically_and_rotate_attachment_authorization() {
         let (app, tmp, state) = app_for_tests_with_state();
-        let vault_id =
-            create_vault_with_files(&app, "Mcp", &tmp.path().join("mcp-attachments"), &[], 0).await;
+        let vault_root = tmp.path().join("mcp-attachments");
+        let vault_id = create_vault_with_files(&app, "Mcp", &vault_root, &[], 0).await;
 
         let invalid = app
             .clone()
@@ -2135,9 +2210,8 @@ mod tests {
             .expect("response");
         assert_eq!(read_only.status(), StatusCode::OK);
 
-        // S9: the attachment route's token check does not gate on
-        // `mcp.write_enabled` — a token that worked while MCP write mode was
-        // on must keep working with write mode off.
+        // The same live MCP token loses its attachment-write capability on the
+        // first request after write mode is disabled.
         let read_only_attachment = app
             .clone()
             .oneshot(attachment_upload_request(
@@ -2147,7 +2221,36 @@ mod tests {
             ))
             .await
             .expect("response");
-        assert_eq!(read_only_attachment.status(), StatusCode::OK);
+        assert_eq!(read_only_attachment.status(), StatusCode::FORBIDDEN);
+        assert!(!vault_root.join("Attachments/read-only.png").exists());
+
+        let writes_enabled = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .method("PATCH")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"updates":{"HATCHDOOR_MCP_WRITE_ENABLED":"true"}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(writes_enabled.status(), StatusCode::OK);
+
+        let enabled_attachment = app
+            .clone()
+            .oneshot(attachment_upload_request(
+                &vault_id,
+                "Attachments/writes-enabled.png",
+                Some("first-token"),
+            ))
+            .await
+            .expect("response");
+        assert_eq!(enabled_attachment.status(), StatusCode::OK);
+        assert!(vault_root.join("Attachments/writes-enabled.png").exists());
 
         let limits = app
             .clone()
@@ -2157,7 +2260,7 @@ mod tests {
                     .method("PATCH")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_MAX_ATTACHMENT_BYTES":"1","HATCHDOOR_MCP_MAX_BASE64_BYTES":"1","HATCHDOOR_MCP_WRITE_ENABLED":"true"}}"#,
+                        r#"{"updates":{"HATCHDOOR_MAX_ATTACHMENT_BYTES":"1","HATCHDOOR_MCP_MAX_BASE64_BYTES":"1"}}"#,
                     ))
                     .expect("request"),
             )
@@ -2362,26 +2465,118 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_route_accepts_body_above_axum_default_limit() {
-        // axum's default request-body limit is 2 MiB. A base64-encoded attachment
-        // can legitimately exceed that, so the /mcp route must raise its limit to
-        // fit the base64 cap; otherwise the framework rejects the upload with 413
-        // before the handler runs.
-        let (app, _tmp) = app_for_tests();
-        let body = "a".repeat(3 * 1024 * 1024);
+    async fn mcp_route_accepts_an_authenticated_write_request_above_axums_default_limit() {
+        // Axum's default request-body limit is 2 MiB. A valid write-enabled MCP
+        // session may need more than that for base64 attachment data, so this
+        // must reach normal JSON-RPC dispatch rather than only an auth failure.
+        let (_unused_app, _tmp, state) = app_for_tests_with_state();
+        state
+            .runtime_config
+            .save([
+                ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
+                (
+                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                    "true".to_string(),
+                ),
+                (
+                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+                    "mcp-secret".to_string(),
+                ),
+                (
+                    "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                    (2 * 1024 * 1024).to_string(),
+                ),
+            ])
+            .expect("configure write-enabled MCP");
+        let app = build_router(state, None);
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"padding":"{}"}}}}"#,
+            "x".repeat(2 * 1024 * 1024 + 1)
+        );
         let response = app
             .oneshot(
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
                     .header("content-type", "application/json")
+                    .header("authorization", "Bearer mcp-secret")
                     .body(Body::from(body))
                     .expect("request"),
             )
             .await
             .expect("response");
 
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("JSON-RPC");
+        assert_eq!(payload["result"], serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn mcp_route_rejects_an_authenticated_read_only_body_over_its_live_limit() {
+        let (_unused_app, _tmp, state) = app_for_tests_with_state();
+        state
+            .runtime_config
+            .save([
+                ("HATCHDOOR_MCP_ENABLED".to_string(), "true".to_string()),
+                (
+                    "HATCHDOOR_MCP_WRITE_ENABLED".to_string(),
+                    "false".to_string(),
+                ),
+                (
+                    "HATCHDOOR_MCP_BEARER_TOKEN".to_string(),
+                    "mcp-secret".to_string(),
+                ),
+            ])
+            .expect("configure read-only MCP");
+        let app = build_router(state, None);
+        let body = vec![b' '; crate::mcp::config::MAX_ORDINARY_MCP_REQUEST_BYTES as usize + 1];
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer mcp-secret")
+                    .body(Body::from(body))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let payload = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        assert!(String::from_utf8_lossy(&payload).contains("MCP request exceeds"));
+    }
+
+    #[tokio::test]
+    async fn mcp_route_rejects_unauthorized_requests_before_polling_the_body() {
+        use std::convert::Infallible;
+        use tokio_stream::StreamExt;
+
+        let (app, _tmp) = app_for_tests();
+        let panic_if_polled = tokio_stream::once(Ok::<_, Infallible>(axum::body::Bytes::new()))
+            .then(|_| async {
+                panic!("unauthorized MCP request body must not be collected");
+                #[allow(unreachable_code)]
+                Ok::<_, Infallible>(axum::body::Bytes::new())
+            });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .body(Body::from_stream(panic_if_polled))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2837,6 +3032,36 @@ mod tests {
             .await
             .expect("response");
         assert_ne!(root.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn post_start_model_choice_is_rejected_without_persisting_a_new_selection() {
+        let (app, _tmp, state) = app_for_tests_with_state();
+        assert_eq!(
+            state.model_setup.selected().expect("initial selection"),
+            SelectedModel::TermsRequired
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/model/accept-gemma")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            state
+                .model_setup
+                .selected()
+                .expect("selection after refusal"),
+            SelectedModel::TermsRequired,
+            "a rejected post-start request must not persist a model the runtime did not adopt"
+        );
     }
 
     #[tokio::test]
@@ -3413,6 +3638,36 @@ mod tests {
                 .len(),
             3 * 1024 * 1024
         );
+    }
+
+    #[tokio::test]
+    async fn vault_attachment_route_enforces_a_lowered_live_limit_while_reading_the_field() {
+        // Regression for the R06 upload bound: the limit must be bound from the
+        // live snapshot *before* the field is consumed, so lowering it takes
+        // effect immediately rather than after the bytes are already buffered.
+        // `attachment_upload_request` sends a 9-byte file.
+        let (app, tmp, state) = app_for_tests_with_state();
+        let vault_root = tmp.path().join("attachments");
+        let vault_id = create_vault_with_files(&app, "Attachments", &vault_root, &[], 0).await;
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MAX_ATTACHMENT_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("lower live attachment limit");
+
+        let response = app
+            .oneshot(attachment_upload_request(
+                &vault_id,
+                "Attachments/limited.png",
+                None,
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!vault_root.join("Attachments/limited.png").exists());
     }
 
     #[tokio::test]
