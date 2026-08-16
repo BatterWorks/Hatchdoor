@@ -4,16 +4,65 @@ import { type Simulation } from "d3-force";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
-import type { GraphData, GraphNode } from "../../types";
+import { deriveVaultSlot, type VaultSlotState } from "../../app/vaultSlotLogic";
+import { useVaultDiscovery, useVaultScope } from "../../hooks/useVaultScope";
+import { describeVaultsNotDrawn } from "../../lib/vaultParticipants";
+import type {
+  GraphData,
+  GraphNode,
+  VaultGraph,
+  VaultParticipant,
+  VaultReadProjection,
+} from "../../types";
 import { StateBlock } from "../ui";
 import {
+  buildIslandGraphs,
   buildSimulationGraph,
   createGraphSimulation,
+  createIslandSimulation,
   hitTest as hitTestNodes,
+  nodeKey,
   nodeRadius,
+  settleSimulationSync,
+  type GraphIsland,
   type SimLink,
   type SimNode,
 } from "./graphSimulation";
+
+/** Read fresh each time a simulation is (re)created rather than cached —
+ * cheap, and the setting can change mid-session. */
+function prefersReducedMotion(): boolean {
+  return (
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+  );
+}
+
+/** Settles a freshly created simulation synchronously under reduced motion
+ * (#147) — shared by both the plain and island simulation-setup paths below,
+ * which otherwise only differ in how they build `nodes`/`links`. */
+function activateSimulation(
+  sim: Simulation<SimNode, SimLink>,
+): Simulation<SimNode, SimLink> {
+  if (prefersReducedMotion()) {
+    settleSimulationSync(sim);
+  }
+  return sim;
+}
+
+/** Merges every participating Vault's graph component into the one
+ * `GraphData` shape the simulation already renders. With exactly one
+ * participant (a single-enabled-Vault instance, or any narrowed scope) this
+ * is that participant's own graph, unchanged — byte-identical to today. With
+ * more than one, nodes and edges are concatenated: edges never cross Vaults
+ * (the API guarantees this), and every node/edge carries its own `vault_id`,
+ * so the per-Vault island layout an accordion-equivalent treatment would give
+ * is a later slice (#118) this ticket explicitly excludes. */
+function mergeVaultGraphs(vaultGraphs: VaultGraph[]): GraphData {
+  return {
+    nodes: vaultGraphs.flatMap((vaultGraph) => vaultGraph.nodes),
+    edges: vaultGraphs.flatMap((vaultGraph) => vaultGraph.edges),
+  };
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -44,10 +93,12 @@ interface ThemeColors {
   ink: string;
   muted: string;
   hot: string;
+  warn: string;
+  err: string;
 }
 
-// getComputedStyle forces a synchronous style recalc, so the six theme reads
-// are resolved once here and cached — refreshed only when the theme changes
+// getComputedStyle forces a synchronous style recalc, so the theme reads are
+// resolved once here and cached — refreshed only when the theme changes
 // rather than on every animation frame.
 function readThemeColors(): ThemeColors {
   return {
@@ -57,32 +108,62 @@ function readThemeColors(): ThemeColors {
     ink: cssVar("--ink"),
     muted: cssVar("--muted"),
     hot: cssVar("--hot"),
+    warn: cssVar("--warn-fg"),
+    err: cssVar("--err-fg"),
   };
+}
+
+const ISLAND_ENCLOSURE_MARGIN = 40;
+const ISLAND_CAPTION_GAP = 16;
+/** Leading for the caption stack, set for the 20px name line above the 13px
+ * count line. Mirrored as `ISLAND_CAPTION_HEADROOM` in graphSimulation, which
+ * reserves the row space these two lines need. */
+const ISLAND_CAPTION_LINE_HEIGHT = 24;
+
+interface RenderIsland extends GraphIsland {
+  slot: VaultSlotState;
 }
 
 // ── component ─────────────────────────────────────────────────────────────────
 
 export function GraphPage() {
   const navigate = useNavigate();
+  const [scope] = useVaultScope();
+  const { vaults, demoMode, loading: loadingVaults } = useVaultDiscovery();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  const [graphData, setGraphData] = useState<GraphData | null>(null);
+  const [vaultGraphs, setVaultGraphs] = useState<VaultGraph[] | null>(null);
+  const [participants, setParticipants] = useState<VaultParticipant[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [allTags, setAllTags] = useState<string[]>([]);
   const [activeTags, setActiveTags] = useState<Set<string>>(new Set());
   const [nodeCount, setNodeCount] = useState(0);
   const [edgeCount, setEdgeCount] = useState(0);
+  // Island mode is driven by how many Vaults actually answered, not by the
+  // requested scope: a single-enabled-Vault instance under "all" is the same
+  // picture as narrowed (#118's resolution), so it takes the plain path too.
+  const [islandMode, setIslandMode] = useState(false);
+  const [notDrawnVaultNames, setNotDrawnVaultNames] = useState<string[]>([]);
 
   // mutable state shared between render loop and event handlers
   const simNodesRef = useRef<SimNode[]>([]);
   const simLinksRef = useRef<SimLink[]>([]);
+  const islandsRef = useRef<RenderIsland[]>([]);
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
+  // Island mode only: fit the whole field once the layout settles. Centring
+  // world (0,0) at a fixed zoom framed a single component fine, but a grid of
+  // islands is as wide as the grid, so the landing view cropped the field and
+  // "zoom out to see the rest" became a thing you had to guess at. Cleared the
+  // moment the reader touches the view — a fit that fights a deliberate pan is
+  // worse than no fit at all.
+  const pendingFitRef = useRef(false);
+  const viewInitialisedRef = useRef(false);
   const hoveredRef = useRef<SimNode | null>(null);
   const selectedRef = useRef<SimNode | null>(null);
   const activeTagsRef = useRef<Set<string>>(new Set());
-  const lastClickSlugRef = useRef<string | null>(null);
+  const lastClickKeyRef = useRef<string | null>(null);
   const rafRef = useRef<number>(0);
   const runningRef = useRef(false);
   const themeColorsRef = useRef<ThemeColors | null>(null);
@@ -122,19 +203,28 @@ export function GraphPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await apiFetch("/api/graph");
+        const res = await apiFetch(
+          `/api/v1/vaults/${encodeURIComponent(scope)}/graph`,
+        );
         if (!res.ok)
           throw new Error(await readErrorMessage(res, "Graph fetch failed"));
-        const data = (await res.json()) as GraphData;
+        const projection = (await res.json()) as VaultReadProjection<
+          VaultGraph[]
+        >;
         if (cancelled) return;
 
-        setGraphData(data);
-        setNodeCount(data.nodes.length);
-        setEdgeCount(data.edges.length);
+        setVaultGraphs(projection.data);
+        setParticipants(projection.participants);
+
+        const nodes = projection.data.flatMap((vg) => vg.nodes);
+        setNodeCount(nodes.length);
+        setEdgeCount(
+          projection.data.reduce((sum, vg) => sum + vg.edges.length, 0),
+        );
 
         const tags = Array.from(
           new Set(
-            data.nodes
+            nodes
               .map((n: GraphNode) => n.primary_tag)
               .filter((t): t is string => t !== null),
           ),
@@ -150,7 +240,7 @@ export function GraphPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [scope]);
 
   // ── hit test ────────────────────────────────────────────────────────────────
 
@@ -260,16 +350,47 @@ export function GraphPage() {
       return node.primary_tag !== null && activeTags.has(node.primary_tag);
     };
 
-    // connected slugs for selection highlight
-    const connectedSlugs = new Set<string>();
+    // connected node keys for selection highlight (vault_id:slug — a slug is
+    // only unique within its own Vault, and edges never cross Vaults)
+    const connectedKeys = new Set<string>();
     if (selected) {
-      connectedSlugs.add(selected.slug);
+      connectedKeys.add(nodeKey(selected));
       for (const link of links) {
-        if (link.source.slug === selected.slug)
-          connectedSlugs.add(link.target.slug);
-        if (link.target.slug === selected.slug)
-          connectedSlugs.add(link.source.slug);
+        if (nodeKey(link.source) === nodeKey(selected))
+          connectedKeys.add(nodeKey(link.target));
+        if (nodeKey(link.target) === nodeKey(selected))
+          connectedKeys.add(nodeKey(link.source));
       }
+    }
+
+    // ── island enclosures (#143) — drawn under edges/nodes, at the settled
+    // layout radius (recomputed every frame from live node positions) plus a
+    // margin. World-space sizing throughout: unlike node labels below, this
+    // is canvas furniture that scales with zoom rather than staying a
+    // constant screen size (#118's resolution).
+    const islands = islandsRef.current;
+    const islandRadii = new Map<string, number>();
+    if (islands.length > 0) {
+      ctx.save();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = ruleColor;
+      ctx.lineWidth = 1.5;
+      ctx.globalAlpha = 0.7;
+      for (const island of islands) {
+        let maxDist = 0;
+        for (const node of island.nodes) {
+          const dist =
+            Math.hypot(node.x - island.cx, node.y - island.cy) +
+            nodeRadius(node.backlink_count);
+          if (dist > maxDist) maxDist = dist;
+        }
+        const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
+        islandRadii.set(island.vaultId, radius);
+        ctx.beginPath();
+        ctx.arc(island.cx, island.cy, radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
 
     // draw edges
@@ -283,14 +404,17 @@ export function GraphPage() {
       let color = mutedColor;
 
       if (selected) {
-        const srcConn = connectedSlugs.has(src.slug);
-        const tgtConn = connectedSlugs.has(tgt.slug);
+        const srcConn = connectedKeys.has(nodeKey(src));
+        const tgtConn = connectedKeys.has(nodeKey(tgt));
         if (srcConn && tgtConn) {
           alpha = 0.55;
           color = hotColor;
         } else alpha = 0.04;
       } else if (hovered) {
-        if (src.slug === hovered.slug || tgt.slug === hovered.slug) {
+        if (
+          nodeKey(src) === nodeKey(hovered) ||
+          nodeKey(tgt) === nodeKey(hovered)
+        ) {
           alpha = 0.6;
           color = hotColor;
         } else {
@@ -306,7 +430,9 @@ export function GraphPage() {
       ctx.strokeStyle = color;
       ctx.globalAlpha = alpha;
       ctx.lineWidth =
-        selected && connectedSlugs.has(src.slug) && connectedSlugs.has(tgt.slug)
+        selected &&
+        connectedKeys.has(nodeKey(src)) &&
+        connectedKeys.has(nodeKey(tgt))
           ? 1.5 / k
           : 1 / k;
       ctx.stroke();
@@ -317,9 +443,9 @@ export function GraphPage() {
     for (const node of nodes) {
       const r = nodeRadius(node.backlink_count);
       const vis = isVisible(node);
-      const isHovered = hovered?.slug === node.slug;
-      const isSelected = selected?.slug === node.slug;
-      const isConnected = selected ? connectedSlugs.has(node.slug) : false;
+      const isHovered = hovered ? nodeKey(hovered) === nodeKey(node) : false;
+      const isSelected = selected ? nodeKey(selected) === nodeKey(node) : false;
+      const isConnected = selected ? connectedKeys.has(nodeKey(node)) : false;
 
       let alpha = vis ? 1 : 0.15;
       if (selected && !isConnected) alpha = vis ? 0.2 : 0.06;
@@ -375,10 +501,11 @@ export function GraphPage() {
     const guaranteed = new Set<string>();
     const labelCandidates: SimNode[] = [];
     const pushLabel = (n: SimNode, force = false) => {
-      if (!seen.has(n.slug)) {
-        seen.add(n.slug);
+      const key = nodeKey(n);
+      if (!seen.has(key)) {
+        seen.add(key);
         labelCandidates.push(n);
-        if (force) guaranteed.add(n.slug);
+        if (force) guaranteed.add(key);
       }
     };
 
@@ -389,8 +516,8 @@ export function GraphPage() {
       .filter(
         (n) =>
           isVisible(n) &&
-          n.slug !== hovered?.slug &&
-          n.slug !== selected?.slug &&
+          (!hovered || nodeKey(n) !== nodeKey(hovered)) &&
+          (!selected || nodeKey(n) !== nodeKey(selected)) &&
           (n.backlink_count >= hubMinBacklinks ||
             nodeRadius(n.backlink_count) * k >= labelThreshold),
       )
@@ -399,14 +526,15 @@ export function GraphPage() {
 
     // Deconfliction: track occupied regions in screen space.
     // Pre-seed with every visible node circle so labels can't overlap nodes.
-    // Each entry carries the owning slug so a node's own label can self-exclude.
+    // Each entry carries the owning node key so a node's own label can
+    // self-exclude.
     const NODE_MARGIN = 4; // extra px around each circle
     const placed: Array<{
       sx: number;
       sy: number;
       sw: number;
       sh: number;
-      slug?: string;
+      key?: string;
     }> = nodes.filter(isVisible).map((n) => {
       const rScr = nodeRadius(n.backlink_count) * k + NODE_MARGIN;
       return {
@@ -414,7 +542,7 @@ export function GraphPage() {
         sy: n.y * k + y - rScr,
         sw: rScr * 2,
         sh: rScr * 2,
-        slug: n.slug,
+        key: nodeKey(n),
       };
     });
 
@@ -426,11 +554,11 @@ export function GraphPage() {
       sy: number,
       sw: number,
       sh: number,
-      ownSlug: string,
+      ownKey: string,
     ) =>
       placed.some(
         (p) =>
-          p.slug !== ownSlug &&
+          p.key !== ownKey &&
           sx < p.sx + p.sw &&
           sx + sw > p.sx &&
           sy < p.sy + p.sh &&
@@ -439,9 +567,9 @@ export function GraphPage() {
 
     for (const node of labelCandidates) {
       const r = nodeRadius(node.backlink_count);
-      const isHov = node.slug === hovered?.slug;
-      const isSel = node.slug === selected?.slug;
-      const isGuaranteed = guaranteed.has(node.slug);
+      const isHov = hovered ? nodeKey(node) === nodeKey(hovered) : false;
+      const isSel = selected ? nodeKey(node) === nodeKey(selected) : false;
+      const isGuaranteed = guaranteed.has(nodeKey(node));
 
       ctx.save();
       ctx.font = `500 ${fontSize}px "Inter Tight", system-ui, sans-serif`;
@@ -473,7 +601,7 @@ export function GraphPage() {
         const sy = pos.by * k + y;
         const sw = bw * k;
         const sh = bh * k;
-        if (!collidesWithPlaced(sx, sy, sw, sh, node.slug)) {
+        if (!collidesWithPlaced(sx, sy, sw, sh, nodeKey(node))) {
           chosen = pos;
           break;
         }
@@ -485,7 +613,7 @@ export function GraphPage() {
         const sy = by * k + y;
         const sw = bw * k;
         const sh = bh * k;
-        placed.push({ sx, sy, sw, sh, slug: node.slug });
+        placed.push({ sx, sy, sw, sh, key: nodeKey(node) });
 
         ctx.globalAlpha = isSel ? 1 : isHov ? 0.95 : 0.75;
         ctx.fillStyle = paperColor;
@@ -501,6 +629,45 @@ export function GraphPage() {
       ctx.restore();
     }
 
+    // ── island captions (#143) — inert: drawn on canvas, not a DOM element,
+    // so clicking one does nothing. Vault name in display ink over a mono
+    // count line; the count line takes the condition word and its ink when
+    // the Vault is not healthy (#116/#139's slot vocabulary reused verbatim).
+    if (islands.length > 0) {
+      ctx.save();
+      ctx.textAlign = "center";
+      ctx.textBaseline = "alphabetic";
+      for (const island of islands) {
+        const radius = islandRadii.get(island.vaultId) ?? 0;
+        const countY = island.cy - radius - ISLAND_CAPTION_GAP;
+        const nameY = countY - ISLAND_CAPTION_LINE_HEIGHT;
+
+        ctx.font = '700 20px "Bricolage Grotesque", system-ui, sans-serif';
+        ctx.fillStyle = inkColor;
+        ctx.fillText(island.vaultName, island.cx, nameY);
+
+        // "49 notes", not a bare "49": the caption floats in open canvas with
+        // no column header or neighbouring label to say what the figure counts,
+        // unlike the sidebar slot this vocabulary came from, where the row it
+        // sits on supplies that. The condition word still replaces it outright.
+        const slot = island.slot;
+        const countLine =
+          slot.kind === "condition"
+            ? slot.word
+            : `${island.nodeCount} ${island.nodeCount === 1 ? "note" : "notes"}`;
+        const countColor =
+          slot.kind === "condition"
+            ? slot.tier === "error"
+              ? theme.err
+              : theme.warn
+            : mutedColor;
+        ctx.font = '500 13px "JetBrains Mono", "SF Mono", Menlo, monospace';
+        ctx.fillStyle = countColor;
+        ctx.fillText(countLine, island.cx, countY);
+      }
+      ctx.restore();
+    }
+
     ctx.restore();
     ctx.restore();
   }, []);
@@ -511,6 +678,62 @@ export function GraphPage() {
   // (simulation still warm, an animated zoom, or an active drag/pan/pinch).
   // Once everything settles the rAF loop stops entirely instead of spinning a
   // core at 60fps forever; interaction handlers call requestRender() to wake it.
+  /**
+   * Frame every island: the union of each enclosure (settled radius plus its
+   * margin) and the caption stack above it, since a caption clipped by the
+   * viewport edge is exactly as unreadable as a missing island. Runs off live
+   * node positions, so it can only be called once the layout has settled —
+   * the enclosure radius does not exist until then.
+   */
+  const fitIslandsToView = useCallback(() => {
+    const islands = islandsRef.current;
+    const canvas = canvasRef.current;
+    if (islands.length === 0 || !canvas) return;
+    const W = canvas.clientWidth;
+    const H = canvas.clientHeight;
+    if (W === 0 || H === 0) return;
+
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const island of islands) {
+      let maxDist = 0;
+      for (const node of island.nodes) {
+        const dist =
+          Math.hypot(node.x - island.cx, node.y - island.cy) +
+          nodeRadius(node.backlink_count);
+        if (dist > maxDist) maxDist = dist;
+      }
+      const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
+      const captionHeight =
+        ISLAND_CAPTION_GAP + ISLAND_CAPTION_LINE_HEIGHT * 2;
+      minX = Math.min(minX, island.cx - radius);
+      maxX = Math.max(maxX, island.cx + radius);
+      minY = Math.min(minY, island.cy - radius - captionHeight);
+      maxY = Math.max(maxY, island.cy + radius);
+    }
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+
+    const pad = 32;
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    // Never zoom *in* past the single-graph landing scale: a lone small Vault
+    // should not arrive magnified just because it is the only thing on screen.
+    const k = Math.max(
+      0.1,
+      Math.min(0.9, (W - pad * 2) / spanX, (H - pad * 2) / spanY),
+    );
+    transformRef.current = {
+      x: W / 2 - ((minX + maxX) / 2) * k,
+      y: H / 2 - ((minY + maxY) / 2) * k,
+      k,
+    };
+    // The canvas-resize effect is declared after the simulation effect, so its
+    // first pass would otherwise re-centre at a fixed zoom and undo this fit.
+    viewInitialisedRef.current = true;
+  }, []);
+
   const requestRender = useCallback(() => {
     if (runningRef.current) return;
     runningRef.current = true;
@@ -518,6 +741,17 @@ export function GraphPage() {
       render();
       const sim = simRef.current;
       const simActive = !!sim && sim.alpha() > sim.alphaMin();
+      // Keep the field framed for every frame of the settle rather than
+      // snapping once at the end: `alphaDecay(0.02)` leaves the layout warm for
+      // roughly six seconds, and a view that jumps that long after you arrive
+      // reads as the page glitching. Islands start grid-placed, so each re-fit
+      // is a small correction and the whole field stays on screen throughout.
+      // Stops the moment the layout settles or the reader takes the view.
+      if (pendingFitRef.current) {
+        fitIslandsToView();
+        if (!simActive) pendingFitRef.current = false;
+        render();
+      }
       const busy =
         simActive ||
         zoomAnimRef.current !== null ||
@@ -531,20 +765,44 @@ export function GraphPage() {
       }
     };
     rafRef.current = requestAnimationFrame(tick);
-  }, [render]);
+  }, [render, fitIslandsToView]);
 
   // ── simulation setup ─────────────────────────────────────────────────────────
 
+  // Waits on vault discovery too so islands can be ordered and captioned in
+  // one pass — the same trade-off StatsPage makes, and #143's layout has
+  // nothing sensible to draw before both are in anyway.
   useEffect(() => {
-    if (!graphData) return;
+    if (!vaultGraphs || loadingVaults) return;
 
-    // Nodes live in world space centred at (0,0). The canvas transform maps
-    // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
-    // using them caused a double-shift that put every node off-screen.
-    const { nodes, links } = buildSimulationGraph(graphData);
+    const vaultOrder = new Map(vaults.map((v, i) => [v.vault_id, i]));
+    const ordered = [...vaultGraphs].sort(
+      (a, b) =>
+        (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+    );
 
-    simNodesRef.current = nodes;
-    simLinksRef.current = links;
+    // A Vault absent from the response (unavailable — never a fresh-but-
+    // stale participant, which still contributes its component) draws no
+    // island and is named instead (#118's resolution).
+    const drawnIds = new Set(ordered.map((vg) => vg.vault_id));
+    const missingNames = participants
+      .filter((p) => !drawnIds.has(p.vault_id))
+      .sort(
+        (a, b) =>
+          (vaultOrder.get(a.vault_id) ?? 0) - (vaultOrder.get(b.vault_id) ?? 0),
+      )
+      .map((p) => p.vault_name);
+
+    // Island mode is a property of the instance — under "all" scope with
+    // more than one *enabled* Vault — not of how many happened to answer
+    // this particular read. A Vault going down doesn't collapse the shape
+    // back to plain: it stays an island field with one fewer island and a
+    // line naming the gap (#118's resolution: "no threshold, no fallback").
+    // A genuine single-Vault instance, or any narrowed scope, is always the
+    // byte-identical plain single-graph path instead.
+    const nextIslandMode = scope === "all" && vaults.length > 1;
+    setIslandMode(nextIslandMode);
+    setNotDrawnVaultNames(nextIslandMode ? missingNames : []);
 
     // Centre transform on the canvas. The canvas is already sized by the
     // ResizeObserver so clientWidth/Height are reliable here.
@@ -554,15 +812,60 @@ export function GraphPage() {
     transformRef.current = { x: W / 2, y: H / 2, k: 0.9 };
 
     simRef.current?.stop();
-    const sim = createGraphSimulation(nodes, links);
 
-    simRef.current = sim;
+    if (!nextIslandMode) {
+      islandsRef.current = [];
+
+      // Nodes live in world space centred at (0,0). The canvas transform maps
+      // world (0,0) → canvas centre. Do NOT use canvas pixel dimensions here —
+      // using them caused a double-shift that put every node off-screen.
+      const { nodes, links } = buildSimulationGraph(mergeVaultGraphs(ordered));
+      simNodesRef.current = nodes;
+      simLinksRef.current = links;
+
+      const sim = createGraphSimulation(nodes, links);
+      simRef.current = activateSimulation(sim);
+      requestRender();
+      return () => {
+        sim.stop();
+      };
+    }
+
+    const vaultById = new Map(vaults.map((v) => [v.vault_id, v]));
+    const { islands, nodes, links } = buildIslandGraphs(ordered);
+    simNodesRef.current = nodes;
+    simLinksRef.current = links;
+    islandsRef.current = islands.map((island) => {
+      const vault = vaultById.get(island.vaultId);
+      const slot: VaultSlotState = vault
+        ? deriveVaultSlot(vault, island.nodeCount, demoMode)
+        : { kind: "count", count: island.nodeCount };
+      return { ...island, slot };
+    });
+
+    const sim = createIslandSimulation(nodes, links);
+    simRef.current = activateSimulation(sim);
+    pendingFitRef.current = true;
+    // Reduced motion settles synchronously, so the layout is already final and
+    // there is no later frame to fit on — frame it now and paint once.
+    if (sim.alpha() <= sim.alphaMin()) {
+      pendingFitRef.current = false;
+      fitIslandsToView();
+    }
     requestRender();
-
     return () => {
       sim.stop();
     };
-  }, [graphData, requestRender]);
+  }, [
+    vaultGraphs,
+    vaults,
+    demoMode,
+    loadingVaults,
+    participants,
+    scope,
+    requestRender,
+    fitIslandsToView,
+  ]);
 
   // ── canvas resize ───────────────────────────────────────────────────────────
 
@@ -570,8 +873,6 @@ export function GraphPage() {
     const canvas = canvasRef.current;
     const wrap = wrapRef.current;
     if (!canvas || !wrap) return;
-
-    let centred = false;
 
     const resize = () => {
       const dpr = window.devicePixelRatio || 1;
@@ -581,10 +882,13 @@ export function GraphPage() {
       canvas.height = rect.height * dpr;
       canvas.style.width = `${rect.width}px`;
       canvas.style.height = `${rect.height}px`;
-      // Re-centre the world origin on first valid size so the graph
-      // is always visible regardless of when the sim initialised.
-      if (!centred) {
-        centred = true;
+      // Re-centre the world origin on first valid size so the graph is always
+      // visible regardless of when the sim initialised. Tracked in a ref, not a
+      // local: this effect re-runs whenever `requestRender` changes identity,
+      // and a local flag reset to false there, re-centring at a fixed zoom and
+      // discarding both the island fit and any view the reader had set.
+      if (!viewInitialisedRef.current) {
+        viewInitialisedRef.current = true;
         transformRef.current = {
           x: rect.width / 2,
           y: rect.height / 2,
@@ -685,6 +989,8 @@ export function GraphPage() {
     };
 
     const onMouseDown = (e: MouseEvent) => {
+      // The reader has taken the view; cancel any pending auto-fit.
+      pendingFitRef.current = false;
       if (e.button !== 0) return;
       const { cx, cy } = getPos(e);
       const hit = hitTest(cx, cy);
@@ -714,16 +1020,21 @@ export function GraphPage() {
 
         if (!moved) {
           const node = dragRef.current.node;
-          if (lastClickSlugRef.current === node.slug) {
-            void navigate(`/n/${node.slug}`);
-            lastClickSlugRef.current = null;
+          const key = nodeKey(node);
+          if (lastClickKeyRef.current === key) {
+            void navigate(
+              `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`,
+            );
+            lastClickKeyRef.current = null;
           } else {
             selectedRef.current =
-              selectedRef.current?.slug === node.slug ? null : node;
-            lastClickSlugRef.current = node.slug;
+              selectedRef.current && nodeKey(selectedRef.current) === key
+                ? null
+                : node;
+            lastClickKeyRef.current = key;
             setTimeout(() => {
-              if (lastClickSlugRef.current === node.slug) {
-                lastClickSlugRef.current = null;
+              if (lastClickKeyRef.current === key) {
+                lastClickKeyRef.current = null;
               }
             }, 500);
           }
@@ -738,7 +1049,7 @@ export function GraphPage() {
         const movedY = Math.abs(cy - panRef.current.startY);
         if (movedX < 4 && movedY < 4) {
           selectedRef.current = null;
-          lastClickSlugRef.current = null;
+          lastClickKeyRef.current = null;
         }
         panRef.current = null;
       }
@@ -748,6 +1059,8 @@ export function GraphPage() {
     };
 
     const onWheel = (e: WheelEvent) => {
+      // The reader has taken the view; cancel any pending auto-fit.
+      pendingFitRef.current = false;
       e.preventDefault();
       const { cx, cy } = getPos(e);
       // Proportional factor: works naturally for both mouse wheels (~120/notch)
@@ -774,6 +1087,8 @@ export function GraphPage() {
     };
 
     const onTouchStart = (e: TouchEvent) => {
+      // The reader has taken the view; cancel any pending auto-fit.
+      pendingFitRef.current = false;
       e.preventDefault();
       requestRender();
 
@@ -886,16 +1201,21 @@ export function GraphPage() {
 
         if (!moved) {
           const node = dragRef.current.node;
-          if (lastClickSlugRef.current === node.slug) {
-            void navigate(`/n/${node.slug}`);
-            lastClickSlugRef.current = null;
+          const key = nodeKey(node);
+          if (lastClickKeyRef.current === key) {
+            void navigate(
+              `/v/${encodeURIComponent(node.vault_id)}/n/${node.slug}`,
+            );
+            lastClickKeyRef.current = null;
           } else {
             selectedRef.current =
-              selectedRef.current?.slug === node.slug ? null : node;
-            lastClickSlugRef.current = node.slug;
+              selectedRef.current && nodeKey(selectedRef.current) === key
+                ? null
+                : node;
+            lastClickKeyRef.current = key;
             setTimeout(() => {
-              if (lastClickSlugRef.current === node.slug)
-                lastClickSlugRef.current = null;
+              if (lastClickKeyRef.current === key)
+                lastClickKeyRef.current = null;
             }, 500);
           }
         }
@@ -910,7 +1230,7 @@ export function GraphPage() {
           Math.abs(cy - panRef.current.startY) > 8;
         if (!moved) {
           selectedRef.current = null;
-          lastClickSlugRef.current = null;
+          lastClickKeyRef.current = null;
         }
         panRef.current = null;
       }
@@ -987,10 +1307,16 @@ export function GraphPage() {
     </div>
   );
 
+  const effectiveLoading = loading || loadingVaults;
+
   return (
     <div className="graph-page">
       <div className="graph-header">
-        <p className="graph-eyebrow">Vault · Knowledge Graph</p>
+        <p className="graph-eyebrow">
+          {islandMode
+            ? "ALL VAULTS · KNOWLEDGE GRAPH"
+            : "Vault · Knowledge Graph"}
+        </p>
 
         <div className="graph-header-row">
           <h1 className="graph-title">Graph</h1>
@@ -1032,6 +1358,12 @@ export function GraphPage() {
           Scroll to zoom · Drag background to pan · Click node to select ·
           Double-click to open
         </p>
+
+        {islandMode && notDrawnVaultNames.length > 0 && (
+          <p className="graph-not-drawn">
+            {describeVaultsNotDrawn(notDrawnVaultNames)}
+          </p>
+        )}
       </div>
 
       {/* Mobile-only filter overlay — sits on top of canvas, doesn't push it */}
@@ -1049,14 +1381,14 @@ export function GraphPage() {
       <div className="graph-canvas-wrap" ref={wrapRef}>
         <canvas ref={canvasRef} className="graph-canvas" />
 
-        {loading && (
+        {effectiveLoading && (
           <div className="graph-overlay">
             <div className="graph-loading-pulse" />
             <div className="graph-loading-label">Mapping your vault…</div>
           </div>
         )}
 
-        {!loading && (error || !graphData) && (
+        {!effectiveLoading && (error || !vaultGraphs) && (
           <div className="graph-overlay">
             <StateBlock
               title="Graph Unavailable"

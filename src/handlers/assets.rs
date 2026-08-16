@@ -1,36 +1,17 @@
+use std::io::Read;
 use std::path::{Component, Path as FsPath, PathBuf};
 
-use axum::Json;
-use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 
-use crate::api_types::ErrorResponse;
-use crate::app_state::{AppState, run_blocking};
+/// Asset serving is intentionally bounded until a streaming response primitive
+/// is introduced. It keeps direct `<img>` and PDF responses from turning one
+/// request into an unbounded in-memory allocation.
+const MAX_ASSET_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
-pub async fn vault_asset_handler(
-    Path(path): Path<String>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    let asset_path = match resolve_asset_path(&state.vault_path, &path) {
-        Ok(path) => path,
-        Err(kind) => {
-            return asset_error_response(kind, &path);
-        }
-    };
-
-    let content_type = content_type_for_path(&asset_path);
-    let read_path = asset_path.clone();
-    let bytes = match run_blocking(move || {
-        std::fs::read(&read_path)
-            .map_err(|error| format!("failed reading asset '{}': {error}", read_path.display()))
-    })
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(err) => return err.into_response(),
-    };
-
+/// Shared response shape for a resolved, in-bounds asset/attachment file,
+/// used by the Vault-scoped route in `handlers/vault_content.rs`.
+pub(crate) fn asset_response(content_type: &'static str, bytes: Vec<u8>) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     // Cacheable in the browser (assets re-render on every note view) but never
@@ -57,7 +38,36 @@ pub async fn vault_asset_handler(
     (StatusCode::OK, headers, bytes).into_response()
 }
 
-fn resolve_asset_path(vault_root: &FsPath, raw_path: &str) -> Result<PathBuf, AssetPathError> {
+pub(crate) fn read_asset_bytes(path: &FsPath) -> Result<Vec<u8>, AssetReadError> {
+    read_asset_bytes_with_limit(path, MAX_ASSET_RESPONSE_BYTES)
+}
+
+fn read_asset_bytes_with_limit(path: &FsPath, maximum: u64) -> Result<Vec<u8>, AssetReadError> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        AssetReadError::Io(format!(
+            "failed opening asset '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            AssetReadError::Io(format!(
+                "failed reading asset '{}': {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 > maximum {
+        return Err(AssetReadError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn resolve_asset_path(
+    vault_root: &FsPath,
+    raw_path: &str,
+) -> Result<PathBuf, AssetPathError> {
     let relative = sanitize_asset_path(raw_path).ok_or(AssetPathError::BadRequest)?;
     if !is_allowed_asset_extension(&relative) {
         return Err(AssetPathError::Forbidden);
@@ -118,7 +128,7 @@ fn is_allowed_asset_extension(path: &FsPath) -> bool {
         .unwrap_or(false)
 }
 
-fn content_type_for_path(path: &FsPath) -> &'static str {
+pub(crate) fn content_type_for_path(path: &FsPath) -> &'static str {
     match path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -137,35 +147,56 @@ fn content_type_for_path(path: &FsPath) -> &'static str {
     }
 }
 
-fn asset_error_response(kind: AssetPathError, requested_path: &str) -> axum::response::Response {
-    let (status, message) = match kind {
+/// One `AssetPathError` -> (structured code, HTTP status, human message)
+/// mapping, shared by this route's `ErrorResponse{error}` shape and
+/// `handlers/vault_content.rs`'s Vault-scoped `VaultApiError{code, ...}`
+/// shape, so the two wire shapes cannot silently diverge on the same
+/// underlying containment outcome.
+pub(crate) fn asset_error_parts(
+    kind: AssetPathError,
+    requested_path: &str,
+) -> (&'static str, StatusCode, String) {
+    match kind {
         AssetPathError::BadRequest => (
+            "invalid_asset_path",
             StatusCode::BAD_REQUEST,
             format!("Invalid asset path: {requested_path}"),
         ),
         AssetPathError::Forbidden => (
+            "asset_access_denied",
             StatusCode::FORBIDDEN,
             format!("Asset access denied: {requested_path}"),
         ),
         AssetPathError::NotFound => (
+            "asset_not_found",
             StatusCode::NOT_FOUND,
             format!("Asset not found: {requested_path}"),
         ),
+        AssetPathError::TooLarge => (
+            "asset_too_large",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("Asset is too large to serve: {requested_path}"),
+        ),
         AssetPathError::Internal => (
+            "internal_error",
             StatusCode::INTERNAL_SERVER_ERROR,
             "Asset resolution failed".to_string(),
         ),
-    };
-
-    (status, Json(ErrorResponse { error: message })).into_response()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AssetPathError {
+pub(crate) enum AssetPathError {
     BadRequest,
     Forbidden,
     NotFound,
     Internal,
+    TooLarge,
+}
+
+pub(crate) enum AssetReadError {
+    TooLarge,
+    Io(String),
 }
 
 #[cfg(test)]
@@ -203,6 +234,19 @@ mod tests {
             content_type_for_path(FsPath::new("Attachments/manual.pdf")),
             "application/pdf"
         );
+    }
+
+    #[test]
+    fn read_asset_bytes_rejects_files_past_the_response_cap() {
+        let tmp = TempDir::new().expect("temp dir");
+        let path = tmp.path().join("large.png");
+        let file = std::fs::File::create(&path).expect("file");
+        file.set_len(5).expect("set sparse length");
+
+        assert!(matches!(
+            read_asset_bytes_with_limit(&path, 4),
+            Err(AssetReadError::TooLarge)
+        ));
     }
 
     #[test]

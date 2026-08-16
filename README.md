@@ -154,9 +154,22 @@ HOST_VAULT_PATH=/absolute/path/to/your/markdown-vault
 What these mean:
 
 - `HOST_VAULT_PATH` is your Markdown vault on the host machine.
-- `HOST_CACHE_PATH` and `HOST_MODELS_PATH` are optional host-side locations for
-  the generated cache and downloaded models; Compose defaults both beside the
-  project.
+- `HOST_CACHE_PATH`, `HOST_STATE_PATH`, and `HOST_MODELS_PATH` are optional
+  host-side locations for the generated cache, authoritative Vault registry,
+  and downloaded models; Compose defaults them beside the project.
+
+Before the first managed-Vault start, create the default authoritative state
+directory with access for the image's numeric `nonroot` user. Docker otherwise
+may create a missing bind source as root, leaving the registry unwritable:
+
+```bash
+mkdir -p data/state
+chmod 700 data/state
+sudo chown 65532:65532 data/state
+```
+
+For rootless Podman, use `podman unshare chown 65532:65532 data/state` instead
+of `sudo chown`. Apply the same ownership rule to a custom `HOST_STATE_PATH`.
 
 Do not add ordinary Settings values to `.env`: an unset value can be changed
 live in Settings. See [Configuration](#configuration) for the few deployment
@@ -225,6 +238,7 @@ Docker Compose mounts:
 | --- | --- |
 | `/data/vault` | Markdown vault, source of truth |
 | `/data/cache` | Generated SQLite cache |
+| `/data/state` | Authoritative Vault identities and source definitions |
 | `/models` | Downloaded search model and local Gemma terms receipt |
 
 ## Data And Safety Model
@@ -233,6 +247,12 @@ Hatchdoor is designed around a simple rule: your Markdown vault is the source of
 truth.
 
 - Markdown files live in `VAULT_PATH`.
+- Vault identities and source definitions live in `/data/state/vaults.json`.
+  A Vault's Git HTTPS credential is stored there too, so the file is created
+  with `0600` permissions on Unix and belongs in a backup you treat as secret.
+  The API never returns it: a Vault reports only `credential_configured`, and
+  an edit that means to keep a stored secret says so with `https_credentials:
+  {"action": "keep"}` rather than resending it.
 - SQLite is a generated cache and can be rebuilt.
 - The SQLite cache should live outside the vault.
 - Hatchdoor scans `.md` files under the vault while excluding built-in and
@@ -244,6 +264,11 @@ truth.
 - MCP requires its own bearer token whenever it is enabled.
 - Versioning is off by default; it can keep local Git history or safely sync an
   existing remote.
+
+Upgrading an existing single-Vault deployment requires persistent
+`/data/state`; see the [legacy single-Vault upgrade
+guide](docs/migrations/legacy-single-vault.md) for detection, recovery, and
+rollback constraints.
 
 If `VAULT_PATH` contains no Markdown files, Hatchdoor creates a small starter
 vault before the first index build. Existing vaults are not seeded or modified
@@ -333,11 +358,14 @@ For read-only browsing:
 
 - Mount the vault read-only if you want.
 - Keep the cache directory writable.
+- Keep the state directory writable whenever migration or Vault management may
+  create or update the authoritative registry.
 
 For browser writes, MCP writes, attachment uploads, or git sync:
 
 - The vault mount must be writable by the container runtime user.
 - The cache directory must be writable.
+- The state directory must be writable.
 
 If Hatchdoor starts but write features are disabled, check the permissions on
 your vault mount and call `/api/write-capabilities` from an authenticated
@@ -362,6 +390,7 @@ different container layout.
 | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | Compose host mount input; set in `.env` for an existing vault |
 | `HOST_CACHE_PATH` | `./data/cache` | Compose host mount input |
+| `HOST_STATE_PATH` | `./data/state` | Compose host mount for authoritative Vault registry state; preserve across upgrades |
 | `HOST_MODELS_PATH` | `./models` | Compose host mount input |
 | `VAULT_PATH` | `./vault` directly; `/data/vault` in Compose | Environment-only runtime path |
 | `HATCHDOOR_CACHE_DB` | `./data/cache/hatchdoor-cache.sqlite3` directly; `/data/cache/hatchdoor-cache.sqlite3` in Compose | Environment-only runtime path |
@@ -500,9 +529,9 @@ causes startup indexing to fail, correcting it lets the vault watcher recover
 without restarting the server.
 
 To inspect the active rules, markers, layer counts, and conflicts, call
-`GET /api/diagnostics` (optionally `?path=sources/Clip.md`) or the MCP
-`layer_diagnostics` tool. Diagnostics are disabled in demo mode because they can
-reveal demoted paths.
+`GET /api/diagnostics` (optionally `?path=sources/Clip.md`). Diagnostics are
+disabled in demo mode because they can reveal demoted paths; they have no
+Vault-scoped MCP replacement.
 
 ### Note URLs And Links
 
@@ -570,24 +599,16 @@ Send:
 Authorization: Bearer <token>
 ```
 
-### MCP Metadata Queries
+### MCP Vault scope
 
-`search_notes` accepts optional exact metadata filters alongside semantic or
-keyword retrieval. Filters support all-of exact tag matching, hierarchical tag
-prefixes (a `topic/selfhosting` prefix also matches `topic/selfhosting/immich`),
-a vault-relative path prefix, required property names, and typed property equality. Search results
-always include normalized tags and aliases; use `include_properties` to return
-only the frontmatter fields the agent needs.
-
-Use `query_notes` when metadata completely defines the request and there is no
-meaningful content query—for example, listing every note tagged `type/device`
-with `status: active`. It requires at least one filter and returns note summaries
-rather than repeated chunks. `get_note` returns the complete normalized metadata
-object for a single note.
-
-Date values are currently exposed as frontmatter values and support exact
-matching. Date ranges and a broader Dataview-style query language are not part
-of the 2.3.0 metadata filter contract.
+Start every agent session with `list_vaults`; it returns immutable `vault_id`
+values, collection/registry revisions, capabilities, status, and only a
+redacted credential indicator. There is no selected or default Vault.
+Collection reads (`search_notes`, `get_tree`, `get_stats`, `get_graph`, and
+`recently_modified`) require `scope`, set to one Vault ID or `all`. Exact reads,
+Markdown mutations, and controls of an existing Vault require `vault_id`.
+Collection results include `scope`, `collection_revision`, `partial`, and
+participants; agents should branch on structured error `code`, never text.
 
 ### Agent Skill
 
@@ -606,11 +627,11 @@ backlinks, moves, and git sync.
 Agents and the web UI upload attachments directly — no shared staging folder to
 mount. Two paths cover the size/compatibility trade-off:
 
-- **`POST /api/attachment`** (multipart) — the default. Used by the web UI and
+- **`POST /api/v1/vaults/{vault_id}/attachments`** (multipart) — the default. Used by the web UI and
   by any agent that can make an HTTP request (e.g. shell out to `curl`).
-  Accepts either the web bearer token or the MCP bearer token, so an MCP agent
-  can reuse its existing credential. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES`
-  (default 10 MiB).
+  Accepts the web bearer token regardless of MCP write mode. An MCP agent can
+  reuse its MCP bearer token only while MCP and MCP writes are currently
+  enabled. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES` (default 10 MiB).
 - **`import_attachment` MCP tool** — the fallback, for MCP clients that cannot
   make an out-of-band HTTP request. Sends the file bytes base64-encoded inline;
   works with any MCP client, but base64 rides inside the JSON-RPC message and
@@ -618,8 +639,7 @@ mount. Two paths cover the size/compatibility trade-off:
   (default 5 MiB), measured on the decoded file.
 
 Use **Settings → Uploads** to change either limit while Hatchdoor is running.
-Agents can call `get_attachment_import_config` to discover both methods, their
-current size limits, and which to use.
+The `import_attachment` MCP fallback requires the same explicit `vault_id`.
 
 ## Versioning and Git Sync
 
@@ -647,8 +667,8 @@ Requirements:
 - Merge conflicts are kept for human resolution on the server; Hatchdoor never
   force-checks out over uncommitted manual vault edits.
 
-Use the `get_git_sync_status` MCP tool to check whether recent writes were
-committed and pushed.
+Use `list_vaults` to inspect each Vault's Git status, and `sync_vault` or
+`retry_vault` (with that `vault_id`) for eligible managed-Git Vaults.
 
 ## Running Without Docker
 
@@ -656,9 +676,10 @@ If [`just`](https://github.com/casey/just) is installed, `just dev-start` builds
 on top of the manual steps below to also track PIDs and prevent duplicate
 servers or stale build-cache directories from piling up; `just dev-stop` shuts
 both down cleanly, and `just --list` shows the rest (`dev-status`,
-`dev-clean`, `prod-check`). See the `justfile` for what each recipe does -
-`CARGO_TARGET_DIR`/`CARGO_HOME` there are pinned to this host's layout and may
-need adjusting on a different machine.
+`dev-clean`, `prod-check`). See the `justfile` for what each recipe does. Build
+artifacts are shared through the primary checkout across linked worktrees;
+explicit `CARGO_TARGET_DIR`, `CARGO_HOME`, and `HATCHDOOR_TMPDIR` values can
+override the portable defaults.
 
 Otherwise, build the frontend once:
 
@@ -781,7 +802,7 @@ Common routes:
 | `PATCH` | `/api/note/:slug/archive` | Archive a note |
 | `PATCH` | `/api/note/:slug/move-rename` | Move and rename a note |
 | `DELETE` | `/api/note/:slug` | Move a note to trash |
-| `POST` | `/api/attachment` | Upload an attachment |
+| `POST` | `/api/v1/vaults/{vault_id}/attachments` | Upload an attachment |
 | `GET` | `/vault-assets/*path` | Serve vault assets |
 | `POST` | `/mcp` | Streamable HTTP MCP endpoint |
 

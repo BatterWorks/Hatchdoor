@@ -487,7 +487,13 @@
     background: var(--bg);
     border-bottom: 1px solid var(--rule);
   }
-  .topbar-actions { display: flex; align-items: center; gap: 0.4rem; }
+  .topbar-actions { display: flex; align-items: center; gap: 0.95rem; }
+  .topbar-actions > * + * { position: relative; }
+  .topbar-actions > * + *::before {
+    content: ""; position: absolute; left: -0.5rem; top: 50%;
+    transform: translateY(-50%);
+    width: 1px; height: 1.15rem; background: var(--rule-strong);
+  }
   .search-trigger {
     display: inline-flex;
     align-items: center;
@@ -515,7 +521,9 @@
   }
   .icon-btn {
     width: 2.1rem; height: 2.1rem;
-    border: 1px solid var(--rule);
+    /* Transparent rather than absent: the box must not shift by a pixel when
+       hover or an open menu paints it. */
+    border: 1px solid transparent;
     background: transparent;
     color: var(--ink-soft);
     cursor: pointer;
@@ -527,6 +535,7 @@
     transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
   }
   .icon-btn:hover, .icon-btn.is-hover { background: var(--ink); color: var(--bg); }
+  .icon-btn[aria-expanded="true"], .icon-btn.is-open { background: var(--ink); color: var(--bg); }
   .icon-btn:focus-visible, .icon-btn.is-focus {
     outline: 2px solid var(--hot);
     outline-offset: 1px;
@@ -583,10 +592,26 @@
 
   /* Sidebar zones */
   .sidebar-zoned { display: flex; flex-direction: column; height: 460px; width: 280px; background: var(--bg); border-right: 1px solid var(--rule); }
-  .side-rail { display: flex; align-items: center; gap: 0.15rem; flex: 0 0 auto; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--rule); }
+  /* Scope zone — the one sidebar zone with a ground of its own (#138). */
+  .side-scope { flex: 0 0 auto; padding: 0.6rem 0.5rem 0.7rem; border-bottom: 1px solid var(--rule); background: var(--paper); }
+  .side-scope .side-head { margin-bottom: 0.45rem; }
+  .side-scope[data-open="false"] .side-head { margin-bottom: 0; }
+  .side-scope-keycap {
+    flex: 0 0 auto; font-family: var(--font-mono); font-size: 0.6rem;
+    color: var(--muted); border: 1px solid var(--rule); padding: 0.02rem 0.32rem; border-radius: 999px;
+  }
+  .side-scope-row {
+    display: flex; align-items: center; gap: 0.5rem; width: 100%;
+    padding: 0.32rem 0.35rem; border: 0; background: transparent;
+    font-family: var(--font-display); font-size: 0.82rem; color: var(--ink-soft); text-align: left;
+  }
+  .side-scope-row.on { color: var(--ink); font-weight: 600; background: var(--hot-soft); box-shadow: inset 3px 0 0 var(--hot); }
+  .side-scope-row .grow { flex: 1 1 auto; }
+  .side-scope-viewing { margin: 0 0 0 1.05rem; padding-bottom: 0.15rem; font-family: var(--font-sans); font-size: 0.7rem; color: var(--muted); }
+  .side-rail { display: flex; align-items: center; gap: 0.15rem; flex: 0 0 auto; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--rule); }
   .side-rail-item {
     display: inline-flex; align-items: center; justify-content: center;
-    width: 2.1rem; height: 2.1rem;
+    width: 1.9rem; height: 1.9rem;
     border: 1px solid transparent; background: transparent;
     color: var(--ink-soft); font-size: 1.05rem; cursor: pointer;
   }
@@ -677,12 +702,20 @@
     width: 280px;
   }
   .side-section { margin-bottom: 1.5rem; }
+  /* The width/border/background reset matters: §29's heads are real buttons,
+     and without it the specimen shows UA button chrome the app does not have. */
   .side-head {
     display: flex;
     align-items: center;
     gap: 0.55rem;
+    width: 100%;
     margin-bottom: 0.7rem;
     padding: 0 0.3rem;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
   }
   .side-num {
     font-family: var(--font-mono);
@@ -698,22 +731,40 @@
     text-transform: uppercase;
     color: var(--ink);
   }
+  /* Vault accordion head (§29) — a Vault name keeps its own capitalisation,
+     and outranks its contents by weight and caret, not by size. */
+  .vault-accordion-head {
+    margin-bottom: 0.5rem;
+    margin-left: -0.35rem;
+    width: calc(100% + 0.35rem);
+    padding-left: 0.65rem;
+  }
+  .vault-accordion-head[data-open="true"] { margin-bottom: 0.2rem; }
+  .vault-accordion-head .side-label {
+    font-variation-settings: "wdth" 100, "wght" 700;
+    font-size: 0.9rem;
+    letter-spacing: 0.01em;
+    text-transform: none;
+  }
+  .vault-accordion-head .side-caret {
+    border-top-width: 5px; border-bottom-width: 5px; border-left-width: 6px;
+  }
   .side-rule { flex: 1; height: 1px; background: var(--rule); }
   .side-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
   .folder-item { display: block; }
   .folder-row {
     display: flex; align-items: center; gap: 0.55rem;
-    padding: 0.28rem 0.4rem;
+    padding: 0.16rem 0.4rem;
     font-family: var(--font-display);
     font-variation-settings: "wdth" 98, "wght" 500;
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     color: var(--ink-soft);
     cursor: pointer;
     text-decoration: none;
-    line-height: 1.4;
+    line-height: 1.35;
   }
   .folder-row .caret {
-    width: 8px; height: 8px;
+    width: 6px; height: 6px;
     background: var(--muted);
     clip-path: polygon(0 0, 100% 50%, 0 100%);
     transition: transform 180ms var(--ease);
@@ -724,13 +775,13 @@
   .children { padding-left: 0.95rem; margin-left: 0.4rem; border-left: 1px solid var(--rule); }
   .note-link {
     display: flex; align-items: center; gap: 0.55rem;
-    padding: 0.22rem 0.45rem;
+    padding: 0.14rem 0.45rem;
     font-family: var(--font-display);
     font-variation-settings: "wdth" 100, "wght" 400;
     font-size: 0.9rem;
     color: var(--ink-soft);
     text-decoration: none;
-    line-height: 1.4;
+    line-height: 1.35;
     position: relative;
   }
   .note-link .idx {
@@ -738,6 +789,7 @@
     font-size: 0.66rem;
     color: var(--tertiary);
     min-width: 1.8rem;
+    transform: translateY(0.1em);
   }
   .note-link:hover, .note-link.is-hover { color: var(--ink); background: var(--paper-2); }
   .note-link:focus-visible, .note-link.is-focus {
@@ -1233,6 +1285,7 @@
     box-shadow: var(--shadow-overlay);
     padding: 1rem;
   }
+  .search-panel--faceted { width: min(calc(59rem + 0.75rem + 1px), 100%); }
   .search-panel-head {
     display: flex;
     align-items: center;
@@ -1272,6 +1325,18 @@
     color: var(--muted);
   }
   .search-toggle input { accent-color: var(--hot); }
+
+  /* Facet rail (#119, #144) — the dialog's own Vault filter, never the browsing scope. */
+  .search-body { display: flex; align-items: flex-start; gap: 1rem; }
+  .search-facet-rail { flex: 0 0 auto; width: calc(12rem + 0.75rem + 1px); display: flex; flex-direction: column; gap: 0.1rem; margin-top: 0.5rem; padding-right: 0.75rem; border-right: 1px solid var(--rule); }
+  .search-facet-row { display: flex; align-items: center; justify-content: space-between; gap: 0.45rem; width: 100%; padding: 0.32rem 0.4rem; border: 0; background: transparent; font-family: var(--font-display); font-size: 0.82rem; color: var(--ink-soft); text-align: left; cursor: pointer; }
+  .search-facet-row.is-selected { color: var(--ink); font-weight: 600; background: var(--hot-soft); box-shadow: inset 3px 0 0 var(--hot); }
+  .search-facet-row[aria-disabled="true"] { cursor: not-allowed; color: var(--muted); }
+  .search-facet-label { flex: 1 1 auto; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .search-main { flex: 1 1 auto; min-width: 0; }
+  .search-field-strip { display: flex; gap: 0.6rem; margin: 0.7rem 0 0.55rem; }
+  .search-field-strip .field { flex: 1 1 0; margin-bottom: 0; }
+
   .search-results {
     list-style: none;
     margin: 0.5rem 0 0;
@@ -1355,6 +1420,31 @@
     animation: shimmer 1.2s linear infinite;
   }
   @keyframes shimmer { 0% { background-position: 0 0; } 100% { background-position: 200% 0; } }
+
+  /* Vault count-or-condition slot (#116, amended by #117). One trailing
+     reading per Vault, never a count and a condition together. */
+  .vslot-row { display: flex; align-items: center; gap: 0.7rem; padding: 0.3rem 0; }
+  .vslot-name { flex: 1 1 auto; font-family: var(--font-display); font-size: 0.86rem; color: var(--ink-soft); }
+  .vault-slot-indexing { display: inline-flex; align-items: center; }
+  .vault-slot-indexing-bar { width: 1.6rem; height: 0.6rem; background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+  .vault-slot-condition, .vault-slot-shortfall { font-family: var(--font-mono); font-size: 0.62rem; white-space: nowrap; }
+  .vault-tier-warn { color: var(--warn-fg); }
+  .vault-tier-error { color: var(--err-fg); }
+  .vault-slot-condition.vault-tier-error, .vault-slot-shortfall.vault-tier-error { background: var(--err-bg); border: 1px solid var(--err-border); font-weight: 600; padding: 0.05rem 0.4rem; border-radius: var(--radius-pill); }
+
+  /* Marked path root (#115, implemented by #140). Sized and weighted from the
+     surrounding row; only colour and the middot separator are its own. */
+  .path-vault { flex: 0 0 auto; display: inline-flex; align-items: baseline; color: var(--hot); font-variation-settings: "wdth" 100, "wght" 500; }
+  .path-sep { margin-left: 0.3rem; margin-right: 0.3rem; color: var(--hot); }
+
+  /* Island caption + enclosure (#143). Canvas furniture — no DOM class backs
+     these in the app; this demo approximates the canvas draw with inline SVG. */
+  .island-demo { display: flex; align-items: flex-end; justify-content: center; gap: 3rem; flex-wrap: wrap; }
+  .island-demo-item { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; }
+  .island-demo-name { font-family: var(--font-display); font-variation-settings: "wdth" 85, "wght" 700; font-size: 1.25rem; color: var(--ink); }
+  .island-demo-count { font-family: var(--font-mono); font-size: 0.81rem; color: var(--muted); }
+  .island-demo-count.vault-tier-warn { color: var(--warn-fg); }
+  .island-demo-count.vault-tier-error { color: var(--err-fg); }
 
   /* ════════════════════════════════════════════════════════════════
      COMPONENT — Buttons
@@ -1499,13 +1589,23 @@
     border-bottom: 1px solid var(--rule); font-size: 0.82rem;
   }
   .set-index-item[data-active="true"] { color: var(--hot); }
+  .set-index-group {
+    margin: 0.9rem 0 0.35rem; font-family: var(--font-display); font-size: 0.68rem;
+    font-variation-settings: "wdth" 85, "wght" 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .set-index-vault { grid-template-columns: 1fr auto; align-items: start; }
+  .set-index-vault[data-off="true"] { color: var(--muted); }
+  .set-index-add { grid-template-columns: auto 1fr; color: var(--hot); }
+  .set-index-add::before { content: "+"; font-family: var(--font-mono); color: var(--hot); }
   .set-index-num { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
   .set-index-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
   .set-eyebrow {
     font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.2em;
     text-transform: uppercase; color: var(--hot); margin: 0 0 0.35rem;
   }
-  .set-row { border-bottom: 1px solid var(--rule); padding: 0.9rem 0; display: grid; grid-template-columns: 1fr auto; gap: 1.5rem; align-items: start; }
+  .set-row { border-bottom: 1px solid var(--rule); padding: 0.9rem 0; display: grid; grid-template-columns: 1fr 21.5rem; gap: 1.5rem; align-items: center; }
+  .set-row > :last-child { justify-self: end; }
   .set-row-label { font-size: 0.9rem; }
   .set-row-help { font-size: 0.78rem; color: var(--muted); margin: 0.25rem 0 0; max-width: 46ch; line-height: 1.6; }
   .set-row-class { font-size: 0.74rem; color: var(--warn-fg); margin: 0.35rem 0 0; }
@@ -1524,7 +1624,7 @@
   .set-segmented span {
     font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em;
     text-transform: uppercase; padding: 0.3rem 0.7rem; color: var(--ink-soft);
-    border-right: 1px solid var(--rule-strong);
+    white-space: nowrap; border-right: 1px solid var(--rule-strong);
   }
   .set-segmented span:last-child { border-right: none; }
   .set-segmented span[data-on="true"] { background: var(--hot); color: #fff; }
@@ -1549,199 +1649,6 @@
   }
   .set-console-val { font-size: 0.9rem; }
   .set-notice { border-left: 2px solid var(--warn-fg); background: var(--warn-bg); padding: 0.6rem 0.9rem; font-size: 0.82rem; margin-top: 1rem; }
-
-  /* ── Vault scope, status, and provenance ───────────── */
-
-  /* The count-or-condition slot. One slot per Vault, everywhere a Vault is
-     named. Meaning comes from the word, severity from ink AND form. */
-  .vslot {
-    font-family: var(--font-mono); font-size: 0.66rem;
-    color: var(--muted); white-space: nowrap; justify-self: end;
-    padding: 0.05rem 0.3rem; border: 1px solid transparent;
-  }
-  .vslot.warn { color: var(--warn-fg); }
-  .vslot.err {
-    color: var(--err-fg); font-weight: 600;
-    background: var(--err-bg); border-color: var(--err-border);
-  }
-  .vslot.progress {
-    background: linear-gradient(90deg, var(--paper-2) 0%, var(--paper) 50%, var(--paper-2) 100%);
-    background-size: 200% 100%;
-    animation: shimmer 1.4s linear infinite;
-  }
-
-  /* Scope zone — the sidebar's fourth zone, above the rail. */
-  .scope-zone { padding: 0.75rem 1rem 0; border-bottom: 1px solid var(--rule); }
-  .scope-zone .side-head { margin-bottom: 0.35rem; }
-  .scope-head-name {
-    font-family: var(--font-mono); font-size: 0.66rem;
-    letter-spacing: 0.06em; color: var(--ink-soft);
-  }
-  .scope-head-name.warn { color: var(--warn-fg); }
-  .scope-head-name.err { color: var(--err-fg); font-weight: 600; }
-  .scope-rows { padding-bottom: 0.7rem; }
-  .scope-row {
-    display: grid; grid-template-columns: 1fr auto auto;
-    gap: 0.5rem; align-items: baseline;
-    padding: 0.24rem 0.5rem 0.24rem 0.55rem;
-    border-left: 2px solid transparent;
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 96, "wght" 400;
-    font-size: 0.86rem; color: var(--ink-soft);
-    background: transparent; border-top: 0; border-right: 0; border-bottom: 0;
-    width: 100%; text-align: left; cursor: pointer;
-  }
-  .scope-row:hover { background: var(--paper-2); color: var(--ink); }
-  .scope-row[aria-checked="true"] {
-    border-left-color: var(--hot); background: var(--hot-soft); color: var(--ink);
-    font-variation-settings: "wdth" 96, "wght" 600;
-  }
-  .scope-row:focus-visible, .scope-row.is-focus { outline: 2px solid var(--hot); outline-offset: -2px; }
-  .scope-viewing {
-    font-family: var(--font-sans); font-size: 0.66rem;
-    color: var(--muted); letter-spacing: 0.04em;
-  }
-  .scope-head-kbd { margin-left: 0; }
-
-  /* Vault accordion head — the explorer under `all`. */
-  .vault-head {
-    display: grid; grid-template-columns: auto 1fr auto auto;
-    gap: 0.5rem; align-items: center;
-    padding: 0.3rem 0.5rem 0.3rem 0.55rem;
-    border-left: 2px solid transparent;
-    margin-bottom: 0.2rem; width: 100%; text-align: left;
-    background: transparent; border-top: 0; border-right: 0; border-bottom: 0;
-    cursor: pointer;
-  }
-  .vault-head:hover { background: var(--paper-2); }
-  .vault-head[data-open="true"] { border-left-color: var(--hot); background: var(--hot-soft); }
-  .vault-head[aria-disabled="true"] { cursor: default; opacity: 0.75; }
-  .vault-head .side-label { font-size: 0.72rem; }
-
-  /* Marked path root — a Vault declaring itself on a flattened row. */
-  .path-vault {
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 96, "wght" 500;
-    color: var(--hot);
-  }
-  .path-sep { color: var(--tertiary); margin: 0 0.3rem; }
-  .recent-row { display: grid; grid-template-columns: 5.5rem 1fr; gap: 0.2rem; font-size: 0.84rem; padding: 0.18rem 0; }
-
-  /* Search facet rail and its phone form. */
-  .search-body { display: grid; grid-template-columns: 11rem 1fr; gap: 1rem; align-items: start; }
-  .facet-rail { border-right: 1px solid var(--rule); padding-right: 0.75rem; }
-  .facet-head {
-    font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.16em;
-    text-transform: uppercase; color: var(--muted); margin: 0 0 0.4rem;
-  }
-  .facet-row {
-    display: grid; grid-template-columns: 1fr auto; gap: 0.5rem; align-items: baseline;
-    padding: 0.22rem 0.4rem 0.22rem 0.45rem;
-    border-left: 2px solid transparent;
-    font-size: 0.8rem; color: var(--ink-soft);
-    background: transparent; border-top: 0; border-right: 0; border-bottom: 0;
-    width: 100%; text-align: left; cursor: pointer;
-  }
-  .facet-row:hover { background: var(--paper-2); }
-  .facet-row[aria-pressed="true"] { border-left-color: var(--hot); background: var(--hot-soft); color: var(--ink); font-weight: 600; }
-  .facet-row[aria-disabled="true"] { cursor: default; }
-  .search-partial {
-    font-family: var(--font-sans); font-size: 0.72rem;
-    color: var(--warn-fg); padding: 0.5rem 0.2rem 0; margin: 0;
-  }
-  .search-fieldstrip { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; margin: 0.6rem 0; }
-  .search-fieldstrip .field { margin-bottom: 0; }
-
-  /* Mobile scope row + scope sheet. */
-  .mobile-scope {
-    display: grid; grid-template-columns: auto 1fr auto auto;
-    gap: 0.5rem; align-items: center;
-    width: 100%; text-align: left; padding: 0.2rem 0.2rem;
-    background: transparent; border: 0; cursor: pointer;
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 96, "wght" 500;
-    font-size: 0.86rem; color: var(--ink);
-  }
-  .mobile-scope-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .mobile-scope-viewing {
-    font-family: var(--font-sans); font-size: 0.62rem; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--muted); white-space: nowrap;
-  }
-  .scope-sheet {
-    border-top: 1px solid var(--rule-strong); background: var(--bg);
-    box-shadow: var(--shadow-float); padding: 0.4rem 0 0.6rem;
-  }
-  .scope-sheet-head {
-    font-family: var(--font-mono); font-size: 0.6rem; letter-spacing: 0.16em;
-    text-transform: uppercase; color: var(--muted); padding: 0.5rem 0.9rem;
-  }
-  .scope-sheet .scope-row { min-height: 46px; align-items: center; padding-left: 0.85rem; padding-right: 0.9rem; }
-
-  /* Graph canvas furniture. */
-  .graph-field { position: relative; height: 260px; background: var(--paper); overflow: hidden; }
-  .island { position: absolute; text-align: center; }
-  .island-enclosure {
-    width: 108px; height: 108px; border: 1px dashed var(--rule-strong);
-    border-radius: 50%; position: relative;
-  }
-  .island-enclosure .node {
-    position: absolute; width: 7px; height: 7px; border-radius: 50%; background: var(--hot);
-  }
-  .island-enclosure .node.small { width: 4px; height: 4px; background: var(--tertiary); }
-  .island-caption { margin-bottom: 0.3rem; }
-  .island-name {
-    font-family: var(--font-display);
-    font-variation-settings: "wdth" 84, "wght" 700;
-    font-size: 0.74rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink);
-  }
-  .island-count { font-family: var(--font-mono); font-size: 0.62rem; color: var(--muted); }
-  .island-count.warn { color: var(--warn-fg); }
-
-  /* Startup gate. */
-  .gate {
-    display: grid; place-items: center; gap: 1.1rem;
-    padding: 2.4rem 1.5rem; background: var(--bg); text-align: center;
-  }
-  .gate-progress {
-    font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted);
-  }
-
-  /* Settings additions. */
-  .set-index-group + .set-index-group { margin-top: 1.1rem; }
-  .set-index-item[data-paused="true"] { color: var(--tertiary); }
-  .set-num-unit { display: inline-flex; align-items: center; border: 1px solid var(--rule-strong); background: var(--paper); }
-  .set-num-unit input { border: 0; background: transparent; width: 5rem; padding: 0.5rem 0.6rem; font-family: var(--font-sans); font-size: 0.95rem; color: var(--ink); }
-  .set-num-unit input:focus { outline: none; }
-  .set-num-unit .unit {
-    font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted);
-    padding: 0 0.6rem 0 0.2rem; border-left: 1px solid var(--rule);
-    align-self: stretch; display: inline-flex; align-items: center;
-  }
-  .set-plaque-edit {
-    margin-left: auto; font-family: var(--font-mono); font-size: 0.62rem;
-    letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
-    background: transparent; border: 0; cursor: pointer; padding: 0;
-  }
-  .set-plaque-edit:hover { color: var(--hot); }
-  .set-plaque-head-row { display: flex; align-items: baseline; gap: 0.6rem; }
-  .set-plaque[data-editing="true"] { border-style: solid; background: var(--paper); }
-  .set-console-action { display: flex; align-items: center; padding: 0.5rem 0.9rem; border-left: 1px solid var(--rule); }
-  .set-condition { border: 1px solid var(--rule); border-left-width: 2px; background: var(--paper-2); padding: 0.7rem 0.9rem; margin-bottom: 1.2rem; }
-  .set-condition[data-tone="warn"] { border-left-color: var(--warn-fg); }
-  .set-condition[data-tone="error"] { border-left-color: var(--err-fg); }
-  .set-condition-head { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.35rem; }
-  .set-condition p { margin: 0; font-size: 0.84rem; line-height: 1.6; }
-  .set-condition-files { margin: 0.5rem 0 0; padding: 0; list-style: none; font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); }
-
-  /* Visually hidden — the app shell's polite announcement region. */
-  .sr-only {
-    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
-  }
-  .sr-demo {
-    border: 1px dashed var(--rule-strong); background: var(--paper-2);
-    padding: 0.5rem 0.7rem; font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-soft);
-  }
 </style>
 </head>
 <body>
@@ -1795,10 +1702,12 @@
     <a href="#buttons">Buttons</a>
     <a href="#icons">Icons</a>
 
+    <h3>Canvas</h3>
+    <a href="#graph-islands">Island caption / enclosure</a>
+
     <h3>Pages</h3>
     <a href="#settings">Settings</a>
     <a href="#gate">Startup gate</a>
-    <a href="#graph-canvas">Graph canvas</a>
 
     <div class="doc-theme">
       <button data-set="light">Light</button>
@@ -1915,7 +1824,6 @@
           </table>
         </div>
       </div>
-      <p class="blurb" style="margin-top: 0.9rem;"><b>Motion policy.</b> The tokens above say how long a movement lasts, not what earns one. <b>Content snaps.</b> When a surface&rsquo;s content changes &mdash; a filter narrowing, a list being replaced, a tree becoming a different tree &mdash; it changes between one frame and the next, the way <span class="key">.folder-item details</span> already opens. Motion belongs to <b>overlays and affordances</b> only: a drawer or sheet arriving over the app, a caret rotating, a colour settling. Nothing animates a change <i>at</i> the reader. <b>A wait holds.</b> A surface awaiting a replacement answer keeps showing the answer it has, and only gives way to <span class="key">.skeleton-list</span> once <span class="key">--dur</span> has passed &mdash; local reads normally beat the eye, and a skeleton that flashes on every fast answer is the stutter it was meant to prevent. An unarrived answer must never be drawn as an empty one. <b>Continuous simulation is exempt</b> &mdash; the graph&rsquo;s force layout settles because that is the thing it does, not because a change is being narrated &mdash; but it must start only once its data has arrived, and under <span class="key">prefers-reduced-motion: reduce</span> it computes silently and paints already settled.</p>
     </section>
 
     <!-- ───────── TYPOGRAPHY ───────── -->
@@ -1945,6 +1853,7 @@
       <div class="doc-section-num">§03</div>
       <h2>Topbar — desktop</h2>
       <p class="blurb">A 3px hot rule sits above the topbar in every page. Three columns: brand, breadcrumb, actions. The search trigger is a click target that opens the search dialog.</p>
+      <p class="blurb">The actions are bare glyphs parted by hairlines (<a href="#buttons">§25</a>). <b>The search trigger keeps its border</b> — it reads as a field rather than a button, and that distinction is worth the one box. At the ends of the row each glyph is nudged outward by its own inset, so what aligns with the content below is the mark itself and not the hit area around it.</p>
 
       <div class="stage" style="padding: 0;">
         <div class="hotbar"></div>
@@ -1981,7 +1890,8 @@
     <section class="doc-section" id="topbar-mobile">
       <div class="doc-section-num">§04</div>
       <h2>Topbar — mobile</h2>
-      <p class="blurb">Two rows. Top row: brand + actions (drawer toggle, search icon, more). 44px hit targets, safe-area insets respected. <b>The bottom row describes the browsing context, not the document.</b> It carries the current Vault scope, the <span class="key">viewing</span> marker, and the count-or-condition slot &mdash; the two facts the closed drawer would otherwise hide. Below 920px the sidebar&rsquo;s Scope zone (<a href="#sidebar">§05</a>) is not rendered at all: this row is the only place scope is read, and tapping it is the only place scope is changed.</p>
+      <p class="blurb">Two rows. Top row: brand + actions (drawer toggle, search icon, more). Bottom row: the current note's path as a button that opens the explorer drawer. 44px hit targets, safe-area insets respected.</p>
+      <p class="blurb">The hit target grows to 44px here but the glyph does not, so the end-of-row correction grows with it. The drawer toggle&rsquo;s glyph lines up with the row beneath it, not with the invisible box around itself.</p>
 
       <div class="stage" style="padding:0; max-width: 420px;">
         <div class="hotbar"></div>
@@ -1996,44 +1906,51 @@
           </div>
         </div>
         <div class="mobile-meta">
-          <button class="mobile-scope">
-            <span class="mobile-scope-name">All Vaults ▾</span>
-            <span class="side-rule"></span>
-            <span class="mobile-scope-viewing">viewing Kitchen</span>
-            <span class="vslot err">7 of 8</span>
-          </button>
+          <button class="mobile-path">Journal / 2026 / May / Field notes from the orchard</button>
         </div>
       </div>
-
-      <p class="blurb"><b>Narrowed, and under pressure.</b> Scoped to one Vault the row reads <span class="key">Kitchen ▾ ──── 126</span>: no marker, the Vault&rsquo;s own count. On a 360px screen something has to give, and the priority is fixed &mdash; <b>the rule collapses first, then the Vault name ellipsizes, and the status word never truncates.</b> The word carries whether anything is wrong; a Vault name is still recognisable clipped, and a clipped <span class="key">unavailable</span> is not. The slot always describes what you are <i>browsing</i>, never the Vault of the note you happen to have open &mdash; a slot that changed subject with the page is a slot nobody can learn.</p>
-
-      <p class="blurb"><b>The path is gone from the chrome.</b> The note already says where it is: <a href="#meta">§08</a> carries a <span class="key">Vault</span> property row and the title block names the note. The magnifier in row one is the search entry point the path button used to duplicate. Scope persists across navigation and a path does not &mdash; the row that never moves should hold the fact that never moves.</p>
-
-      <h3 class="doc-sub">Scope sheet</h3>
-      <p class="blurb">Tapping the row opens a bottom sheet: the same scope rows <a href="#sidebar">§05</a> documents, at a 46px touch height. It is a labelled dialog that traps focus and returns it to the row on close. Picking one sets scope and dismisses the sheet.</p>
-      <div class="stage" style="padding:0; max-width: 420px;">
-        <div class="scope-sheet">
-          <div class="scope-sheet-head">Scope</div>
-          <button class="scope-row" role="radio" aria-checked="true"><span>All Vaults</span><span></span><span class="vslot err">7 of 8</span></button>
-          <button class="scope-row" role="radio" aria-checked="false"><span>Work</span><span></span><span class="vslot">126</span></button>
-          <button class="scope-row" role="radio" aria-checked="false"><span>Kitchen</span><span class="scope-viewing">viewing</span><span class="vslot">84</span></button>
-          <button class="scope-row" role="radio" aria-checked="false"><span>Field Station</span><span></span><span class="vslot err">unavailable</span></button>
-        </div>
-      </div>
-
-      <div class="tag-row"><span class="key">.mobile-topbar</span><span class="key">.mobile-topbar-row</span><span class="key">.mobile-meta</span><span class="key">.mobile-scope</span><span class="key">.mobile-scope-name</span><span class="key">.mobile-scope-viewing</span><span class="key">.scope-sheet</span><span class="key">.scope-sheet-head</span><span class="key">.scope-row</span><span class="key">.vslot</span></div>
+      <div class="tag-row"><span class="key">.mobile-topbar</span><span class="key">.mobile-topbar-row</span><span class="key">.mobile-meta</span><span class="key">.mobile-path</span></div>
     </section>
 
     <!-- ───────── SIDEBAR ───────── -->
     <section class="doc-section" id="sidebar">
       <div class="doc-section-num">§05</div>
       <h2>Sidebar (Explorer)</h2>
-      <p class="blurb"><b>Four zones:</b> the Scope zone, a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the middle scrolls</b> &mdash; the rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it.</p>
+      <p class="blurb"><b>Four zones:</b> the Scope zone (#138), a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the third scrolls</b> &mdash; scope, rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>).</p>
+
+      <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The rail below it stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
+
+      <p class="blurb"><b>Scope rows are set one step tighter than the tree below them:</b> <span class="key">0.82rem</span> against the tree&rsquo;s own size, <span class="key">0.32rem 0.35rem</span> padding, <span class="key">0.5rem</span> gap. The zone is a register of what exists, read once and then ignored; the tree is the thing under the cursor all day. Sizing them alike made the sidebar open with two equal claims on attention. Rows keep <span class="key">--font-display</span> with its <span class="key">wdth</span>/<span class="key">wght</span> axes rather than dropping to the sans face &mdash; a Vault name is a name, and the display face is what names are set in everywhere else in this app.</p>
+
+      <p class="blurb"><b>Collapsed, the zone is head plus viewing line and nothing else</b> &mdash; no residual gap where the rows were. <span class="key">.side-head</span> carries a <span class="key">0.7rem</span> bottom margin for its ordinary use in the tree, and is declared <i>after</i> <span class="key">.scope-zone-head</span> at equal specificity, so the collapsed head silently inherits a margin under nothing unless the override is parent-scoped as <span class="key">.scope-zone .scope-zone-head</span>. Any future rule on this head needs the same scoping or it will not apply at all.</p>
+      <p class="blurb"><b>Recency panels align to the Scope zone, not to the tree.</b> <span class="key">RECENTLY VIEWED</span> and <span class="key">CHANGED ON DISK</span> are lists Hatchdoor keeps, the same kind of thing <span class="key">SCOPE</span> is, so they sit at the zone&rsquo;s outer edge &mdash; negative margins cancelling <span class="key">.explorer-nav</span>&rsquo;s <span class="key">1rem</span> inset back to the zone&rsquo;s <span class="key">0.5rem</span>, giving one shared left edge and one rule width. The Vault accordion keeps the deeper inset. <b>Indent is the signal:</b> headings this app owns at the outer edge, the Vaults you named one step inside. Their heads also drop <span class="key">.side-head</span>&rsquo;s <span class="key">0.7rem</span> to <span class="key">0.35rem</span> &mdash; that margin is sized for the tree&rsquo;s taller sections, and a head sitting straight onto a five-row list does not need it.</p>
+
       <p class="blurb">Folders use a CSS-only chevron caret that rotates open. <b>Notes show a mono index</b> &mdash; that is what tells note rows apart from folder rows without changing size or weight. Active note: hot-orange left rail + hot-soft background + bolded, and it is <b>canonical in the tree only</b>. Applying it in the recency lists too is what made one note light up in three places at once.</p>
+
+      <p class="blurb"><b>The index is centred optically, not geometrically.</b> It is always lining digits &mdash; ascent only, no descender &mdash; while the title beside it hangs about two pixels below their shared baseline. <span class="key">align-items: center</span> lines the two <i>boxes</i> up exactly and still leaves the digits reading high by half that descender, so <span class="key">.idx</span> takes a <span class="key">translateY(0.1em)</span> correction, in em so it survives a resize. The residual is content-dependent &mdash; a title full of descenders sits lower than an all-caps one &mdash; so the target is the face&rsquo;s typical profile, never any single string&rsquo;s ink.</p>
+
+      <p class="blurb"><b>Depth is carried by weight and by the caret, not by size.</b> The whole tree sits at one reading size: <span class="key">0.9rem</span> for a Vault head, for the folders and notes beneath it, and for <span class="key">RECENTLY VIEWED</span>&rsquo;s rows above it. None of this is chrome &mdash; it is all the operator&rsquo;s own text, and setting the head above the rest made it shout. What separates a head from its contents is <span class="key">wght 700</span> and, when it is open, the hot rail; folders and notes separate from each other the same way, <span class="key">wght 500</span> with a caret against <span class="key">wght 400</span> with the mono index. Buying a size step here would cost legibility to say something weight already says. Carets shrink the same way: <span class="key">6&times;10</span> at a Vault head, <span class="key">6&times;6</span> at a folder. A child marker larger than its parent&rsquo;s reads as the child outranking it, which is what an <span class="key">8&times;8</span> folder caret under a <span class="key">5&times;8</span> head was doing.</p>
+
+      <p class="blurb"><b>An open head&rsquo;s hot rail sits outside the tree&rsquo;s left edge, not inside it.</b> The head reaches <span class="key">0.35rem</span> further left than its own column and pays it straight back as padding, so the rail clears the caret instead of crowding it into one thick marker, and the caret keeps the left edge it shares with the folders below. The offset is carried by every head, open or closed &mdash; put it on the open state alone and the row slides sideways as you fold it.</p>
+
+      <p class="blurb"><b>Row rhythm descends with depth too:</b> <span class="key">26px</span> between Vault heads, <span class="key">24.5px</span> between folders, <span class="key">23.9px</span> between notes. Pitch alone is not what the eye reads &mdash; before this the three were within 2px of each other and the tree still felt slack, because a head fills its box with large bold type while a note puts small light type in the same box, and the emptier box reads as looser. Rows are sized by the ratio of ink to box, not by matching numbers.</p>
       <p class="blurb">Section heads take a label, a rule, and a mono count. A collapsible section adds the same caret the folder rows use, so a foldable thing reads the same way wherever it appears. Section numerals are optional &mdash; use them only where the order carries meaning.</p>
 
       <div class="stage" style="padding:0; display:flex; align-items: stretch;">
         <div class="sidebar-zoned">
+
+          <div class="side-scope" data-open="true">
+            <div class="side-head">
+              <span class="side-caret"></span>
+              <span class="side-label">Scope</span>
+              <span class="side-scope-keycap">V</span>
+              <span class="side-rule"></span>
+              <span class="side-count">03</span>
+            </div>
+            <button class="side-scope-row on"><span class="grow">All Vaults</span><span class="side-count">3</span></button>
+            <button class="side-scope-row"><span class="grow">Kitchen</span><span class="side-count">126</span></button>
+            <button class="side-scope-row"><span class="grow">Work</span><span class="side-count">412</span></button>
+          </div>
 
           <div class="side-rail">
             <span class="side-rail-item" title="Stats">
@@ -2102,85 +2019,18 @@
         </div>
       </div>
 
-      <h3 class="doc-sub">Scope zone</h3>
-      <p class="blurb"><b>Vault scope lives here, and nowhere else in the chrome.</b> A fixed zone above the rail, never scrolling with the notes: one row for <span class="key">All Vaults</span>, then one row per <b>enabled</b> Vault in the order Vault management holds them. Disabled Vaults do not appear &mdash; they do not participate in <span class="key">all</span>, and they belong to <a href="#settings">§27</a>. The current scope takes the documented active treatment, hot-orange left rail plus hot-soft ground, so scope is legible with zero interaction whenever the sidebar is on screen. Desktop width only; below 920px <a href="#topbar-mobile">§04</a>&rsquo;s scope row stands in for it.</p>
-
-      <div class="stage" style="padding:0; max-width: 300px;">
-        <div class="scope-zone">
-          <div class="side-head open">
-            <span class="side-caret"></span>
-            <span class="side-label">Scope</span>
-            <span class="kbd scope-head-kbd">V</span>
-            <span class="side-rule"></span>
-            <span class="side-count">4</span>
-          </div>
-          <div class="scope-rows" role="radiogroup" aria-label="Vault scope">
-            <button class="scope-row" role="radio" aria-checked="true"><span>All Vaults</span><span></span><span class="vslot err">3 of 4</span></button>
-            <button class="scope-row" role="radio" aria-checked="false"><span>Work</span><span></span><span class="vslot">126</span></button>
-            <button class="scope-row" role="radio" aria-checked="false"><span>Personal</span><span class="scope-viewing">viewing</span><span class="vslot warn">stale</span></button>
-            <button class="scope-row" role="radio" aria-checked="false"><span>Notebook</span><span></span><span class="vslot progress">63%</span></button>
-            <button class="scope-row" role="radio" aria-checked="false"><span>Archive</span><span></span><span class="vslot err">unavailable</span></button>
-          </div>
-        </div>
-      </div>
-
-      <p class="blurb"><b>Collapsing never costs the guarantee.</b> The zone folds with the same head, caret and rule every other foldable thing in the sidebar uses, and the collapse state persists per browser &mdash; but the collapsed head names the current scope in place of the count, <b>in the worst ink present</b>, with the aggregate beside it: <span class="key">▸ SCOPE ──── All Vaults  3 of 4</span>. Folding buys back rows, never the fact that something is wrong. On an exact read the collapsed head carries a second line naming the open note&rsquo;s Vault. <b>Default is expanded</b>, so a new instance teaches that scope is switchable; anyone who wants it folded pays one click, once.</p>
-
-      <p class="blurb"><b>The <span class="key">viewing</span> marker</b> names the on-screen note&rsquo;s Vault &mdash; always, including when that Vault is also the selected scope. Scope persists across navigation, so opening a note from an all-Vault result never narrows the sidebar; the chrome states two facts at once, the scope you are browsing and the one Vault this page is. A mismatch between them is stated, never dramatised: no banner, no hot topbar, no invitation to narrow.</p>
-
-      <h3 class="doc-sub">The count-or-condition slot</h3>
-      <p class="blurb">One slot per Vault, wherever a Vault is named &mdash; scope rows, accordion heads, the mobile scope row, search facets, the settings index. It holds <b>either</b> the note count <b>or</b> the Vault&rsquo;s condition, never both. <b>Meaning comes from the word, severity from ink and form, progress from the sweep.</b> Nothing is carried by colour alone: <span class="key">--warn-fg</span> and <span class="key">--err-fg</span> are both muted browns and are not tellable apart at 0.66rem, so the red tier takes a bordered ground and medium weight while amber stays plain ink.</p>
-      <div class="stage">
-        <table class="kv-table">
-          <tr><th>slot</th><th>condition</th></tr>
-          <tr><td><span class="vslot">126</span></td><td class="val">healthy &mdash; the note count</td></tr>
-          <tr><td><span class="vslot progress">63%</span></td><td class="val">indexing; search still answers from the previous snapshot</td></tr>
-          <tr><td><span class="vslot warn">stale</span></td><td class="val">indexing failed; the snapshot is frozen behind the Markdown</td></tr>
-          <tr><td><span class="vslot warn">sync failed</span></td><td class="val">last Git sync did not succeed; backoff retry is running</td></tr>
-          <tr><td><span class="vslot err">sync stopped</span></td><td class="val">local edits halted integration</td></tr>
-          <tr><td><span class="vslot err">conflict</span></td><td class="val">content conflict; every local commit retained, remote untouched</td></tr>
-          <tr><td><span class="vslot err">unavailable</span></td><td class="val">should be answering and is not</td></tr>
-        </table>
-      </div>
-      <p class="blurb"><b>Amber means the app is handling it; red means it is waiting on you.</b> The split is moving versus stuck, not behind versus current &mdash; indexing runs on every save, so treating &ldquo;the index is behind&rdquo; as a warning produces amber several times an hour during ordinary writing. A first index shows the shimmering percentage, not the red word: a Vault that never published a snapshot and a Vault whose directory vanished report the same thing to the API and the opposite thing to a person. <b>The slot carries conditions, never configuration</b> &mdash; a read-only Vault shows its note count like any other, because a permanently correct setup wearing a permanent mark is a mark that stops being read. The word is the whole label; the full plain-language sentence lives on hover, in the accessible name, and on the Vault&rsquo;s page in <a href="#settings">§27</a>.</p>
-      <p class="blurb"><b>The row keeps one click target and one job.</b> The status word is not a second button: a row this narrow with two targets is a mis-click generator, worse under touch. On the <span class="key">All Vaults</span> row the slot carries the Vault count, or the shortfall in the worst ink present when some are not participating &mdash; a plain number means everything answered.</p>
-
-      <h3 class="doc-sub">Vault accordion</h3>
-      <p class="blurb">Under <span class="key">all</span> scope the explorer is an accordion of per-Vault sections with <b>exactly one Vault unfolded at a time</b>. Every Vault keeps a permanent one-line head; only the unfolded one shows a tree. The head is the documented section head with the Vault name in the label slot and the count-or-condition slot trailing; unfolded takes the active treatment, folded is plain. It is one click target with one job &mdash; unfold this Vault. <b>It does not narrow scope.</b></p>
-      <div class="stage" style="padding:0; max-width: 300px;">
-        <div style="padding: 1rem 1rem 1.2rem; background: var(--bg);">
-          <button class="vault-head" data-open="true"><span class="side-caret"></span><span class="side-label">Work</span><span class="side-rule"></span><span class="vslot">126</span></button>
-          <div class="folder-item" data-open="true">
-            <a class="folder-row" href="#"><span class="caret"></span>10-journal</a>
-            <div class="children">
-              <a class="note-link is-active" href="#"><span class="idx">001</span>Field notes from the orchard</a>
-              <a class="note-link" href="#"><span class="idx">002</span>On pruning</a>
-            </div>
-          </div>
-          <div class="folder-item"><a class="folder-row" href="#"><span class="caret"></span>20-reading</a></div>
-          <button class="vault-head"><span class="side-caret"></span><span class="side-label">Personal</span><span class="side-rule"></span><span class="vslot warn">stale</span></button>
-          <button class="vault-head"><span class="side-caret"></span><span class="side-label">Notebook</span><span class="side-rule"></span><span class="vslot">84</span></button>
-          <button class="vault-head" aria-disabled="true"><span class="side-caret"></span><span class="side-label">Archive</span><span class="side-rule"></span><span class="vslot err">unavailable</span></button>
-        </div>
-      </div>
-      <p class="blurb"><b>Bounded height is the whole argument.</b> Stacked open trees put the third Vault below the fold before a folder is expanded; the accordion is one tree plus N one-line heads whatever N is. A Vault that cannot answer keeps its head, carries <span class="key">unavailable</span>, and does not unfold &mdash; <span class="key">aria-disabled</span> rather than <span class="key">disabled</span>, since a dead control with no explanation reads as a bug.</p>
-      <p class="blurb"><b>Ordering is fixed and never re-sorts</b> &mdash; the order Vault management holds them in, in the Scope zone, the accordion, the facet rail, the graph field and the settings index alike. Not by status, not by count, not by recency. A list that rearranges itself when a Vault falls behind is a list nobody can build muscle memory in; a condition changes the slot, never the position. That shared order is also what makes the Vault list appearing twice tolerable: the Scope zone and the accordion are visibly the same list twice, doing two different jobs &mdash; one changes what you are browsing, the other opens a Vault&rsquo;s files without leaving <span class="key">all</span>.</p>
-      <p class="blurb"><b>Defaults and memory.</b> Landing with a note open unfolds the Vault holding that note. Landing with none unfolds the last one, persisted per browser. Neither, and nothing is unfolded &mdash; a plain list of Vault names is the honest picture of an instance with no history. Folder open state is remembered per Vault. <b>Narrowing to one Vault deletes the accordion entirely</b>: the heads disappear and the single <span class="key">Notes</span> head returns with the count-or-condition slot in place of its plain count, so a narrowed view &mdash; and a single-Vault instance &mdash; is byte-identical to a single-Vault Hatchdoor. Widening restores the accordion with the Vault just left unfolded.</p>
-
-      <h3 class="doc-sub">Keyboard</h3>
-      <p class="blurb"><b><span class="key">v</span> takes you to where scope is changed</b>, at every width: it focuses the current row in the Scope zone, unfolding the zone for good if it was folded, and below 920px it opens <a href="#topbar-mobile">§04</a>&rsquo;s sheet with focus on the current row. Bare, no modifier, following the same rule <span class="key">/</span> already proves &mdash; it acts while you are reading and types itself the moment you are in a field, and it is ignored while a dialog is open. The <span class="key">V</span> keycap after the word <span class="key">SCOPE</span> is the documented <span class="key">.kbd</span> pill in a new position, on wide screens only.</p>
-      <p class="blurb"><b>The scope rows are a pick-exactly-one group</b>, not a list of places to go: one tab stop for the whole group, up and down move between Vaults, <span class="key">Enter</span> picks. Ten Vaults do not become ten tab stops between the sidebar and the note, and a screen reader announces position and selection from the structure alone. This is deliberately <b>not</b> the note tree&rsquo;s model, which keeps its own tab stop per row and no arrow navigation &mdash; the sidebar carries two keyboard behaviours because it holds two different kinds of thing. Focus stays with the control you used: after a pick you remain on the row, free to correct it; <span class="key">Escape</span> without picking returns focus to wherever <span class="key">v</span> was pressed.</p>
+      <p class="blurb"><b>The rail is sized to its icons, not to a touch target</b> &mdash; <span class="key">1.9rem</span> items in <span class="key">0.35rem 0.5rem</span> of padding. It is a desktop-only strip: below 920px these destinations are reached from the drawer and the topbar, so the 44px minimum that governs tapped controls does not apply here, and holding to it only bought vertical space away from the tree. Scope zone and rail together are the fixed cost the sidebar pays before showing a single note, and that cost is kept deliberately small.</p>
 
       <p class="blurb"><b>The footer holds one action.</b> Three things in it and it becomes the grab-bag the header used to be. Contextual creation stays on the folder rows as a <code>+</code>.</p>
       <p class="blurb">Settings now has a destination (<a href="#settings">§27</a>) and is a live link. It keeps its own slot at the far edge of the rail &mdash; <span class="key">margin-left: auto</span> &mdash; because it is the one rail item that leaves the vault rather than reframing it. <b>When the page is unavailable the item is not rendered at all</b>, rather than shown dimmed: the earlier reserved-and-disabled treatment was replaced once there was something to link to, since a permanently dead control reads as a bug no matter how well it is labelled.</p>
 
       <div class="tag-row">
         <span class="key">.explorer-pane</span><span class="key">.explorer-rail</span><span class="key">.explorer-rail-item</span><span class="key">.explorer-rail-item.active</span><span class="key">.explorer-rail-item.is-disabled</span><span class="key">.explorer-nav</span><span class="key">.explorer-footer</span>
+        <span class="key">.scope-zone</span><span class="key">.scope-zone .scope-zone-head</span><span class="key">.scope-zone-keycap</span><span class="key">.scope-zone-current</span><span class="key">.scope-zone-viewing-line</span><span class="key">.scope-zone-list</span><span class="key">.scope-row</span><span class="key">.scope-row.is-selected</span><span class="key">.scope-row-label</span><span class="key">.scope-row-viewing</span>
         <span class="key">.side-section</span><span class="key">.side-head</span><span class="key">.side-label</span><span class="key">.side-rule</span><span class="key">.side-count</span><span class="key">.side-caret</span>
         <span class="key">.folder-item[data-open]</span><span class="key">.folder-row</span><span class="key">.caret</span><span class="key">.children</span>
         <span class="key">.note-link</span><span class="key">.note-link.active-note</span><span class="key">.idx</span>
-        <span class="key">.explorer-changes</span><span class="key">.sidebar-resizer</span>
-        <span class="key">.scope-zone</span><span class="key">.scope-rows</span><span class="key">.scope-row</span><span class="key">.scope-row[aria-checked]</span><span class="key">.scope-viewing</span><span class="key">.scope-head-name</span><span class="key">.vslot</span><span class="key">.vslot.warn</span><span class="key">.vslot.err</span><span class="key">.vslot.progress</span><span class="key">.vault-head</span><span class="key">.vault-head[data-open]</span>
+        <span class="key">.recent-notes</span><span class="key">.recent-notes .side-head</span><span class="key">.explorer-changes</span><span class="key">.sidebar-resizer</span>
       </div>
     </section>
 
@@ -2212,6 +2062,8 @@
       <div class="doc-section-num">§07</div>
       <h2>Note title block</h2>
       <p class="blurb">The opening of every note: super-row (pill + date + section), uppercase posterized title with a lowercase orange middle word, italic sans lede.</p>
+      <p class="blurb"><b>The title owns the full measure.</b> Nothing shares its line — the save state and <b>Edit</b> moved down to the Properties rule (<a href="#save-state">§21</a>) precisely so a long title wraps on its own terms.</p>
+      <p class="blurb"><b>Trailing scroll space is conditional.</b> A note long enough to scroll keeps a screenful below it, so a heading near its end can still be brought to the top of the pane. A note that does not scroll gets none: a short note that ended two lines in was offering a screenful of nothing to scroll through.</p>
       <div class="stage" style="padding: 2rem 1.5rem;">
         <div class="super-row">
           <span class="ty-super"><span class="pill">№ 012</span><span class="tick">/</span><span>13.05.2026 · 06:43</span><span class="tick">/</span><span>Observations</span></span>
@@ -2236,13 +2088,11 @@
         </h3>
         <dl class="meta-grid">
           <div><dt class="ty-meta-dt">Created</dt><dd class="ty-meta-dd">13 May 2026</dd></div>
-          <div><dt class="ty-meta-dt">Vault</dt><dd class="ty-meta-dd">Work</dd></div>
           <div><dt class="ty-meta-dt">Folder</dt><dd class="ty-meta-dd">Journal / 2026 / May</dd></div>
           <div><dt class="ty-meta-dt">Reading</dt><dd class="ty-meta-dd">4 min · 612 words</dd></div>
           <div><dt class="ty-meta-dt">Tags</dt><dd class="ty-meta-dd"><span class="tag">orchard</span><span class="tag">pruning</span></dd></div>
         </dl>
       </div>
-      <p class="blurb"><b>The <span class="key">Vault</span> row is the note&rsquo;s durable, selectable, factual home</b>, beside <span class="key">Folder</span>. It renders whenever more than one Vault is enabled &mdash; an exact read is always one Vault, so &ldquo;could span&rdquo; has no meaning here. The title block is untouched: the super-row is editorial voice &mdash; issue number, date, section &mdash; and a Vault is infrastructure. The grid is collapsible and that is fine; the chrome carries the always-visible guarantee, the grid carries the detail.</p>
       <p class="blurb"><b>Collapsed keeps the grid mounted and <code>hidden</code></b>, not unmounted, so <code>aria-controls</code> points at something real. That needs an explicit <code>.note-properties-grid[hidden] { display: none }</code>: the grid&rsquo;s own <code>display: grid</code> is author-origin and beats the user agent&rsquo;s <code>[hidden]</code> rule, so without it the disclosure toggles state while the table stays on screen. jsdom does not reproduce that cascade &mdash; verify this one in a browser.</p>
       <div class="tag-row"><span class="key">.meta-grid</span><span class="key">.ty-meta-dt</span><span class="key">.ty-meta-dd</span><span class="key">.tag</span><span class="key">.note-properties-head</span><span class="key">.note-properties-toggle</span><span class="key">.note-properties-caret</span><span class="key">.note-properties-grid[hidden]</span></div>
     </section>
@@ -2325,7 +2175,8 @@
           <p>Search highlight: the word <span class="search-hit">orchard</span> appears 5 times, and <span class="search-hit active">this is the active match</span>.</p>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
+      <p class="blurb"><b>A link shaped like a button must pay off the prose link rule.</b> <span class="key">.note-body a</span> outweighs a bare component class, so a button inside the body &mdash; the PDF preview&rsquo;s <span class="key">Open PDF</span> &mdash; inherits the 2px hot rail (wanted: it is still a link) along with a <span class="key">1px</span> bottom padding and the body&rsquo;s <span class="key">1.45</span> line-height (not wanted: together they set the label high in a box 5px taller than it should be). Any such button restores its own <span class="key">padding-block</span> and <span class="key">line-height: 1</span> under a type-qualified selector, less <span class="key">1px</span> off the bottom for the rail it is standing on.</p>
+      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
     </section>
 
     <!-- ───────── LISTS ───────── -->
@@ -2527,80 +2378,98 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
             <label class="search-toggle">
               <input type="checkbox" checked /> include note content
             </label>
+            <ul class="search-results">
+              <li><button class="search-result is-hover">
+                <div class="search-main">
+                  <span>Field notes from the <span class="search-hit">orchard</span></span>
+                  <span class="crumb">Journal / 2026 / May</span>
+                </div>
+                <span class="search-kind">note</span>
+                <p class="search-snippet">…the wasps were already on the cherries, which is earlier than I have ever recorded them in the <span class="search-hit active">orchard</span>…</p>
+              </button></li>
+              <li><button class="search-result">
+                <div class="search-main">
+                  <span>The grafting calendar</span>
+                  <span class="crumb">Journal / 2026 / May</span>
+                </div>
+                <span class="search-kind">note</span>
+              </button></li>
+              <li><button class="search-result">
+                <div class="search-main">
+                  <span>Reading notes / Pollan</span>
+                  <span class="crumb">Reading notes</span>
+                </div>
+                <span class="search-kind">note</span>
+                <p class="search-snippet">…there is something about the <span class="search-hit">orchard</span> as a system of patience that I want to write down…</p>
+              </button></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-toggle</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span></div>
+
+      <h3 class="doc-sub">The dialog&rsquo;s own filter &mdash; never the browsing scope</h3>
+      <p class="blurb">The sidebar decides what you are browsing; the dialog decides what you are looking at right now. Selecting a facet (or the phone&rsquo;s <code>Scope</code> field) narrows only the results in view, changes no ranking, and dies the moment the dialog closes. No future surface may adopt either as a scope control (#119).</p>
+
+      <h4 class="doc-sub" style="font-size:0.86rem;">Desktop &mdash; the facet rail</h4>
+      <p class="blurb">A 12rem column beside the results, divided from them by a hairline rule: every Vault the search reached, each ending in #116&rsquo;s own count-or-condition slot. The width is what a Vault name needs when it shares its row with <code>no answer</code>; narrower, and every <code>Git &mdash; &hellip;</code> name truncated to the same stub. The rail is <b>added to the panel, never carved out of it</b>: a faceted panel widens by exactly the rail, its rule and its gap, so a result row is the same width whether or not there is anything to filter across. <code>All results</code> is the permanent widening row. A Vault that answered with nothing reads <code>0</code>, inert; a Vault that did not answer keeps its row, reading <code>no answer</code> in error ink, <code>aria-disabled</code> rather than removed. Order is Vault-management order, never re-sorted by count or condition (#117). Absent when scope is narrowed or at one enabled Vault &mdash; there is nothing to filter across, and the Scope zone is already on screen behind the overlay.</p>
+      <div class="stage" style="padding:0; overflow:hidden;">
+        <div class="search-overlay">
+          <div class="search-panel search-panel--faceted">
+            <div class="search-panel-head">
+              <h2>Search vault</h2>
+              <button class="icon-btn" title="Close">✕</button>
+            </div>
+            <input class="search-input" placeholder="Search by title, folder, or content…" value="orchard" />
             <div class="search-body">
-              <nav class="facet-rail">
-                <p class="facet-head">Vaults</p>
-                <button class="facet-row" aria-pressed="true"><span>All results</span><span class="vslot">14</span></button>
-                <button class="facet-row" aria-pressed="false"><span>Work</span><span class="vslot">9</span></button>
-                <button class="facet-row" aria-pressed="false"><span>Kitchen</span><span class="vslot">5</span></button>
-                <button class="facet-row" aria-pressed="false"><span>Personal</span><span class="vslot">0</span></button>
-                <button class="facet-row" aria-disabled="true"><span>Field Station</span><span class="vslot err">no answer</span></button>
-              </nav>
-              <div>
-                <ul class="search-results">
+              <div class="search-facet-rail">
+                <button class="search-facet-row is-selected"><span class="search-facet-label">All results</span><span class="side-count">12</span></button>
+                <button class="search-facet-row"><span class="search-facet-label">Work</span><span class="side-count">09</span></button>
+                <button class="search-facet-row"><span class="search-facet-label">Personal</span><span class="side-count">00</span></button>
+                <button class="search-facet-row" aria-disabled="true"><span class="search-facet-label">Archive</span><span class="vault-slot-condition vault-tier-error">no answer</span></button>
+              </div>
+              <div class="search-main">
+                <ul class="search-results" style="margin:0;">
                   <li><button class="search-result is-hover">
                     <div class="search-main">
                       <span>Field notes from the <span class="search-hit">orchard</span></span>
-                      <span class="crumb"><span class="path-vault">Work</span><span class="path-sep">·</span>Journal / 2026 / May</span>
+                      <span class="crumb">Work &middot; Journal / 2026 / May</span>
                     </div>
                     <span class="search-kind">note</span>
-                    <p class="search-snippet">…the wasps were already on the cherries, which is earlier than I have ever recorded them in the <span class="search-hit active">orchard</span>…</p>
-                  </button></li>
-                  <li><button class="search-result">
-                    <div class="search-main">
-                      <span>The grafting calendar</span>
-                      <span class="crumb"><span class="path-vault">Work</span><span class="path-sep">·</span>Journal / 2026 / May</span>
-                    </div>
-                    <span class="search-kind">note</span>
-                  </button></li>
-                  <li><button class="search-result">
-                    <div class="search-main">
-                      <span>Reading notes / Pollan</span>
-                      <span class="crumb"><span class="path-vault">Kitchen</span><span class="path-sep">·</span>Reading notes</span>
-                    </div>
-                    <span class="search-kind">note</span>
-                    <p class="search-snippet">…there is something about the <span class="search-hit">orchard</span> as a system of patience that I want to write down…</p>
                   </button></li>
                 </ul>
-                <p class="search-partial">Field Station did not answer, so this search did not cover it.</p>
               </div>
             </div>
           </div>
         </div>
       </div>
+      <div class="tag-row"><span class="key">.search-panel--faceted</span><span class="key">.search-body</span><span class="key">.search-facet-rail</span><span class="key">.search-facet-row</span><span class="key">.search-facet-row.is-selected</span><span class="key">.search-facet-row[aria-disabled]</span><span class="key">.search-facet-label</span><span class="key">.search-main</span></div>
 
-      <h3 class="doc-sub">Marked path root</h3>
-      <p class="blurb"><b>A Vault declares itself as a marked path root</b>, leading the most specific location line the row has &mdash; the path line where one exists, the title line where none does. <span class="key">.path-vault</span> is hot ink at medium weight and <span class="key">.path-sep</span> is a middot, deliberately not the <span class="key">/</span> the folder path uses: a Vault named <i>Journal</i> must not read as a folder named <i>Journal</i>. It renders only <b>when the set can actually span</b> &mdash; scope is <span class="key">all</span> and more than one Vault is enabled &mdash; so a single-Vault instance is byte-identical to a single-Vault Hatchdoor on every surface, and provenance is never redundant with the Scope zone.</p>
-      <p class="blurb"><b>It is inert</b>: a plain span inside the row&rsquo;s own button or link. It does not narrow scope on click &mdash; nesting an interactive element inside another is invalid markup, and a four-character target inside a row people click fast is a footgun where one click would mean two things. <b>It never elides.</b> It is the disambiguator the primitive exists for, and on a phone the sidebar is a closed drawer, so the row-level Vault is doing more work there, not less. The folder path takes the loss instead, eliding head-first: <span class="key">Work · … / 2026 / May.md</span>, then <span class="key">Work · … / May.md</span>, then <span class="key">Work · …</span>.</p>
-      <p class="blurb"><b>Recent items and metadata lists share the grammar.</b> A recency row has no path line at all, so the prefix leads the title, in a fixed-width column so titles still left-align, and the list stays one line per note:</p>
-      <div class="stage">
-        <div class="recent-row"><span><span class="path-vault">Work</span><span class="path-sep">·</span></span><span>Field notes from the orchard</span></div>
-        <div class="recent-row"><span><span class="path-vault">Personal</span><span class="path-sep">·</span></span><span>The grafting calendar</span></div>
-      </div>
-
-      <h3 class="doc-sub">Facet rail, and its phone form</h3>
-      <p class="blurb"><b>The dialog never changes the browsing scope.</b> The rail is a filter over the answer in front of you, and it dies when the dialog closes &mdash; the sidebar decides what you are browsing, the dialog decides what you are looking at right now. <b>No future surface may adopt it as a scope control.</b> Every Vault the search reached keeps a row with the number of results it contributed; <span class="key">All results</span> is the permanent widening row; a Vault that answered with nothing reads <span class="key">0</span>, inert; a Vault that did not answer keeps its row reading <span class="key">no answer</span> and is <span class="key">aria-disabled</span>. A missing facet would be an absence; a named one is a fact. Order is Vault-management order, never re-sorted.</p>
-      <p class="blurb">Below 920px the panel is already full-screen, so the rail cannot be a column. It becomes a <span class="key">Scope</span> field beside <span class="key">Mode</span> in a field strip under the input, using <a href="#fields">§18</a>&rsquo;s field grammar &mdash; a native picker is one tap with a full-size target, where a horizontally scrolling chip strip buries the rightmost Vaults. <b>Same filter, same semantics, different form.</b> A layout that changes with the viewport is ordinary; a meaning that changes with the viewport is a trap. The phone keeps the field <b>even when scope is narrowed</b>, because the panel covers the Scope zone and the field is then the only thing on screen able to say what the scope is.</p>
-      <div class="stage" style="max-width: 420px;">
-        <div class="search-fieldstrip">
-          <div class="field"><label class="field-label">Scope</label><select class="field-input"><option>All results</option><option>Work</option><option>Kitchen</option></select></div>
-          <div class="field"><label class="field-label">Mode</label><select class="field-input"><option>Semantic</option><option>Keyword</option></select></div>
+      <h4 class="doc-sub" style="font-size:0.86rem;">Phone &mdash; the field strip</h4>
+      <p class="blurb">Below 920px a rail cannot be a column, so the same filter becomes the <code>Scope</code> field of a field strip under the input, beside <code>Mode</code>, using §18&rsquo;s documented field grammar. Same filter, same semantics, different form. The phone keeps <code>Scope</code> even when the sidebar&rsquo;s browsing scope is narrowed &mdash; the panel covers the Scope zone here, and the map&rsquo;s always-visible-scope rule needs the field to carry it regardless of whether there is anything left to switch to.</p>
+      <div class="stage" style="max-width: 22rem;">
+        <div class="search-field-strip" style="display:flex;">
+          <div class="field">
+            <span class="field-label">Scope</span>
+            <select class="field-input">
+              <option>All results</option>
+              <option>Work</option>
+              <option>Personal</option>
+              <option disabled>Archive (no answer)</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label">Mode</span>
+            <select class="field-input">
+              <option>Semantic</option>
+              <option>Keyword</option>
+            </select>
+          </div>
         </div>
       </div>
-      <p class="blurb"><b>Layer folders stay out of the browser.</b> Both shapes were built with a <span class="key">Layers</span> control and both drop it: every search would carry a control almost nobody touches, notes filed away to be out of the way would be one tap from the front page, and under <span class="key">all</span> the offered list is a union of unrelated per-Vault namespaces &mdash; a <i>sources</i> in Kitchen and a <i>sources</i> in Work sitting in one list as though they were the same thing. The accepted cost is real: demoted notes are unreachable from the web application, which is what the layer marker was for.</p>
-      <p class="blurb"><b>Ranking is the API&rsquo;s own</b>, flattened, best matches first, with no per-Vault interleaving, guaranteed slot, or rebalancing by Vault size &mdash; so the list a person sees is the list an assistant gets for the same query. Per-note capping is unchanged. <b>Tapping a tag</b> on a note opens the dialog with the query filled in and that note&rsquo;s Vault already selected in the filter: tags are per-Vault vocabularies, and one click on <span class="key">All results</span> widens it.</p>
+      <div class="tag-row"><span class="key">.search-field-strip</span></div>
 
-      <h3 class="doc-sub">When a Vault did not answer</h3>
-      <p class="blurb"><b>Never a banner, never a change to ranking.</b> With results, one trailing line below the last row in warn ink, in the <span class="key">.search-kind</span> register &mdash; below rather than above, because the results are what was asked for. With nothing usable, that line <b>replaces</b> the empty state, using <a href="#states">§23</a>&rsquo;s error block rather than the empty one: the application never says &ldquo;no matching notes&rdquo; when it did not look everywhere. <b>The sentence names only the Vaults that did not answer</b>, never the ones that did &mdash; the failing set is normally one or two, so the sentence has one shape at three Vaults and at eight, and needs no threshold. The same two rules cover recent items and exact metadata queries, which share the flattened shape.</p>
-      <div class="stage" style="max-width: 520px;">
-        <div class="state-block error">
-          <h2>Nothing found</h2>
-          <p>Field Station did not answer, so this search did not cover it.</p>
-        </div>
-      </div>
-      <p class="blurb"><b>Search that cannot answer at all</b> &mdash; no Vault has ever published a snapshot, or the embedding model failed to download &mdash; opens the dialog normally and renders <a href="#states">§23</a>&rsquo;s <span class="key">Could not load</span> shell in the result area, in two wordings: work in flight, carrying the same percentage the Scope zone is showing, or cannot be built, carrying the reason and the retry. Typing is allowed and changes nothing. The entry point is never greyed: a keyboard shortcut that silently does nothing is the most reliable way to make an application feel broken, and its hover explanation does not exist under touch.</p>
-
-      <div class="tag-row"><span class="key">.search-overlay</span><span class="key">.search-panel</span><span class="key">.search-panel-head</span><span class="key">.search-input</span><span class="key">.search-toggle</span><span class="key">.search-body</span><span class="key">.search-results</span><span class="key">.search-result</span><span class="key">.search-main + .crumb</span><span class="key">.search-kind</span><span class="key">.search-snippet</span><span class="key">.search-hit</span><span class="key">.path-vault</span><span class="key">.path-sep</span><span class="key">.facet-rail</span><span class="key">.facet-row</span><span class="key">.facet-row[aria-pressed]</span><span class="key">.search-partial</span><span class="key">.search-fieldstrip</span></div>
+      <p class="blurb">Tapping a <code>#tag</code> opens the dialog with the query filled in and that note&rsquo;s own Vault already selected in the filter &mdash; tags are per-Vault vocabularies, and this is the dialog&rsquo;s own filter doing the pre-filling, not a scope change. Layer folders stay out of both shapes entirely: there is no way to reach a demoted note from the web application (#119).</p>
     </section>
 
     <!-- ───────── FIELDS ───────── -->
@@ -2705,6 +2574,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <h2>Save state</h2>
       <p class="blurb">Autosave removed the Save button, and with it the only evidence a user had that their writing survived. In a vault with agent co-writers and git sync, that evidence is the trust surface of the whole feature, so it gets a permanent slot beside <b>Edit</b>.</p>
       <p class="blurb">It states what is true <i>now</i> rather than announcing an event: &ldquo;Saved 14:32&rdquo;, not &ldquo;Saved!&rdquo;. The failure state is a click target that opens the conflict review.</p>
+      <p class="blurb"><b>The slot sits at the end of the Properties heading line</b> (<a href="#meta">§08</a>), not beside the title. On the title&rsquo;s line the pair took width from it and a long title wrapped around them; the Properties rule already runs the full measure and has the room. Where a note has no properties and no Vault row, that line renders for the actions alone rather than showing a disclosure that opens on to nothing.</p>
       <div class="stage" style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">
         <span class="save-state">Saving…</span>
         <span class="save-state">Saved 14:32</span>
@@ -2771,12 +2641,26 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
       <h3 class="doc-sub">Announcement region</h3>
-      <p class="blurb">One polite live region in the app shell &mdash; the first general one in the application, the others being local to the startup screen and the PDF viewer. It exists because <b>content snaps</b>: when a change is legible only as different content, a person listening gets nothing for free. It is visually hidden and holds one short sentence at a time.</p>
+      <p class="blurb">The shell keeps one polite live region, the only general one in the
+      application &mdash; the others belong to the startup gate (<a href="#gate">§33</a>) and the PDF
+      viewer. It earns its place because <strong>content snaps</strong>: a scope change rewrites the
+      tree and the slot without moving anything, so a person listening rather than looking gets
+      nothing for free. It is <code>.visually-hidden</code> carrying <code>aria-live="polite"</code>
+      and <code>aria-atomic="true"</code> &mdash; atomic because the sentence is replaced whole and
+      half of it read against the other half's remains would be worse than silence. It holds one
+      short sentence at a time.</p>
       <div class="stage">
-        <div class="sr-demo">&lt;div class="sr-only" role="status" aria-live="polite"&gt; &rarr; &ldquo;Work. 126 notes.&rdquo;</div>
+        <div class="vslot-row"><span class="vslot-name">&lt;div class="visually-hidden" aria-live="polite" aria-atomic="true"&gt; &rarr; &ldquo;Work. 126 notes.&rdquo;</span></div>
       </div>
-      <p class="blurb"><b>It mirrors the wait rule.</b> The fact the person just caused &mdash; the Vault name they picked &mdash; is spoken the instant it lands, because that is the confirmation the keystroke worked and it never waits. The count or condition joins it in the same breath when the answer is already there, and follows as a short second sentence when it was not, in <a href="#sidebar">§05</a>&rsquo;s exact slot words so what is heard and what is shown are the same sentence. <b>It never announces a value it does not have yet</b>, for the same reason an unarrived answer is never drawn as an empty one.</p>
-      <div class="tag-row"><span class="key">.state-block</span><span class="key">.state-block.error</span><span class="key">.skeleton-list</span><span class="key">.skeleton-line</span><span class="key">@keyframes shimmer</span><span class="key">.sr-only[role=status]</span></div>
+      <p class="blurb"><b>It mirrors the wait rule.</b> The fact the person just caused &mdash; the
+      Vault name they picked &mdash; is spoken the moment it lands, because that is the confirmation
+      the keystroke worked and it never waits on anything else. The count or condition joins it in
+      the same breath when the answer is already there, and follows as a short second sentence when
+      it was not, in <a href="#vault-slot">§27</a>'s exact slot words, so what is heard and what is
+      shown are one sentence. <strong>It never announces a value it does not have yet</strong>, for
+      the reason an unarrived answer is never drawn as an empty one. The scope the app opens with is
+      not a pick and is recorded silently: the first announcement is the first genuine change.</p>
+      <div class="tag-row"><span class="key">.state-block</span><span class="key">.state-block.error</span><span class="key">.skeleton-list</span><span class="key">.skeleton-line</span><span class="key">@keyframes shimmer</span><span class="key">.visually-hidden[aria-live]</span></div>
     </section>
 
     <!-- ───────── BADGES ───────── -->
@@ -2800,6 +2684,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="doc-section-num">§25</div>
       <h2>Buttons</h2>
       <p class="blurb">Three variants: default (ink border), primary (hot fill), ghost (rule border). Icon buttons are 2.1rem square (or 44px on mobile). All states are shown — focus uses a 2px hot outline.</p>
+      <p class="blurb"><b>Icon buttons carry no resting border.</b> A box drawn around every glyph repeats structure the row already has — in this system rules separate <i>zones</i> (the topbar&rsquo;s underline, the meta row&rsquo;s, the sidebar&rsquo;s edge), and three boxes in a row is UI-kit habit rather than this language. The hit area is unchanged and the ink square still arrives, on hover and while a menu the button owns is open; it is simply not drawn at rest. The border is kept and made transparent so nothing shifts when it appears.</p>
 
       <h3 class="doc-sub">Default button — all states</h3>
       <div class="stage" style="display:flex; gap: 0.6rem; flex-wrap: wrap; align-items: center;">
@@ -2823,11 +2708,23 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="stage" style="display:flex; gap: 0.6rem; align-items: center;">
         <button class="icon-btn">+</button>
         <button class="icon-btn is-hover">+</button>
+        <button class="icon-btn is-open">+</button>
         <button class="icon-btn is-focus">+</button>
         <button class="icon-btn is-disabled" disabled>+</button>
-        <span style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-left: 0.5rem;">2.1rem · square</span>
+        <span style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--muted); margin-left: 0.5rem;">rest · hover · menu open · focus · disabled</span>
       </div>
-      <div class="tag-row"><span class="key">.icon-btn</span><span class="key">.icon-btn.is-hover</span><span class="key">.icon-btn.is-focus</span></div>
+      <div class="tag-row"><span class="key">.icon-btn</span><span class="key">.icon-btn.is-hover</span><span class="key">.icon-btn.is-open</span><span class="key">.icon-btn.is-focus</span></div>
+
+      <h3 class="doc-sub">Separated by a hairline, not by a box</h3>
+      <p class="blurb">Where icon buttons sit together in the chrome, a 1px <span class="key">--rule-strong</span> hairline stands between them. It lives in the gap rather than on either control, so a pressed button&rsquo;s ink square never paints over it, and it is the same mark that separates every other zone in the app rather than a new one invented for buttons.</p>
+      <div class="stage" style="display:flex; align-items:center;">
+        <div class="topbar-actions">
+          <button class="icon-btn">&#9906;</button>
+          <button class="icon-btn">&#9681;</button>
+          <button class="icon-btn is-open">&ctdot;</button>
+        </div>
+      </div>
+      <div class="tag-row"><span class="key">.topbar-actions</span><span class="key">.topbar-actions &gt; * + *::before</span></div>
 
       <h3 class="doc-sub">Floating actions (theme toggle, etc.)</h3>
       <div class="stage" style="display:flex; gap: 0.6rem; align-items: center;">
@@ -2839,7 +2736,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">.float-actions</span></div>
     </section>
 
-    <p style="font-family: var(--font-sans); font-size: 0.8rem; color: var(--muted); margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);">End of design system · v2026.7 · all components used by the React app, with light + dark variants and every interaction state. Implementation: token block → component classes → wire to existing JSX.</p>
+    <p style="font-family: var(--font-sans); font-size: 0.8rem; color: var(--muted); margin-top: 4rem; padding-top: 1.5rem; border-top: 1px solid var(--rule);">End of design system · v2026.8 · all components used by the React app, with light + dark variants and every interaction state. Implementation: token block → component classes → wire to existing JSX.</p>
 
     <!-- ───────── ICONS ───────── -->
     <section class="doc-section" id="icons">
@@ -2883,36 +2780,370 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="tag-row"><span class="key">components/icons.tsx</span><span class="key">.icon-button</span><span class="key">.explorer-rail-item</span></div>
     </section>
 
+    <!-- ───────── VAULT COUNT-OR-CONDITION SLOT ───────── -->
+    <section class="doc-section" id="vault-slot">
+      <div class="doc-section-num">§27</div>
+      <h2>Vault count-or-condition slot</h2>
+      <p class="blurb">Each Vault's row in the sidebar Scope zone (§05, extended by #138) ends in one
+      trailing slot: its note count when healthy, or exactly one condition otherwise &mdash; never
+      both. Meaning comes from the word, severity from ink and form, progress from the sweep. Because
+      <code>--warn-fg</code> and <code>--err-fg</code> are not reliably tellable apart at this size,
+      the red tier takes a bordered ground and medium weight; the amber tier stays plain ink. Nothing
+      is carried by colour alone (#116, amended by #117).</p>
+
+      <div class="stage">
+        <div class="vslot-row"><span class="vslot-name">Alpha</span><span class="side-count">126</span></div>
+        <div class="vslot-row"><span class="vslot-name">Beta</span><span class="vault-slot-indexing" role="status" aria-label="Indexing"><span class="vault-slot-indexing-bar"></span></span></div>
+        <div class="vslot-row"><span class="vslot-name">Gamma</span><span class="vault-slot-condition vault-tier-warn">stale</span></div>
+        <div class="vslot-row"><span class="vslot-name">Delta</span><span class="vault-slot-condition vault-tier-warn">sync failed</span></div>
+        <div class="vslot-row"><span class="vslot-name">Echo</span><span class="vault-slot-condition vault-tier-error">sync stopped</span></div>
+        <div class="vslot-row"><span class="vslot-name">Foxtrot</span><span class="vault-slot-condition vault-tier-error">conflict</span></div>
+        <div class="vslot-row"><span class="vslot-name">Golf</span><span class="vault-slot-condition vault-tier-error">unavailable</span></div>
+      </div>
+
+      <table class="token-table">
+        <thead><tr><th>slot reads</th><th>ink</th><th>condition</th></tr></thead>
+        <tbody>
+          <tr><td class="name">126</td><td class="val">muted, mono</td><td class="val">healthy &mdash; the note count</td></tr>
+          <tr><td class="name">shimmer</td><td class="val">muted, moving</td><td class="val">indexing &mdash; search still answers from the previous snapshot. Also covers a first index that has never published one: <code>activation</code> stays <code>active</code> the moment a Vault's directory stats fine, so a never-indexed Vault is distinguishable from one whose directory vanished (only the latter turns <code>activation</code> <code>unavailable</code> too)</td></tr>
+          <tr><td class="name">stale</td><td class="val">warn, plain ink</td><td class="val">indexing failed &mdash; the snapshot is frozen behind the Markdown</td></tr>
+          <tr><td class="name">sync failed</td><td class="val">warn, plain ink</td><td class="val">the last Git sync did not succeed &mdash; backoff retry is running</td></tr>
+          <tr><td class="name">sync stopped</td><td class="val">error, bordered ground</td><td class="val"><code>dirty_working_copy</code> &mdash; local edits halted integration</td></tr>
+          <tr><td class="name">conflict</td><td class="val">error, bordered ground</td><td class="val">content conflict &mdash; every local commit retained, remote untouched</td></tr>
+          <tr><td class="name">unavailable</td><td class="val">error, bordered ground</td><td class="val">should be answering and is not</td></tr>
+        </tbody>
+      </table>
+
+      <p class="blurb">The <code>All Vaults</code> row and the collapsed Scope head share one aggregate:
+      the enabled-Vault count when every Vault is healthy or indexing (both count as participating),
+      or the shortfall against the worst tier present when some do not &mdash; <code>7 of 8</code>, in
+      that worst ink. The collapsed head's scope name takes the same worst ink, coloured only, without
+      the trailing reading's bordered ground, so naming the Vault it names never itself reads as an
+      alarm: <code>&#9656; SCOPE &#9472;&#9472;&#9472;&#9472; All Vaults&nbsp;&nbsp;7 of 8</code>.
+      Hover text and the accessible name carry the full plain-language sentence for each condition
+      (the Vault's own runtime error message where one exists); the word on screen stays the API's
+      own, terse.</p>
+
+      <p class="blurb">The prototype's coloured status dot is deleted: it is chrome the design system
+      does not have, and a mark carrying its meaning only in colour tells a colourblind person nothing
+      and everyone else nothing specific. A read-only Vault shows its note count &mdash; the slot
+      carries conditions, never configuration. <code>Tree Stale</code> is deleted from the topbar with
+      nothing replacing it; the topbar keeps only <code>Offline</code> (§03), which is about the
+      workspace and not about any one Vault.</p>
+
+      <div class="tag-row">
+        <span class="key">app/vaultSlot.tsx</span><span class="key">app/vaultSlotLogic.ts</span><span class="key">.vault-slot-condition</span><span class="key">.vault-slot-shortfall</span>
+        <span class="key">.vault-tier-warn</span><span class="key">.vault-tier-error</span>
+        <span class="key">.vault-slot-indexing</span><span class="key">.vault-slot-indexing-bar</span><span class="key">.side-count</span>
+      </div>
+    </section>
+
+    <!-- ───────── GRAPH ISLANDS ───────── -->
+    <section class="doc-section" id="graph-islands">
+      <div class="doc-section-num">§28</div>
+      <h2>Island caption / enclosure</h2>
+      <p class="blurb">Under <code>all</code> scope with more than one participating Vault, the
+      knowledge graph (§27's slot vocabulary reused, not a new one) becomes one field: every Vault's
+      component is laid out on its own and placed as a labelled island in a single shared canvas, with
+      one zoom and one pan across all of them (#118, implemented by #143). Both primitives here are
+      canvas furniture &mdash; drawn with the graph's own <code>&lt;canvas&gt;</code> 2D context, not a
+      DOM element &mdash; so this demo approximates the draw with inline SVG rather than reusing a real
+      component class. The shape never changes with Vault count: at eight Vaults the answer is to zoom,
+      not for the page to become something else. Narrowing to one Vault removes every caption and
+      enclosure and restores today's single-Vault graph unchanged.</p>
+
+      <p class="blurb"><b>The count line names its unit here</b> &mdash; <code>42 notes</code>, not the
+      bare <code>42</code> §27 uses in the sidebar. The slot vocabulary is the same, but the sidebar
+      figure sits on a row that already says what it counts, and this one floats in open canvas with
+      nothing beside it. A caption is read alone, so it carries its own unit; the condition word still
+      replaces the line outright, and gets no unit because a word is not a quantity.</p>
+
+      <p class="blurb"><b>Each column is as wide as its own widest island, each row as tall as its own
+      tallest</b> &mdash; never one spacing derived from the largest Vault anywhere. That single figure
+      failed in both directions at once: a 49-note Vault outgrew the shared cell and overlapped its
+      neighbours by up to 120px, while 2-note Vaults sat in cells a third wider than they needed.
+      Grid order is untouched by this &mdash; it is still Vault-management order &mdash; only the cell
+      sizes vary. Because an island's true radius does not exist until the layout settles, the packing
+      estimates it from node count and deliberately <i>over</i>-estimates: spare space inside a cell
+      costs only zoom, since the view fits the whole field, whereas an underestimate overlaps two
+      Vaults and makes both illegible.</p>
+
+      <p class="blurb"><b>The landing view fits the whole field, captions included</b> &mdash; a caption
+      clipped at the viewport edge is exactly as unreadable as a missing island. The fit runs on every
+      frame while the layout settles rather than once at the end: <code>alphaDecay(0.02)</code> leaves
+      the simulation warm for about six seconds, and a view that jumps that long after you arrive reads
+      as the page glitching. It stops the moment the layout cools <i>or</i> the reader pans, zooms or
+      touches the canvas &mdash; an auto-fit that fights a deliberate pan is worse than none. Zoom is
+      capped at the single-graph landing scale, so a lone small Vault never arrives magnified.</p>
+
+      <div class="stage island-demo">
+        <div class="island-demo-item">
+          <div class="island-demo-name">Alpha Vault</div>
+          <div class="island-demo-count">42 notes</div>
+          <svg width="150" height="150" viewBox="0 0 150 150" aria-hidden="true">
+            <circle cx="75" cy="75" r="58" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+            <line x1="55" y1="70" x2="92" y2="55" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <line x1="92" y1="55" x2="97" y2="97" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <line x1="55" y1="70" x2="97" y2="97" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <circle cx="55" cy="70" r="5" fill="var(--hot)"/>
+            <circle cx="92" cy="55" r="7" fill="var(--hot)"/>
+            <circle cx="97" cy="97" r="4" fill="var(--hot)"/>
+          </svg>
+        </div>
+        <div class="island-demo-item">
+          <div class="island-demo-name">Field Station</div>
+          <div class="island-demo-count vault-tier-warn">stale</div>
+          <svg width="120" height="120" viewBox="0 0 120 120" aria-hidden="true">
+            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+            <line x1="48" y1="58" x2="72" y2="66" stroke="var(--muted)" stroke-width="1" opacity="0.35"/>
+            <circle cx="48" cy="58" r="5" fill="var(--muted)"/>
+            <circle cx="72" cy="66" r="4" fill="var(--muted)"/>
+          </svg>
+        </div>
+        <div class="island-demo-item">
+          <div class="island-demo-name">Archive</div>
+          <div class="island-demo-count vault-tier-error">conflict</div>
+          <svg width="110" height="110" viewBox="0 0 110 110" aria-hidden="true">
+            <circle cx="55" cy="55" r="40" fill="none" stroke="var(--rule)" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+            <circle cx="55" cy="55" r="4" fill="var(--muted)"/>
+          </svg>
+        </div>
+      </div>
+
+      <table class="token-table">
+        <thead><tr><th>primitive</th><th>drawn</th><th>reads</th></tr></thead>
+        <tbody>
+          <tr><td class="name">Island caption</td><td class="val">canvas space, scaled with zoom (not screen-constant like a node label)</td><td class="val">Vault name in display ink at 20px, over a 13px mono count line &mdash; <code>42 notes</code> when healthy (singular <code>1 note</code>), or the §27 condition word and ink when not. Inert: it neither narrows scope nor zooms to fit</td></tr>
+          <tr><td class="name">Island enclosure</td><td class="val">dashed circle, token rule colour</td><td class="val">the component's settled layout radius plus a margin &mdash; marks where one Vault ends without implying a container the data model doesn't have</td></tr>
+          <tr><td class="name">Not-drawn line</td><td class="val">DOM, one line under the header</td><td class="val">names every Vault that contributed no island (it could not answer), always in warn ink regardless of that Vault's own condition tier: <code>Field Station could not be drawn.</code></td></tr>
+        </tbody>
+      </table>
+
+      <p class="blurb">Islands are placed in Vault-management order, packed on a grid &mdash; never
+      sorted by size, note count, or condition, the same rule the sidebar Scope zone and the explorer
+      already follow. A Vault gets no per-Vault colour: colour already means tag, and giving it a second
+      job would break the one legend the page has. The meta strip totals across the participating
+      Vaults, and the eyebrow reads <code>ALL VAULTS &middot; KNOWLEDGE GRAPH</code>.</p>
+
+      <div class="tag-row">
+        <span class="key">components/graph/GraphPage.tsx</span><span class="key">components/graph/graphSimulation.ts</span>
+        <span class="key">computeIslandCenters</span><span class="key">islandRadiusEstimate</span><span class="key">buildIslandGraphs</span><span class="key">createIslandSimulation</span>
+        <span class="key">lib/vaultParticipants.ts</span><span class="key">describeVaultsNotDrawn</span><span class="key">.graph-not-drawn</span>
+      </div>
+    </section>
+
+    <!-- ───────── VAULT ACCORDION ───────── -->
+    <section class="doc-section" id="vault-accordion">
+      <div class="doc-section-num">§29</div>
+      <h2>Vault accordion</h2>
+      <p class="blurb">Under <span class="key">all</span> scope the explorer is an accordion of
+      per-Vault sections with <b>exactly one Vault unfolded at a time</b>. Every Vault keeps a
+      permanent one-line head; only the unfolded one shows a tree, so the explorer stays one tree
+      plus N one-line heads whatever N is &mdash; bounded height is the whole argument. The head is
+      the documented section head (§05) with the Vault name in the label slot and §27's own
+      count-or-condition slot trailing; unfolded takes the active treatment, folded is plain. It is
+      one click target with one job &mdash; unfold this Vault. <b>It does not narrow scope.</b>
+      Clicking the unfolded head folds it, leaving nothing unfolded &mdash; the same plain list of
+      names this section already documents for an instance with no history, and the only way back to
+      it by hand. A head that ignores every click after the first reads as broken.</p>
+
+      <p class="blurb"><b>The Vault name keeps the capitalisation it was given.</b> It is the
+      operator&rsquo;s own text, not a label this app wrote, so the head overrides
+      <span class="key">.side-label</span>&rsquo;s uppercase and tracking &mdash; the same reasoning
+      <a href="#editing">§20</a> applies to the inline editor, where an inherited
+      <code>text-transform</code> would show the typist a different string than the one on disk.
+      Uppercasing it also collapsed the one signal separating these heads from
+      <span class="key">SCOPE</span> and <span class="key">RECENTLY VIEWED</span> above them:
+      <b>caps mean a heading Hatchdoor owns, sentence case means your data</b>. The Scope zone and the
+      accordion name the same Vaults, and must name them identically.</p>
+
+      <p class="blurb"><b>The gap belongs to the group, not to every head.</b> An unfolded head owns
+      the tree directly beneath it and closes up to <span class="key">0.2rem</span>; the separating
+      <span class="key">0.5rem</span> moves below the tree, so one Vault is held off the next by the
+      same distance whether the group is a single line or a whole tree. Carried under every head
+      instead, it put a folder further from its own Vault than from the following one &mdash;
+      proximity claiming the opposite of the nesting. The closing margin is scoped
+      <span class="key">.explorer-nav &gt; .tree.root-tree</span> so it reaches accordion trees only
+      and never the recency lists, whose own root tree is nested inside its panel.</p>
+
+      <div class="stage" style="padding:0; max-width: 300px;">
+        <div style="padding: 1rem 1rem 1.2rem; background: var(--bg);">
+          <button class="side-head vault-accordion-head" data-open="true"><span class="side-caret"></span><span class="side-label">Work</span><span class="side-rule"></span><span class="side-count">126</span></button>
+          <div class="folder-item" data-open="true">
+            <a class="folder-row" href="#"><span class="caret"></span>10-journal</a>
+            <div class="children">
+              <a class="note-link is-active" href="#"><span class="idx">001</span>Field notes from the orchard</a>
+              <a class="note-link" href="#"><span class="idx">002</span>On pruning</a>
+            </div>
+          </div>
+          <div class="folder-item"><a class="folder-row" href="#"><span class="caret"></span>20-reading</a></div>
+          <button class="side-head vault-accordion-head"><span class="side-caret"></span><span class="side-label">Personal</span><span class="side-rule"></span><span class="vault-slot-condition vault-tier-warn">stale</span></button>
+          <button class="side-head vault-accordion-head"><span class="side-caret"></span><span class="side-label">Notebook</span><span class="side-rule"></span><span class="side-count">84</span></button>
+          <button class="side-head vault-accordion-head" aria-disabled="true"><span class="side-caret"></span><span class="side-label">Archive</span><span class="side-rule"></span><span class="vault-slot-condition vault-tier-error">unavailable</span></button>
+        </div>
+      </div>
+
+      <p class="blurb">A Vault that cannot answer keeps its head, carries the same <code>unavailable</code>
+      condition word §27 already defines, and does not unfold &mdash; <code>aria-disabled</code>
+      rather than <code>disabled</code>, the same precedent the rail's Settings slot (§05) set: a
+      keyboard user can still reach it and hear why it does nothing, since a dimmed control with no
+      explanation reads as a bug. <b>Ordering is fixed and never re-sorts</b> &mdash; the order Vault
+      management holds them in, the same order the Scope zone (§27) lists them in. Not by status, not
+      by count, not by recency: a condition changes the slot, never the position. The Scope zone and
+      the accordion are visibly the same list twice, doing two different jobs &mdash; one changes what
+      you are browsing, the other opens a Vault's files without leaving <span class="key">all</span>.</p>
+
+      <p class="blurb"><b>Defaults and memory.</b> Landing with a note open unfolds the Vault holding
+      that note. Landing with none unfolds the last one, persisted per browser. Neither, and nothing
+      is unfolded &mdash; a plain list of Vault names is the honest picture of an instance with no
+      history. The landing Vault is read directly off the URL (a direct link to a note) or the stored
+      last-note entry (landing at the root), rather than waited for from the open note's own content
+      fetch, so the accordion's first paint never races that fetch or App.tsx's own last-note
+      redirect. Folder open state is remembered per Vault, namespaced under the shared
+      <code>expandedFolders</code> record so two Vaults' identically-named folders (two
+      <code>Journal</code>s) never share open/closed state; narrowed-scope browsing keeps today's
+      unnamespaced keys untouched.</p>
+
+      <p class="blurb"><b>Narrowing to one Vault deletes the accordion entirely</b>: the heads
+      disappear and the single <span class="key">Notes</span> head (§05) returns with §27's
+      count-or-condition slot in place of its plain count, so a narrowed view &mdash; and a
+      single-Vault instance, which never sees the accordion at all &mdash; is byte-identical to a
+      single-Vault Hatchdoor. Widening restores the accordion with the Vault just left unfolded: the
+      narrowed scope and the accordion's own memory are the same value, so leaving a Vault and
+      returning to <span class="key">all</span> reopens exactly where you were.</p>
+
+      <div class="tag-row">
+        <span class="key">app/vaultAccordion.ts</span><span class="key">app/ExplorerPane.tsx</span><span class="key">lib/notePath.ts</span>
+        <span class="key">.vault-accordion-head</span><span class="key">.vault-accordion-head[data-open]</span><span class="key">.vault-accordion-head[aria-disabled]</span>
+        <span class="key">.vault-accordion-head .side-label</span><span class="key">.vault-accordion-head .side-caret</span><span class="key">.explorer-nav &gt; .tree.root-tree</span>
+        <span class="key">SideHead <i>slot</i> / <i>disabled</i></span>
+      </div>
+    </section>
+
+    <!-- ───────── MOBILE SCOPE ROW ───────── -->
+    <section class="doc-section" id="mobile-scope-row">
+      <div class="doc-section-num">§30</div>
+      <h2>Mobile scope row &amp; bottom sheet</h2>
+      <p class="blurb">Below 920px the topbar's second row stops describing the document and becomes
+      the scope row (#145). The note path leaves the chrome entirely for this row's real estate: the
+      open note's own <span class="key">Vault</span> property row and title block (§07) already say
+      where it is, the magnifier in row one is the same search entry point the path button used to be,
+      and scope persists where a path does not. The row carries three things, always in this order:
+      the browsing scope's name, a rule, and §27's own count-or-condition slot &mdash; every one of
+      them on screen at all times, drawer closed, zero interaction.</p>
+
+      <div class="stage" style="max-width: 22rem; padding: 0;">
+        <div style="border-bottom:1px solid var(--rule); background:var(--paper); padding:0.32rem 0.75rem;">
+          <button class="topbar-scope-trigger" style="display:flex;align-items:center;width:100%;background:transparent;border:0;padding:0.12rem 0.2rem;text-align:left;cursor:pointer;">
+            <span class="topbar-scope-name">Personal</span>
+            <span class="topbar-scope-rule" aria-hidden="true">/</span>
+            <span class="topbar-scope-viewing">Viewing: Work</span>
+            <span class="topbar-scope-slot"><span class="vault-slot-condition vault-tier-warn">stale</span></span>
+          </button>
+        </div>
+      </div>
+
+      <p class="blurb"><b>The slot always describes the browsing scope, never the open note's
+      Vault</b> &mdash; a slot that changed subject with the page is a slot nobody could learn. The
+      <code>Viewing: &hellip;</code> marker pictured above is the one exception, and it is not a
+      status: it sits between the rule and the slot, and appears only on an exact read whose Vault
+      differs from a <i>narrowed</i> scope &mdash; reading a note reached from elsewhere while
+      <span class="key">Personal</span> is selected, say. At <span class="key">all</span> scope every
+      open note is already within scope by definition, so the marker never appears there, and it is
+      absent with no note open. This is deliberately not the sidebar Scope zone's own
+      <code>Viewing: &hellip;</code> line (§27), which names the open note's Vault unconditionally,
+      even when it matches the selected scope &mdash; two different jobs for two different chrome
+      surfaces at two different breakpoints.</p>
+
+      <p class="blurb"><b>Truncation priority is fixed, not proportional.</b> Under width pressure,
+      in order: the rule collapses first (a <code>flex-shrink</code> two orders of magnitude past the
+      name's absorbs nearly all the shrinkage before the name loses a pixel), then the Vault name
+      ellipsizes, and the status word never truncates (<code>flex-shrink: 0</code>) &mdash; the same
+      "condition over path" priority the sidebar's own slot already carries. Asserted at the
+      narrowest supported phone width with a long Vault name.</p>
+
+      <h4 class="doc-sub" style="font-size:0.86rem;">The bottom sheet</h4>
+      <p class="blurb">Tapping the row opens a bottom sheet holding the scope rows at
+      <b>46px touch height</b> &mdash; a couple of pixels past the 44px floor the rest of mobile
+      chrome uses (§05), earned by a fuller list of short taps. <span class="key">All Vaults</span> is
+      first, then every Vault in Vault-management order, reusing the desktop Scope zone's own
+      <code>.scope-row</code>/<code>.scope-row-label</code>/<code>.is-selected</code> grammar (§27)
+      row for row. Picking one sets scope and dismisses the sheet in the same tap; tapping the
+      backdrop or anywhere outside the sheet dismisses without changing scope. The drawer holds notes
+      and nothing else below 920px: the sidebar's Scope zone is not rendered there at all (§05), so
+      this sheet is the only narrowing control on a phone.</p>
+
+      <div class="stage" style="max-width: 22rem; padding: 0; background: var(--bg);">
+        <ul class="scope-sheet-list" style="list-style:none;margin:0;padding:0.4rem 0;">
+          <li><button class="scope-row" style="min-height:46px;padding-left:1rem;padding-right:1rem;"><span class="scope-row-label">All Vaults</span><span class="side-count">03</span></button></li>
+          <li><button class="scope-row is-selected" style="min-height:46px;padding-left:1rem;padding-right:1rem;"><span class="scope-row-label">Personal</span><span class="vault-slot-condition vault-tier-warn">stale</span></button></li>
+          <li><button class="scope-row" style="min-height:46px;padding-left:1rem;padding-right:1rem;"><span class="scope-row-label">Work</span><span class="side-count">126</span></button></li>
+        </ul>
+      </div>
+
+      <div class="tag-row">
+        <span class="key">app/AppTopbar.tsx</span><span class="key">app/vaultSlotLogic.ts <i>(scopeName)</i></span>
+        <span class="key">.topbar-scope-trigger</span><span class="key">.topbar-scope-name</span><span class="key">.topbar-scope-rule</span><span class="key">.topbar-scope-viewing</span><span class="key">.topbar-scope-slot</span>
+        <span class="key">.scope-sheet</span><span class="key">.scope-sheet-backdrop</span><span class="key">.scope-sheet-list</span>
+      </div>
+    </section>
+
+    <!-- ───────── MARKED PATH ROOT ───────── -->
+    <section class="doc-section" id="path-vault">
+      <div class="doc-section-num">§31</div>
+      <h2>Marked path root</h2>
+      <p class="blurb">On a flattened surface &mdash; search results, recent items, metadata queries
+      &mdash; a note says which Vault it came from by declaring a marked path root: the Vault name in
+      hot ink at medium weight, followed by a middot rather than the <code>/</code> a folder path
+      would use, so it reads as visibly not a folder segment. Provenance leads the most specific
+      location line the surface has: the path line where one exists, the title line where none does.
+      It renders on collection surfaces when the set <em>can</em> span (scope is <code>all</code> and
+      more than one Vault is enabled), and on exact reads whenever more than one Vault is enabled
+      &mdash; a single-Vault instance is byte-identical to an instance that never knew about Vaults.
+      The prefix is <strong>inert</strong>, a plain span inside the row's own button or link and never
+      a second click target, and it <strong>never elides</strong>: the folder path takes the loss,
+      eliding head-first (#115, implemented by #140).</p>
+
+      <div class="stage">
+        <div class="vslot-row"><span class="vslot-name"><span class="path-vault">Notes<span class="path-sep">&middot;</span></span>10-topics/finance</span></div>
+        <div class="vslot-row"><span class="vslot-name"><span class="path-vault">Archive<span class="path-sep">&middot;</span></span>clippings/2026</span></div>
+      </div>
+
+      <div class="tag-row">
+        <span class="key">components/ui.tsx <i>(VaultPrefix)</i></span>
+        <span class="key">.path-vault</span><span class="key">.path-sep</span>
+      </div>
+    </section>
+
     <!-- ───────── SETTINGS ───────── -->
     <section class="doc-section" id="settings">
-      <div class="doc-section-num">§27</div>
+      <div class="doc-section-num">§32</div>
       <h2>Settings</h2>
       <p class="blurb">The first page-level surface in the system, settled by the Variant B prototype (issue&nbsp;#58). <b>An index of sections on the left, one section at a time on the right.</b> It sits inside <span class="key">.note-pane</span>, which already owns the gutter, so the page adds no outer padding of its own &mdash; only a deep bottom margin so the last row clears the fold.</p>
+      <p class="blurb"><b>The index is the collection</b> (issue&nbsp;#120, Variant B). Every Vault is a settings section like any other, listed under a <span class="key">Vaults</span> group above the instance sections under <span class="key">This server</span>. There is no third level: selecting a Vault opens it in the same right-hand pane the other sections use, so a Vault is never a page inside a page. <span class="key">+ Add a Vault</span> is the last row of the collection rather than a link beneath it &mdash; underlined, it made the one row you cannot select the loudest thing in the list.</p>
+      <p class="blurb">A Vault row is a name column and a status column, ending in §27&rsquo;s count-or-condition slot. <b>The status hangs from the name&rsquo;s first line</b>, not from the middle of the row: centred, it floated halfway down a wrapped name and the right-hand column read as scattered marks rather than a column. <b>Names wrap in full and are never truncated</b> &mdash; three Vaults called <span class="key">Git &mdash; unreachable remote</span>, <span class="key">Git &mdash; clones cleanly</span> and <span class="key">Git &mdash; auth refused</span> all ellipsise to the same stub, and this index is where you identify a Vault. The column is <span class="key">17rem</span> for the same reason: at 15rem an ordinary name plus a condition pill took three lines.</p>
+      <p class="blurb"><b>A Vault section saves where every other section saves</b> &mdash; the button sits in the section head, not at the foot of the form. Its destructive action states its consequence in place, before the click: disconnecting forgets the Vault and never deletes the notes, the folder, or its history. That sentence is the whole guarantee the word &ldquo;disconnect&rdquo; does not make on its own.</p>
+
       <p class="blurb">Two devices are new here and are what make the page work. <b>The plaque</b> pulls settings that cannot be edited out of the form entirely, instead of showing them as disabled inputs. <b>The console</b> is a fixed strip of live state at the top of a section, so the reader is never editing blind.</p>
 
       <div class="stage">
         <div class="set-layout">
           <nav class="set-index">
-            <div class="set-index-group">
-              <p class="set-eyebrow">Vaults</p>
-              <div class="set-index-item"><span></span><span>Work</span><span class="vslot">126</span></div>
-              <div class="set-index-item"><span></span><span>Personal</span><span class="vslot warn">stale</span></div>
-              <div class="set-index-item"><span></span><span>Field Station</span><span class="vslot err">conflict</span></div>
-              <div class="set-index-item" data-paused="true"><span></span><span>Old notebook</span><span class="vslot">paused</span></div>
-              <div class="set-index-item"><span></span><span>Add a Vault</span><span></span></div>
-            </div>
-            <div class="set-index-group">
-              <p class="set-eyebrow">This server</p>
-              <div class="set-index-item" data-active="true"><span class="set-index-num">01</span><span>Notes handling</span><span class="set-index-count">03</span></div>
-              <div class="set-index-item"><span class="set-index-num">02</span><span>Agent access</span><span class="set-index-count">05</span></div>
-              <div class="set-index-item"><span class="set-index-num">03</span><span>Uploads</span><span class="set-index-count">02</span></div>
-              <div class="set-index-item"><span class="set-index-num">04</span><span>This deployment</span><span class="set-index-count">04</span></div>
-            </div>
+            <p class="set-index-group">Vaults</p>
+            <div class="set-index-item set-index-vault"><span>Kitchen</span><span class="set-index-count">126</span></div>
+            <div class="set-index-item set-index-vault"><span>Work</span><span class="set-index-count">412</span></div>
+            <div class="set-index-item set-index-vault"><span>Field Station</span><span class="vault-slot-condition vault-tier-error">unavailable</span></div>
+            <div class="set-index-item set-index-vault" data-off="true"><span>Work (old employer)</span><span class="set-index-count">paused</span></div>
+            <div class="set-index-item set-index-add"><span>Add a Vault</span></div>
+            <p class="set-index-group">This server</p>
+            <div class="set-index-item" data-active="true"><span class="set-index-num">01</span><span>Notes handling</span><span class="set-index-count">1/2</span></div>
+            <div class="set-index-item"><span class="set-index-num">02</span><span>Agent access (MCP)</span><span class="set-index-count">0/4</span></div>
+            <div class="set-index-item"><span class="set-index-num">03</span><span>Uploads</span><span class="set-index-count">0/2</span></div>
           </nav>
 
           <div>
-            <p class="set-eyebrow">§01 — Notes handling</p>
-            <h3 style="margin: 0 0 0.9rem; font-family: var(--font-serif); font-weight: 500;">Notes handling</h3>
+            <p class="set-eyebrow">§02 — Indexing</p>
+            <h3 style="margin: 0 0 0.9rem; font-family: var(--font-serif); font-weight: 500;">Indexing</h3>
 
             <div class="set-console">
               <div class="set-console-cell"><span class="set-console-lbl">Notes</span><span class="set-console-val">1,284</span></div>
@@ -2956,151 +3187,70 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         </div>
       </div>
 
-      <h3 class="doc-sub">The index is the Vault list</h3>
-      <p class="blurb"><b>There is no separate collection page.</b> Every Vault is a settings section in its own right, so the page is two levels deep and never three, and Vault management is neither a destination beside Settings nor a section inside it that opens into a list. Two labelled groups: <span class="key">Vaults</span>, unnumbered because it grows, in Vault-management order, ending in <span class="key">Add a Vault</span>; then <span class="key">This server</span>, keeping the numbered form, holding the settings nothing per-Vault owns.</p>
-      <p class="blurb"><b>The condition marker appears here too</b>, in the trailing slot, the same vocabulary and the same slot used everywhere else. Below 920px the explorer is a drawer, so this is the only Vault list on screen &mdash; a management list that refused to say which Vault is in trouble would be useless exactly where a person is most likely to be checking. On the desktop the marker does appear twice, about 250px apart; that is one fact, from one source, rendered one way.</p>
-      <p class="blurb"><b>A paused Vault appears here and nowhere else</b> &mdash; muted, marked <span class="key">paused</span>, absent from the sidebar and from All Vaults. It has to be reachable or it could never be turned back on, and the alternatives are worse: a second list at the foot of the column splits the collection in two, and a &ldquo;show paused&rdquo; toggle makes the only route back to a Vault a control you have to already know exists. <b>Pausing is a choice, not a condition</b>, which is why it is the one entry the browsing list can never show.</p>
-      <p class="blurb"><b>What is per Vault:</b> its name, its history choice, its repository sign-in, what it ignores, its archive folder, how long to wait before recording, and its commit identity. Commit identity is <b>server-wide with an empty per-Vault override</b> that shows the server value greyed in place, so adding a Vault costs nothing and signing work notes with a work address is still available to the one Vault that needs it.</p>
-
-      <h3 class="doc-sub">A Vault&rsquo;s own page</h3>
-      <p class="blurb">The condition&rsquo;s full sentence leads the page, because this is where the controls that resolve it live. Then the editable rows, then the identity facts that make it that Vault in the plaque, then pause, rebuild and disconnect.</p>
-      <div class="stage">
-        <p class="set-eyebrow">Vaults — Field Station</p>
-        <h3 style="margin: 0 0 0.9rem; font-family: var(--font-serif); font-weight: 500;">Field Station</h3>
-
-        <div class="set-console">
-          <div class="set-console-cell"><span class="set-console-lbl">Notes</span><span class="set-console-val">412</span></div>
-          <div class="set-console-cell"><span class="set-console-lbl">Last sync</span><span class="set-console-val">2 days ago</span></div>
-          <div class="set-console-action"><button class="ui-btn">Try again</button></div>
-        </div>
-
-        <div class="set-condition" data-tone="error">
-          <div class="set-condition-head"><span class="vslot err">conflict</span></div>
-          <p>Field Station changed here and on the server. Both versions are kept and nothing was overwritten. Open the two files below, decide what the note should say, and sync again.</p>
-          <ul class="set-condition-files">
-            <li>10-journal/2026-05-13.md</li>
-            <li>20-reading/pollan.md</li>
-          </ul>
-        </div>
-
-        <div class="set-row">
-          <div>
-            <div class="set-row-label">History</div>
-            <p class="set-row-help">What Git does with this folder. This folder was cloned by Hatchdoor, so it can only pull or sync both ways.</p>
-          </div>
-          <span class="set-segmented"><span>Pull only</span><span data-on="true">Two-way</span></span>
-        </div>
-
-        <div class="set-row">
-          <div>
-            <div class="set-row-label">Check the server every</div>
-            <p class="set-row-help">Hatchdoor has no way to be told when something is pushed, so it asks on this schedule.</p>
-          </div>
-          <span class="set-num-unit"><input value="30"><span class="unit">minutes</span></span>
-        </div>
-
-        <div class="set-row">
-          <div>
-            <div class="set-row-label">Sign-in</div>
-            <p class="set-row-help">Leave the token blank to keep the one already saved.</p>
-            <p class="set-row-class">Editing the repository clears the saved token.</p>
-          </div>
-          <div style="text-align:right;">
-            <span class="set-segmented" style="margin-bottom:0.4rem;"><span>No sign-in</span><span data-on="true">Access token</span></span>
-            <div class="field" style="margin-bottom:0;"><label class="field-label">Token <span style="color:var(--warn-fg)">will be cleared</span></label><input class="field-input" style="width:12rem;" value=""></div>
-          </div>
-        </div>
-
-        <div class="set-plaque" data-editing="true">
-          <div class="set-plaque-head-row">
-            <p class="set-plaque-head" style="margin:0;">What makes this Vault this Vault</p>
-            <button class="set-plaque-edit">Editing</button>
-          </div>
-          <div class="set-plaque-row"><span>Folder</span><span class="set-plaque-why">cloned by Hatchdoor</span></div>
-          <div class="field" style="margin: 0.5rem 0 0;"><label class="field-label">Repository</label><input class="field-input" value="https://forge.example/notes.git"></div>
-          <div class="field" style="margin: 0.5rem 0 0;"><label class="field-label">Branch</label><input class="field-input" value="main"></div>
-        </div>
-      </div>
-
-      <p class="blurb"><b>One console, healthy or broken.</b> The console gains a trailing action cell so the live state and the single button that answers it are never separated, and nothing jumps position when a Vault fails. <span class="key">Sync now</span> and <span class="key">Try again</span> are one button with two labels &mdash; two endpoint names calling one function is a label, not a control, and two identical-acting buttons side by side only ask a person to worry about which one is correct.</p>
-      <p class="blurb"><b>The condition block says what happened, what was not lost, and the single thing that clears it</b>, with the button above changing to match, so reading and acting are one motion. The server distinguishes nine failures and <b>each gets its own sentence</b>: grouping them into families would force wording vague enough to cover the whole group, so no sentence would be quite about what actually happened. The two failures that involve files list them, as data rather than names picked back out of an English string.</p>
-      <p class="blurb"><b>One control holds the Git behaviour, carrying only the behaviours legal for this Vault</b> &mdash; four on a folder you own, two on a cloned one. Illegal options are <b>absent, not greyed</b>, and the plaque above states which kind of folder this is, so the shorter list has its reason sitting directly over it. Turning Git on or off changes what the Vault <i>is</i> and the server refuses it twice over; that refusal is re-offered through the confirmation modal, and <b>accepting runs pause, edit, un-pause as one act</b> &mdash; the naive flow would turn on versioning and make the Vault silently vanish from the sidebar with nothing saying it was now the person&rsquo;s job to bring it back. If only the last step fails the Vault is changed and invisible, and its index entry carries a red line and a single button until it is back &mdash; the one condition allowed to persist across visits, because it is the only one that hides a Vault from the rest of the application.</p>
-      <p class="blurb"><b>The plaque opens.</b> <span class="key">.settings-plaque</span> otherwise only ever reads; it gains one affordance that opens its identity lines into fields, and saving them runs the same round trip and the same modal as turning Git on, so there is one procedure for every identity change rather than two.</p>
-      <p class="blurb"><b>The token field is honestly empty</b>, because the server never returns a token and there is genuinely nothing to show. Its state is a word beside the label, <span class="key">saved</span> or <span class="key">none</span>, and the help line says blank means keep. Masked dots were rejected: decoration standing in for a value, suggesting the app could show it if it wanted. The one moment &ldquo;blank means keep&rdquo; stops being true is an identity change, which makes the server discard the token &mdash; so the instant the repository, branch, subfolder or folder is edited the label flips to <span class="key">will be cleared</span> in warn ink and the modal repeats it. The save is never blocked: a public repository needing no sign-in is a real answer.</p>
-
-      <h3 class="doc-sub">When the registry cannot be read</h3>
-      <p class="blurb">Management stays reachable and tells the truth about what it can do. The <span class="key">Vaults</span> group is replaced by <a href="#states">§23</a>&rsquo;s error block carrying the same sentence shown in the workspace &mdash; one fact, one wording, wherever it appears &mdash; and <b><span class="key">Add a Vault</span> is absent</b>, with one line saying why: a control whose only possible outcome is a refusal is noise. The <span class="key">This server</span> group works normally, because nothing in it lives in the registry.</p>
-      <div class="stage" style="max-width: 300px;">
-        <nav class="set-index" style="border-right:0; padding-right:0;">
-          <div class="set-index-group">
-            <p class="set-eyebrow">Vaults</p>
-            <div class="state-block error" style="text-align:left;">
-              <h2>Could not load</h2>
-              <p>Hatchdoor could not read the list of your Vaults. Nothing was changed and your Markdown is untouched.</p>
-              <button class="ui-btn">Try again</button>
-            </div>
-            <p class="set-row-help" style="margin-top:0.5rem;">Adding a Vault is unavailable until the list can be read.</p>
-          </div>
-        </nav>
-      </div>
-
-      <h3 class="doc-sub">Unsaved drafts</h3>
-      <p class="blurb">A temporary section in the <span class="key">This server</span> group carrying a count of what is waiting, <b>withdrawn permanently once the last draft is dealt with</b> &mdash; recovery is a migration artefact, not a standing feature, and must not leave a permanent row competing with the Vault list. It composes existing primitives only: the plaque holds each draft&rsquo;s note name, claimed folder, when it was last typed in, and a short inert preview set in the editor&rsquo;s source typography because it is the person&rsquo;s prose and not a code sample; below it one destination Vault field and one <span class="key">Restore</span>, with a quieter <span class="key">Discard</span> beside it.</p>
-      <p class="blurb"><b>Restore hands the text back unsaved</b> &mdash; it opens the note or the create form in the chosen Vault with the draft loaded, and writes nothing until the person presses Save. Restoring straight to disk would write files nobody has read since before the upgrade, for a draft they may only have wanted to look at. One row per draft and no <span class="key">Restore all</span>, because drafts need not share a Vault; the destination is pre-filled only when the instance holds exactly one Vault, which is every legacy upgrade at the moment it completes. When the chosen Vault has no such note the row says so in place, in the warn tone, and offers either a different Vault or restoring it as a new note at that path &mdash; an edit becoming a brand-new note is a change of meaning and must be visible when it happens. <b>Held drafts never age out</b>; only a confirmed <span class="key">Discard</span> deletes them, because the text exists nowhere else. One plain line explains the cleared recents and folded folders, said once, in the surface already explaining the upgrade, and withdrawn with it.</p>
-
       <p class="blurb"><b>Why a plaque and not a disabled field.</b> A value pinned by an environment variable is authoritative for the process (<a href="../adr/README.md">ADR-14</a>), so no amount of clicking will change it. Rendering it as a greyed-out input invites the attempt and reads as a fault; lifting it into a dashed plaque, with its source stated once in the heading, says <i>this is configuration, not a control</i>. The plaque collapses its top margin when a section has no editable rows at all, so a fully pinned section does not open with a gap.</p>
       <p class="blurb"><b>Consequences are declared before they are accepted, not after.</b> A row whose change forces a rebuild carries <span class="key">.settings-row-class</span> in <span class="key">--warn-fg</span> &mdash; the same ink a warning callout uses, so the weight of the word matches the weight elsewhere in the system. The save itself is refused with a machine-readable consequence and re-offered through a confirmation modal, and consents accumulate rather than being asked one at a time.</p>
+      <p class="blurb"><b>Every control hangs off the row&rsquo;s right edge and centres on the row&rsquo;s own band.</b> Left-aligned in the control column, a two-option segmented group and a four-option one ended in different places and the column read as ragged; pinned to the top of a row whose label side runs to three lines of prose, a control read as belonging to the rule above it. The column is sized to the widest control the page has &mdash; <span class="key">21.5rem</span>, a four-option group on one line &mdash; because a segment that wraps stops reading as one of a set of choices. A numeric field is sized to what it holds and sets its value <span class="key">text-align: right</span>, so the number grows leftward out of the unit beside it: <span class="key">4.25rem</span> for a schedule that caps at four digits, where <span class="key">8rem</span> promised a value ten times longer than any it takes.</p>
+
       <p class="blurb"><b>The toggle&rsquo;s travel is derived, not typed.</b> The track is 2.4rem with a 1px border each side and the knob is 1rem inset by 1px, so the on-position is <span class="key">calc(2.4rem - 1rem - 4px)</span>. Writing a rounded literal there leaves the knob fractionally past its resting inset, which on a 1px-bordered control reads as a wobble.</p>
 
-      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span>
-        <span class="key">.settings-index-group</span><span class="key">.settings-index-item[data-paused]</span><span class="key">.settings-num-unit</span><span class="key">.settings-plaque-edit</span><span class="key">.settings-plaque[data-editing]</span><span class="key">.settings-console-action</span><span class="key">.settings-condition</span><span class="key">.settings-condition-files</span></div>
+      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-index-group</span><span class="key">.settings-vault-index-item</span><span class="key">.settings-vault-index-add</span><span class="key">.settings-vault-disconnect-note</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
     </section>
 
     <!-- ───────── STARTUP GATE ───────── -->
     <section class="doc-section" id="gate">
-      <div class="doc-section-num">§28</div>
+      <div class="doc-section-num">§33</div>
       <h2>Startup gate</h2>
-      <p class="blurb"><b>Only an unanswered licence question may lock a person out of Hatchdoor.</b> This is the application&rsquo;s one full-screen surface and it survives for exactly two conditions: the licence choice, and the first embedding-model download. It never renders for scanning, indexing, zero Vaults, a failed download, or any registry condition &mdash; local Markdown reading and writing remain available throughout, and indexing is per-Vault work with a per-Vault marker (<a href="#sidebar">§05</a>). On every later start the model is already present, so in practice the gate is seen once in the life of an instance.</p>
-      <div class="stage">
-        <div class="gate">
-          <span class="ty-brand"><span class="dot"></span>HATCHDOOR</span>
-          <p style="max-width: 42ch; margin: 0; font-size: 0.9rem;">Hatchdoor uses an embedding model to make your notes searchable. Using it means accepting its licence.</p>
-          <div style="display:flex; gap:0.5rem;"><button class="ui-btn primary">Accept and continue</button><button class="ui-btn ghost">Continue without search</button></div>
-          <p class="gate-progress">Downloading the model — 41%</p>
-        </div>
-      </div>
-      <p class="blurb"><b>Brand mark, the choice, one progress line, nothing else.</b> The gate polls, because the work it is waiting on is the application&rsquo;s own. Every other incomplete start opens the ordinary workspace with the missing piece named in place, and <b>those screens do not poll</b> &mdash; they are waiting on a person, from outside the browser, and re-reading every second retries nothing while risking the screen vanishing mid-sentence as it is being read.</p>
-      <p class="blurb"><b>Zero Vaults keeps the workspace.</b> The Scope zone holds its place reading <span class="key">All Vaults</span> with no rows beneath it, the tree is blank, and the note pane holds <a href="#states">§23</a>&rsquo;s empty block with a single <span class="key">Add a Vault</span> &mdash; the only call to action on screen, because a rail invitation that later turns into a list is a control that changes meaning. A brand-new install and an instance whose last Vault was just disconnected render identically. Nothing here wears warn or error ink: <b>an empty setup is a valid setup</b>, and zero enabled Vaults is a complete empty result rather than a partial one.</p>
-      <p class="blurb"><b>Two broken starts, told apart</b>, both opening the ordinary workspace with the error block in the note pane and both stating that nothing was changed and the Markdown is untouched. An <b>unreadable registry</b> &mdash; damaged, or a future schema from a version since downgraded from &mdash; offers <span class="key">Try again</span> alone: writing a fresh registry would discard the record of every Vault, and a downgrade is precisely the case where that record is the only thing worth saving, so the application refuses to be the instrument of that loss. A <b>failed legacy upgrade</b> also offers a confirmed <span class="key">Start with no Vaults</span>, safe for one reason &mdash; there was never a list to lose. That confirmation is one <a href="#fields">§18</a> dialog with a labelled action, not a typed phrase: it deletes nothing, and the ceremony would claim a danger that is not present. It says the sharp edge in those terms &mdash; your notes and history are untouched, your old settings will be ignored from now on, and you will add your folder yourself.</p>
-      <div class="tag-row"><span class="key">.gate</span><span class="key">.gate-progress</span></div>
-    </section>
+      <p class="blurb"><b>Only an unanswered licence question may lock a person out of Hatchdoor.</b>
+      This is the application's one full-screen surface and it survives for exactly two states,
+      <code>terms_required</code> and <code>downloading</code>. It never renders for scanning, for
+      indexing, for a failed download, for zero Vaults, or for any registry condition &mdash; those
+      all open the ordinary workspace with the missing piece named in place, because reading and
+      writing local Markdown never depended on the model. Discovery resolves before either model
+      state can gate, which is what keeps a broken registry out of it. The step-past is latched in
+      <code>localStorage</code> and the latch survives a reload: the gate is an <em>instance</em>
+      first-run surface, not a mount first-run one, so a later retry that sends the state back to
+      <code>downloading</code> can never re-block a client that has already reached the workspace.
+      In practice it is seen once in the life of an instance.</p>
 
-    <!-- ───────── GRAPH CANVAS ───────── -->
-    <section class="doc-section" id="graph-canvas">
-      <div class="doc-section-num">§29</div>
-      <h2>Graph canvas — Vault islands</h2>
-      <p class="blurb">Canvas furniture, drawn in canvas space and scaled with zoom rather than laid out in the DOM. Under <span class="key">all</span> scope the graph is <b>one field</b>: every Vault&rsquo;s component is laid out on its own and placed as a labelled island in a single shared canvas, with one zoom and one pan across all of them. Links never cross a Vault boundary, so the islands sit apart because nothing joins them &mdash; <b>the disconnection is the picture</b>, and a person who has never read a word about Vault scope can see the boundary and will not go looking for a connection that cannot exist.</p>
-      <div class="stage">
-        <div class="graph-field">
-          <div class="island" style="left: 6%; top: 14%;">
-            <div class="island-caption"><div class="island-name">Work</div><div class="island-count">126 notes</div></div>
-            <div class="island-enclosure"><span class="node" style="left:46%; top:40%;"></span><span class="node small" style="left:24%; top:58%;"></span><span class="node small" style="left:64%; top:26%;"></span><span class="node small" style="left:70%; top:62%;"></span></div>
-          </div>
-          <div class="island" style="left: 40%; top: 8%;">
-            <div class="island-caption"><div class="island-name">Kitchen</div><div class="island-count">84 notes</div></div>
-            <div class="island-enclosure"><span class="node" style="left:52%; top:48%;"></span><span class="node small" style="left:30%; top:32%;"></span><span class="node small" style="left:66%; top:66%;"></span></div>
-          </div>
-          <div class="island" style="left: 72%; top: 30%;">
-            <div class="island-caption"><div class="island-name">Personal</div><div class="island-count warn">stale</div></div>
-            <div class="island-enclosure"><span class="node" style="left:44%; top:52%;"></span><span class="node small" style="left:62%; top:34%;"></span></div>
-          </div>
-        </div>
+      <p class="blurb"><b>It is not the app shell.</b> The gate brings its own topbar &mdash; brand
+      mark, a crumb reading <code>Model setup</code> or <code>Preparing vault</code>, and the theme
+      cycler, which is here and nowhere else on this screen because someone meeting Hatchdoor for
+      the first time in the wrong theme should not have to accept a licence to fix it. No sidebar,
+      no rail, no search. Below it a single column of <code>min(780px, 100% - 2rem)</code>: the mono
+      kicker in hot ink, then a display <code>h1</code> at <code>clamp(2.6rem, 7vw, 5.2rem)</code>
+      &mdash; the largest type in the application, which this screen can afford because it holds one
+      idea.</p>
+
+      <p class="blurb"><b>The licence step states what accepting costs.</b> Two paragraphs and two
+      links, then two actions: <code>Accept terms and set up Gemma</code> and <code>Use Nomic
+      instead</code>. Both are real choices and neither is a dismissal, so the second is a
+      <code>.startup-secondary</code> outline rather than a ghost &mdash; declining is a
+      configuration decision, not a cancel. Under them a fallback note in muted small type gives the
+      trade in the terms a person can act on: English only, better search from Gemma, and the RAM
+      each one costs while indexing. <b>The second paragraph is load-bearing:</b> it says accepting
+      does not change ownership of the vault and that notes are never sent to Google. A licence
+      prompt that does not answer that question gets answered by the reader's worst guess.</p>
+
+      <p class="blurb"><b>The download step is a progress bar and one line, and it is honest about
+      what it does not know.</b> The bar is an 8px band ruled top and bottom, filled by a
+      <code>scaleX</code> transform so the fill animates without relayout. Where the backend reports
+      no percentage it takes <code>.is-indeterminate</code> and sweeps instead of pretending to a
+      position. The line beneath pairs a bold percentage with the byte count, in mono, and reads
+      <code>Connecting to model source</code> rather than a zero when there are no bytes yet. The
+      lede holds <code>min-height: 2.8em</code> so the column does not jump as the sentence changes
+      length under it, and a dropped connection swaps that sentence for <code>Waiting for Hatchdoor
+      to respond&hellip;</code> rather than blanking the screen. <b>This screen polls</b>, once a
+      second, because the work it waits on is the application's own; the ordinary workspace's
+      incomplete-start screens do not, because those wait on a person and re-reading retries
+      nothing.</p>
+
+      <div class="tag-row">
+        <span class="key">startup/StartupGate.tsx</span><span class="key">startup/useStartupStatus.ts</span>
+        <span class="key">.startup-shell</span><span class="key">.startup-topbar</span><span class="key">.startup-brand</span><span class="key">.startup-brand-mark</span><span class="key">.startup-crumb</span><span class="key">.startup-theme</span>
+        <span class="key">.startup-main</span><span class="key">.startup-kicker</span><span class="key">.startup-lede</span><span class="key">.startup-terms</span><span class="key">.startup-actions</span>
+        <span class="key">.startup-primary</span><span class="key">.startup-secondary</span><span class="key">.startup-fallback-note</span>
+        <span class="key">.startup-progress</span><span class="key">.startup-progress.is-indeterminate</span><span class="key">.startup-progress-line</span><span class="key">@keyframes startup-scan</span>
       </div>
-      <p class="blurb"><b>Three parts.</b> A caption above each island &mdash; the Vault name over a mono count line, which carries <a href="#sidebar">§05</a>&rsquo;s condition word in the same ink when the Vault is not healthy, so a Vault that is behind says so where you are looking at it. A dashed enclosure around the component, marking where one Vault ends without implying a container the data model does not have. And the nodes and edges unchanged &mdash; same tag hues, same backlink-driven radii, same muted edges. <b>A Vault gets no per-Vault colour</b>: colour already means tag, and a second job would break the one legend the page has.</p>
-      <p class="blurb"><b>The caption is inert.</b> Clicking a Vault&rsquo;s name does nothing &mdash; it does not narrow scope and it does not zoom to fit. Scope changes in the Scope zone and nowhere else, so no reading surface can move the browsing context out from under the rest of the app as a side effect of being clicked. The graph reads; the chrome decides.</p>
-      <p class="blurb"><b>The shape never changes with Vault count.</b> At eight Vaults the islands shrink and the answer is to zoom, not for the page to become something else &mdash; a page that silently changes shape when a Vault is added is a page nobody can hold a model of, and the failure it prevents is mild. Islands are placed in Vault-management order, packed on a grid, never sorted by size or condition, so the same instance has the same layout every visit. A Vault that cannot answer <b>contributes no island</b> and is named in one warn-ink line under the header instead: drawing an empty enclosure would be drawing an absence. The meta strip totals across the participating Vaults, and the hint line ends with the reason the field looks the way it does.</p>
-      <p class="blurb"><b>Narrowing removes the captions and the enclosures</b> and centres the one component, restoring today&rsquo;s graph page unchanged &mdash; so a single-Vault instance never sees an island, because at one Vault <span class="key">all</span> and that Vault are the same picture. The layout is thrown away and laid out afresh rather than freezing the survivors, which would show a Vault still wearing the shape its neighbours pressed it into; a force layout is not stable between visits, so there is no learned shape to protect. The settling is exempt from the motion policy in <a href="#tokens">§01</a>, and it starts only once the data has arrived.</p>
-      <div class="tag-row"><span class="key">.island</span><span class="key">.island-caption</span><span class="key">.island-name</span><span class="key">.island-count</span><span class="key">.island-enclosure</span></div>
     </section>
 
   </main>

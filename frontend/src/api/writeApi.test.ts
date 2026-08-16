@@ -7,6 +7,7 @@ import {
   deleteNote,
   describeWriteOutcome,
   getWriteCapabilities,
+  isDemoReadOnlyError,
   moveNote,
   renameNote,
   MUTATION_FETCH_TIMEOUT_MS,
@@ -16,17 +17,20 @@ import {
 } from "./writeApi";
 import type { WriteOutcome } from "../types";
 
+const VAULT_ID = "00000000-0000-4000-8000-000000000001";
+
 function outcome(overrides: Partial<WriteOutcome> = {}): WriteOutcome {
   return {
+    vault_id: VAULT_ID,
     ok: true,
     slug: "home",
     relative_path: "Home.md",
     content_hash: "hash",
     quality_warnings: [],
-    git_sync_warning: null,
     rewritten_notes: 0,
     moved_assets: 0,
     trashed_path: null,
+    layer: null,
     ...overrides,
   };
 }
@@ -64,137 +68,91 @@ function expectJsonCall(
 }
 
 describe("writeApi", () => {
-  it("loads write capabilities", async () => {
+  it("loads write capabilities for one Vault", async () => {
     mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({ enabled: true, warnings: ["read-only mode off"] }),
+      jsonResponse({
+        vault_id: VAULT_ID,
+        enabled: true,
+        warnings: ["read-only mode off"],
+      }),
     );
 
-    await expect(getWriteCapabilities()).resolves.toEqual({
+    await expect(getWriteCapabilities(VAULT_ID)).resolves.toEqual({
+      vault_id: VAULT_ID,
       enabled: true,
       warnings: ["read-only mode off"],
     });
 
-    expect(mockedApiFetch).toHaveBeenCalledWith("/api/write-capabilities");
+    expect(mockedApiFetch).toHaveBeenCalledWith(
+      `/api/v1/vaults/${VAULT_ID}/write-capabilities`,
+    );
   });
 
   it("sends the expected create/update/rename/move/archive/delete write requests", async () => {
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({
-        ok: true,
-        slug: "home",
-        relative_path: "Home.md",
-        content_hash: "hash-create",
-        git_sync_warning: null,
-        rewritten_notes: 0,
-        moved_assets: 0,
-        trashed_path: null,
-      }),
-    );
-    await createNote("Notes/Home.md", "# Home");
-    expectJsonCall(0, "/api/note", "POST", {
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await createNote(VAULT_ID, "Notes/Home.md", "# Home");
+    expectJsonCall(0, `/api/v1/vaults/${VAULT_ID}/notes`, "POST", {
       relative_path: "Notes/Home.md",
       content: "# Home",
     });
 
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({
-        ok: true,
-        slug: "folder/alpha beta",
-        relative_path: "Folder/Alpha Beta.md",
-        content_hash: "hash-update",
-        git_sync_warning: null,
-        rewritten_notes: 0,
-        moved_assets: 0,
-        trashed_path: null,
-      }),
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await updateNote(VAULT_ID, "folder/alpha beta", "# Updated", "hash-1");
+    expectJsonCall(
+      1,
+      `/api/v1/vaults/${VAULT_ID}/notes/folder%2Falpha%20beta`,
+      "PUT",
+      { content: "# Updated", expected_content_hash: "hash-1" },
     );
-    await updateNote("folder/alpha beta", "# Updated", "hash-1");
-    expectJsonCall(1, "/api/note/folder%2Falpha%20beta", "PUT", {
-      content: "# Updated",
-      expected_content_hash: "hash-1",
-    });
 
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({
-        ok: true,
-        slug: "folder/alpha beta",
-        relative_path: "Folder/Renamed.md",
-        content_hash: "hash-rename",
-        git_sync_warning: null,
-        rewritten_notes: 0,
-        moved_assets: 0,
-        trashed_path: null,
-      }),
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await renameNote(VAULT_ID, "folder/alpha beta", "Renamed Note", "hash-2");
+    expectJsonCall(
+      2,
+      `/api/v1/vaults/${VAULT_ID}/notes/folder%2Falpha%20beta/rename`,
+      "PATCH",
+      { new_title: "Renamed Note", expected_content_hash: "hash-2" },
     );
-    await renameNote("folder/alpha beta", "Renamed Note", "hash-2");
-    expectJsonCall(2, "/api/note/folder%2Falpha%20beta/rename", "PATCH", {
-      new_title: "Renamed Note",
-      expected_content_hash: "hash-2",
-    });
 
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({
-        ok: true,
-        slug: "folder/alpha beta",
-        relative_path: "Archive/Renamed.md",
-        content_hash: "hash-move",
-        git_sync_warning: null,
-        rewritten_notes: 0,
-        moved_assets: 0,
-        trashed_path: null,
-      }),
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await moveNote(VAULT_ID, "folder/alpha beta", "Archive/2026", "hash-3");
+    expectJsonCall(
+      3,
+      `/api/v1/vaults/${VAULT_ID}/notes/folder%2Falpha%20beta/move`,
+      "PATCH",
+      { target_folder: "Archive/2026", expected_content_hash: "hash-3" },
     );
-    await moveNote("folder/alpha beta", "Archive/2026", "hash-3");
-    expectJsonCall(3, "/api/note/folder%2Falpha%20beta/move", "PATCH", {
-      target_folder: "Archive/2026",
-      expected_content_hash: "hash-3",
-    });
 
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({
-        ok: true,
-        slug: "folder/alpha beta",
-        relative_path: "90-archive/Renamed.md",
-        content_hash: "hash-archive",
-        git_sync_warning: null,
-        rewritten_notes: 0,
-        moved_assets: 0,
-        trashed_path: null,
-      }),
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await archiveNote(VAULT_ID, "folder/alpha beta", "hash-4");
+    expectJsonCall(
+      4,
+      `/api/v1/vaults/${VAULT_ID}/notes/folder%2Falpha%20beta/archive`,
+      "PATCH",
+      { expected_content_hash: "hash-4" },
     );
-    await archiveNote("folder/alpha beta", "hash-4");
-    expectJsonCall(4, "/api/note/folder%2Falpha%20beta/archive", "PATCH", {
-      expected_content_hash: "hash-4",
-    });
 
-    mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({
-        ok: true,
-        slug: "folder/alpha beta",
-        relative_path: null,
-        content_hash: null,
-        git_sync_warning: null,
-        rewritten_notes: 0,
-        moved_assets: 0,
-        trashed_path: "90-archive/Renamed.md",
-      }),
+    mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
+    await deleteNote(VAULT_ID, "folder/alpha beta", "hash-5");
+    expectJsonCall(
+      5,
+      `/api/v1/vaults/${VAULT_ID}/notes/folder%2Falpha%20beta`,
+      "DELETE",
+      { expected_content_hash: "hash-5" },
     );
-    await deleteNote("folder/alpha beta", "hash-5");
-    expectJsonCall(5, "/api/note/folder%2Falpha%20beta", "DELETE", {
-      expected_content_hash: "hash-5",
-    });
   });
 
-  it("uploads an attachment as multipart form data", async () => {
+  it("uploads an attachment to one Vault as multipart form data", async () => {
     mockedApiFetch.mockResolvedValueOnce(
       jsonResponse({
+        vault_id: VAULT_ID,
         ok: true,
         attachment: {
           relative_path: "Attachments/pasted.png",
           size_bytes: 9,
           content_hash: "fnv1a64:test",
+          layer: null,
         },
-        git_sync_warning: null,
         rewritten_notes: 0,
         trashed_path: null,
         cleanup_warning: null,
@@ -202,10 +160,10 @@ describe("writeApi", () => {
     );
 
     const file = new File(["png-bytes"], "pasted.png", { type: "image/png" });
-    await uploadAttachment(file, "Attachments/pasted.png");
+    await uploadAttachment(VAULT_ID, file, "Attachments/pasted.png");
 
     const [url, init] = mockedApiFetch.mock.calls[0] ?? [];
-    expect(url).toBe("/api/attachment");
+    expect(url).toBe(`/api/v1/vaults/${VAULT_ID}/attachments`);
     expect(init?.method).toBe("POST");
     expect(init?.body).toBeInstanceOf(FormData);
     expect((init?.body as FormData).get("target_relative_path")).toBe(
@@ -217,13 +175,14 @@ describe("writeApi", () => {
   it("gives attachment uploads a timeout large enough for big files on slow links", async () => {
     mockedApiFetch.mockResolvedValueOnce(
       jsonResponse({
+        vault_id: VAULT_ID,
         ok: true,
         attachment: {
           relative_path: "Attachments/manual.pdf",
           size_bytes: 9,
           content_hash: "fnv1a64:test",
+          layer: null,
         },
-        git_sync_warning: null,
         rewritten_notes: 0,
         trashed_path: null,
         cleanup_warning: null,
@@ -233,7 +192,7 @@ describe("writeApi", () => {
     const file = new File(["pdf-bytes"], "manual.pdf", {
       type: "application/pdf",
     });
-    await uploadAttachment(file, "Attachments/manual.pdf");
+    await uploadAttachment(VAULT_ID, file, "Attachments/manual.pdf");
 
     const [, init] = mockedApiFetch.mock.calls[0] ?? [];
     expect(init?.timeoutMs).toBe(UPLOAD_FETCH_TIMEOUT_MS);
@@ -242,7 +201,7 @@ describe("writeApi", () => {
 
   it("gives note mutations a longer timeout than reads", async () => {
     mockedApiFetch.mockResolvedValueOnce(jsonResponse(outcome()));
-    await updateNote("home", "# Updated", "hash-1");
+    await updateNote(VAULT_ID, "home", "# Updated", "hash-1");
 
     const [, init] = mockedApiFetch.mock.calls[0] ?? [];
     expect(init?.timeoutMs).toBe(MUTATION_FETCH_TIMEOUT_MS);
@@ -251,9 +210,6 @@ describe("writeApi", () => {
 
   it("summarizes write outcome side effects", () => {
     expect(describeWriteOutcome(outcome())).toBeNull();
-    expect(
-      describeWriteOutcome(outcome({ git_sync_warning: "push failed" })),
-    ).toBe("Git sync warning: push failed");
     expect(
       describeWriteOutcome(
         outcome({ quality_warnings: ["added final newline"] }),
@@ -272,18 +228,50 @@ describe("writeApi", () => {
 
   it("maps conflict and write errors to named exceptions", async () => {
     mockedApiFetch.mockResolvedValueOnce(
-      jsonResponse({ error: "changed" }, 409),
+      jsonResponse(
+        { code: "write_conflict", message: "changed", retryable: true },
+        409,
+      ),
     );
-    await expect(createNote("Home", "# Home")).rejects.toMatchObject({
+    await expect(createNote(VAULT_ID, "Home", "# Home")).rejects.toMatchObject({
       name: "ConflictError",
       message: "changed",
     });
 
-    mockedApiFetch.mockResolvedValueOnce(jsonResponse({ error: "boom" }, 500));
-    await expect(deleteNote("home", "hash-1")).rejects.toMatchObject({
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse(
+        { code: "internal_error", message: "boom", retryable: false },
+        500,
+      ),
+    );
+    await expect(deleteNote(VAULT_ID, "home", "hash-1")).rejects.toMatchObject({
       name: "WriteApiError",
       message: "boom",
     });
+  });
+
+  it("carries the demo_read_only code on the thrown error so callers can detect it (#152)", async () => {
+    mockedApiFetch.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          code: "demo_read_only",
+          message:
+            "This is a public read-only demo instance; mutations and Vault-control operations are disabled.",
+          retryable: false,
+        },
+        403,
+      ),
+    );
+
+    let caught: unknown;
+    try {
+      await createNote(VAULT_ID, "Home", "# Home");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isDemoReadOnlyError(caught)).toBe(true);
+    expect(isDemoReadOnlyError(new Error("unrelated"))).toBe(false);
   });
 
   it("explains common non-JSON infrastructure errors without relying on statusText", async () => {
@@ -295,7 +283,7 @@ describe("writeApi", () => {
       }),
     );
 
-    await expect(createNote("Home", "# Home")).rejects.toMatchObject({
+    await expect(createNote(VAULT_ID, "Home", "# Home")).rejects.toMatchObject({
       name: "WriteApiError",
       message: "502 Bad Gateway",
     });
@@ -309,7 +297,7 @@ describe("writeApi", () => {
     );
 
     await expect(
-      uploadAttachment(new File(["x"], "x.png"), "x.png"),
+      uploadAttachment(VAULT_ID, new File(["x"], "x.png"), "x.png"),
     ).rejects.toMatchObject({
       name: "WriteApiError",
       message: "413 Payload Too Large",

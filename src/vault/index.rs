@@ -25,6 +25,33 @@ impl VaultIndex {
     }
 
     pub fn build_with_config(root: impl AsRef<Path>, config: &VaultScanConfig) -> io::Result<Self> {
+        let mut catalog = Self::build_catalog_with_config(root, config)?;
+        let (outgoing_by_slug, backlinks_by_slug) = build_link_graph(
+            &catalog.by_slug,
+            &catalog.by_title,
+            &catalog.by_path_title,
+            &catalog.ordered_slugs,
+        );
+        catalog.outgoing_by_slug = outgoing_by_slug;
+        catalog.backlinks_by_slug = backlinks_by_slug;
+        Ok(catalog)
+    }
+
+    /// The metadata-only half of [`Self::build_with_config`]: walks the tree
+    /// and assigns slug/title/layer bookkeeping without reading any note's
+    /// *content*. Skips [`build_link_graph`] (`links.rs`), which reads and
+    /// parses every Markdown file to build the wikilink graph and is the
+    /// dominant cost of a full index build in a large Vault.
+    ///
+    /// A caller that only needs a note's slug or layer — e.g. the write API
+    /// filling in its response after a commit already on disk — should use
+    /// this instead of `build_with_config` and never pay for the content
+    /// read. The returned `VaultIndex`'s `outgoing_by_slug`/`backlinks_by_slug`
+    /// are empty; do not call `note_links` on it.
+    pub fn build_catalog_with_config(
+        root: impl AsRef<Path>,
+        config: &VaultScanConfig,
+    ) -> io::Result<Self> {
         let root = root.as_ref().to_path_buf();
         let mut by_slug = HashMap::new();
         let mut by_title = HashMap::new();
@@ -121,16 +148,13 @@ impl VaultIndex {
             left.cmp(right)
         });
 
-        let (outgoing_by_slug, backlinks_by_slug) =
-            build_link_graph(&by_slug, &by_title, &by_path_title, &ordered_slugs);
-
         Ok(Self {
             by_slug,
             by_title,
             by_path_title,
             ordered_slugs,
-            outgoing_by_slug,
-            backlinks_by_slug,
+            outgoing_by_slug: HashMap::new(),
+            backlinks_by_slug: HashMap::new(),
             layers,
         })
     }

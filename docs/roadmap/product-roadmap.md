@@ -55,46 +55,14 @@ Direction:
 _Horizon: unversioned ("at some point"), but high-value for trust and safety.
 Some conflict-diff scaffolding already exists in the frontend._
 
-### Polished, publishable UI/UX
+### Onboarding experience
 
-**Problem:** the web experience needs to be good enough to show publicly.
+**Problem:** a first-time user lands in Hatchdoor with no onboarding.
 
-Direction: address the open UI/UX issues and raise the overall quality of the web
-experience to a publishable bar. Tracked issues:
+Direction: build a first-run onboarding flow, tracked as
+[#9](https://github.com/BattermanZ/Hatchdoor/issues/9).
 
-- [#7 — Improve attachment UX](https://github.com/BattermanZ/Hatchdoor/issues/7)
-- [#8 — Improve presentation of submenu](https://github.com/BattermanZ/Hatchdoor/issues/8)
-- [#9 — Add an onboarding experience](https://github.com/BattermanZ/Hatchdoor/issues/9)
-- [#10 — Messy UX hierarchy](https://github.com/BattermanZ/Hatchdoor/issues/10)
-- [#11 — Create-note interaction is odd](https://github.com/BattermanZ/Hatchdoor/issues/11)
-- [#12 — Sidebar layout is odd](https://github.com/BattermanZ/Hatchdoor/issues/12)
-
-Related but broader than pure UI polish: [#13 — Global Settings](https://github.com/BattermanZ/Hatchdoor/issues/13)
-and [#14 — Live editing content](https://github.com/BattermanZ/Hatchdoor/issues/14).
-
-_Horizon: **v2.5.0**._
-
-### PDF preview engine
-
-**Problem:** PDFs kept alongside Markdown notes currently interrupt the reading
-flow: people must leave Hatchdoor or download the attachment merely to inspect
-it.
-
-Direction: provide an in-app, local PDF preview for vault attachments, with
-page navigation, zoom, and a clear route to download or open the original file.
-The preview is for reading existing files; creating or editing PDFs is out of
-scope.
-
-_Horizon: **v2.5.0**._
-
-### Agent-driven ingestion
-
-**Problem:** agents can edit notes but cannot bring new material into the vault.
-
-Direction: let agents **send files through MCP for ingestion** into the vault, so
-content can be captured by agents, not only authored by hand. _To be detailed._
-
-_Horizon: **v2.4**._
+_Horizon: **v2.6.0**._
 
 ### Vault lifecycle & multi-vault
 
@@ -103,24 +71,63 @@ single instance serves only one folder. Users need to connect, configure, sync,
 and manage vaults from the product, and eventually run several at once.
 
 Direction: detailed in the
-[vault lifecycle & multi-vault roadmap](vault-lifecycle.md). Also includes
-**excluding sub-folders from indexing**
-([#22](https://github.com/BattermanZ/Hatchdoor/issues/22)) when Hatchdoor points at
-a directory, so parts of a vault can be kept out of the index.
+[vault lifecycle & multi-vault roadmap](vault-lifecycle.md).
 
-_Horizon: ongoing; managed Git vaults are proposed in
-[PR #18](https://github.com/BattermanZ/Hatchdoor/pull/18)._
+_Horizon: ongoing; managed Git vault support is in active development (see the
+[vault lifecycle & multi-vault roadmap](vault-lifecycle.md) for status)._
+
+### Adopt the 2026-07-28 MCP specification
+
+**Problem:** Hatchdoor's MCP server implements protocol version `2025-11-25`
+(`src/mcp/config.rs`); the current spec, `2026-07-28`, is a substantial rewrite,
+not an incremental bump.
+
+Direction: migrate to `2026-07-28`. Headline changes to account for: the
+protocol becomes **stateless** (handshake and session header removed, replaced
+by a mandatory `server/discover` RPC and per-request `_meta`); live updates
+move to a single opt-in `subscriptions/listen` stream, replacing SSE
+subscribe/unsubscribe; `ping`, `logging/setLevel`, and stream resumability are
+removed; **Roots, Sampling, and Logging are deprecated**; server-initiated
+requests (elicitation, sampling) move to a request/retry pattern instead of
+being pushed mid-call. HTTP+SSE transport is now formally deprecated too.
+
+_Horizon: **v2.6.0**._
+
+### User documentation, in-app and answerable by the agent
+
+**Problem:** the only documentation a new user has today is `README.md` and
+contributor-facing material under `docs/` — there's no proper end-user
+documentation, and no way to ask a question and get an answer without leaving
+the app.
+
+Direction: write proper **end-user documentation** as its own Hatchdoor
+vault, hosted as a **separate demo instance** — Hatchdoor is already a
+knowledge base, so the docs live in the product rather than a separate docs
+toolchain. Make that instance queryable from inside the app **through the
+existing MCP interface**: the in-app agent adds the docs instance as an
+MCP-reachable source, so a user can ask a question ("how do I connect a Git
+vault?") and get an answer grounded in the docs without leaving the app.
+
+_Horizon: **v2.6.0**._
 
 ### Multi-user, network-exposed deployment
 
 **Problem:** Hatchdoor assumes a single trusted user on a private deployment.
 
-Direction: support **several users on one instance with scoped permissions**, with
-the app **exposed online**. This is a multi-tenancy initiative — authentication,
-accounts, authorization, isolation, and audit must be designed explicitly, since
-it means serving mutually untrusted users.
+Direction: support **several users and agents on one shared instance**, each
+scoped to the vaults they're permitted to see. A user or agent should only be
+able to list, search, read, and write the vaults granted to them — e.g. a
+personal vault, a shared/common vault, and nothing else — while an admin role
+sees and manages everything. This turns vault access into a first-class
+permission boundary, not just a UI convenience, and is what makes Hatchdoor
+usable by more than one person/agent per instance (a household, a small team)
+rather than only self-hosted single-tenant. Authentication, accounts,
+authorization, isolation, and audit must be designed explicitly, since it means
+serving mutually untrusted users and agents on shared infrastructure.
 
-_Horizon: **v3** (long-term)._
+_Horizon: **v3** (long-term). Depends on the multi-vault work in
+[vault lifecycle & multi-vault](vault-lifecycle.md) existing first — you can't
+scope access to vaults that aren't yet independent, addressable entities._
 
 ## How to Use This Roadmap
 

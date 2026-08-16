@@ -133,6 +133,13 @@ Git is a transport and collaboration mechanism around the Markdown vault. A
 Git failure should affect synchronization, not the availability of the entire
 Hatchdoor application.
 
+The proposed first increment is detailed in the
+[managed Git vault foundation architecture](../architecture/managed-git-vault-foundation.md)
+and its [implementation plan](../plans/managed-git-vault-foundation.md). These
+are draft working documents for turning this roadmap outcome into reviewable
+delivery slices; they do not expand the product-managed configuration scope of
+Phase 1.
+
 ### 1.4 Configurable Embedding Provider
 
 > **Status: exploratory, low priority, not accepted.** External inference
@@ -295,6 +302,11 @@ Multi-vault support should not be described as multi-tenancy by itself.
 Authentication, user accounts, authorization, isolation, and audit policy form
 a separate product initiative that should be designed explicitly if Hatchdoor
 is later intended to serve mutually untrusted users.
+
+Vault-level access scoping for multiple users/agents is tracked as its own
+initiative — see [Multi-user, network-exposed deployment](product-roadmap.md#multi-user-network-exposed-deployment)
+in the product roadmap — but this document's multi-vault work is a
+prerequisite for it.
 
 ## Decisions to Make Together
 

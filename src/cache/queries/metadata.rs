@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cache::SqliteCache;
 use crate::search::LayerSelection;
@@ -149,6 +149,14 @@ impl SqliteCache {
 
     pub fn note_summaries(&self, selection: &LayerSelection) -> Result<Vec<NoteSummary>, String> {
         let conn = self.read()?;
+        self.note_summaries_on(&conn, selection)
+    }
+
+    pub(crate) fn note_summaries_on(
+        &self,
+        conn: &Connection,
+        selection: &LayerSelection,
+    ) -> Result<Vec<NoteSummary>, String> {
         let mut tags_by_slug: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         let mut tags_stmt = conn

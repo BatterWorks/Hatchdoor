@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 
+use rusqlite::Connection;
+
 use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 
-use super::{SearchMode, SearchRequest, matching_note_slugs};
+use super::{SearchMode, SearchRequest, matching_note_slugs_on};
 
 const RAW_K_CEILING: usize = 200;
 
@@ -23,29 +25,48 @@ pub fn retrieve(
     embedder: &dyn Embedder,
     req: &SearchRequest,
 ) -> Result<Vec<ChunkHit>, String> {
+    let conn = cache.read()?;
+    retrieve_on(cache, &conn, embedder, req)
+}
+
+pub(crate) fn retrieve_on(
+    cache: &SqliteCache,
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    req: &SearchRequest,
+) -> Result<Vec<ChunkHit>, String> {
     let raw_k = (req.limit.saturating_mul(req.per_note_cap)).min(RAW_K_CEILING);
     if raw_k == 0 {
         return Ok(Vec::new());
     }
 
-    let eligible = matching_note_slugs(cache, &req.filters, &req.layers)?;
+    let eligible = matching_note_slugs_on(cache, conn, &req.filters, &req.layers)?;
     let raw_hits: Vec<ChunkHit> = match req.mode {
-        SearchMode::Semantic => semantic(
+        SearchMode::Semantic => semantic_on(
             cache,
+            conn,
             embedder,
             &req.query,
             raw_k,
             &req.layers,
             eligible.as_ref(),
         )?,
-        SearchMode::Keyword => keyword(cache, &req.query, raw_k, &req.layers, eligible.as_ref())?,
+        SearchMode::Keyword => keyword_on(
+            cache,
+            conn,
+            &req.query,
+            raw_k,
+            &req.layers,
+            eligible.as_ref(),
+        )?,
     };
 
     Ok(apply_per_note_cap(raw_hits, req.per_note_cap, req.limit))
 }
 
-fn semantic(
+fn semantic_on(
     cache: &SqliteCache,
+    conn: &Connection,
     embedder: &dyn Embedder,
     query: &str,
     k: usize,
@@ -55,10 +76,12 @@ fn semantic(
     let hits = match eligible_slugs {
         // Note filters present: the accepted slow scan, scoped to the selected
         // layer tables. Never entered for plain layer separation.
-        Some(slugs) => cache.semantic_search_filtered(embedder, query, k, selection, slugs)?,
+        Some(slugs) => {
+            cache.semantic_search_filtered_on(conn, embedder, query, k, selection, slugs)?
+        }
         // No note filters: the fast vec0 KNN path, routed by layer. For the
         // default surface this is the unfiltered KNN against `chunk_vectors`.
-        None => cache.semantic_search_layered(embedder, query, k, selection)?,
+        None => cache.semantic_search_layered_on(conn, embedder, query, k, selection)?,
     };
     Ok(hits
         .into_iter()
@@ -72,16 +95,17 @@ fn semantic(
         .collect())
 }
 
-fn keyword(
+fn keyword_on(
     cache: &SqliteCache,
+    conn: &Connection,
     query: &str,
     k: usize,
     selection: &crate::search::LayerSelection,
     eligible_slugs: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<ChunkHit>, String> {
     let hits = match eligible_slugs {
-        Some(slugs) => cache.fts_search_chunks_filtered(query, k, selection, slugs)?,
-        None => cache.fts_search_chunks_layered(query, k, selection)?,
+        Some(slugs) => cache.fts_search_chunks_filtered_on(conn, query, k, selection, slugs)?,
+        None => cache.fts_search_chunks_layered_on(conn, query, k, selection)?,
     };
     if hits.is_empty() {
         return Ok(Vec::new());

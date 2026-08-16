@@ -2,13 +2,14 @@
 
 use std::collections::HashSet;
 
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::cache::SqliteCache;
 use crate::cache::parse::{build_fts_query, fts_query_terms};
 use crate::embed::Embedder;
 use crate::search::LayerSelection;
 use crate::vault::{SearchHit, content_snippet, normalize_title};
+use crate::vault_registry::VaultId;
 
 /// The default-surface semantic KNN query (against `chunk_vectors`). Kept as a
 /// named constant so a test can assert the default search path runs THIS query —
@@ -64,7 +65,194 @@ pub struct SemanticHit {
     pub distance: f32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct VaultSemanticHit {
+    pub(crate) vault_id: VaultId,
+    pub(crate) chunk_id: i64,
+    pub(crate) note_slug: String,
+    pub(crate) heading_path: Option<String>,
+    pub(crate) content: String,
+    pub(crate) distance: f32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct VaultChunkFtsHit {
+    pub(crate) vault_id: VaultId,
+    pub(crate) chunk_id: i64,
+    pub(crate) note_slug: String,
+    pub(crate) heading_path: Option<String>,
+    pub(crate) content: String,
+    pub(crate) bm25: f32,
+}
+
 impl SqliteCache {
+    /// Vault-qualified variant of the established layered KNN path. Scope is
+    /// part of the SQL eligibility predicate before sqlite-vec ranks chunks,
+    /// so an all-Vault request has one global result window rather than a
+    /// merged set of per-Vault windows.
+    pub(crate) fn vault_semantic_search_layered(
+        &self,
+        conn: &Connection,
+        vault_ids: &[VaultId],
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<VaultSemanticHit>, String> {
+        if vault_ids.is_empty() || k == 0 {
+            return Ok(Vec::new());
+        }
+        let prefixed_query = format!("{}{}", embedder.query_prefix(), query);
+        let query_vec = embedder
+            .embed(&[prefixed_query])?
+            .into_iter()
+            .next()
+            .ok_or("embedder returned no vectors")?;
+        let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
+        let ids = vault_ids
+            .iter()
+            .map(|vault_id| format!("'{}'", vault_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut hits = Vec::new();
+        let mut collect = |sql: String| -> Result<(), String> {
+            let mut statement = conn
+                .prepare(&sql)
+                .map_err(|error| format!("prepare Vault semantic KNN: {error}"))?;
+            let rows = statement
+                .query_map(params![query_bytes, k as i64], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, f64>(5)? as f32,
+                    ))
+                })
+                .map_err(|error| format!("query Vault semantic KNN: {error}"))?;
+            for row in rows {
+                let (vault_id, chunk_id, note_slug, heading_path, content, distance) =
+                    row.map_err(|error| format!("read Vault semantic KNN row: {error}"))?;
+                hits.push(VaultSemanticHit {
+                    vault_id: vault_id
+                        .parse()
+                        .map_err(|error| format!("read Vault semantic identity: {error}"))?,
+                    chunk_id,
+                    note_slug,
+                    heading_path,
+                    content,
+                    distance,
+                });
+            }
+            Ok(())
+        };
+
+        if selection.includes_default() {
+            collect(format!(
+                "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
+                 FROM vault_chunk_vectors v JOIN vault_chunks c ON c.id = v.chunk_id \
+                 WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_id IN ({ids}) \
+                 ORDER BY v.distance"
+            ))?;
+        }
+        if selection.is_all() {
+            collect(format!(
+                "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
+                 FROM vault_chunk_vectors_demoted v JOIN vault_chunks c ON c.id = v.chunk_id \
+                 WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_id IN ({ids}) \
+                 ORDER BY v.distance"
+            ))?;
+        } else {
+            for layer in selection.named_layers() {
+                collect(format!(
+                    "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
+                     FROM vault_chunk_vectors_demoted v JOIN vault_chunks c ON c.id = v.chunk_id \
+                     WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.layer = '{}' \
+                       AND v.vault_id IN ({ids}) ORDER BY v.distance",
+                    layer.replace('\'', "''"),
+                ))?;
+            }
+        }
+        hits.sort_by(|left, right| {
+            left.distance
+                .total_cmp(&right.distance)
+                .then_with(|| left.vault_id.cmp(&right.vault_id))
+                .then_with(|| left.note_slug.cmp(&right.note_slug))
+                .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+        });
+        hits.truncate(k);
+        Ok(hits)
+    }
+
+    /// Globally rank keyword hits across the given already-participating Vault
+    /// snapshots. The caller owns snapshot status; this method keeps the FTS
+    /// BM25 window global rather than merging per-Vault result windows.
+    pub(crate) fn vault_fts_search_chunks(
+        &self,
+        conn: &Connection,
+        vault_ids: &[VaultId],
+        query: &str,
+        selection: &LayerSelection,
+    ) -> Result<Vec<VaultChunkFtsHit>, String> {
+        if vault_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(fts_q) = build_fts_query(query) else {
+            return Ok(Vec::new());
+        };
+        let ids = vault_ids
+            .iter()
+            .map(|vault_id| format!("'{}'", vault_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            SELECT c.vault_id, c.id, c.note_slug, c.heading_path, c.content, bm25(vault_chunk_fts)
+            FROM vault_chunk_fts
+            JOIN vault_chunks c ON c.id = vault_chunk_fts.rowid
+            JOIN vault_notes n ON n.vault_id = c.vault_id AND n.slug = c.note_slug
+            WHERE vault_chunk_fts MATCH ?1
+              AND c.vault_id IN ({ids})
+              AND {layer}
+            ORDER BY bm25(vault_chunk_fts), c.vault_id, c.note_slug, c.id
+            "#,
+            layer = selection.sql_filter("n.layer"),
+        );
+        let mut statement = conn
+            .prepare(&sql)
+            .map_err(|error| format!("prepare Vault FTS search: {error}"))?;
+        let rows = statement
+            .query_map(params![fts_q], |row| {
+                let vault_id = row.get::<_, String>(0)?;
+                Ok((
+                    vault_id,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, f64>(5)? as f32,
+                ))
+            })
+            .map_err(|error| format!("query Vault FTS search: {error}"))?;
+        let mut hits = Vec::new();
+        for row in rows {
+            let (vault_id, chunk_id, note_slug, heading_path, content, bm25) =
+                row.map_err(|error| format!("read Vault FTS search row: {error}"))?;
+            hits.push(VaultChunkFtsHit {
+                vault_id: vault_id
+                    .parse()
+                    .map_err(|error| format!("read Vault FTS identity: {error}"))?,
+                chunk_id,
+                note_slug,
+                heading_path,
+                content,
+                bm25,
+            });
+        }
+        Ok(hits)
+    }
+
     pub fn search(
         &self,
         query: &str,
@@ -256,6 +444,18 @@ impl SqliteCache {
         k: usize,
         selection: &LayerSelection,
     ) -> Result<Vec<SemanticHit>, String> {
+        let conn = self.read()?;
+        self.semantic_search_layered_on(&conn, embedder, query, k, selection)
+    }
+
+    pub(crate) fn semantic_search_layered_on(
+        &self,
+        conn: &Connection,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<SemanticHit>, String> {
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -267,7 +467,6 @@ impl SqliteCache {
             .ok_or("embedder returned no vectors")?;
         let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
 
-        let conn = self.read()?;
         let read_hit = |row: &rusqlite::Row<'_>| -> rusqlite::Result<SemanticHit> {
             Ok(SemanticHit {
                 chunk_id: row.get(0)?,
@@ -333,6 +532,19 @@ impl SqliteCache {
         selection: &LayerSelection,
         eligible_slugs: &HashSet<String>,
     ) -> Result<Vec<SemanticHit>, String> {
+        let conn = self.read()?;
+        self.semantic_search_filtered_on(&conn, embedder, query, k, selection, eligible_slugs)
+    }
+
+    pub(crate) fn semantic_search_filtered_on(
+        &self,
+        conn: &Connection,
+        embedder: &dyn Embedder,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+        eligible_slugs: &HashSet<String>,
+    ) -> Result<Vec<SemanticHit>, String> {
         if k == 0 || eligible_slugs.is_empty() {
             return Ok(Vec::new());
         }
@@ -342,7 +554,6 @@ impl SqliteCache {
             .into_iter()
             .next()
             .ok_or("embedder returned no vectors")?;
-        let conn = self.read()?;
         let mut hits = Vec::new();
 
         // Each (sql, params) scan reads chunk_id, note_slug, heading_path,
@@ -513,13 +724,23 @@ impl SqliteCache {
         k: usize,
         selection: &LayerSelection,
     ) -> Result<Vec<ChunkFtsHit>, String> {
+        let conn = self.read()?;
+        self.fts_search_chunks_layered_on(&conn, query, k, selection)
+    }
+
+    pub(crate) fn fts_search_chunks_layered_on(
+        &self,
+        conn: &Connection,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 {
             return Ok(Vec::new());
         }
         let Some(fts_q) = build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.read()?;
         let sql = format!(
             r#"
             SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)
@@ -561,13 +782,24 @@ impl SqliteCache {
         selection: &LayerSelection,
         eligible_slugs: &HashSet<String>,
     ) -> Result<Vec<ChunkFtsHit>, String> {
+        let conn = self.read()?;
+        self.fts_search_chunks_filtered_on(&conn, query, k, selection, eligible_slugs)
+    }
+
+    pub(crate) fn fts_search_chunks_filtered_on(
+        &self,
+        conn: &Connection,
+        query: &str,
+        k: usize,
+        selection: &LayerSelection,
+        eligible_slugs: &HashSet<String>,
+    ) -> Result<Vec<ChunkFtsHit>, String> {
         if k == 0 || eligible_slugs.is_empty() {
             return Ok(Vec::new());
         }
         let Some(fts_q) = build_fts_query(query) else {
             return Ok(Vec::new());
         };
-        let conn = self.read()?;
         let sql = format!(
             r#"
                 SELECT c.id, c.note_slug, c.heading_path, c.content, bm25(chunk_fts)

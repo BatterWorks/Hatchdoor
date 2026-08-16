@@ -1,195 +1,147 @@
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { clearToken, setToken } from "../api/api";
 import { StartupGate } from "./StartupGate";
+import type { StartupStatus } from "./useStartupStatus";
 
 afterEach(() => {
   cleanup();
-  vi.useRealTimers();
   vi.restoreAllMocks();
-  clearToken();
 });
 
-function statusResponse(body: object) {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+function renderGate(
+  overrides: Partial<Parameters<typeof StartupGate>[0]> = {},
+) {
+  const props: Parameters<typeof StartupGate>[0] = {
+    status: null,
+    connectionIssue: false,
+    hasSteppedPastGate: false,
+    discoveryLoading: false,
+    hasRegistryRecovery: false,
+    hasNoVaults: false,
+    onAcceptGemma: vi.fn(),
+    onDeclineGemma: vi.fn(),
+    children: <div>Private vault</div>,
+    ...overrides,
+  };
+  render(<StartupGate {...props} />);
+  return props;
 }
 
 describe("StartupGate", () => {
-  it("shows understandable indexing progress without mounting the vault", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      statusResponse({
-        state: "indexing",
-        notes_completed: 12,
-        notes_total: 40,
-        chunks_completed: 18,
-        chunks_total: 70,
-        tokens_completed: 4_000,
-        tokens_total: 20_000,
-        percent: 20,
-        eta_seconds: 80,
-      }),
-    );
+  it("mounts the workspace before the first status answer lands", () => {
+    renderGate({ status: null });
 
-    render(
-      <StartupGate>
-        <div>Private vault</div>
-      </StartupGate>,
-    );
-
-    expect(
-      await screen.findByRole("heading", { name: "Preparing your vault" }),
-    ).toBeVisible();
-    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
-    expect(screen.getByText("12 of 40 notes")).toBeVisible();
-    expect(screen.getByText("18 of 70 chunks")).toBeVisible();
-    expect(screen.getByText("About 1 min remaining")).toBeVisible();
-    expect(screen.getByRole("progressbar")).toHaveAttribute(
-      "aria-valuenow",
-      "20",
-    );
+    expect(screen.getByText("Private vault")).toBeVisible();
   });
 
-  it("mounts the vault immediately when indexing is ready", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      statusResponse({ state: "ready" }),
-    );
+  it("mounts the vault immediately once the gate has stepped aside, even mid-scan", () => {
+    renderGate({
+      status: { state: "scanning" },
+      hasSteppedPastGate: true,
+    });
 
-    render(
-      <StartupGate>
-        <div>Private vault</div>
-      </StartupGate>,
-    );
-
-    expect(await screen.findByText("Private vault")).toBeVisible();
+    expect(screen.getByText("Private vault")).toBeVisible();
   });
 
-  it("explains Gemma terms before any model download and can accept them", async () => {
-    setToken("setup-token");
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(statusResponse({ state: "terms_required" }))
-      .mockResolvedValueOnce(statusResponse({ state: "downloading" }));
+  it("mounts the vault immediately once indexing is ready", () => {
+    renderGate({ status: { state: "ready" }, hasSteppedPastGate: true });
 
-    render(
-      <StartupGate>
-        <div>Private vault</div>
-      </StartupGate>,
-    );
+    expect(screen.getByText("Private vault")).toBeVisible();
+  });
+
+  it("mounts the vault immediately on a failed model download rather than blocking on it (#150)", () => {
+    renderGate({
+      status: { state: "failed", message: "model download failed" },
+      hasSteppedPastGate: true,
+    });
+
+    expect(screen.getByText("Private vault")).toBeVisible();
+  });
+
+  it("explains Gemma terms before any model download and calls onAcceptGemma/onDeclineGemma", () => {
+    const onAcceptGemma = vi.fn();
+    const onDeclineGemma = vi.fn();
+    renderGate({
+      status: { state: "terms_required" },
+      onAcceptGemma,
+      onDeclineGemma,
+    });
 
     expect(
-      await screen.findByRole("heading", {
-        name: "Set up multilingual search",
-      }),
+      screen.getByRole("heading", { name: "Set up multilingual search" }),
     ).toBeVisible();
     expect(
       screen.getByText(/does not change ownership of your vault/i),
     ).toBeVisible();
     expect(
-      screen.getByText(
-        /Nomic is the fallback if you decline Gemma\. It supports English only\./,
-      ),
-    ).toBeVisible();
-    expect(
-      screen.getByText(
-        /It still provides solid search, but Gemma performed better in our tests, including English searches\./,
-      ),
-    ).toBeVisible();
-    expect(
-      screen.getByText(
-        /Nomic uses about 1\.3 GB of RAM while indexing; Gemma uses about 0\.5 GB\./,
-      ),
-    ).toBeVisible();
-    expect(
       screen.getByRole("link", { name: "Read Gemma Terms" }),
     ).toHaveAttribute("href", "https://ai.google.dev/gemma/terms");
 
-    await act(async () => {
-      screen
-        .getByRole("button", { name: "Accept terms and set up Gemma" })
-        .click();
+    screen
+      .getByRole("button", { name: "Accept terms and set up Gemma" })
+      .click();
+    expect(onAcceptGemma).toHaveBeenCalledTimes(1);
+
+    screen.getByRole("button", { name: "Use Nomic instead" }).click();
+    expect(onDeclineGemma).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows model download progress while downloading, before the gate has stepped aside", () => {
+    renderGate({
+      status: {
+        state: "downloading",
+        model: "EmbeddingGemma 300M Q4",
+        downloaded_bytes: 25,
+        total_bytes: 100,
+        percent: 25,
+      },
     });
-    const [path, init] = fetchMock.mock.calls.at(-1) ?? [];
-    expect(path).toBe("/api/model/accept-gemma");
-    expect(init).toEqual(
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.any(Headers),
-      }),
-    );
-    expect((init?.headers as Headers).get("Authorization")).toBe(
-      "Bearer setup-token",
+
+    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Downloading EmbeddingGemma 300M Q4/),
+    ).toBeVisible();
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuenow",
+      "25",
     );
   });
 
-  it("polls until the backend becomes ready", async () => {
-    vi.useFakeTimers();
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        statusResponse({
-          state: "indexing",
-          notes_completed: 1,
-          notes_total: 2,
-          chunks_completed: 1,
-          chunks_total: 2,
-          tokens_completed: 10,
-          tokens_total: 20,
-          percent: 50,
-          eta_seconds: 2,
-        }),
-      )
-      .mockResolvedValue(statusResponse({ state: "ready" }));
-
-    render(
-      <StartupGate>
-        <div>Private vault</div>
-      </StartupGate>,
-    );
-    await act(async () => {});
-    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1_000);
+  it("stays stepped aside on a later downloading answer once it has stepped aside once (a retry never reopens the gate)", () => {
+    // #150: the gate is seen at most once per session — a retry after a
+    // failed model download must not re-block the workspace even though
+    // `state` genuinely goes back to "downloading".
+    renderGate({
+      status: { state: "downloading", percent: 10 },
+      hasSteppedPastGate: true,
     });
 
     expect(screen.getByText("Private vault")).toBeVisible();
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("shows a safe error when indexing fails", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(
-        statusResponse({
-          state: "failed",
-          message: "The search model could not be downloaded or loaded.",
-        }),
-      )
-      .mockResolvedValueOnce(statusResponse({ state: "downloading" }));
+  it("never renders for scanning, indexing, zero Vaults, or any registry condition — those are not states this component ever sees gated", () => {
+    const scanning: StartupStatus = { state: "scanning" };
+    renderGate({ status: scanning, hasSteppedPastGate: true });
+    expect(screen.getByText("Private vault")).toBeVisible();
+  });
 
-    render(
-      <StartupGate>
-        <div>Private vault</div>
-      </StartupGate>,
-    );
+  it("waits for registry discovery and lets a recovery state override a model gate", () => {
+    const modelSetup = { status: { state: "terms_required" as const } };
+    renderGate({ ...modelSetup, discoveryLoading: true });
+    expect(screen.getByText("Private vault")).toBeVisible();
 
-    expect(
-      await screen.findByRole("heading", { name: "Vault unavailable" }),
-    ).toBeVisible();
-    expect(screen.queryByText("Private vault")).not.toBeInTheDocument();
-    expect(
-      screen.getByText("The search model could not be downloaded or loaded."),
-    ).toBeVisible();
+    cleanup();
+    renderGate({ ...modelSetup, hasRegistryRecovery: true });
+    expect(screen.getByText("Private vault")).toBeVisible();
+  });
 
-    await act(async () => {
-      screen.getByRole("button", { name: "Retry setup" }).click();
+  it("lets a resolved zero-Vault workspace override a model gate", () => {
+    renderGate({
+      status: { state: "terms_required" },
+      hasNoVaults: true,
     });
-    const [path, init] = fetchMock.mock.calls.at(-1) ?? [];
-    expect(path).toBe("/api/model/retry");
-    expect(init).toEqual(expect.objectContaining({ method: "POST" }));
+
+    expect(screen.getByText("Private vault")).toBeVisible();
   });
 });

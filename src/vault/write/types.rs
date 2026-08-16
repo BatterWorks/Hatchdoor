@@ -42,6 +42,23 @@ pub enum WriteError {
     Io(String),
 }
 
+impl WriteError {
+    const RECOVERY_REQUIRED_PREFIX: &'static str = "recovery required: ";
+
+    pub(crate) fn recovery_required(details: String) -> Self {
+        Self::Io(format!("{}{details}", Self::RECOVERY_REQUIRED_PREFIX))
+    }
+
+    pub(crate) fn recovery_message(&self) -> Option<&str> {
+        let Self::Io(message) = self else {
+            return None;
+        };
+        message
+            .strip_prefix(Self::RECOVERY_REQUIRED_PREFIX)
+            .map(|_| message.as_str())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct TextRewrite {
     pub(super) path: PathBuf,
@@ -52,6 +69,13 @@ pub(super) struct TextRewrite {
 pub(super) struct AssetMove {
     pub(super) source: PathBuf,
     pub(super) destination: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MutationPhase {
+    Note,
+    Asset,
+    Rewrite,
 }
 
 impl From<io::Error> for WriteError {

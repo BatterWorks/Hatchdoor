@@ -23,11 +23,17 @@
 /* Article wrapper */
 .note-content {
   min-width: 0;
-  /* Keep enough trailing scroll range for headings near the end of a note to
-     land at the same top position as headings earlier in the document. */
-  padding-bottom: max(3rem, calc(100dvh - 7rem));
+  padding-bottom: 3rem;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+/* Trailing scroll range so headings near the end of a note land at the same
+   top position as headings earlier in it. Only for notes that actually scroll
+   — on a short one this was a screenful of nothing to scroll through, below a
+   note that had already ended. */
+.note-content[data-tail="true"] {
+  padding-bottom: max(3rem, calc(100dvh - 7rem));
 }
 
 .note-content > * {
@@ -246,8 +252,16 @@
   text-transform: uppercase;
 }
 
-.pdf-preview-open {
+/* Type-qualified to outweigh `.note-body a`, which otherwise wins on
+   specificity and leaves this button with 1px of bottom padding against its
+   own 0.45rem top — the label sitting high in its box. The link's hot rule is
+   kept. `line-height: 1` keeps the button the height it was: prose line-height
+   was leaking in and adding 5px of line box that the restored padding would
+   otherwise have paid for twice. */
+.note-body a.pdf-preview-open {
   flex: 0 0 auto;
+  padding-block: 0.45rem calc(0.45rem - 1px);
+  line-height: 1;
 }
 
 .pdf-preview canvas {
@@ -925,10 +939,26 @@
   margin: 0 0 2rem;
 }
 
+/* Label on the left, the page's own actions on the right. The actions moved
+   off the title's line because they were taking width from it and forcing
+   long titles to wrap; this line has the room. */
 .note-properties-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
   margin: 0 0 0.6rem;
   padding: 0 0 0.4rem;
   border-bottom: 1px solid var(--rule-strong);
+}
+
+.note-properties-head-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
+.note-properties-actions {
+  flex: none;
 }
 
 /* The whole heading line is the toggle, so the hit area is the full width
@@ -1184,10 +1214,11 @@
 
 /* The click target for the space between blocks. It reaches past the last one
    so the run-out at the end of a note is clickable too, which is where writing
-   usually continues. 8rem rather than the full pane height: enough to land in
-   without turning a click well below a short note into an edit. */
+   usually continues. 4rem rather than the full pane height: enough to land in
+   without turning a click well below a short note into an edit, and without
+   leaving dead space under every note. */
 .note-body .block-gap {
-  padding-bottom: 8rem;
+  padding-bottom: 4rem;
   cursor: text;
 }
 

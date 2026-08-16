@@ -1,49 +1,71 @@
 import { NavLink } from "react-router-dom";
-import { useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
 
-import type { ExplorerFolder, ExplorerNote, RecentNote } from "../types";
+import type {
+  ExplorerFolder,
+  ExplorerNote,
+  RecentNote,
+  VaultScope,
+  VaultSummary,
+} from "../types";
 import { AddIcon } from "./icons";
-import { UiPanel } from "./ui";
+import { UiPanel, VaultPrefix } from "./ui";
+import { pathToNoteIdentity, type NoteIdentity } from "../lib/notePath";
 
-/** Section header: `01 · RECENT · ──── · 04`, per §05 of the design system. */
+/** Section header: `01 · RECENT · ──── · 04`, per §05 of the design system.
+ * `slot`, when given, replaces the plain mono `count` with arbitrary
+ * trailing content (the count-or-condition slot, #142); `disabled` marks a
+ * collapsible head `aria-disabled` and inert without removing it from the
+ * tab order (#116's precedent, same as the rail's Settings slot). */
 export function SideHead({
   label,
   count,
+  slot,
   collapsible,
   open,
   controls,
   onToggle,
+  disabled,
+  className,
 }: {
   label: string;
   count?: number;
+  slot?: ReactNode;
   collapsible?: boolean;
   open?: boolean;
   controls?: string;
   onToggle?: () => void;
+  disabled?: boolean;
+  className?: string;
 }) {
   const inner = (
     <>
       {collapsible ? <span className="side-caret" aria-hidden="true" /> : null}
       <span className="side-label">{label}</span>
       <span className="side-rule" />
-      {count === undefined ? null : (
+      {slot !== undefined ? (
+        slot
+      ) : count === undefined ? null : (
         <span className="side-count">{String(count).padStart(2, "0")}</span>
       )}
     </>
   );
 
+  const classes = className ? `side-head ${className}` : "side-head";
+
   if (!collapsible) {
-    return <div className="side-head">{inner}</div>;
+    return <div className={classes}>{inner}</div>;
   }
 
   return (
     <button
       type="button"
-      className="side-head"
+      className={classes}
       data-open={open}
-      aria-expanded={open}
+      aria-expanded={disabled ? undefined : open}
+      aria-disabled={disabled || undefined}
       aria-controls={controls}
-      onClick={onToggle}
+      onClick={disabled ? undefined : onToggle}
     >
       {inner}
     </button>
@@ -55,16 +77,33 @@ export function RecentNotesList({
   onNavigate,
   collapsed,
   onToggleCollapsed,
+  vaults,
+  scope,
 }: {
   notes: RecentNote[];
   onNavigate: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  vaults: VaultSummary[];
+  scope: VaultScope;
 }) {
-  if (notes.length === 0) {
+  // A note whose Vault has left the collection cannot be opened — its link
+  // resolves to "Vault definition was not found" — and it has no name to show
+  // but its own raw UUID. Drop those rather than offer a dead row. Discovery
+  // in flight leaves `vaults` a temporary `[]`, which would empty the list on
+  // every load, so filter only once the real collection has arrived.
+  const known =
+    vaults.length === 0
+      ? notes
+      : notes.filter((note) =>
+          vaults.some((vault) => vault.vault_id === note.vaultId),
+        );
+  if (known.length === 0) {
     return null;
   }
-  const recent = notes.slice(0, 5);
+  const recent = known.slice(0, 5);
+  // Provenance only where the list can actually span Vaults (#140).
+  const showVaultPrefix = scope === "all" && vaults.length > 1;
 
   return (
     <UiPanel className="recent-notes" data-testid="recent-notes">
@@ -85,13 +124,21 @@ export function RecentNotesList({
                   issue #12 reported. */}
               <NavLink
                 className="note-link"
-                to={`/n/${note.slug}`}
+                to={`/v/${encodeURIComponent(note.vaultId)}/n/${note.slug}`}
                 onClick={onNavigate}
                 title={`${note.relativePath}.md`}
               >
                 <span className="idx" aria-hidden="true">
                   {String(index + 1).padStart(3, "0")}
                 </span>
+                {showVaultPrefix ? (
+                  <VaultPrefix
+                    name={
+                      vaults.find((vault) => vault.vault_id === note.vaultId)
+                        ?.name ?? note.vaultId
+                    }
+                  />
+                ) : null}
                 <span className="note-label">{note.title}</span>
               </NavLink>
             </li>
@@ -117,10 +164,10 @@ export function FolderTree({
   writeEnabled: boolean;
   onCreateNoteInFolder: (folderPath: string) => void;
 }) {
-  const currentSlug = pathToNoteSlug(currentPath);
+  const current = pathToNoteIdentity(currentPath);
   const activePathFolders = useMemo(
-    () => collectAncestorFolderPaths(root, currentSlug),
-    [currentSlug, root],
+    () => collectAncestorFolderPaths(root, current),
+    [current, root],
   );
 
   return (
@@ -244,11 +291,12 @@ function NoteNode({
     <li className="note-item">
       <NavLink
         className={
-          currentPath === `/n/${note.slug}`
+          currentPath ===
+          `/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`
             ? "note-link active-note"
             : "note-link"
         }
-        to={`/n/${note.slug}`}
+        to={`/v/${encodeURIComponent(note.vault_id)}/n/${note.slug}`}
         title={`${note.title}.md`}
       >
         {/* §05: folders carry the caret, notes carry a mono index. This is what
@@ -262,26 +310,22 @@ function NoteNode({
   );
 }
 
-function pathToNoteSlug(pathname: string): string | null {
-  const match = pathname.match(/^\/n\/([^/]+)$/);
-  if (!match) {
-    return null;
-  }
-
-  return decodeURIComponent(match[1]);
-}
-
 function collectAncestorFolderPaths(
   root: ExplorerFolder,
-  slug: string | null,
+  current: NoteIdentity | null,
 ): Set<string> {
   const paths = new Set<string>();
-  if (!slug) {
+  if (!current) {
     return paths;
   }
 
   const visit = (folder: ExplorerFolder, folderPath: string): boolean => {
-    if (folder.notes.some((note) => note.slug === slug)) {
+    if (
+      folder.notes.some(
+        (note) =>
+          note.slug === current.slug && note.vault_id === current.vaultId,
+      )
+    ) {
       paths.add(folderPath);
       return true;
     }

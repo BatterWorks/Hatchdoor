@@ -98,6 +98,21 @@ body.resizing {
       calc(0.9rem + env(safe-area-inset-bottom));
   }
 
+  /* Same filter, same semantics, different form (#119, #144): the facet
+     rail has no room as a column here, so Scope moves into the field strip
+     beside Mode, and the desktop Mode checkbox stands down. */
+  .search-toggle {
+    display: none;
+  }
+
+  .search-field-strip {
+    display: flex;
+  }
+
+  .search-facet-rail {
+    display: none;
+  }
+
   .explorer-pane[data-open="true"] {
     transform: translateX(0);
   }
@@ -131,6 +146,16 @@ body.resizing {
     width: 44px;
     height: 44px;
     font-size: 1.4rem;
+  }
+
+  /* The touch hit area is wider here, so the glyph sits further in and the
+     end-of-row correction has to grow with it. */
+  .topbar-brand > .icon-button:first-child {
+    margin-inline-start: -0.7rem;
+  }
+
+  .topbar-actions > *:last-child {
+    margin-inline-end: -0.7rem;
   }
 
   .note-property-row {

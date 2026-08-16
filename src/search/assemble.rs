@@ -1,11 +1,22 @@
 //! Phase 2 context assembly stage.
 
 use crate::cache::SqliteCache;
+use rusqlite::Connection;
 
 use super::{ChunkHit, OutboundLink, SearchResult, project_metadata};
 
 pub fn assemble(
     cache: &SqliteCache,
+    hits: Vec<ChunkHit>,
+    include_properties: &[String],
+) -> Result<Vec<SearchResult>, String> {
+    let conn = cache.read()?;
+    assemble_on(cache, &conn, hits, include_properties)
+}
+
+pub(crate) fn assemble_on(
+    cache: &SqliteCache,
+    conn: &Connection,
     hits: Vec<ChunkHit>,
     include_properties: &[String],
 ) -> Result<Vec<SearchResult>, String> {
@@ -22,7 +33,7 @@ pub fn assemble(
         }
     }
 
-    let metadata = cache.notes_with_outbound_links_batch(&distinct_slugs)?;
+    let metadata = cache.notes_with_outbound_links_batch_on(conn, &distinct_slugs)?;
 
     let mut out = Vec::with_capacity(hits.len());
     for h in hits {

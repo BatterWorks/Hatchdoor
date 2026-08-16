@@ -10,18 +10,18 @@ describe("flattenNoteCandidates", () => {
   it("flattens, de-duplicates by slug, and sorts by title", () => {
     const tree = {
       name: "Vault",
-      notes: [{ title: "Zeta", slug: "zeta" }],
+      notes: [{ title: "Zeta", slug: "zeta", vault_id: "vault-1" }],
       folders: [
         {
           name: "Projects",
           notes: [
-            { title: "Alpha", slug: "alpha" },
-            { title: "Zeta", slug: "zeta" },
+            { title: "Alpha", slug: "alpha", vault_id: "vault-1" },
+            { title: "Zeta", slug: "zeta", vault_id: "vault-1" },
           ],
           folders: [
             {
               name: "Sub",
-              notes: [{ title: "Mid", slug: "mid" }],
+              notes: [{ title: "Mid", slug: "mid", vault_id: "vault-1" }],
               folders: [],
             },
           ],

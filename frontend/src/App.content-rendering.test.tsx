@@ -10,6 +10,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { VaultApp as App } from "./App";
+import { discoveryResponse, healthyVault } from "./test/fixtures/vaults";
 
 const mermaidInitialize = vi.fn();
 const mermaidRender = vi.fn(async (id: string, chart: string) => ({
@@ -23,6 +24,25 @@ vi.mock("mermaid", () => ({
   },
 }));
 
+const VAULT = healthyVault("Vault");
+const VAULT_ID = VAULT.vault_id;
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
+}
+
+function collectionEnvelope(data: unknown): Response {
+  return jsonResponse({
+    scope: "all",
+    collection_revision: 1,
+    partial: false,
+    participants: [
+      { vault_id: VAULT_ID, vault_name: VAULT.name, state: "fresh" },
+    ],
+    data,
+  });
+}
+
 afterEach(() => {
   cleanup();
   window.localStorage.clear();
@@ -34,48 +54,57 @@ describe("App content rendering", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: `> [!warning] Heads up
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: `> [!warning] Heads up
 >
 > Callout body
 
 \`\`\`ts
 const x = 1
 \`\`\``,
-              },
-            }),
-            { status: 200 },
-          );
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
 
-        return new Response("not found", { status: 404 });
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -116,43 +145,52 @@ const x = 1
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: `> [!abstract]-
-> A collapsible callout that starts **closed** (\`[!abstract]-\`). Click to expand.`,
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: `> [!abstract]-
+> A collapsible callout that starts **closed** (\`[!abstract]-\`). Click to expand.`,
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -177,54 +215,126 @@ const x = 1
     );
   });
 
+  it("shows a Vault property row when more than one Vault is enabled, even with no frontmatter (#140)", async () => {
+    const otherVault = healthyVault("Second Vault");
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT, otherVault]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
+        }
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Just a note\n\nNo frontmatter on this one.",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+        return jsonResponse({ error: "not found" }, 404);
+      },
+    );
+
+    render(
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const grid = document.querySelector(".note-properties-grid");
+      expect(grid).not.toBeNull();
+      const row = grid!.querySelector(".note-property-row");
+      expect(row?.querySelector("dt")).toHaveTextContent("Vault");
+      expect(row?.querySelector("dd")).toHaveTextContent(VAULT.name);
+    });
+  });
+
   it("keeps table-of-contents targets stable after the note re-renders", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/home/links")) {
-          return new Response(
-            JSON.stringify({ links: { outgoing: [], backlinks: [] } }),
-            { status: 200 },
-          );
-        }
-
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: "# Home\n\n## Target section\n\nBody",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/home/links")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            outgoing: [],
+            backlinks: [],
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: "# Home\n\n## Target section\n\nBody",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
+        }
+
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
       <StrictMode>
-        <MemoryRouter initialEntries={["/n/home"]}>
-          <App />
+        <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+          <App
+            startupStatus={{ state: "ready" }}
+            onRetryModelSetup={() => {}}
+          />
         </MemoryRouter>
       </StrictMode>,
     );
@@ -260,48 +370,57 @@ const x = 1
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: `---
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: `---
 tags: [type/reference, status/active]
 created: 2026-02-08
 ---
 
 # Home
 Body`,
-              },
-            }),
-            { status: 200 },
-          );
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
 
-        return new Response("not found", { status: 404 });
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -329,53 +448,59 @@ Body`,
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Home", slug: "home" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
+        }
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Home", slug: "home" }],
+              },
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/note/home")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Home",
-                slug: "home",
-                relative_path: "Home",
-                content: `---
+        if (url.includes("/notes/home")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Home",
+              slug: "home",
+              relative_path: "Home",
+              content: `---
 tags: [type/reference]
 ---
 
 # Home
 Body`,
-              },
-            }),
-            { status: 200 },
-          );
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        if (url.includes("/api/search")) {
-          return new Response(
-            JSON.stringify({ mode: "keyword", results: [] }),
-            { status: 200 },
-          );
+        if (url.includes("/search")) {
+          return collectionEnvelope({ mode: "keyword", results: [] });
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
         }
 
-        return new Response("not found", { status: 404 });
+        return jsonResponse({ error: "not found" }, 404);
       });
 
     render(
-      <MemoryRouter initialEntries={["/n/home"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/home`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -391,110 +516,128 @@ Body`,
     await waitFor(() => {
       const called = fetchMock.mock.calls.some((call) =>
         String(call[0]).includes(
-          "/api/search?q=%23type%2Freference&mode=keyword",
+          "/api/v1/vaults/all/search?q=%23type%2Freference&mode=keyword",
         ),
       );
       expect(called).toBe(true);
     });
   });
 
-  it("renders note-local markdown images via vault-assets path", async () => {
+  it("renders note-local markdown images via the vault asset API", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Atlas", slug: "atlas" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/atlas")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Atlas",
-                slug: "atlas",
-                relative_path: "Notes/40-reference/Homelab Atlas",
-                content: "![Stack](Media-stack.png)",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Atlas", slug: "atlas" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/atlas")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Atlas",
+              slug: "atlas",
+              relative_path: "Notes/40-reference/Homelab Atlas",
+              content: "![Stack](Media-stack.png)",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/atlas"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
     const image = await screen.findByRole("img", { name: "Stack" });
     expect(image).toHaveAttribute(
       "src",
-      "/vault-assets/Notes/40-reference/Media-stack.png",
+      `/api/v1/vaults/${VAULT_ID}/assets/Notes/40-reference/Media-stack.png`,
     );
   });
 
-  it("renders note-local obsidian image embeds via vault-assets path", async () => {
+  it("renders note-local obsidian image embeds via the vault asset API", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Atlas", slug: "atlas" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/atlas")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Atlas",
-                slug: "atlas",
-                relative_path: "Notes/40-reference/Homelab Atlas",
-                content: "![[Media-stack.png]]",
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Atlas", slug: "atlas" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/atlas")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Atlas",
+              slug: "atlas",
+              relative_path: "Notes/40-reference/Homelab Atlas",
+              content: "![[Media-stack.png]]",
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/atlas"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
     const image = await screen.findByRole("img", { name: "Media-stack.png" });
     expect(image).toHaveAttribute(
       "src",
-      "/vault-assets/Notes/40-reference/Media-stack.png",
+      `/api/v1/vaults/${VAULT_ID}/assets/Notes/40-reference/Media-stack.png`,
     );
   });
 
@@ -502,54 +645,63 @@ Body`,
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Atlas", slug: "atlas" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/atlas")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Atlas",
-                slug: "atlas",
-                relative_path: "Notes/40-reference/Homelab Atlas",
-                content: [
-                  "# Atlas",
-                  "",
-                  "```mermaid",
-                  "graph TD",
-                  "A-->B",
-                  "```",
-                  "",
-                  "```mermaid",
-                  "flowchart LR",
-                  "X-->Y",
-                  "```",
-                ].join("\n"),
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Atlas", slug: "atlas" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/atlas")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Atlas",
+              slug: "atlas",
+              relative_path: "Notes/40-reference/Homelab Atlas",
+              content: [
+                "# Atlas",
+                "",
+                "```mermaid",
+                "graph TD",
+                "A-->B",
+                "```",
+                "",
+                "```mermaid",
+                "flowchart LR",
+                "X-->Y",
+                "```",
+              ].join("\n"),
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/atlas"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -585,49 +737,58 @@ Body`,
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Atlas", slug: "atlas" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/atlas")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Atlas",
-                slug: "atlas",
-                relative_path: "Notes/40-reference/Homelab Atlas",
-                content: [
-                  "# Atlas",
-                  "",
-                  "```mermaid",
-                  "graph TD",
-                  "A-->B",
-                  "```",
-                ].join("\n"),
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Atlas", slug: "atlas" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/atlas")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Atlas",
+              slug: "atlas",
+              relative_path: "Notes/40-reference/Homelab Atlas",
+              content: [
+                "# Atlas",
+                "",
+                "```mermaid",
+                "graph TD",
+                "A-->B",
+                "```",
+              ].join("\n"),
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/atlas"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 
@@ -668,49 +829,58 @@ Body`,
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (input: RequestInfo | URL) => {
         const url = String(input);
-        if (url.includes("/api/tree")) {
-          return new Response(
-            JSON.stringify({
-              name: "Vault",
-              folders: [],
-              notes: [{ title: "Atlas", slug: "atlas" }],
-            }),
-            { status: 200 },
-          );
+        if (url.endsWith("/api/v1/vaults")) {
+          return jsonResponse(discoveryResponse([VAULT]));
         }
-
-        if (url.includes("/api/note/atlas")) {
-          return new Response(
-            JSON.stringify({
-              note: {
-                title: "Atlas",
-                slug: "atlas",
-                relative_path: "Notes/40-reference/Homelab Atlas",
-                content: [
-                  "# Atlas",
-                  "",
-                  "```mermaid",
-                  "graph TD",
-                  "A-->B",
-                  "```",
-                ].join("\n"),
+        if (url.includes("/tree")) {
+          return collectionEnvelope([
+            {
+              vault_id: VAULT_ID,
+              vault_name: VAULT.name,
+              tree: {
+                name: "Vault",
+                folders: [],
+                notes: [{ vault_id: VAULT_ID, title: "Atlas", slug: "atlas" }],
               },
-            }),
-            { status: 200 },
-          );
+            },
+          ]);
+        }
+        if (url.includes("/recent")) {
+          return collectionEnvelope([]);
         }
 
-        if (url.includes("/api/resolve-batch")) {
-          return new Response(JSON.stringify({ results: [] }), { status: 200 });
+        if (url.includes("/notes/atlas")) {
+          return jsonResponse({
+            vault_id: VAULT_ID,
+            note: {
+              title: "Atlas",
+              slug: "atlas",
+              relative_path: "Notes/40-reference/Homelab Atlas",
+              content: [
+                "# Atlas",
+                "",
+                "```mermaid",
+                "graph TD",
+                "A-->B",
+                "```",
+              ].join("\n"),
+              content_hash: "hash",
+              layer: null,
+            },
+          });
         }
 
-        return new Response("not found", { status: 404 });
+        if (url.includes("/resolve-batch")) {
+          return jsonResponse({ vault_id: VAULT_ID, results: [] });
+        }
+
+        return jsonResponse({ error: "not found" }, 404);
       },
     );
 
     render(
-      <MemoryRouter initialEntries={["/n/atlas"]}>
-        <App />
+      <MemoryRouter initialEntries={[`/v/${VAULT_ID}/n/atlas`]}>
+        <App startupStatus={{ state: "ready" }} onRetryModelSetup={() => {}} />
       </MemoryRouter>,
     );
 

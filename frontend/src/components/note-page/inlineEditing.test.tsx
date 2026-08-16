@@ -98,9 +98,14 @@ function NoteHarness({
       <div className="note-body">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
-          components={createNoteMarkdownComponents("Home.md", new Map(), {
-            editable: true,
-          })}
+          components={createNoteMarkdownComponents(
+            "vault-1",
+            "Home.md",
+            new Map(),
+            {
+              editable: true,
+            },
+          )}
         >
           {body}
         </ReactMarkdown>
@@ -591,9 +596,14 @@ describe("stale rendered tree", () => {
         <div className="note-body">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
-            components={createNoteMarkdownComponents("Home.md", new Map(), {
-              editable: true,
-            })}
+            components={createNoteMarkdownComponents(
+              "vault-1",
+              "Home.md",
+              new Map(),
+              {
+                editable: true,
+              },
+            )}
           >
             {"one\n\ntwo\n"}
           </ReactMarkdown>

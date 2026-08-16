@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cache::SqliteCache;
 use crate::search::LayerSelection;
@@ -173,6 +173,17 @@ impl SqliteCache {
             return Ok(HashMap::new());
         }
         let conn = self.read()?;
+        self.notes_with_outbound_links_batch_on(&conn, slugs)
+    }
+
+    pub(crate) fn notes_with_outbound_links_batch_on(
+        &self,
+        conn: &Connection,
+        slugs: &[String],
+    ) -> Result<HashMap<String, NoteWithLinks>, String> {
+        if slugs.is_empty() {
+            return Ok(HashMap::new());
+        }
 
         let placeholders = std::iter::repeat_n("?", slugs.len())
             .collect::<Vec<_>>()

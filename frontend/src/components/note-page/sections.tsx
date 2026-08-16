@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import { normalizeTags, type FrontmatterValue } from "../../lib/markdown";
@@ -15,14 +15,20 @@ import {
 
 export function NoteProperties({
   properties,
+  vaultName,
   content,
   editable = false,
   collapsed,
   onToggleCollapsed,
   onTagSelect,
   onChange,
+  actions,
 }: {
   properties: Record<string, FrontmatterValue>;
+  /** The open note's own Vault, shown as a leading synthetic row (#140).
+   * Passed only when more than one Vault is enabled; absent otherwise, so a
+   * single-Vault instance keeps today's grid unchanged. */
+  vaultName?: string;
   /** The whole note, needed to rewrite the frontmatter in place. */
   content?: string;
   editable?: boolean;
@@ -30,6 +36,9 @@ export function NoteProperties({
   onToggleCollapsed: () => void;
   onTagSelect: (tag: string) => void;
   onChange?: (next: string) => void;
+  /** The page's own controls (save state, Edit), shown at the end of this
+   * section's heading line. */
+  actions?: ReactNode;
 }) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
 
@@ -58,7 +67,8 @@ export function NoteProperties({
 
   const canEdit = editable && !!content && !!onChange;
   const entries = Object.entries(properties);
-  if (entries.length === 0) {
+  const hasRows = entries.length > 0 || !!vaultName;
+  if (!hasRows && !actions) {
     return null;
   }
 
@@ -72,28 +82,50 @@ export function NoteProperties({
        *
        * The caret is the same affordance as the sidebar folder rows, so a
        * collapsible thing reads the same way wherever it appears.
+       *
+       * The page's own actions ride on this line rather than beside the title:
+       * up there they took width from it, and a long title wrapped around
+       * them. This line already runs the full measure and has room to spare.
        */}
-      <h3 className="note-properties-head">
-        <button
-          type="button"
-          className="note-properties-toggle"
-          data-open={!collapsed}
-          onClick={onToggleCollapsed}
-          aria-expanded={!collapsed}
-          aria-controls="note-properties-grid"
-        >
-          <span className="note-properties-caret" aria-hidden="true" />
-          Properties
-        </button>
-      </h3>
+      <div className="note-properties-head">
+        {hasRows ? (
+          <h3 className="note-properties-head-title">
+            <button
+              type="button"
+              className="note-properties-toggle"
+              data-open={!collapsed}
+              onClick={onToggleCollapsed}
+              aria-expanded={!collapsed}
+              aria-controls="note-properties-grid"
+            >
+              <span className="note-properties-caret" aria-hidden="true" />
+              Properties
+            </button>
+          </h3>
+        ) : (
+          // Nothing to disclose, but the actions still need their line — and a
+          // dead "Properties" toggle that opens on to nothing is worse than no
+          // label at all.
+          <span className="note-properties-head-title" />
+        )}
+        {actions ? (
+          <div className="note-properties-actions">{actions}</div>
+        ) : null}
+      </div>
 
       {/* Rendered even when collapsed, and hidden: `aria-controls` pointing at
           an element that does not exist is worse than a hidden one. */}
       <dl
         id="note-properties-grid"
         className="note-properties-grid"
-        hidden={collapsed}
+        hidden={collapsed || !hasRows}
       >
+        {vaultName ? (
+          <div className="note-property-row">
+            <dt>Vault</dt>
+            <dd>{vaultName}</dd>
+          </div>
+        ) : null}
         {entries.map(([key, value]) => (
           <div key={key} className="note-property-row">
             <dt>{key}</dt>
@@ -256,7 +288,13 @@ export function SearchHitNavigator({
   );
 }
 
-export function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
+export function NoteLinksPanel({
+  vaultId,
+  links,
+}: {
+  vaultId: string;
+  links: NoteLinks | null;
+}) {
   const outgoing = links?.outgoing ?? [];
   const backlinks = links?.backlinks ?? [];
   if (outgoing.length === 0 && backlinks.length === 0) {
@@ -272,8 +310,12 @@ export function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
       </summary>
       <div className="note-links-body">
         <div className="note-links-grid">
-          <NoteLinksList title="Outgoing" links={outgoing} />
-          <NoteLinksList title="Backlinks" links={backlinks} />
+          <NoteLinksList vaultId={vaultId} title="Outgoing" links={outgoing} />
+          <NoteLinksList
+            vaultId={vaultId}
+            title="Backlinks"
+            links={backlinks}
+          />
         </div>
       </div>
     </details>
@@ -281,9 +323,11 @@ export function NoteLinksPanel({ links }: { links: NoteLinks | null }) {
 }
 
 function NoteLinksList({
+  vaultId,
   title,
   links,
 }: {
+  vaultId: string;
   title: string;
   links: NoteLinks["outgoing"];
 }) {
@@ -296,7 +340,10 @@ function NoteLinksList({
         <ul>
           {links.map((link) => (
             <li key={`${title}-${link.slug}`}>
-              <Link to={`/n/${link.slug}`} title={`${link.relative_path}.md`}>
+              <Link
+                to={`/v/${encodeURIComponent(vaultId)}/n/${link.slug}`}
+                title={`${link.relative_path}.md`}
+              >
                 {link.title}
               </Link>
             </li>

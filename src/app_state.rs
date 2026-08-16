@@ -14,12 +14,38 @@ use crate::cache::SqliteCache;
 use crate::embed::Embedder;
 use crate::startup::{IndexingProgressSnapshot, StartupTracker};
 use crate::vault::{VaultIndex, VaultScanConfig, seed_empty_vault};
+use crate::vault_migration::LegacyMigrationRecovery;
+use crate::vault_registry::{VaultDefinition, VaultRegistryStore};
+use crate::vault_runtime::VaultCollectionRuntime;
+use crate::vault_runtime::VaultSource;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub vault_path: PathBuf,
     pub cache_db_path: PathBuf,
-    pub cache: Arc<RwLock<VaultCache>>,
+    /// Authoritative Vault definitions and the independently activated runtime
+    /// collection derived from them.
+    pub vault_registry: VaultRegistryStore,
+    pub vaults: VaultCollectionRuntime,
+    /// The instance-wide background-work admission queue and its per-Vault
+    /// managed-Git scheduler. HTTP Vault-collection management (add/edit/
+    /// enable/disable/disconnect) reconciles through these after a registry
+    /// commit; manual sync/retry request a Git turn directly.
+    pub vault_work: crate::vault_work::VaultWorkCoordinator,
+    pub managed_git: Arc<crate::git::ManagedGitScheduler>,
+    /// Present when safe automatic import could not prove the legacy
+    /// deployment. Collection/setup surfaces remain available for recovery.
+    /// Cleared by a confirmed "Start with no Vaults"
+    /// (`start_with_no_vaults_handler`), so this needs interior mutability
+    /// rather than a plain `Option` fixed at startup.
+    pub legacy_migration_recovery: Arc<StdRwLock<Option<LegacyMigrationRecovery>>>,
+    /// Disposable SQLite handle used while a configured local vault is still
+    /// being indexed. It is published through `ready_vault` only after a
+    /// successful build.
+    pub startup_sqlite: Arc<SqliteCache>,
+    /// Published only after a vault path has been validated and its first index
+    /// has committed. The application can serve liveness and lifecycle routes
+    /// while this is `None`.
+    pub ready_vault: Arc<RwLock<Option<ReadyVault>>>,
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
     /// Fires when a reindex changes the vault's layer marker set, so the MCP
@@ -244,6 +270,23 @@ impl AppState {
             .ok_or_else(|| "runtime configuration is missing HATCHDOOR_ARCHIVE_PREFIX".to_string())
     }
 
+    /// Resolve the archive folder for one Vault: its own configured folder
+    /// (`VaultDefinition::archive_folder`) if set, else the instance-wide
+    /// `HATCHDOOR_ARCHIVE_PREFIX` default. `definition` is `None` when the
+    /// Vault has no reconciled runtime yet — that degrades to the
+    /// instance-wide default rather than failing, since the caller's own
+    /// Vault-existence check (a not-found/unavailable status) is the
+    /// authoritative error for that case.
+    pub fn vault_archive_prefix(
+        definition: Option<&VaultDefinition>,
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<Arc<str>, String> {
+        if let Some(folder) = definition.and_then(VaultDefinition::archive_folder) {
+            return Ok(Arc::from(folder));
+        }
+        Self::runtime_archive_prefix(snapshot)
+    }
+
     pub fn runtime_scan_config(
         snapshot: &crate::runtime_config::ConfigSnapshot,
     ) -> Result<Arc<VaultScanConfig>, String> {
@@ -254,6 +297,19 @@ impl AppState {
         Ok(Arc::new(VaultScanConfig {
             exclude: crate::vault::ExcludeMatcher::new(&patterns)?,
         }))
+    }
+
+    /// Derive every configuration value consumed by one cache build from the
+    /// same immutable snapshot. A settings save may publish a new snapshot at
+    /// any time, so a reindex must not call a live accessor after binding this
+    /// operation's generation.
+    pub(crate) fn runtime_index_options(
+        snapshot: &crate::runtime_config::ConfigSnapshot,
+    ) -> Result<(Arc<VaultScanConfig>, bool), String> {
+        let scan_config = Self::runtime_scan_config(snapshot)?;
+        let embed_layers =
+            crate::runtime_config::is_truthy(snapshot.required("HATCHDOOR_EMBED_LAYERS")?);
+        Ok((scan_config, embed_layers))
     }
 
     /// Derive the noise-exclusion scan config from the *current* runtime
@@ -298,8 +354,42 @@ impl AppState {
             handle.record(record);
         }
     }
+
+    pub async fn ready_vault(&self) -> Result<ReadyVault, (StatusCode, Json<ErrorResponse>)> {
+        self.ready_vault
+            .read()
+            .await
+            .clone()
+            .ok_or_else(vault_unavailable)
+    }
+
+    pub async fn publish_ready_vault(&self, vault_path: PathBuf, cache: VaultCache) {
+        *self.ready_vault.write().await = Some(ReadyVault { vault_path, cache });
+    }
+
+    pub async fn vault_path(&self) -> Option<PathBuf> {
+        self.ready_vault
+            .read()
+            .await
+            .as_ref()
+            .map(|ready| ready.vault_path.clone())
+    }
+
+    pub fn configured_local_vault_path(&self) -> Option<PathBuf> {
+        match self.startup.runtime().source() {
+            VaultSource::Local { vault_path } => Some(vault_path.clone()),
+            VaultSource::ManagedGit(_) => None,
+        }
+    }
 }
 
+#[derive(Clone)]
+pub struct ReadyVault {
+    pub vault_path: PathBuf,
+    pub cache: VaultCache,
+}
+
+#[derive(Clone)]
 pub struct VaultCache {
     pub sqlite: Arc<SqliteCache>,
 }
@@ -356,8 +446,16 @@ pub fn build_cache_with_sqlite_and_progress(
 pub async fn sqlite_cache(
     state: &AppState,
 ) -> Result<Arc<SqliteCache>, (StatusCode, Json<ErrorResponse>)> {
-    let guard = state.cache.read().await;
-    Ok(guard.sqlite.clone())
+    Ok(state.ready_vault().await?.cache.sqlite)
+}
+
+pub fn vault_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ErrorResponse {
+            error: "Vault is not ready".to_string(),
+        }),
+    )
 }
 
 /// Build a generic `500` response, logging the real detail rather than leaking
@@ -388,25 +486,37 @@ where
     }
 }
 
-/// Coalescing refresh for the public `/api/refresh` endpoint: if a reindex is
-/// already running, skip rather than queue another full pass behind it. This
-/// defuses a request loop that would otherwise pin a CPU core (F-02).
-pub async fn refresh_coalescing(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let _refresh_guard = match state.refresh_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            debug!("Refresh already in progress; coalescing request");
-            return Ok(());
-        }
-    };
-    run_reindex(state, None).await.map_err(internal_error)
-}
-
 /// Guaranteed refresh for paths that must see their own change reflected (MCP
 /// writes, the vault watcher): waits for any in-flight reindex, then reindexes.
 pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     let _refresh_guard = state.refresh_lock.lock().await;
     run_reindex(state, None).await.map_err(internal_error)
+}
+
+/// Start the versioning task selected at startup if it is not already active.
+/// A watcher recovery calls this before it releases readiness, so recovering a
+/// broken initial index cannot leave the HTTP/MCP process ready without its
+/// configured background capability.
+pub(crate) async fn ensure_startup_git_sync(state: &AppState) {
+    let Some(config) = state.startup_git_config.as_ref().clone() else {
+        return;
+    };
+    let mut active_git_sync = state.git_sync.write().await;
+    if active_git_sync.is_some() {
+        return;
+    }
+    let handle = crate::git::spawn_sync_task(
+        config,
+        state.vault_write_lock.clone(),
+        crate::git::SyncOps {
+            commit: Box::new(crate::git::commit_local),
+            fetch: Box::new(crate::git::fetch_remote),
+            integrate: Box::new(crate::git::integrate_fetched),
+            push: Box::new(crate::git::push_branch),
+        },
+    );
+    *active_git_sync = Some(handle);
+    info!("Git sync enabled");
 }
 
 /// Spawn an index-settings rebuild after its new settings have been persisted.
@@ -438,15 +548,22 @@ async fn run_reindex(
     state: &AppState,
     on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
 ) -> Result<(), String> {
-    let sqlite = state.cache.read().await.sqlite.clone();
-    let vault_path = state.vault_path.clone();
+    let ready_vault = state.ready_vault.read().await.clone();
+    let was_ready = ready_vault.is_some();
+    let (sqlite, vault_path) = match ready_vault {
+        Some(ready) => (ready.cache.sqlite, ready.vault_path),
+        None => (
+            state.startup_sqlite.clone(),
+            state
+                .configured_local_vault_path()
+                .ok_or_else(|| "Vault is not ready".to_string())?,
+        ),
+    };
+    let current_sqlite = sqlite.clone();
+    let logged_vault_path = vault_path.clone();
     let embedder = state.embedder.clone();
     let runtime_snapshot = state.runtime_snapshot();
-    let scan_config = state.live_scan_config()?;
-    let embed_layers = runtime_snapshot
-        .setting("HATCHDOOR_EMBED_LAYERS")
-        .map(|setting| crate::runtime_config::is_truthy(&setting.value))
-        .unwrap_or(true);
+    let (scan_config, embed_layers) = AppState::runtime_index_options(&runtime_snapshot)?;
 
     // The marker-set hash the last build persisted. Compared against the value
     // after this reindex to detect a runtime layer change (a marker added,
@@ -477,13 +594,20 @@ async fn run_reindex(
     .await
     .map_err(|error| format!("background reindex task panicked: {error}"))??;
 
-    debug!(vault_path = %state.vault_path.display(), "SQLite vault cache refreshed");
+    if !was_ready {
+        state
+            .publish_ready_vault(
+                logged_vault_path.clone(),
+                VaultCache {
+                    sqlite: current_sqlite.clone(),
+                },
+            )
+            .await;
+    }
 
-    let current_marker_hash = state
-        .cache
-        .read()
-        .await
-        .sqlite
+    debug!(vault_path = %logged_vault_path.display(), "SQLite vault cache refreshed");
+
+    let current_marker_hash = current_sqlite
         .get_metadata("marker_set_hash")
         .ok()
         .flatten();
@@ -495,13 +619,13 @@ async fn run_reindex(
     }
 
     // A successful reindex after a failed startup — e.g. the watcher picking up a
-    // corrected `.hatchdoor-layer` marker — clears the failed state and brings
-    // the vault routes back online. When run_reindex is reached, startup is
-    // either Ready (normal writes/refresh) or Failed (recovery); the read routes
-    // are gated behind readiness, so a refresh can only arrive in those two
-    // states. Git sync, if configured, still requires a restart after a failed
-    // startup: it is started only on the clean-startup path.
+    // corrected `.hatchdoor-layer` marker — restores every configured background
+    // capability before it brings the vault routes back online. When run_reindex
+    // is reached, startup is either Ready (normal writes/refresh) or Failed
+    // (recovery); the read routes are gated behind readiness, so a refresh can
+    // only arrive in those two states.
     if !state.startup.is_ready() {
+        ensure_startup_git_sync(state).await;
         info!("Vault reindex succeeded; clearing failed startup state");
         state.startup.set_ready();
     }
@@ -525,6 +649,8 @@ mod tests {
     use super::*;
     use std::path::Path;
     use tempfile::tempdir;
+
+    use crate::git::{GitConfig, GitMode};
 
     #[test]
     fn index_status_keeps_search_stale_until_the_latest_queued_rebuild_finishes() {
@@ -643,10 +769,17 @@ mod tests {
         let cache = build_cache(&vault_path, embedder.as_ref()).expect("build cache");
         let (vault_events, _) = broadcast::channel(64);
         let (mcp_tools_changed, _) = broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         AppState {
-            vault_path,
             cache_db_path: state_root.join("cache.sqlite3"),
-            cache: Arc::new(RwLock::new(cache)),
+            vault_registry: VaultRegistryStore::new(state_root.join("state/vaults.json")),
+            vaults: VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
+            legacy_migration_recovery: Arc::new(StdRwLock::new(None)),
+            startup_sqlite: cache.sqlite.clone(),
+            ready_vault: Arc::new(RwLock::new(Some(ReadyVault { vault_path, cache }))),
             vault_revision: Arc::new(AtomicU64::new(0)),
             vault_events,
             mcp_tools_changed,
@@ -670,28 +803,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_coalescing_surfaces_errors() {
-        let dir = tempdir().expect("temp dir");
-        let vault_path = dir.path().join("vault");
-        std::fs::create_dir_all(&vault_path).expect("create vault");
-        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-
-        let mut state = state_with_vault(vault_path);
-        state.vault_path = dir.path().join("missing-vault");
-
-        let result = refresh_coalescing(&state).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
     async fn sqlite_cache_returns_current_cache_without_reindexing() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
 
-        let mut state = state_with_vault(vault_path);
-        state.vault_path = dir.path().join("missing-vault");
+        let state = state_with_vault(vault_path);
+        state.ready_vault.write().await.as_mut().unwrap().vault_path =
+            dir.path().join("missing-vault");
 
         let result = sqlite_cache(&state).await;
         assert!(result.is_ok());
@@ -742,16 +862,54 @@ mod tests {
         refresh_now(&state).await.expect("refresh");
 
         assert!(
-            state
-                .cache
-                .read()
+            sqlite_cache(&state)
                 .await
-                .sqlite
+                .expect("ready cache")
                 .read_note_by_slug("ignored")
                 .expect("read")
                 .is_none(),
             "the reindex must bind the saved exclusion snapshot"
         );
+    }
+
+    #[test]
+    fn reindex_options_remain_on_one_bound_snapshot_after_settings_publish() {
+        let dir = tempdir().expect("temp dir");
+        let vault_path = dir.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create vault");
+        let state = state_with_vault(vault_path);
+
+        let bound_snapshot = state.runtime_snapshot();
+        state
+            .runtime_config
+            .save([
+                ("HATCHDOOR_EXCLUDE".to_string(), "Ignored.md".to_string()),
+                ("HATCHDOOR_EMBED_LAYERS".to_string(), "false".to_string()),
+            ])
+            .expect("publish newer settings between operation reads");
+
+        let (bound_scan, bound_embed_layers) =
+            AppState::runtime_index_options(&bound_snapshot).expect("bound index options");
+        assert!(
+            !bound_scan
+                .exclude
+                .is_excluded(Path::new("Ignored.md"), false),
+            "the scan config must remain on the operation's original generation"
+        );
+        assert!(
+            bound_embed_layers,
+            "all index options must remain on the operation's original generation"
+        );
+
+        let current_snapshot = state.runtime_snapshot();
+        let (current_scan, current_embed_layers) =
+            AppState::runtime_index_options(&current_snapshot).expect("current index options");
+        assert!(
+            current_scan
+                .exclude
+                .is_excluded(Path::new("Ignored.md"), false)
+        );
+        assert!(!current_embed_layers);
     }
 
     #[tokio::test]
@@ -763,7 +921,18 @@ mod tests {
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-        let state = state_with_vault(vault_path);
+        let mut state = state_with_vault(vault_path.clone());
+        state.startup_git_config = Arc::new(Some(GitConfig {
+            vault_path,
+            mode: GitMode::Local,
+            remote: "origin".to_string(),
+            branch: "main".to_string(),
+            username: "hatchdoor".to_string(),
+            token: String::new(),
+            debounce_seconds: 60,
+            author_name: "Hatchdoor".to_string(),
+            author_email: "hatchdoor@localhost".to_string(),
+        }));
         state.startup.set_failed();
         assert!(!state.startup.is_ready(), "precondition: startup is failed");
 
@@ -773,6 +942,27 @@ mod tests {
             state.startup.is_ready(),
             "a successful reindex must clear the failed startup state"
         );
+        let first_handle = state
+            .git_sync
+            .read()
+            .await
+            .clone()
+            .expect("recovery must restore configured Git before Ready");
+
+        refresh_now(&state)
+            .await
+            .expect("subsequent refresh after recovery");
+        let second_handle = state
+            .git_sync
+            .read()
+            .await
+            .clone()
+            .expect("configured Git remains active");
+        assert!(Arc::ptr_eq(&first_handle.status(), &second_handle.status()));
+        first_handle
+            .stop(std::time::Duration::from_secs(1))
+            .await
+            .expect("stop test Git task");
     }
 
     #[tokio::test]
@@ -784,9 +974,10 @@ mod tests {
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
         std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-        let mut state = state_with_vault(vault_path);
+        let state = state_with_vault(vault_path);
         state.startup.set_failed();
-        state.vault_path = dir.path().join("missing-vault");
+        state.ready_vault.write().await.as_mut().unwrap().vault_path =
+            dir.path().join("missing-vault");
 
         let result = refresh_now(&state).await;
 
@@ -798,7 +989,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_coalescing_broadcasts_revision_after_successful_refresh() {
+    async fn refresh_broadcasts_revision_after_successful_reindex() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("create vault");
@@ -807,7 +998,7 @@ mod tests {
         let mut events = state.vault_events.subscribe();
 
         std::fs::write(vault_path.join("Second.md"), "second").expect("write note");
-        refresh_coalescing(&state).await.expect("refresh");
+        refresh_now(&state).await.expect("refresh");
 
         assert_eq!(events.recv().await.expect("revision"), 1);
     }
@@ -837,6 +1028,80 @@ mod tests {
         assert!(
             after.exclude.is_excluded(Path::new("Secret.md"), false),
             "the saved HATCHDOOR_EXCLUDE pattern must take effect immediately"
+        );
+    }
+
+    /// Issue #130: a Vault's own configured archive folder overrides the
+    /// instance-wide `HATCHDOOR_ARCHIVE_PREFIX` default when present, and the
+    /// default applies unchanged both when the Vault has none configured and
+    /// when no Vault definition is available at all (e.g. no reconciled
+    /// runtime yet).
+    #[test]
+    fn vault_archive_prefix_prefers_the_vaults_own_folder_and_falls_back_to_the_instance_default() {
+        let directory = tempdir().expect("temp dir");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("vault dir");
+        let store =
+            crate::vault_registry::VaultRegistryStore::new(directory.path().join("vaults.json"));
+        let committed = store
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Team Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_path.clone(),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: Some("Team Archive".to_string()),
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault with its own archive folder");
+        let with_override = committed.definitions().next().expect("definition");
+
+        std::fs::create_dir_all(directory.path().join("plain")).expect("plain vault dir");
+        let plain_committed = store
+            .add(
+                committed.revision(),
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Plain Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: directory.path().join("plain"),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault without an archive folder");
+        let without_override = plain_committed
+            .definitions()
+            .find(|definition| definition.name() == "Plain Vault")
+            .expect("plain definition");
+
+        let snapshot = crate::runtime_config::RuntimeConfig::for_tests().snapshot();
+
+        assert_eq!(
+            AppState::vault_archive_prefix(Some(&with_override), &snapshot)
+                .expect("resolve override")
+                .as_ref(),
+            "Team Archive/"
+        );
+        assert_eq!(
+            AppState::vault_archive_prefix(Some(&without_override), &snapshot)
+                .expect("resolve default")
+                .as_ref(),
+            "90-archive/"
+        );
+        assert_eq!(
+            AppState::vault_archive_prefix(None, &snapshot)
+                .expect("resolve default with no definition")
+                .as_ref(),
+            "90-archive/"
         );
     }
 }

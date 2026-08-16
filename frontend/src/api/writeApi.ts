@@ -1,6 +1,7 @@
 import { apiFetch } from "./api";
 import type {
   AttachmentOutcome,
+  VaultId,
   WriteCapabilities,
   WriteOutcome,
 } from "../types";
@@ -21,9 +22,6 @@ export const MUTATION_FETCH_TIMEOUT_MS = 60_000;
 export function describeWriteOutcome(outcome: WriteOutcome): string | null {
   const parts: string[] = [];
 
-  if (outcome.git_sync_warning) {
-    parts.push(`Git sync warning: ${outcome.git_sync_warning}`);
-  }
   const qualityWarnings = outcome.quality_warnings ?? [];
   if (qualityWarnings.length > 0) {
     parts.push(`Write quality: ${qualityWarnings.join(" ")}`);
@@ -49,16 +47,36 @@ export function describeWriteOutcome(outcome: WriteOutcome): string | null {
   return parts.length > 0 ? parts.join(" ") : null;
 }
 
-async function parseError(res: Response): Promise<string> {
+async function parseError(
+  res: Response,
+): Promise<{ message: string; code?: string }> {
   try {
-    const json = (await res.json()) as { error?: unknown };
-    if (typeof json.error === "string") {
-      return json.error;
-    }
+    const json = (await res.json()) as { message?: unknown; code?: unknown };
+    const message =
+      typeof json.message === "string" && json.message.trim().length > 0
+        ? json.message
+        : `${res.status} ${statusFallbackText(res)}`.trim();
+    return {
+      message,
+      code: typeof json.code === "string" ? json.code : undefined,
+    };
   } catch {
-    // Fall back to status text below.
+    return { message: `${res.status} ${statusFallbackText(res)}`.trim() };
   }
-  return `${res.status} ${statusFallbackText(res)}`.trim();
+}
+
+/** The stable code the server sends for every mutation and Vault-control
+ * refusal in demo mode (`src/handlers/vaults.rs`'s `demo_read_only_response`). */
+export const DEMO_READ_ONLY_CODE = "demo_read_only";
+
+/** True for any write-API error carrying the demo-read-only code — the one
+ * refusal the shell renders in its own words rather than the server's
+ * (#152). */
+export function isDemoReadOnlyError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (error as Error & { code?: string }).code === DEMO_READ_ONLY_CODE
+  );
 }
 
 function statusFallbackText(res: Response): string {
@@ -91,9 +109,10 @@ function statusFallbackText(res: Response): string {
   }
 }
 
-function makeWriteError(message: string, status: number): Error {
-  const error = new Error(message);
+function makeWriteError(message: string, status: number, code?: string): Error {
+  const error = new Error(message) as Error & { code?: string };
   error.name = status === 409 ? "ConflictError" : "WriteApiError";
+  error.code = code;
   return error;
 }
 
@@ -107,53 +126,74 @@ async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
     },
   });
   if (!res.ok) {
-    throw makeWriteError(await parseError(res), res.status);
+    const { message, code } = await parseError(res);
+    throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as T;
 }
 
-export async function getWriteCapabilities(): Promise<WriteCapabilities> {
-  const res = await apiFetch("/api/write-capabilities");
+function vaultNotesUrl(vaultId: VaultId): string {
+  return `/api/v1/vaults/${encodeURIComponent(vaultId)}/notes`;
+}
+
+function vaultNoteUrl(vaultId: VaultId, slug: string): string {
+  return `${vaultNotesUrl(vaultId)}/${encodeURIComponent(slug)}`;
+}
+
+export async function getWriteCapabilities(
+  vaultId: VaultId,
+): Promise<WriteCapabilities> {
+  const res = await apiFetch(
+    `/api/v1/vaults/${encodeURIComponent(vaultId)}/write-capabilities`,
+  );
   if (!res.ok) {
-    throw makeWriteError(await parseError(res), res.status);
+    const { message, code } = await parseError(res);
+    throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as WriteCapabilities;
 }
 
 export function createNote(
+  vaultId: VaultId,
   relativePath: string,
   content: string,
 ): Promise<WriteOutcome> {
-  return requestJson("/api/note", {
+  return requestJson(vaultNotesUrl(vaultId), {
     method: "POST",
     body: JSON.stringify({ relative_path: relativePath, content }),
   });
 }
 
 export async function uploadAttachment(
+  vaultId: VaultId,
   file: File,
   targetRelativePath: string,
 ): Promise<AttachmentOutcome> {
   const form = new FormData();
   form.set("target_relative_path", targetRelativePath);
   form.set("file", file);
-  const res = await apiFetch("/api/attachment", {
-    method: "POST",
-    body: form,
-    timeoutMs: UPLOAD_FETCH_TIMEOUT_MS,
-  });
+  const res = await apiFetch(
+    `/api/v1/vaults/${encodeURIComponent(vaultId)}/attachments`,
+    {
+      method: "POST",
+      body: form,
+      timeoutMs: UPLOAD_FETCH_TIMEOUT_MS,
+    },
+  );
   if (!res.ok) {
-    throw makeWriteError(await parseError(res), res.status);
+    const { message, code } = await parseError(res);
+    throw makeWriteError(message, res.status, code);
   }
   return (await res.json()) as AttachmentOutcome;
 }
 
 export function updateNote(
+  vaultId: VaultId,
   slug: string,
   content: string,
   expectedContentHash: string,
 ): Promise<WriteOutcome> {
-  return requestJson(`/api/note/${encodeURIComponent(slug)}`, {
+  return requestJson(vaultNoteUrl(vaultId, slug), {
     method: "PUT",
     body: JSON.stringify({
       content,
@@ -163,11 +203,12 @@ export function updateNote(
 }
 
 export function renameNote(
+  vaultId: VaultId,
   slug: string,
   newTitle: string,
   expectedContentHash: string,
 ): Promise<WriteOutcome> {
-  return requestJson(`/api/note/${encodeURIComponent(slug)}/rename`, {
+  return requestJson(`${vaultNoteUrl(vaultId, slug)}/rename`, {
     method: "PATCH",
     body: JSON.stringify({
       new_title: newTitle,
@@ -177,11 +218,12 @@ export function renameNote(
 }
 
 export function moveNote(
+  vaultId: VaultId,
   slug: string,
   targetFolder: string,
   expectedContentHash: string,
 ): Promise<WriteOutcome> {
-  return requestJson(`/api/note/${encodeURIComponent(slug)}/move`, {
+  return requestJson(`${vaultNoteUrl(vaultId, slug)}/move`, {
     method: "PATCH",
     body: JSON.stringify({
       target_folder: targetFolder,
@@ -191,20 +233,22 @@ export function moveNote(
 }
 
 export function archiveNote(
+  vaultId: VaultId,
   slug: string,
   expectedContentHash: string,
 ): Promise<WriteOutcome> {
-  return requestJson(`/api/note/${encodeURIComponent(slug)}/archive`, {
+  return requestJson(`${vaultNoteUrl(vaultId, slug)}/archive`, {
     method: "PATCH",
     body: JSON.stringify({ expected_content_hash: expectedContentHash }),
   });
 }
 
 export function deleteNote(
+  vaultId: VaultId,
   slug: string,
   expectedContentHash: string,
 ): Promise<WriteOutcome> {
-  return requestJson(`/api/note/${encodeURIComponent(slug)}`, {
+  return requestJson(vaultNoteUrl(vaultId, slug), {
     method: "DELETE",
     body: JSON.stringify({ expected_content_hash: expectedContentHash }),
   });

@@ -39,7 +39,7 @@ tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # alias for the read-only index microbenchmark, which inspects the FastEmbed
 # model tokenizer directly and must speak its exact API version.
 tokenizers-fe = { package = "tokenizers", version = "0.22", default-features = false, features = ["onig"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }
 tracing = "0.1"

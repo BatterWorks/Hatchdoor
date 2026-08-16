@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
+import { useVaultDiscovery, useVaultScope } from "../hooks/useVaultScope";
 
 import { StateBlock } from "./ui";
 import type {
@@ -12,7 +13,11 @@ import type {
   NoteRef,
   NoteWordRef,
   TagStat,
+  VaultId,
+  VaultQualifiedStats,
+  VaultScope,
   VaultStats,
+  VaultSummary,
 } from "../types";
 
 function fmtNum(n: number): string {
@@ -64,13 +69,22 @@ function TagBars({ tags }: { tags: TagStat[] }) {
   );
 }
 
-function RankedList({ notes }: { notes: LinkedNoteRef[] }) {
+function RankedList({
+  vaultId,
+  notes,
+}: {
+  vaultId: VaultId;
+  notes: LinkedNoteRef[];
+}) {
   return (
     <div className="stats-ranked-list">
       {notes.map((n, i) => (
         <div key={n.slug} className="stats-ranked-row">
           <span className="stats-ranked-rank">{i + 1}</span>
-          <Link className="stats-ranked-title" to={`/n/${n.slug}`}>
+          <Link
+            className="stats-ranked-title"
+            to={`/v/${encodeURIComponent(vaultId)}/n/${n.slug}`}
+          >
             {n.title}
           </Link>
           <span className="stats-ranked-meta">
@@ -135,9 +149,11 @@ function FolderList({ folders }: { folders: FolderStat[] }) {
 }
 
 function NoteWordList({
+  vaultId,
   notes,
   sublabel,
 }: {
+  vaultId: VaultId;
   notes: NoteWordRef[];
   sublabel: string;
 }) {
@@ -149,7 +165,10 @@ function NoteWordList({
       <div className="stats-note-list" style={{ marginBottom: "0.9rem" }}>
         {notes.map((n) => (
           <div key={n.slug} className="stats-note-row">
-            <Link className="stats-note-title" to={`/n/${n.slug}`}>
+            <Link
+              className="stats-note-title"
+              to={`/v/${encodeURIComponent(vaultId)}/n/${n.slug}`}
+            >
               {n.title}
             </Link>
             <span className="stats-note-meta">{fmtNum(n.word_count)} w</span>
@@ -160,7 +179,7 @@ function NoteWordList({
   );
 }
 
-function PillList({ notes }: { notes: NoteRef[] }) {
+function PillList({ vaultId, notes }: { vaultId: VaultId; notes: NoteRef[] }) {
   if (notes.length === 0) {
     return (
       <p
@@ -177,7 +196,11 @@ function PillList({ notes }: { notes: NoteRef[] }) {
   return (
     <div className="stats-pill-list">
       {notes.map((n) => (
-        <Link key={n.slug} className="stats-pill" to={`/n/${n.slug}`}>
+        <Link
+          key={n.slug}
+          className="stats-pill"
+          to={`/v/${encodeURIComponent(vaultId)}/n/${n.slug}`}
+        >
           {n.title}
         </Link>
       ))}
@@ -185,12 +208,21 @@ function PillList({ notes }: { notes: NoteRef[] }) {
   );
 }
 
-function RecentList({ notes }: { notes: NoteRef[] }) {
+function RecentList({
+  vaultId,
+  notes,
+}: {
+  vaultId: VaultId;
+  notes: NoteRef[];
+}) {
   return (
     <div className="stats-note-list">
       {notes.map((n) => (
         <div key={n.slug} className="stats-note-row">
-          <Link className="stats-note-title" to={`/n/${n.slug}`}>
+          <Link
+            className="stats-note-title"
+            to={`/v/${encodeURIComponent(vaultId)}/n/${n.slug}`}
+          >
             {n.title}
           </Link>
         </div>
@@ -199,22 +231,83 @@ function RecentList({ notes }: { notes: NoteRef[] }) {
   );
 }
 
+/** One Vault's answer: its numbers, or the reason it could not give them. */
+interface VaultStatsResult {
+  vault: VaultSummary;
+  stats: VaultStats | null;
+  error: string | null;
+}
+
+/**
+ * Every Vault the current scope covers, in Vault-management order: the one
+ * named Vault when scope is narrowed, every enabled Vault under `"all"`.
+ * A narrowed scope naming a Vault that discovery no longer returns (it was
+ * disabled or removed in another tab) covers nothing, which the caller states
+ * rather than silently falling back to a Vault the reader did not ask for.
+ */
+function vaultsInScope(
+  scope: VaultScope,
+  vaults: VaultSummary[],
+): VaultSummary[] {
+  if (scope === "all") {
+    return vaults;
+  }
+  const narrowed = vaults.find((vault) => vault.vault_id === scope);
+  return narrowed ? [narrowed] : [];
+}
+
 export function StatsPage() {
-  const [stats, setStats] = useState<VaultStats | null>(null);
+  const [scope] = useVaultScope();
+  const { vaults, loading: loadingVaults } = useVaultDiscovery();
+  const targets = vaultsInScope(scope, vaults);
+  // Statistics stay grouped per Vault (#62) and `stats/detail` is an exact
+  // single-Vault read, so `all` is N reads presented as N sections rather
+  // than one merged total that would silently add unlike Vaults together.
+  const targetIds = targets.map((vault) => vault.vault_id).join(",");
+  const [results, setResults] = useState<VaultStatsResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (loadingVaults) {
+      return;
+    }
+    if (targets.length === 0) {
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
     let cancelled = false;
     void (async () => {
       setLoading(true);
       setError(null);
       try {
-        const res = await apiFetch("/api/stats");
-        if (!res.ok)
-          throw new Error(await readErrorMessage(res, "Stats failed"));
-        const data = (await res.json()) as VaultStats;
-        if (!cancelled) setStats(data);
+        const loaded = await Promise.all(
+          targets.map(async (vault): Promise<VaultStatsResult> => {
+            try {
+              const res = await apiFetch(
+                `/api/v1/vaults/${encodeURIComponent(vault.vault_id)}/stats/detail`,
+              );
+              if (!res.ok) {
+                throw new Error(await readErrorMessage(res, "Stats failed"));
+              }
+              const projection = (await res.json()) as VaultQualifiedStats;
+              return { vault, stats: projection.stats, error: null };
+            } catch (err) {
+              return {
+                vault,
+                stats: null,
+                error:
+                  err instanceof Error
+                    ? err.message
+                    : "Failed to load stats for this Vault.",
+              };
+            }
+          }),
+        );
+        if (!cancelled) setResults(loaded);
       } catch (err) {
         if (!cancelled)
           setError(err instanceof Error ? err.message : "Failed to load stats");
@@ -225,9 +318,11 @@ export function StatsPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+    // `targetIds` stands in for `targets`, which is a fresh array each render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadingVaults, targetIds]);
 
-  if (loading) {
+  if (loadingVaults || loading) {
     return (
       <div className="stats-loading">
         <div className="stats-loading-strip" />
@@ -237,14 +332,26 @@ export function StatsPage() {
     );
   }
 
-  if (error || !stats) {
+  if (targets.length === 0) {
     return (
       <StateBlock
         title="Stats Unavailable"
-        description={error ?? "Could not load vault stats."}
+        description={
+          scope === "all"
+            ? "No Vault is available to show statistics for."
+            : "The Vault this page is scoped to is no longer available."
+        }
       />
     );
   }
+
+  if (error) {
+    return <StateBlock title="Stats Unavailable" description={error} />;
+  }
+
+  // A single-Vault answer keeps the page it has always had; only a scope that
+  // genuinely spans more than one Vault earns the per-Vault section heading.
+  const grouped = results.length > 1;
 
   return (
     <div className="stats-page">
@@ -260,6 +367,40 @@ export function StatsPage() {
         </p>
       </div>
 
+      {results.map((result) => (
+        <section
+          key={result.vault.vault_id}
+          className={grouped ? "stats-vault-section" : undefined}
+        >
+          {grouped ? (
+            <h2 className="stats-vault-heading">{result.vault.name}</h2>
+          ) : null}
+          {result.stats ? (
+            <VaultStatsReport
+              vaultId={result.vault.vault_id}
+              stats={result.stats}
+            />
+          ) : (
+            <StateBlock
+              title="Stats Unavailable"
+              description={result.error ?? "Could not load vault stats."}
+            />
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function VaultStatsReport({
+  vaultId,
+  stats,
+}: {
+  vaultId: VaultId;
+  stats: VaultStats;
+}) {
+  return (
+    <>
       {/* Metric strip */}
       <div className="stats-metric-strip">
         <div className="stats-metric-cell">
@@ -292,7 +433,7 @@ export function StatsPage() {
         </div>
         <div className="stats-section">
           <SectionHead num="02" title="Most Linked Notes" />
-          <RankedList notes={stats.most_linked} />
+          <RankedList vaultId={vaultId} notes={stats.most_linked} />
         </div>
       </div>
 
@@ -310,8 +451,16 @@ export function StatsPage() {
         </div>
         <div className="stats-section">
           <SectionHead num="05" title="Word Count Extremes" />
-          <NoteWordList notes={stats.longest_notes} sublabel="Longest" />
-          <NoteWordList notes={stats.shortest_notes} sublabel="Shortest" />
+          <NoteWordList
+            vaultId={vaultId}
+            notes={stats.longest_notes}
+            sublabel="Longest"
+          />
+          <NoteWordList
+            vaultId={vaultId}
+            notes={stats.shortest_notes}
+            sublabel="Shortest"
+          />
         </div>
       </div>
 
@@ -355,7 +504,10 @@ export function StatsPage() {
             {stats.modified_this_week.count}
           </div>
           <div className="stats-big-count-lbl">notes</div>
-          <RecentList notes={stats.modified_this_week.notes.slice(0, 5)} />
+          <RecentList
+            vaultId={vaultId}
+            notes={stats.modified_this_week.notes.slice(0, 5)}
+          />
         </div>
       </div>
 
@@ -374,7 +526,7 @@ export function StatsPage() {
           >
             No incoming or outgoing links.
           </p>
-          <PillList notes={stats.orphan_notes} />
+          <PillList vaultId={vaultId} notes={stats.orphan_notes} />
         </div>
         <div className="stats-section">
           <SectionHead num="10" title="Notes with No Tags" />
@@ -389,9 +541,9 @@ export function StatsPage() {
           >
             Missing all tags.
           </p>
-          <PillList notes={stats.no_tag_notes} />
+          <PillList vaultId={vaultId} notes={stats.no_tag_notes} />
         </div>
       </div>
-    </div>
+    </>
   );
 }

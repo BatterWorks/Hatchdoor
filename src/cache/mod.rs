@@ -3,10 +3,13 @@ pub mod parse;
 mod populate;
 mod queries;
 mod schema;
+pub(crate) mod vault_snapshots;
+
+pub(crate) use schema::is_recognized_legacy_cache;
 
 pub use populate::BuildOptions;
 pub use queries::SemanticHit;
-
+use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,8 @@ use std::sync::{Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+
+use crate::vault_registry::VaultId;
 
 /// Where the cache database lives. File-backed caches get a pool of extra
 /// read connections (WAL lets many readers run alongside the single writer);
@@ -24,7 +29,8 @@ enum CacheSource {
     Memory,
 }
 
-/// Upper bound on pooled read connections kept idle for a file-backed cache.
+/// Upper bound on active file-backed read connections, including checked-out
+/// leases and connections retained idle for reuse.
 const MAX_READ_CONNECTIONS: usize = 4;
 
 pub struct SqliteCache {
@@ -34,6 +40,18 @@ pub struct SqliteCache {
     source: CacheSource,
     /// Idle read connections available for checkout (file-backed only).
     read_pool: Mutex<Vec<Connection>>,
+    /// Monotonic per-Vault cache-publication attempts. This is disposable
+    /// process state: it prevents an older failed or successful candidate from
+    /// overwriting a newer attempt's cache status while the durable Markdown
+    /// source remains untouched.
+    #[allow(dead_code)]
+    vault_snapshot_attempts: Mutex<BTreeMap<VaultId, u64>>,
+    /// Serializes model identity reset, candidate construction, and shared
+    /// snapshot publication so two Vault rebuilds cannot interleave models.
+    pub(crate) snapshot_model_epoch: Mutex<()>,
+    /// Active file-backed reader leases. Reserving before opening keeps bursts
+    /// of concurrent reads from creating an unbounded number of SQLite handles.
+    read_leases: Mutex<usize>,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -80,6 +98,39 @@ pub struct ReadConn<'a> {
     cache: &'a SqliteCache,
     pooled: Option<Connection>,
     shared: Option<MutexGuard<'a, Connection>>,
+}
+
+/// A pinned SQLite read snapshot. Dropping an unfinished snapshot rolls it
+/// back before its connection returns to the pool.
+pub(crate) struct ReadSnapshot<'a> {
+    conn: ReadConn<'a>,
+    complete: bool,
+}
+
+impl Deref for ReadSnapshot<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+impl ReadSnapshot<'_> {
+    pub(crate) fn commit(&mut self) -> Result<(), String> {
+        self.conn
+            .execute_batch("COMMIT")
+            .map_err(|error| format!("commit SQLite read snapshot: {error}"))?;
+        self.complete = true;
+        Ok(())
+    }
+}
+
+impl Drop for ReadSnapshot<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        }
+    }
 }
 
 impl Deref for ReadConn<'_> {
@@ -129,6 +180,23 @@ impl SqliteCache {
             })?;
         }
 
+        match Self::open_file(path, embedding_dim) {
+            Ok(cache) => Ok(cache),
+            Err(error) if is_physical_cache_corruption(&error) => {
+                let quarantine = quarantine_corrupt_cache(path)?;
+                tracing::warn!(
+                    cache = %path.display(),
+                    quarantine = %quarantine.display(),
+                    error = %error,
+                    "SQLite cache is physically malformed; quarantined and rebuilding from Markdown"
+                );
+                Self::open_file(path, embedding_dim)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_file(path: &Path, embedding_dim: usize) -> Result<Self, String> {
         register_sqlite_vec();
         let conn = Connection::open(path).map_err(|error| {
             format!("failed to open SQLite cache '{}': {error}", path.display())
@@ -138,6 +206,9 @@ impl SqliteCache {
             conn: Mutex::new(conn),
             source: CacheSource::File(path.to_path_buf()),
             read_pool: Mutex::new(Vec::new()),
+            vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
+            snapshot_model_epoch: Mutex::new(()),
+            read_leases: Mutex::new(0),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -152,6 +223,9 @@ impl SqliteCache {
             conn: Mutex::new(conn),
             source: CacheSource::Memory,
             read_pool: Mutex::new(Vec::new()),
+            vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
+            snapshot_model_epoch: Mutex::new(()),
+            read_leases: Mutex::new(0),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -187,6 +261,7 @@ impl SqliteCache {
                 shared: Some(self.connection()?),
             }),
             CacheSource::File(path) => {
+                self.reserve_read_lease()?;
                 let pooled = {
                     let mut pool = self
                         .read_pool
@@ -196,7 +271,13 @@ impl SqliteCache {
                 };
                 let conn = match pooled {
                     Some(conn) => conn,
-                    None => open_read_connection(path)?,
+                    None => match open_read_connection(path) {
+                        Ok(conn) => conn,
+                        Err(error) => {
+                            self.release_read_lease();
+                            return Err(error);
+                        }
+                    },
                 };
                 Ok(ReadConn {
                     cache: self,
@@ -207,13 +288,56 @@ impl SqliteCache {
         }
     }
 
+    /// Pin one SQLite snapshot for related reads. This is for compound
+    /// responses whose rows are assembled by more than one query: WAL readers
+    /// otherwise see a fresh autocommit snapshot for each query and can combine
+    /// revisions. Dropping without `commit` rolls the snapshot back.
+    pub(crate) fn read_snapshot(&self) -> Result<ReadSnapshot<'_>, String> {
+        let conn = self.read()?;
+        conn.execute_batch("BEGIN")
+            .map_err(|error| format!("begin SQLite read snapshot: {error}"))?;
+        Ok(ReadSnapshot {
+            conn,
+            complete: false,
+        })
+    }
+
     fn return_read_connection(&self, conn: Connection) {
-        if let Ok(mut pool) = self.read_pool.lock()
-            && pool.len() < MAX_READ_CONNECTIONS
         {
-            pool.push(conn);
+            let mut pool = self
+                .read_pool
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if pool.len() < MAX_READ_CONNECTIONS {
+                pool.push(conn);
+            }
         }
-        // Otherwise the connection is dropped (closed) here.
+        // Otherwise the connection is dropped (closed) here. Either way, the
+        // checked-out lease is available to the next caller.
+        self.release_read_lease();
+    }
+
+    fn reserve_read_lease(&self) -> Result<(), String> {
+        let mut leases = self
+            .read_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *leases >= MAX_READ_CONNECTIONS {
+            return Err(format!(
+                "SQLite read connection limit ({MAX_READ_CONNECTIONS}) reached; retry shortly"
+            ));
+        }
+        *leases += 1;
+        Ok(())
+    }
+
+    fn release_read_lease(&self) {
+        let mut leases = self
+            .read_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(*leases > 0, "file-backed read lease underflow");
+        *leases = leases.saturating_sub(1);
     }
 
     pub fn set_metadata(&self, key: &str, value: &str) -> Result<(), String> {
@@ -274,9 +398,41 @@ impl SqliteCache {
     }
 }
 
+fn is_physical_cache_corruption(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("file is not a database")
+        || normalized.contains("database disk image is malformed")
+        || normalized.contains("database corruption")
+}
+
+fn quarantine_corrupt_cache(path: &Path) -> Result<PathBuf, String> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("failed creating cache quarantine timestamp: {error}"))?
+        .as_nanos();
+    let mut attempt = 0_u32;
+    loop {
+        let candidate = PathBuf::from(format!("{}.corrupt-{stamp}-{attempt}", path.display()));
+        if !candidate.exists() {
+            fs::rename(path, &candidate).map_err(|error| {
+                format!(
+                    "failed quarantining malformed SQLite cache '{}' as '{}': {error}",
+                    path.display(),
+                    candidate.display()
+                )
+            })?;
+            return Ok(candidate);
+        }
+        attempt = attempt.saturating_add(1);
+    }
+}
+
 #[cfg(test)]
 mod metadata_tests {
     use super::*;
+    use std::sync::{Arc, Barrier, mpsc};
+
+    use tempfile::tempdir;
 
     #[test]
     fn set_and_get_metadata_roundtrip() {
@@ -328,6 +484,80 @@ mod metadata_tests {
         assert_eq!(
             cache.get_metadata("after_poison").expect("get").as_deref(),
             Some("ok")
+        );
+    }
+
+    #[test]
+    fn file_backed_read_leases_are_capped_and_recover_after_release() {
+        let dir = tempdir().expect("temp dir");
+        let cache =
+            Arc::new(SqliteCache::open(dir.path().join("cache.sqlite3"), 384).expect("open"));
+        let barrier = Arc::new(Barrier::new(MAX_READ_CONNECTIONS + 1));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let mut release_txs = Vec::new();
+        let mut workers = Vec::new();
+
+        for _ in 0..MAX_READ_CONNECTIONS {
+            let cache = cache.clone();
+            let barrier = barrier.clone();
+            let ready_tx = ready_tx.clone();
+            let (release_tx, release_rx) = mpsc::channel();
+            release_txs.push(release_tx);
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                let lease = cache.read();
+                ready_tx.send(lease.is_ok()).expect("report lease");
+                release_rx.recv().expect("release lease");
+                drop(lease);
+            }));
+        }
+        drop(ready_tx);
+
+        barrier.wait();
+        for _ in 0..MAX_READ_CONNECTIONS {
+            assert!(ready_rx.recv().expect("lease result"));
+        }
+
+        let overload = match cache.read() {
+            Ok(_) => panic!("active lease ceiling must reject overload"),
+            Err(error) => error,
+        };
+        assert!(
+            overload.contains("read connection limit"),
+            "overload should identify the bounded reader pool: {overload}"
+        );
+
+        for release in release_txs {
+            release.send(()).expect("release worker");
+        }
+        for worker in workers {
+            worker.join().expect("reader worker");
+        }
+
+        cache.read().expect("a released lease must be reusable");
+    }
+
+    #[test]
+    fn malformed_disposable_cache_file_is_quarantined_and_rebuilt() {
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("cache.sqlite3");
+        std::fs::write(&path, b"this is not an SQLite database").expect("write malformed cache");
+
+        let cache = SqliteCache::open(&path, 384)
+            .expect("a malformed disposable cache must be quarantined and rebuilt");
+        cache
+            .get_metadata("schema_version")
+            .expect("rebuilt cache must be queryable")
+            .expect("rebuilt cache must carry schema metadata");
+
+        let quarantined = std::fs::read_dir(dir.path())
+            .expect("read cache directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .any(|name| name.starts_with("cache.sqlite3.corrupt-"));
+        assert!(
+            quarantined,
+            "the malformed bytes must be quarantined, not overwritten"
         );
     }
 }

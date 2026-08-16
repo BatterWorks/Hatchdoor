@@ -2,7 +2,43 @@
 
 ## Unreleased
 
+### ⚠️ Breaking changes — action required on upgrade
+- **A read-only MCP token can no longer upload attachments over HTTP.** The
+  multipart attachment endpoint now accepts an MCP bearer token only while MCP
+  and MCP writes are both currently enabled. Previously it accepted that token
+  whenever MCP was enabled, including in read-only mode, while the
+  `import_attachment` MCP tool already refused: the same credential performing
+  the same action got two different answers depending on which surface it came
+  through. Disabling MCP, or MCP write mode, is now an immediate revocation of
+  that credential's upload capability, checked per request.
+  Unaffected: the web bearer token, which still works regardless of MCP write
+  mode; the web UI's own paste and drop upload, which uses it; and deployments
+  with no token configured, where the route stays open as before.
+  **Action:** if an agent uploads attachments over HTTP using the MCP bearer
+  token, either enable MCP write mode or move that workflow to the web bearer
+  token. Call `get_attachment_import_config` to see the methods and limits
+  currently available to a session.
+- **A single-Vault deployment is imported into a Vault collection on first
+  start.** Your existing vault becomes the first Vault in a registry Hatchdoor
+  stores alongside the cache, and the per-vault environment variables it was
+  configured with (`HATCHDOOR_EXCLUDE`, the `HATCHDOOR_GIT_*` family) are read
+  once, stored as that Vault's own settings, and ignored from then on. They are
+  per-Vault questions now, and a server-wide answer cannot survive a second
+  Vault. Nothing on disk moves and no note is touched; the import only writes
+  the registry. If it cannot be proven safe, Hatchdoor starts and says what
+  stopped it rather than guessing.
+  **Action:** none, unless you set those variables from a deployment script and
+  expect them to keep taking effect. Change them in Settings instead, per Vault.
+
 ### Added
+- **Hatchdoor holds more than one Vault.** Add, pause, and disconnect Vaults
+  from Settings, then browse them together or one at a time. A single-Vault
+  install is unchanged: the collection interface appears only once there is a
+  collection to show.
+- **A Vault can be backed by Git.** Connect a repository you already have,
+  clone one for Hatchdoor to manage, or keep local history inside a folder you
+  own. Remotes that need one take an access token, and a sync console reports
+  what actually happened rather than a status light.
 - A **New note** button now sits at the bottom of the sidebar, always reachable
   without scrolling. The per-folder `+` stays for creating in a specific folder.
 - A **changes panel**, opened from the sidebar rail, listing notes that changed
@@ -13,11 +49,28 @@
 - Recently viewed is now collapsible, and remembers whether you folded it away.
 
 ### Changed
+- **The sidebar says what you are browsing.** A Scope zone at the top switches
+  between one Vault and all of them, each row ending in a note count or the
+  reason there is no count to give. On phones it moves into the topbar as a
+  scope row and a bottom sheet, since the sidebar is a drawer there.
+- **The explorer becomes a per-Vault accordion when you browse everything**,
+  one Vault unfolded at a time. Narrow to a single Vault and the accordion
+  disappears: a collection of one is just a vault.
+- **The graph draws every Vault as its own labelled island** in one field,
+  rather than merging separate collections into a single cloud of dots.
+- **Search filters by Vault without changing what you are browsing.** A rail
+  beside the results on desktop, a Scope field on phones. It narrows only the
+  results in front of you, changes no ranking, and is forgotten when the dialog
+  closes.
+- **Search says so when a Vault could not answer**, naming it instead of
+  quietly returning fewer results as though that were all there was.
+- **Settings is the collection.** Every Vault is a section in the settings
+  index, beside the sections that belong to the server itself.
 - **The sidebar is restructured into three zones**: a fixed rail of whole-vault
   destinations at top, the scrolling note navigation in the middle, and the
   create action pinned at the bottom. Only the middle scrolls.
 - **Stats and Graph moved** out of the sidebar header into that rail, as icons.
-  Settings sits alongside them, dimmed, until it has somewhere to go.
+  Settings sits alongside them and is now a live link.
 - Notes in the tree now carry a small index, so note rows and folder rows no
   longer look identical.
 - The topbar's `···` menu on desktop is left-aligned sentence case with
@@ -35,11 +88,45 @@
   a live line shows the path you are about to create.
 
 ### Fixed
+- The MCP server told agents to call `get_attachment_import_config` before
+  uploading a file, but the Vault-scoping migration had removed the tool: an
+  agent following the server's own instructions got "Unknown MCP tool". It is
+  restored, now taking one `vault_id` and reporting the Vault-scoped upload
+  path. It also reports the instance-wide write switch and the Vault's own
+  mutation capability as separate fields, so an agent that cannot upload is
+  told which of the two closed the door instead of guessing.
+- An agent could not create its first Vault over MCP without guessing. The
+  `source` and credential arguments of `create_vault` and `edit_vault` were
+  advertised as bare objects described in a sentence, while the server rejects
+  unknown fields: every guess came back as a rejection with nothing to correct
+  against. Both now publish their real per-variant shapes, including which
+  `mode` each source accepts, the poll-interval floor, and the fact that a
+  managed Vault has no local-history mode.
+- `edit_vault` replaces a Vault definition wholesale, so omitting a field
+  cleared it. It said none of this; it now says to read the Vault from
+  `list_vaults` and send back what you are not changing, and explains what
+  `confirm_identity_change` consents to and that the Vault must be disabled
+  first.
+- `list_note_attachments` required MCP write mode, though it only reads. A
+  read-only agent could not see what a note referenced without fetching the
+  whole note. It is now a read tool, and works on Vaults that do not accept
+  writes at all.
 - Opening a note highlighted it in up to three sidebar lists at once. The
   highlight is now canonical in the folder tree only.
+- Browsing no longer waits on the search index. A Vault's structure is
+  published as soon as it is read, so you can open notes while its vectors are
+  still being built.
+- The explorer kept showing notes, and whole Vaults, after they had left the
+  collection.
+- A public demo deployment no longer reveals local filesystem paths, disabled
+  Vaults, or notes on demoted layers.
+- One unreadable file no longer fails the indexing run for the Vault
+  containing it.
 
-No upgrade action required. Nothing changes on disk, in configuration, or in the
-API; the cache is not rebuilt.
+Your notes and folders are untouched, and the cache is not rebuilt. Two upgrade
+notes apply: the one-time Vault import described above, which is automatic, and
+the attachment authorization change, which matters only if an agent uploads over
+HTTP with the MCP bearer token.
 
 ## v2.4.0 - 2026-07-27
 

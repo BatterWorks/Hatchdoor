@@ -1,18 +1,20 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::cache::parse::content_hash;
-use crate::vault::paths::strip_md_extension;
+use crate::vault::paths::{slugify, strip_md_extension};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::asset_move_plan;
-use super::fs_ops::{atomic_write, ensure_content_hash, move_assets};
+use super::fs_ops::{
+    MutationJournal, atomic_write, atomic_write_if_unchanged, ensure_content_hash,
+};
 use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
 };
-use super::rewrites::{apply_rewrites, backlink_rewrite_plan, merge_rewrites, parse_fence_marker};
-use super::types::{WriteError, WriteOutcome};
+use super::rewrites::{backlink_rewrite_plan, merge_rewrites, parse_fence_marker};
+use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
 
 /// Where `replace_section` places the supplied content relative to the matched section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +89,89 @@ fn frontmatter_warnings(content: &str) -> Vec<String> {
     warnings
 }
 
+/// The priority order `VaultIndex::build_catalog_with_config` (`vault/index.rs`)
+/// implicitly assigns slugs in: `markdown_paths.sort()` then a stable
+/// `sort_by_cached_key(is_layered)` puts every default-surface note ahead of
+/// every layered one (preserving path order within each group), so on a
+/// title collision a default-surface note always claims the contested slug
+/// first. Comparing `(is_layered, Path)` tuples lexicographically reproduces
+/// that exact order: `false < true` puts default-surface first, and `Path`'s
+/// component-wise `Ord` matches how the real build sorts `PathBuf`s.
+///
+/// Crucially, `path` here must still carry the `.md` extension: `markdown_paths.sort()`
+/// runs on the raw `WalkDir` paths *before* any extension-stripping happens
+/// (that only happens per-entry, later, inside the loop), so the real sort
+/// compares e.g. `"Home.md"` against `"Home!!.md"`, not `"Home"` against
+/// `"Home!!"`. These two orderings are not equivalent — `.` (0x2E) sorts
+/// before common title punctuation like `!`, so stripping the extension
+/// before comparing can reverse the outcome. A plain string compare of the
+/// extension-free `relative_path` would be doubly wrong for the same reason
+/// (see the module's `move_or_rename_note_disambiguates_a_slug_collision_against_a_different_note`
+/// test in `write/tests.rs`, which exists specifically to pin this down).
+fn slug_priority(catalog: &VaultIndex, relative_path: &str, path: &Path) -> (bool, PathBuf) {
+    (
+        catalog.layers.layer_for(relative_path).is_some(),
+        path.to_path_buf(),
+    )
+}
+
+/// The slug a fresh `VaultIndex::build_with_config` would assign to a note
+/// whose extension-free relative path is `relative_path` (and whose real,
+/// extension-bearing on-disk path is `path`), computed from a catalog already
+/// fetched under this Vault's mutation lock instead of re-walking the Vault.
+///
+/// This is deliberately not a plain `unique_slug` occupancy check
+/// (`vault/paths.rs`): a real index build assigns slugs in priority order
+/// (`slug_priority` above), so an already-catalogued note only "blocks" a
+/// candidate slug for this note if it has *higher* priority — a
+/// lower-priority occupant would itself be bumped in a real rebuild once this
+/// note claims the slug first, and never gets to hold it against us. Checking
+/// literal `by_slug` occupancy while ignoring priority (as `unique_slug` does)
+/// is only correct for `index.rs`'s own build loop, which already visits
+/// entries in priority order, so nothing lower-priority has been inserted yet
+/// when a given entry is assigned.
+///
+/// `exclude_slug`, when set, is the note's own pre-existing slug: without it,
+/// recomputing a rename/move's slug would collide with the note's own
+/// still-present entry in `by_slug` whenever the new title slugifies back to
+/// the same value (e.g. renaming "Home" to "home").
+fn slug_for_relative_path(
+    catalog: &VaultIndex,
+    relative_path: &str,
+    path: &Path,
+    exclude_slug: Option<&str>,
+) -> String {
+    let stem = relative_path.rsplit('/').next().unwrap_or(relative_path);
+    let mut base = slugify(stem);
+    if base.is_empty() {
+        base = "untitled".to_string();
+    }
+    let priority = slug_priority(catalog, relative_path, path);
+
+    let mut idx = 1usize;
+    loop {
+        let candidate = if idx == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{idx}")
+        };
+        let blocked = catalog.by_slug.get(&candidate).is_some_and(|entry| {
+            Some(entry.slug.as_str()) != exclude_slug
+                && slug_priority(catalog, &entry.relative_path, &entry.path) < priority
+        });
+        if !blocked {
+            return candidate;
+        }
+        idx += 1;
+    }
+}
+
 pub fn create_note(
     vault_root: &Path,
     relative_path: &str,
     content: &str,
     overwrite: bool,
+    catalog: &VaultIndex,
 ) -> Result<WriteOutcome, WriteError> {
     let path = resolve_new_note_path(vault_root, relative_path)?;
     if path.exists() && !overwrite {
@@ -106,9 +186,11 @@ pub fn create_note(
     let prepared = prepare_note_content(content)?;
     atomic_write(&path, &prepared.content)?;
     let normalized = normalize_note_relative_path(relative_path)?;
+    let relative_without_ext = strip_md_extension(&normalized).to_string();
+    let slug = slug_for_relative_path(catalog, &relative_without_ext, &path, None);
     Ok(WriteOutcome {
-        slug: None,
-        relative_path: Some(strip_md_extension(&normalized).to_string()),
+        slug: Some(slug),
+        relative_path: Some(relative_without_ext),
         content_hash: Some(content_hash(&prepared.content)),
         quality_warnings: prepared.warnings,
         rewritten_notes: 0,
@@ -125,7 +207,7 @@ pub fn update_note(
 ) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
     let prepared = prepare_note_content(content)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -155,7 +237,7 @@ pub fn append_note(
     }
     current.push_str(content);
     let prepared = prepare_note_content(&current)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -204,7 +286,7 @@ pub fn edit_note(
         current.replacen(old_string, new_string, 1)
     };
     let prepared = prepare_note_content(&updated)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -239,7 +321,7 @@ pub fn replace_section(
         SectionMode::After => splice(&current[..end], content, &current[end..]),
     };
     let prepared = prepare_note_content(&updated)?;
-    atomic_write(&entry.path, &prepared.content)?;
+    atomic_write_if_unchanged(&entry.path, &prepared.content, expected_content_hash)?;
     Ok(WriteOutcome {
         slug: Some(entry.slug.clone()),
         relative_path: Some(entry.relative_path.clone()),
@@ -352,6 +434,24 @@ pub fn move_or_rename_note(
     target_relative_path: &str,
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
+    move_or_rename_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        target_relative_path,
+        expected_content_hash,
+        |_| Ok(()),
+    )
+}
+
+fn move_or_rename_note_with_hook(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    target_relative_path: &str,
+    expected_content_hash: &str,
+    mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
     let target_path = resolve_new_note_path(vault_root, target_relative_path)?;
     if target_path.exists() {
@@ -364,6 +464,7 @@ pub fn move_or_rename_note(
 
     let target_without_ext =
         strip_md_extension(&normalize_note_relative_path(target_relative_path)?).to_string();
+    let slug = slug_for_relative_path(index, &target_without_ext, &target_path, Some(&entry.slug));
     let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, Some(&target_without_ext))?;
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
@@ -373,22 +474,18 @@ pub fn move_or_rename_note(
         false,
         &backlink_rewrites,
     )?;
-    fs::rename(&entry.path, &target_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to move note '{}' to '{}': {error}",
-            entry.path.display(),
-            target_path.display()
-        ))
-    })?;
-    let moved_assets = move_assets(&asset_moves)?;
-    let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let mutation = execute_note_mutation(
+        vault_root,
+        entry,
+        &target_path,
+        expected_content_hash,
+        &asset_moves,
+        merge_rewrites(backlink_rewrites, asset_rewrites),
+        &mut after_phase,
+    )?;
+    let moved_assets = asset_moves.len();
+    let rewritten = mutation.rewritten;
     let rewritten_notes = rewritten.len();
-    let moved_content = fs::read_to_string(&target_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read moved note '{}': {error}",
-            target_path.display()
-        ))
-    })?;
 
     let mut affected_paths = rewritten;
     affected_paths.push(entry.path.clone());
@@ -399,9 +496,9 @@ pub fn move_or_rename_note(
     }
 
     Ok(WriteOutcome {
-        slug: None,
+        slug: Some(slug),
         relative_path: Some(target_without_ext),
-        content_hash: Some(content_hash(&moved_content)),
+        content_hash: Some(content_hash(&mutation.moved_content)),
         quality_warnings: Vec::new(),
         rewritten_notes,
         moved_assets,
@@ -466,6 +563,16 @@ pub fn delete_note(
     entry: &NoteEntry,
     expected_content_hash: &str,
 ) -> Result<WriteOutcome, WriteError> {
+    delete_note_with_hook(vault_root, index, entry, expected_content_hash, |_| Ok(()))
+}
+
+fn delete_note_with_hook(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    expected_content_hash: &str,
+    mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
     ensure_content_hash(entry, expected_content_hash)?;
     let trash_relative = unique_trash_relative_path(vault_root, &entry.relative_path)?;
     let trash_path = vault_root.join(format!("{trash_relative}.md"));
@@ -480,26 +587,17 @@ pub fn delete_note(
         true,
         &backlink_rewrites,
     )?;
-    // Trash the note FIRST, then move its assets (mirroring move_or_rename_note).
-    // Doing assets first meant a failed note rename left a live note pointing at
-    // attachments that had already been relocated into trash, with no rollback.
-    fs::rename(&entry.path, &trash_path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to move note '{}' to trash '{}': {error}",
-            entry.path.display(),
-            trash_path.display()
-        ))
-    })?;
-    let moved_assets = match move_assets(&asset_moves) {
-        Ok(count) => count,
-        Err(error) => {
-            // move_assets is all-or-nothing, so no asset is stranded. Restore the
-            // note out of trash so the whole delete is a no-op on failure.
-            let _ = fs::rename(&trash_path, &entry.path);
-            return Err(error);
-        }
-    };
-    let rewritten = apply_rewrites(merge_rewrites(backlink_rewrites, asset_rewrites))?;
+    let mutation = execute_note_mutation(
+        vault_root,
+        entry,
+        &trash_path,
+        expected_content_hash,
+        &asset_moves,
+        merge_rewrites(backlink_rewrites, asset_rewrites),
+        &mut after_phase,
+    )?;
+    let moved_assets = asset_moves.len();
+    let rewritten = mutation.rewritten;
     let rewritten_notes = rewritten.len();
 
     let mut affected_paths = rewritten;
@@ -520,4 +618,95 @@ pub fn delete_note(
         trashed_path: Some(trash_relative),
         affected_paths,
     })
+}
+
+struct CompletedNoteMutation {
+    rewritten: Vec<std::path::PathBuf>,
+    moved_content: String,
+}
+
+fn execute_note_mutation(
+    vault_root: &Path,
+    entry: &NoteEntry,
+    target_path: &Path,
+    expected_content_hash: &str,
+    asset_moves: &[AssetMove],
+    rewrites: Vec<TextRewrite>,
+    after_phase: &mut impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<CompletedNoteMutation, WriteError> {
+    let mut journal = MutationJournal::new(vault_root);
+
+    if let Err(error) = journal.move_note(&entry.path, target_path, expected_content_hash) {
+        return Err(journal.rollback(error));
+    }
+    if let Err(error) = after_phase(MutationPhase::Note) {
+        return Err(journal.rollback(error));
+    }
+
+    for asset in asset_moves {
+        if let Err(error) =
+            journal.move_file(MutationPhase::Asset, &asset.source, &asset.destination)
+        {
+            return Err(journal.rollback(error));
+        }
+    }
+    if !asset_moves.is_empty()
+        && let Err(error) = after_phase(MutationPhase::Asset)
+    {
+        return Err(journal.rollback(error));
+    }
+
+    let had_rewrites = !rewrites.is_empty();
+    let rewritten = match journal.apply_rewrites(rewrites) {
+        Ok(rewritten) => rewritten,
+        Err(error) => return Err(journal.rollback(error)),
+    };
+    if had_rewrites && let Err(error) = after_phase(MutationPhase::Rewrite) {
+        return Err(journal.rollback(error));
+    }
+
+    let moved_content = match fs::read_to_string(target_path) {
+        Ok(content) => content,
+        Err(error) => {
+            return Err(journal.rollback(WriteError::Io(format!(
+                "failed to read moved note '{}': {error}",
+                target_path.display()
+            ))));
+        }
+    };
+
+    Ok(CompletedNoteMutation {
+        rewritten,
+        moved_content,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn move_or_rename_note_with_failure(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    target_relative_path: &str,
+    expected_content_hash: &str,
+    after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
+    move_or_rename_note_with_hook(
+        vault_root,
+        index,
+        entry,
+        target_relative_path,
+        expected_content_hash,
+        after_phase,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn delete_note_with_failure(
+    vault_root: &Path,
+    index: &VaultIndex,
+    entry: &NoteEntry,
+    expected_content_hash: &str,
+    after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<WriteOutcome, WriteError> {
+    delete_note_with_hook(vault_root, index, entry, expected_content_hash, after_phase)
 }

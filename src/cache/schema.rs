@@ -1,12 +1,67 @@
-use rusqlite::OptionalExtension;
+use std::path::Path;
+
+use rusqlite::{OpenFlags, OptionalExtension};
 use tracing::warn;
 
 use super::SqliteCache;
-use crate::embed::Embedder;
+use crate::embed::{Embedder, PENDING_IDENTITY};
 
 // Bump this when the schema structure or data-population logic changes to force
 // a full cache rebuild on next startup.
-const SCHEMA_VERSION: &str = "8";
+const SCHEMA_VERSION: &str = "11";
+
+/// Identify a cache written by a supported single-Vault Hatchdoor release
+/// without creating, migrating, or otherwise mutating the database.
+pub(crate) fn is_recognized_legacy_cache(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let Ok(connection) = rusqlite::Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return false;
+    };
+    let version = connection.query_row(
+        "SELECT value FROM metadata WHERE key = 'schema_version'",
+        [],
+        |row| row.get::<_, String>(0),
+    );
+    let current_version = SCHEMA_VERSION.parse::<u32>().expect("numeric cache schema");
+    if !version
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|version| (1..=current_version).contains(&version))
+    {
+        return false;
+    }
+
+    let hatchdoor_tables = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name IN ('notes', 'note_links', 'headings', 'tags')",
+        [],
+        |row| row.get::<_, u32>(0),
+    );
+    let note_columns = connection.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('notes')
+         WHERE name IN (
+            'slug', 'title', 'relative_path', 'absolute_path',
+            'content', 'content_hash', 'indexed_at'
+         )",
+        [],
+        |row| row.get::<_, u32>(0),
+    );
+    let hatchdoor_fts = connection.query_row(
+        "SELECT COUNT(*) FROM sqlite_master
+         WHERE type = 'table' AND name = 'note_fts' AND lower(sql) LIKE '%using fts5%'",
+        [],
+        |row| row.get::<_, u32>(0),
+    );
+    matches!(
+        (hatchdoor_tables, note_columns, hatchdoor_fts),
+        (Ok(4), Ok(7), Ok(1))
+    )
+}
 
 impl SqliteCache {
     pub fn ensure_schema(&self, embedding_dim: usize) -> Result<(), String> {
@@ -52,9 +107,36 @@ impl SqliteCache {
     /// silently ruins semantic search). A cache with no stored identity yet
     /// (fresh, or built by a version that never stamped it) is left alone — the
     /// build stamps the current identity and there is no old model to conflict.
+    ///
+    /// An embedder whose model has not loaded yet reports
+    /// [`PENDING_IDENTITY`], which names no embedding space at all. Comparing
+    /// that placeholder against a stored identity would mismatch every time and
+    /// destroy a perfectly valid cache on every startup, so it is refused
+    /// outright: there is no meaningful index to build without a model, and the
+    /// caller is expected to defer the work until setup completes.
     pub fn reset_if_embedder_changed(&self, embedder: &dyn Embedder) -> Result<(), String> {
         let current = embedder.identity();
-        if let Some(stored) = self.get_metadata("embedder_id")?
+        if current == PENDING_IDENTITY {
+            return Err(
+                "embedding model setup is not complete; refusing to evaluate the cache's \
+                 embedder identity against a placeholder"
+                    .to_string(),
+            );
+        }
+        let stored = match self.get_metadata("embedder_id")? {
+            Some(identity) => Some(identity),
+            None => {
+                let conn = self.connection()?;
+                conn.query_row(
+                    "SELECT value FROM vault_snapshot_metadata WHERE key = 'embedder_id' LIMIT 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| format!("read Vault snapshot embedder identity: {error}"))?
+            }
+        };
+        if let Some(stored) = stored
             && stored != current
         {
             warn!(
@@ -133,6 +215,20 @@ fn wipe_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         r#"
         DROP TABLE IF EXISTS chunk_vectors_demoted;
         DROP TABLE IF EXISTS chunk_vectors;
+        DROP TABLE IF EXISTS vault_chunk_vectors_demoted;
+        DROP TABLE IF EXISTS vault_chunk_vectors;
+        DROP TRIGGER IF EXISTS vault_chunk_fts_au;
+        DROP TRIGGER IF EXISTS vault_chunk_fts_ad;
+        DROP TRIGGER IF EXISTS vault_chunk_fts_ai;
+        DROP TABLE IF EXISTS vault_chunk_fts;
+        DROP TABLE IF EXISTS vault_chunks;
+        DROP TABLE IF EXISTS vault_headings;
+        DROP TABLE IF EXISTS vault_tags;
+        DROP TABLE IF EXISTS vault_note_links;
+        DROP TABLE IF EXISTS vault_note_fts;
+        DROP TABLE IF EXISTS vault_notes;
+        DROP TABLE IF EXISTS vault_snapshot_metadata;
+        DROP TABLE IF EXISTS vault_snapshots;
         DROP TRIGGER IF EXISTS chunk_fts_au;
         DROP TRIGGER IF EXISTS chunk_fts_ad;
         DROP TRIGGER IF EXISTS chunk_fts_ai;
@@ -277,6 +373,154 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
             layer     TEXT PARTITION KEY
         );
 
+        -- A Vault snapshot is published atomically. These tables deliberately
+        -- sit beside the legacy single-Vault cache while the draft backend
+        -- packets replace its callers; no implicit or default Vault ID exists.
+        CREATE TABLE IF NOT EXISTS vault_snapshots (
+            vault_id TEXT PRIMARY KEY,
+            participating INTEGER NOT NULL CHECK (participating IN (0, 1)),
+            freshness TEXT NOT NULL CHECK (freshness IN ('fresh', 'stale')),
+            searchable INTEGER NOT NULL CHECK (searchable IN (0, 1))
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_snapshot_metadata (
+            vault_id TEXT NOT NULL REFERENCES vault_snapshots(vault_id) ON DELETE CASCADE,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            PRIMARY KEY (vault_id, key)
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_notes (
+            vault_id TEXT NOT NULL REFERENCES vault_snapshots(vault_id) ON DELETE CASCADE,
+            slug TEXT NOT NULL,
+            title TEXT NOT NULL,
+            normalized_title TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            normalized_relative_path TEXT NOT NULL,
+            absolute_path TEXT NOT NULL,
+            content TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            layer TEXT,
+            aliases_json TEXT NOT NULL,
+            frontmatter_json TEXT NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            indexed_at INTEGER NOT NULL,
+            PRIMARY KEY (vault_id, slug),
+            UNIQUE (vault_id, relative_path)
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_note_fts USING fts5(
+            vault_id UNINDEXED,
+            title,
+            relative_path,
+            content,
+            slug UNINDEXED,
+            tokenize = 'unicode61 remove_diacritics 2'
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_note_links (
+            vault_id TEXT NOT NULL,
+            source_slug TEXT NOT NULL,
+            target_slug TEXT NOT NULL,
+            PRIMARY KEY (vault_id, source_slug, target_slug),
+            FOREIGN KEY (vault_id, source_slug)
+                REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE,
+            FOREIGN KEY (vault_id, target_slug)
+                REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_headings (
+            vault_id TEXT NOT NULL,
+            note_slug TEXT NOT NULL,
+            level INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            anchor TEXT NOT NULL,
+            position INTEGER NOT NULL,
+            PRIMARY KEY (vault_id, note_slug, anchor, position),
+            FOREIGN KEY (vault_id, note_slug)
+                REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS vault_tags (
+            vault_id TEXT NOT NULL,
+            note_slug TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            PRIMARY KEY (vault_id, note_slug, tag),
+            FOREIGN KEY (vault_id, note_slug)
+                REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vault_notes_normalized_title
+            ON vault_notes(vault_id, normalized_title);
+        CREATE INDEX IF NOT EXISTS idx_vault_notes_normalized_relative_path
+            ON vault_notes(vault_id, normalized_relative_path);
+        CREATE INDEX IF NOT EXISTS idx_vault_note_links_target
+            ON vault_note_links(vault_id, target_slug);
+        CREATE INDEX IF NOT EXISTS idx_vault_headings_note
+            ON vault_headings(vault_id, note_slug);
+        CREATE INDEX IF NOT EXISTS idx_vault_tags_tag
+            ON vault_tags(vault_id, tag);
+
+        CREATE TABLE IF NOT EXISTS vault_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vault_id TEXT NOT NULL,
+            note_slug TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            heading_path TEXT,
+            content TEXT NOT NULL,
+            byte_start INTEGER NOT NULL,
+            byte_end INTEGER NOT NULL,
+            content_hash TEXT NOT NULL,
+            tags TEXT,
+            aliases TEXT,
+            FOREIGN KEY (vault_id, note_slug)
+                REFERENCES vault_notes(vault_id, slug) ON DELETE CASCADE ON UPDATE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_vault_chunks_note
+            ON vault_chunks(vault_id, note_slug);
+        CREATE INDEX IF NOT EXISTS idx_vault_chunks_content_hash
+            ON vault_chunks(vault_id, content_hash);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_fts USING fts5(
+            vault_id UNINDEXED,
+            content,
+            content='vault_chunks',
+            content_rowid='id',
+            tokenize='unicode61 remove_diacritics 2'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ai AFTER INSERT ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(rowid, vault_id, content)
+                VALUES (new.id, new.vault_id, new.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_ad AFTER DELETE ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, content)
+                VALUES ('delete', old.id, old.vault_id, old.content);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS vault_chunk_fts_au AFTER UPDATE ON vault_chunks BEGIN
+            INSERT INTO vault_chunk_fts(vault_chunk_fts, rowid, vault_id, content)
+                VALUES ('delete', old.id, old.vault_id, old.content);
+            INSERT INTO vault_chunk_fts(rowid, vault_id, content)
+                VALUES (new.id, new.vault_id, new.content);
+        END;
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_vectors USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding FLOAT[{dim}],
+            vault_id TEXT AUXILIARY
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS vault_chunk_vectors_demoted USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding FLOAT[{dim}],
+            layer TEXT PARTITION KEY,
+            vault_id TEXT AUXILIARY
+        );
+
         INSERT INTO metadata(key, value)
         VALUES ('schema_version', '{version}')
         ON CONFLICT(key) DO NOTHING;
@@ -294,6 +538,61 @@ fn create_schema(conn: &rusqlite::Connection, embedding_dim: usize) -> Result<()
 #[cfg(test)]
 mod tests {
     use crate::cache::SqliteCache;
+    use crate::embed::{RuntimeEmbedder, StubEmbedder};
+
+    /// Regression: startup queued index work before first-run model setup had
+    /// installed the embedder, so the identity check compared a real stored
+    /// identity against the pending placeholder, mismatched, and wiped the
+    /// cache. Every restart paid a full reindex.
+    #[test]
+    fn pending_embedder_identity_never_wipes_a_valid_cache() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        cache
+            .set_metadata("embedder_id", "stub-384")
+            .expect("stamp a real identity from a previous build");
+
+        let error = cache
+            .reset_if_embedder_changed(&RuntimeEmbedder::new())
+            .expect_err("an unloaded model must be refused, not treated as a model swap");
+        assert!(
+            error.contains("setup is not complete"),
+            "unexpected error: {error}"
+        );
+
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get").as_deref(),
+            Some("stub-384"),
+            "the cache must survive the refusal intact"
+        );
+        let chunks: i64 = cache
+            .connection()
+            .expect("conn")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'chunks'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query");
+        assert_eq!(chunks, 1, "the schema must not have been wiped");
+    }
+
+    #[test]
+    fn a_genuine_embedder_swap_still_wipes_the_cache() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        cache
+            .set_metadata("embedder_id", "some-other-model-384")
+            .expect("stamp");
+
+        cache
+            .reset_if_embedder_changed(&StubEmbedder::new(384))
+            .expect("a loaded model with a different identity is a real swap");
+
+        assert_eq!(
+            cache.get_metadata("embedder_id").expect("get"),
+            None,
+            "wiping must clear the previous model's identity along with its vectors"
+        );
+    }
 
     #[test]
     fn interrupted_schema_init_rebuilds_instead_of_bricking_startup() {
@@ -407,5 +706,37 @@ mod tests {
             sql.contains("FLOAT[768]"),
             "expected FLOAT[768] in schema, got: {sql}"
         );
+    }
+
+    #[test]
+    fn vault_derived_search_rows_carry_their_vault_identity() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let conn = cache.connection().expect("conn");
+        let mut statement = conn
+            .prepare("SELECT name FROM pragma_table_info('vault_chunk_fts')")
+            .expect("prepare FTS columns");
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query FTS columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read FTS columns");
+        assert!(
+            columns.iter().any(|column| column == "vault_id"),
+            "derived FTS rows must remain Vault-qualified"
+        );
+
+        for table in ["vault_chunk_vectors", "vault_chunk_vectors_demoted"] {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .expect("vector table DDL");
+            assert!(
+                sql.contains("vault_id TEXT AUXILIARY"),
+                "{table} must retain Vault identity alongside each vector"
+            );
+        }
     }
 }

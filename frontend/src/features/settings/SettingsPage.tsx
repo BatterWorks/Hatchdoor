@@ -7,8 +7,18 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { apiFetch } from "../../api/api";
+import type { VaultSummary } from "../../types";
+import {
+  discardHeldDraft,
+  listHeldDrafts,
+  type HeldDraft,
+} from "../../lib/writeDrafts";
+import { formatWhen } from "./relativeTime";
+import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
+import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
 type SettingKind = "switch" | "number" | "text" | "secret" | "mode";
 type Setting = {
@@ -74,14 +84,25 @@ const VERSIONING_DETAIL = [
   "HATCHDOOR_GIT_BRANCH",
 ];
 
+/** These legacy instance settings describe one Vault. Their controls move to
+ * that Vault's page; #149 supplies the detailed Git behaviour and sign-in UI. */
+const PER_VAULT_SETTING_KEYS = new Set([
+  "HATCHDOOR_ARCHIVE_PREFIX",
+  "HATCHDOOR_EXCLUDE",
+  "HATCHDOOR_GIT_SYNC_ENABLED",
+  "HATCHDOOR_GIT_HTTPS_USERNAME",
+  "HATCHDOOR_GIT_HTTPS_TOKEN",
+  "HATCHDOOR_GIT_DEBOUNCE_SECONDS",
+  "HATCHDOOR_GIT_BRANCH",
+]);
+
 /** Section order mirrors .env.example (#59), so one vocabulary spans both. */
 const SECTIONS = [
   {
-    id: "vault",
+    id: "notes",
     number: "01",
-    title: "Vault",
-    blurb:
-      "What Hatchdoor treats as archived, and what it leaves out of search.",
+    title: "Notes handling",
+    blurb: "How this server indexes the notes its Vaults provide.",
   },
   {
     id: "agents",
@@ -94,13 +115,6 @@ const SECTIONS = [
     number: "03",
     title: "Uploads",
     blurb: "How large a file may be attached to a note.",
-  },
-  {
-    id: "versioning",
-    number: "04",
-    title: "Versioning",
-    blurb:
-      "Keeping a history of every change, and optionally sending it elsewhere.",
   },
 ] as const;
 
@@ -120,24 +134,24 @@ const COPY: Record<
   }
 > = {
   HATCHDOOR_ARCHIVE_PREFIX: {
-    section: "vault",
+    section: "notes",
     label: "Archive folder",
     help: "Notes under this folder are treated as archived: still searchable, but ranked below everything else.",
   },
   HATCHDOOR_EXCLUDE: {
-    section: "vault",
+    section: "notes",
     label: "Ignore these files and folders",
     help: "Anything matching these patterns is left out of search entirely. Same syntax as a .gitignore file, separated by commas. End a pattern with / to ignore a whole folder and everything in it.",
     example: "drafts/, *.excalidraw.md, 99-scratch/",
     note: "Ignored before your list is read: .obsidian/, .trash/, .hatchdoor-trash/, .DS_Store, *.tmp, *.sync-conflict-*. Start a pattern with ! to bring one of those back.",
   },
   HATCHDOOR_EMBED_LAYERS: {
-    section: "vault",
+    section: "notes",
     label: "Meaning search in demoted layers",
     help: "Folders marked with a .hatchdoor-layer file stay out of the browser and out of normal search; assistants can still ask for them by name. On, those notes can also be found by meaning. Off, only by exact words, which saves disk space and indexing time.",
   },
   HATCHDOOR_DEMO_MODE: {
-    section: "vault",
+    section: "notes",
     label: "Public demo mode",
     help: "Read-only public browsing with every write surface disabled. Set for this deployment; there is nothing to change from here.",
   },
@@ -174,38 +188,38 @@ const COPY: Record<
     unit: "in megabytes",
   },
   HATCHDOOR_GIT_SYNC_ENABLED: {
-    section: "versioning",
+    section: "notes",
     label: "Keep a history of changes",
     help: "Off keeps no history. This machine records every change locally. Send elsewhere also pushes it to a server you already set up.",
   },
   HATCHDOOR_GIT_HTTPS_USERNAME: {
-    section: "versioning",
+    section: "notes",
     label: "Username",
     help: "The username that goes with the access token below.",
   },
   HATCHDOOR_GIT_HTTPS_TOKEN: {
-    section: "versioning",
+    section: "notes",
     label: "Access token",
     help: "The token that lets Hatchdoor send changes to the server. Required when sending elsewhere.",
   },
   HATCHDOOR_GIT_DEBOUNCE_SECONDS: {
-    section: "versioning",
+    section: "notes",
     label: "Wait before recording",
     help: "How long Hatchdoor waits after you stop typing before recording a batch of changes.",
     unit: "in seconds",
   },
   HATCHDOOR_GIT_AUTHOR_NAME: {
-    section: "versioning",
+    section: "notes",
     label: "Recorded as (name)",
     help: "The name attached to every recorded change.",
   },
   HATCHDOOR_GIT_AUTHOR_EMAIL: {
-    section: "versioning",
+    section: "notes",
     label: "Recorded as (email)",
     help: "The email attached to every recorded change.",
   },
   HATCHDOOR_GIT_BRANCH: {
-    section: "versioning",
+    section: "notes",
     label: "Branch",
     help: "Which line of history changes are recorded on. Hatchdoor always uses whichever one your vault folder is already on.",
   },
@@ -300,24 +314,45 @@ function formatEta(seconds: number | undefined): string {
   return `about ${Math.round(seconds / 60)} minutes left`;
 }
 
-function formatWhen(timestamp: string | null | undefined): string | null {
-  if (!timestamp) return null;
-  const then = Date.parse(timestamp);
-  if (!Number.isFinite(then)) return null;
-  const minutes = Math.round((Date.now() - then) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes === 1) return "1 minute ago";
-  if (minutes < 60) return `${minutes} minutes ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours === 1) return "1 hour ago";
-  if (hours < 24) return `${hours} hours ago`;
-  const days = Math.round(hours / 24);
-  return days === 1 ? "1 day ago" : `${days} days ago`;
-}
-
-export function SettingsPage() {
+export function SettingsPage({
+  vaults = [],
+  onVaultDiscoveryRefresh,
+  onRestoreCreateDraft,
+}: {
+  /** Enabled Vaults, for the held-draft destination picker (#151). */
+  vaults?: VaultSummary[];
+  /** Refreshes the app-wide Vault discovery `App.tsx` drives the sidebar and
+   * scope zone from, on top of this page's own Vault list (issue #153). */
+  onVaultDiscoveryRefresh?: () => void;
+  /** Held drafts that need a new note stay unrecoverable without it. */
+  onRestoreCreateDraft?: RestoreCreateDraft;
+} = {}) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  // Set once by the zero-Vault workspace state's `Add a Vault` button
+  // (#150) navigating here; consumed on this first render only so a later
+  // back/forward visit to `/settings` does not reopen the flow on its own.
+  const [autoOpenCreation] = useState(() =>
+    Boolean(
+      (location.state as { openVaultCreation?: boolean } | null)
+        ?.openVaultCreation,
+    ),
+  );
+  useEffect(() => {
+    if (autoOpenCreation) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // Only ever runs once, right after the initial render consumed the
+    // navigation state above — location/navigate are stable across
+    // re-renders for this purpose.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [settings, setSettings] = useState<Setting[]>([]);
-  const [active, setActive] = useState<SectionId>("vault");
+  const [active, setActive] = useState<SectionId>("notes");
+  const [showDrafts, setShowDrafts] = useState(false);
+  const [heldDrafts, setHeldDrafts] = useState<HeldDraft[]>(() =>
+    listHeldDrafts(),
+  );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [banner, setBanner] = useState<string | null>(null);
@@ -331,6 +366,18 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [selectedVaultId, setSelectedVaultId] = useState<string | null>(null);
+
+  const handleDiscardHeldDraft = (id: string) => {
+    discardHeldDraft(id);
+    const next = listHeldDrafts();
+    setHeldDrafts(next);
+    // Recovery is a migration artefact, not a standing feature: once the
+    // last held draft is dealt with, the section withdraws for good.
+    if (next.length === 0) {
+      setShowDrafts(false);
+    }
+  };
 
   const load = async () => {
     const response = await apiFetch("/api/settings");
@@ -408,6 +455,7 @@ export function SettingsPage() {
   );
 
   const visible = (setting: Setting) => {
+    if (PER_VAULT_SETTING_KEYS.has(setting.key)) return false;
     if (!COPY[setting.key]) return false;
     if (mode === "off" && VERSIONING_DETAIL.includes(setting.key)) return false;
     if (mode === "local" && REMOTE_ONLY.includes(setting.key)) return false;
@@ -424,10 +472,14 @@ export function SettingsPage() {
     .map((item) => item.key);
 
   const editableCount = settings.filter(
-    (item) => COPY[item.key] && !item.locked,
+    (item) =>
+      COPY[item.key] && !PER_VAULT_SETTING_KEYS.has(item.key) && !item.locked,
   ).length;
   const pinnedCount = settings.filter(
-    (item) => COPY[item.key] && item.locked === "environment",
+    (item) =>
+      COPY[item.key] &&
+      !PER_VAULT_SETTING_KEYS.has(item.key) &&
+      item.locked === "environment",
   ).length;
 
   const edit = (key: string, value: string) => {
@@ -753,8 +805,33 @@ export function SettingsPage() {
     <div className="settings-page">
       <div className="settings-layout">
         <aside className="settings-index">
-          <p className="settings-eyebrow">Server settings</p>
+          <VaultSettingsIndex
+            selectedVaultId={selectedVaultId}
+            onSelectVault={(vaultId) => {
+              setShowDrafts(false);
+              setSelectedVaultId(vaultId);
+            }}
+            autoOpenCreation={autoOpenCreation}
+            onVaultCreated={onVaultDiscoveryRefresh}
+          />
+          <p className="settings-index-group">This server</p>
           <nav aria-label="Settings sections">
+            {heldDrafts.length > 0 ? (
+              <button
+                type="button"
+                className="settings-index-item"
+                data-active={showDrafts}
+                onClick={() => {
+                  setSelectedVaultId(null);
+                  setShowDrafts(true);
+                }}
+              >
+                <span className="settings-index-title">Unsaved drafts</span>
+                <span className="settings-index-count">
+                  {heldDrafts.length}
+                </span>
+              </button>
+            ) : null}
             {SECTIONS.map((item) => {
               const rows = inSection(item.id);
               const dirty = rows.some(
@@ -765,8 +842,12 @@ export function SettingsPage() {
                   key={item.id}
                   type="button"
                   className="settings-index-item"
-                  data-active={item.id === active}
-                  onClick={() => setActive(item.id)}
+                  data-active={!showDrafts && item.id === active}
+                  onClick={() => {
+                    setSelectedVaultId(null);
+                    setShowDrafts(false);
+                    setActive(item.id);
+                  }}
                 >
                   <span className="settings-index-num">{item.number}</span>
                   <span className="settings-index-title">{item.title}</span>
@@ -806,178 +887,210 @@ export function SettingsPage() {
           </div>
         </aside>
 
-        <div className="settings-main">
-          <div className="settings-console">
-            <div className="settings-console-cell">
-              <span className="settings-console-lbl">Search index</span>
-              {indexStatus?.state === "rebuilding" ? (
-                <>
-                  <span className="settings-console-val">
-                    Rebuilding {indexStatus.percent ?? 0}%
-                  </span>
-                  <div className="settings-mini-bar">
-                    <span style={{ width: `${indexStatus.percent ?? 0}%` }} />
-                  </div>
-                  <span className="settings-muted">
-                    Still answering from the old setting ·{" "}
-                    {formatEta(indexStatus.eta_seconds)}
-                  </span>
-                </>
-              ) : indexStatus?.state === "failed" ? (
-                <>
-                  <span className="settings-console-val settings-warn">
-                    Rebuild failed
-                  </span>
-                  <span className="settings-muted">
-                    {indexStatus.last_failure ??
-                      "The last rebuild did not finish."}{" "}
-                    The next settings change or restart tries again.
-                  </span>
-                </>
-              ) : indexStatus?.stale ? (
-                <span className="settings-console-val settings-warn">
-                  Behind your settings
-                </span>
-              ) : (
-                <span className="settings-console-val">Up to date</span>
-              )}
-            </div>
-            <div className="settings-console-cell">
-              <span className="settings-console-lbl">Versioning</span>
-              <span className="settings-console-val">
-                <span
-                  className={`settings-dot is-${gitStatus?.state ?? "disabled"}`}
-                />
-                {!gitStatus || gitStatus.state === "disabled"
-                  ? "Off"
-                  : gitStatus.state === "starting"
-                    ? "Starting…"
-                    : gitStatus.state === "stopping"
-                      ? "Finishing…"
-                      : gitStatus.mode === "local"
-                        ? "On, this machine"
-                        : "On, sending"}
-              </span>
-              {formatWhen(gitStatus?.last_sync_at) ? (
-                <span className="settings-muted">
-                  last recorded {formatWhen(gitStatus?.last_sync_at)}
-                </span>
-              ) : null}
-              {gitStatus?.mode === "remote" && gitStatus.unpushed != null ? (
-                <span className="settings-muted">
-                  {gitStatus.unpushed} waiting to send
-                </span>
-              ) : null}
-            </div>
-          </div>
-
-          <div className="settings-sec-head">
-            <div>
-              <h2 className="settings-sec-title">
-                <span className="settings-sec-num">{section.number}</span>{" "}
-                {section.title}
-              </h2>
-              <p className="settings-sec-blurb">{section.blurb}</p>
-            </div>
-            {/* A section with nothing to edit is a record, not a form: no dead
-                save button above a plaque holding all its content. */}
-            {editable.length === 0 ? null : (
-              <div className="settings-sec-actions">
-                {saved ? <span className="settings-ok">{saved}</span> : null}
-                <button
-                  type="button"
-                  className="settings-btn"
-                  onClick={discard}
-                  disabled={dirtyKeys.length === 0 || saving}
-                >
-                  Discard
-                </button>
-                <button
-                  type="button"
-                  className="settings-btn settings-btn-hot"
-                  onClick={save}
-                  disabled={dirtyKeys.length === 0 || saving}
-                >
-                  {saving ? "Saving…" : `Save ${section.title.toLowerCase()}`}
-                </button>
-              </div>
-            )}
-          </div>
-
-          {banner ? (
-            <div className="settings-notice settings-notice-err" role="alert">
-              {banner}
-            </div>
-          ) : null}
-          {busy ? (
-            <div className="settings-notice settings-notice-warn" role="alert">
-              {busy}
-            </div>
-          ) : null}
-
-          <div className="settings-rows" data-empty={editable.length === 0}>
-            {editable.map((setting) => {
-              const copy = COPY[setting.key];
-              const error = errors[setting.key];
-              return (
-                <div
-                  className={`settings-row${error ? " has-error" : ""}`}
-                  key={setting.key}
-                >
-                  <div>
-                    <div className="settings-row-label">
-                      {copy.label}
-                      {drafts[setting.key] !== undefined ? (
-                        <span className="settings-dirty" aria-label="unsaved" />
-                      ) : null}
+        {selectedVaultId ? (
+          <VaultSettingsDetail
+            vaultId={selectedVaultId}
+            serverIdentity={{
+              name:
+                settings.find(
+                  (item) => item.key === "HATCHDOOR_GIT_AUTHOR_NAME",
+                )?.value ?? "",
+              email:
+                settings.find(
+                  (item) => item.key === "HATCHDOOR_GIT_AUTHOR_EMAIL",
+                )?.value ?? "",
+            }}
+            onDisconnect={() => setSelectedVaultId(null)}
+          />
+        ) : showDrafts ? (
+          <UnsavedDrafts
+            drafts={heldDrafts}
+            vaults={vaults}
+            onRestoreCreateDraft={onRestoreCreateDraft}
+            onDiscard={handleDiscardHeldDraft}
+          />
+        ) : (
+          <div className="settings-main">
+            <div className="settings-console">
+              <div className="settings-console-cell">
+                <span className="settings-console-lbl">Search index</span>
+                {indexStatus?.state === "rebuilding" ? (
+                  <>
+                    <span className="settings-console-val">
+                      Rebuilding {indexStatus.percent ?? 0}%
+                    </span>
+                    <div className="settings-mini-bar">
+                      <span style={{ width: `${indexStatus.percent ?? 0}%` }} />
                     </div>
-                    <p className="settings-row-help">{copy.help}</p>
-                    {copy.note ? (
-                      <p className="settings-row-note">{copy.note}</p>
-                    ) : null}
-                    {setting.class === "reindex" ? (
-                      <p className="settings-row-class">
-                        Saving this rebuilds the search index.
-                      </p>
-                    ) : null}
-                    {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
-                      <p className="settings-row-class">
-                        This password also controls who can upload files, not
-                        only who can talk to assistants.
-                      </p>
-                    ) : null}
-                    {error ? <p className="settings-error">{error}</p> : null}
-                  </div>
-                  <div>{control(setting)}</div>
-                </div>
-              );
-            })}
-          </div>
+                    <span className="settings-muted">
+                      Still answering from the old setting ·{" "}
+                      {formatEta(indexStatus.eta_seconds)}
+                    </span>
+                  </>
+                ) : indexStatus?.state === "failed" ? (
+                  <>
+                    <span className="settings-console-val settings-warn">
+                      Rebuild failed
+                    </span>
+                    <span className="settings-muted">
+                      {indexStatus.last_failure ??
+                        "The last rebuild did not finish."}{" "}
+                      The next settings change or restart tries again.
+                    </span>
+                  </>
+                ) : indexStatus?.stale ? (
+                  <span className="settings-console-val settings-warn">
+                    Behind your settings
+                  </span>
+                ) : (
+                  <span className="settings-console-val">Up to date</span>
+                )}
+              </div>
+              <div className="settings-console-cell">
+                <span className="settings-console-lbl">Versioning</span>
+                <span className="settings-console-val">
+                  <span
+                    className={`settings-dot is-${gitStatus?.state ?? "disabled"}`}
+                  />
+                  {!gitStatus || gitStatus.state === "disabled"
+                    ? "Off"
+                    : gitStatus.state === "starting"
+                      ? "Starting…"
+                      : gitStatus.state === "stopping"
+                        ? "Finishing…"
+                        : gitStatus.mode === "local"
+                          ? "On, this machine"
+                          : "On, sending"}
+                </span>
+                {formatWhen(gitStatus?.last_sync_at) ? (
+                  <span className="settings-muted">
+                    last recorded {formatWhen(gitStatus?.last_sync_at)}
+                  </span>
+                ) : null}
+                {gitStatus?.mode === "remote" && gitStatus.unpushed != null ? (
+                  <span className="settings-muted">
+                    {gitStatus.unpushed} waiting to send
+                  </span>
+                ) : null}
+              </div>
+            </div>
 
-          {locked.length ? (
-            <div className="settings-plaque">
-              <p className="settings-plaque-head">Managed outside this page</p>
-              <dl>
-                {locked.map((setting) => (
-                  <div className="settings-plaque-row" key={setting.key}>
-                    <dt>
-                      {COPY[setting.key].label}
-                      <code>{setting.key}</code>
-                    </dt>
-                    <dd>{plaqueValue(setting)}</dd>
-                  </div>
-                ))}
-              </dl>
-              {[...new Set(locked.map((setting) => setting.locked!))].map(
-                (reason) => (
-                  <p className="settings-plaque-why" key={reason}>
-                    {LOCK_WHY[reason]}
-                  </p>
-                ),
+            <div className="settings-sec-head">
+              <div>
+                <h2 className="settings-sec-title">
+                  <span className="settings-sec-num">{section.number}</span>{" "}
+                  {section.title}
+                </h2>
+                <p className="settings-sec-blurb">{section.blurb}</p>
+              </div>
+              {/* A section with nothing to edit is a record, not a form: no dead
+                save button above a plaque holding all its content. */}
+              {editable.length === 0 ? null : (
+                <div className="settings-sec-actions">
+                  {saved ? <span className="settings-ok">{saved}</span> : null}
+                  <button
+                    type="button"
+                    className="settings-btn"
+                    onClick={discard}
+                    disabled={dirtyKeys.length === 0 || saving}
+                  >
+                    Discard
+                  </button>
+                  <button
+                    type="button"
+                    className="settings-btn settings-btn-hot"
+                    onClick={save}
+                    disabled={dirtyKeys.length === 0 || saving}
+                  >
+                    {saving ? "Saving…" : `Save ${section.title.toLowerCase()}`}
+                  </button>
+                </div>
               )}
             </div>
-          ) : null}
-        </div>
+
+            {banner ? (
+              <div className="settings-notice settings-notice-err" role="alert">
+                {banner}
+              </div>
+            ) : null}
+            {busy ? (
+              <div
+                className="settings-notice settings-notice-warn"
+                role="alert"
+              >
+                {busy}
+              </div>
+            ) : null}
+
+            <div className="settings-rows" data-empty={editable.length === 0}>
+              {editable.map((setting) => {
+                const copy = COPY[setting.key];
+                const error = errors[setting.key];
+                return (
+                  <div
+                    className={`settings-row${error ? " has-error" : ""}`}
+                    key={setting.key}
+                  >
+                    <div>
+                      <div className="settings-row-label">
+                        {copy.label}
+                        {drafts[setting.key] !== undefined ? (
+                          <span
+                            className="settings-dirty"
+                            aria-label="unsaved"
+                          />
+                        ) : null}
+                      </div>
+                      <p className="settings-row-help">{copy.help}</p>
+                      {copy.note ? (
+                        <p className="settings-row-note">{copy.note}</p>
+                      ) : null}
+                      {setting.class === "reindex" ? (
+                        <p className="settings-row-class">
+                          Saving this rebuilds the search index.
+                        </p>
+                      ) : null}
+                      {setting.key === "HATCHDOOR_MCP_BEARER_TOKEN" ? (
+                        <p className="settings-row-class">
+                          This password also controls who can upload files, not
+                          only who can talk to assistants.
+                        </p>
+                      ) : null}
+                      {error ? <p className="settings-error">{error}</p> : null}
+                    </div>
+                    <div>{control(setting)}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {locked.length ? (
+              <div className="settings-plaque">
+                <p className="settings-plaque-head">
+                  Managed outside this page
+                </p>
+                <dl>
+                  {locked.map((setting) => (
+                    <div className="settings-plaque-row" key={setting.key}>
+                      <dt>
+                        {COPY[setting.key].label}
+                        <code>{setting.key}</code>
+                      </dt>
+                      <dd>{plaqueValue(setting)}</dd>
+                    </div>
+                  ))}
+                </dl>
+                {[...new Set(locked.map((setting) => setting.locked!))].map(
+                  (reason) => (
+                    <p className="settings-plaque-why" key={reason}>
+                      {LOCK_WHY[reason]}
+                    </p>
+                  ),
+                )}
+              </div>
+            ) : null}
+          </div>
+        )}
       </div>
 
       {confirmation ? (

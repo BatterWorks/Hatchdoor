@@ -12,10 +12,16 @@ vi.mock("./PdfPreview", () => ({
   ),
 }));
 
+const VAULT_ID = "vault-1";
+
 function renderMarkdown(markdown: string) {
   render(
     <ReactMarkdown
-      components={createNoteMarkdownComponents("Notes/Entry", new Map())}
+      components={createNoteMarkdownComponents(
+        VAULT_ID,
+        "Notes/Entry",
+        new Map(),
+      )}
     >
       {markdown}
     </ReactMarkdown>,
@@ -28,7 +34,7 @@ describe("note markdown asset renderer", () => {
 
     expect(screen.getByTestId("pdf-preview")).toHaveAttribute(
       "data-src",
-      "/vault-assets/Notes/Attachments/report.PDF#page=2",
+      "/api/v1/vaults/vault-1/assets/Notes/Attachments/report.PDF#page=2",
     );
     expect(screen.getByTestId("pdf-preview")).toHaveTextContent(
       "Quarterly report",
@@ -41,7 +47,7 @@ describe("note markdown asset renderer", () => {
     const image = screen.getByRole("img", { name: "Diagram" });
     expect(image).toHaveAttribute(
       "src",
-      "/vault-assets/Notes/Attachments/diagram.png",
+      "/api/v1/vaults/vault-1/assets/Notes/Attachments/diagram.png",
     );
     expect(image).toHaveAttribute("loading", "lazy");
   });
@@ -56,7 +62,11 @@ describe("block embeds inside paragraphs", () => {
   it("does not wrap a PDF preview in a paragraph", () => {
     const { container } = render(
       <ReactMarkdown
-        components={createNoteMarkdownComponents("Notes/Entry", new Map())}
+        components={createNoteMarkdownComponents(
+          VAULT_ID,
+          "Notes/Entry",
+          new Map(),
+        )}
       >
         {"![Report](Attachments/report.pdf)"}
       </ReactMarkdown>,
@@ -71,7 +81,11 @@ describe("block embeds inside paragraphs", () => {
   it("keeps an ordinary paragraph wrapping its text", () => {
     const { container } = render(
       <ReactMarkdown
-        components={createNoteMarkdownComponents("Notes/Entry", new Map())}
+        components={createNoteMarkdownComponents(
+          VAULT_ID,
+          "Notes/Entry",
+          new Map(),
+        )}
       >
         {"Just prose here."}
       </ReactMarkdown>,
@@ -83,7 +97,11 @@ describe("block embeds inside paragraphs", () => {
   it("keeps a paragraph that mixes text with an inline image", () => {
     const { container } = render(
       <ReactMarkdown
-        components={createNoteMarkdownComponents("Notes/Entry", new Map())}
+        components={createNoteMarkdownComponents(
+          VAULT_ID,
+          "Notes/Entry",
+          new Map(),
+        )}
       >
         {"Before ![Diagram](Attachments/diagram.png) after"}
       </ReactMarkdown>,

@@ -1,0 +1,238 @@
+import type { VaultId, VaultScope, VaultSummary } from "../types";
+
+export type VaultSlotState =
+  | { kind: "count"; count: number }
+  | { kind: "indexing" }
+  /** Browsable but not yet searchable: a real note count, plus a marker that
+   * search is still building. Its own kind rather than a `condition` because
+   * nothing is wrong — the Vault is usable, just not by search yet. */
+  | { kind: "count-pending-search"; count: number; sentence: string }
+  | {
+      kind: "condition";
+      word: string;
+      tier: "warn" | "error";
+      sentence: string;
+    };
+
+export type VaultAggregate =
+  | { kind: "count"; count: number }
+  | {
+      kind: "shortfall";
+      participating: number;
+      total: number;
+      tier: "warn" | "error";
+    };
+
+/** The browsing scope's display name: `All Vaults`, or the narrowed Vault's
+ * own name — shared by the desktop Scope zone (#138) and the mobile scope
+ * row (#145), the two chrome surfaces that name the current scope. */
+export function scopeName(scope: VaultScope, vaults: VaultSummary[]): string {
+  if (scope === "all") {
+    return "All Vaults";
+  }
+  return vaults.find((vault) => vault.vault_id === scope)?.name ?? "All Vaults";
+}
+
+/** In demo mode a condition's sentence is always this fallback, never the
+ * Vault's own runtime message — nobody reading it is in a position to act on
+ * an operator-facing diagnostic, so the generic, instruction-free sentence is
+ * the only one shown (#152). */
+function slotSentence(
+  demoMode: boolean,
+  serverMessage: string | undefined,
+  fallback: string,
+): string {
+  return demoMode ? fallback : (serverMessage ?? fallback);
+}
+
+/** In demo mode nobody is waiting on the read-only visitor, so the red tier
+ * — reserved for something the app is not already handling — never appears;
+ * everything clamps to amber (#152). */
+function slotTier(demoMode: boolean, tier: "warn" | "error"): "warn" | "error" {
+  return demoMode ? "warn" : tier;
+}
+
+/**
+ * Each Vault's single trailing slot: its note count when healthy, a
+ * shimmering placeholder while indexing, or one condition word otherwise —
+ * never a count and a condition together (#116, amended by #117).
+ *
+ * Priority (worst first): `unavailable` outranks every Git condition, which
+ * outranks `stale`, which outranks indexing. A Vault that has never
+ * published a snapshot reports the same `search: "unavailable"` the API uses
+ * for a vanished directory, but only the latter also turns `activation`
+ * `"unavailable"` (`activation_snapshot` in `src/vault_runtime.rs`: a Vault
+ * whose directory stats fine is `"active"` the moment it is enabled,
+ * regardless of whether it has indexed yet). Checking `activation` first is
+ * what tells "first index" apart from "lost it" without reopening the
+ * frozen contract, exactly as #116's resolution describes.
+ *
+ * `demoMode` clamps every condition to the amber tier with an
+ * instruction-free sentence (#152) — nobody browsing a public demo is the
+ * one who would act on it.
+ */
+export function deriveVaultSlot(
+  vault: VaultSummary,
+  noteCount: number | undefined,
+  demoMode = false,
+): VaultSlotState {
+  if (vault.activation === "unavailable") {
+    return {
+      kind: "condition",
+      word: "unavailable",
+      tier: slotTier(demoMode, "error"),
+      sentence: slotSentence(
+        demoMode,
+        vault.activation_error?.message,
+        "This Vault should be answering and is not.",
+      ),
+    };
+  }
+  if (vault.git === "unavailable") {
+    if (vault.git_error?.code === "git_content_conflict") {
+      return {
+        kind: "condition",
+        word: "conflict",
+        tier: slotTier(demoMode, "error"),
+        sentence: slotSentence(
+          demoMode,
+          vault.git_error.message,
+          "A content conflict is blocking Git sync for this Vault.",
+        ),
+      };
+    }
+    if (vault.git_error?.code === "dirty_working_copy") {
+      return {
+        kind: "condition",
+        word: "sync stopped",
+        tier: slotTier(demoMode, "error"),
+        sentence: slotSentence(
+          demoMode,
+          vault.git_error.message,
+          "Local edits in this Vault halted Git sync.",
+        ),
+      };
+    }
+    return {
+      kind: "condition",
+      word: "sync failed",
+      tier: "warn",
+      sentence: slotSentence(
+        demoMode,
+        vault.git_error?.message,
+        "The last Git sync for this Vault did not succeed.",
+      ),
+    };
+  }
+  if (vault.search === "stale") {
+    return {
+      kind: "condition",
+      word: "stale",
+      tier: "warn",
+      sentence: slotSentence(
+        demoMode,
+        vault.search_error?.message,
+        "The last index build for this Vault failed.",
+      ),
+    };
+  }
+  // Browsable outranks indexing: the Vault has published its notes and is
+  // usable now, so it shows what it has rather than a placeholder. The
+  // embedding pass that follows is reported alongside the count, not instead
+  // of it.
+  if (vault.search === "browsable") {
+    // A browsable Vault carrying an error is one whose embedding pass failed
+    // after its notes were published. It is still browsable, but "search is
+    // still building" would be a lie — nothing is building until a retry.
+    if (vault.search_error) {
+      return {
+        kind: "condition",
+        word: "search failed",
+        tier: slotTier(demoMode, "warn"),
+        sentence: slotSentence(
+          demoMode,
+          vault.search_error.message,
+          "This Vault can be browsed, but building its search failed.",
+        ),
+      };
+    }
+    return {
+      kind: "count-pending-search",
+      count: noteCount ?? 0,
+      sentence: "Browsing is ready. Search for this Vault is still building.",
+    };
+  }
+  if (vault.search === "indexing" || vault.search === "unavailable") {
+    return { kind: "indexing" };
+  }
+  return { kind: "count", count: noteCount ?? 0 };
+}
+
+/**
+ * The current scope's count-or-condition, in the same words §27's slot
+ * renders, for the shell's polite live region (#146). `null` means not yet
+ * known (an indexing Vault) — the live region must never announce a value it
+ * does not have.
+ */
+export function describeScopeSlot(
+  scope: VaultScope,
+  vaults: VaultSummary[],
+  counts: Record<VaultId, number | undefined>,
+  demoMode = false,
+): string | null {
+  if (scope === "all") {
+    const aggregate = deriveVaultAggregate(vaults, counts, demoMode);
+    if (aggregate.kind === "count") {
+      return `${aggregate.count} Vault${aggregate.count === 1 ? "" : "s"}`;
+    }
+    return `${aggregate.participating} of ${aggregate.total}`;
+  }
+  const vault = vaults.find((candidate) => candidate.vault_id === scope);
+  if (!vault) {
+    return null;
+  }
+  const slot = deriveVaultSlot(vault, counts[vault.vault_id], demoMode);
+  if (slot.kind === "indexing") {
+    return null;
+  }
+  if (slot.kind === "condition") {
+    return slot.word;
+  }
+  const notes = `${slot.count} note${slot.count === 1 ? "" : "s"}`;
+  return slot.kind === "count-pending-search"
+    ? `${notes}, search still building`
+    : notes;
+}
+
+/**
+ * The `All Vaults` row's and the collapsed Scope head's shared aggregate:
+ * the enabled-Vault count when every Vault is healthy or indexing (both
+ * "participating" — an indexing Vault keeps answering from its previous
+ * snapshot), or the shortfall against the worst tier present when some are
+ * not (#116, amended by #117).
+ */
+export function deriveVaultAggregate(
+  vaults: VaultSummary[],
+  counts: Record<VaultId, number | undefined>,
+  demoMode = false,
+): VaultAggregate {
+  let worstTier: "warn" | "error" | null = null;
+  let participating = 0;
+  for (const vault of vaults) {
+    const slot = deriveVaultSlot(vault, counts[vault.vault_id], demoMode);
+    if (slot.kind === "condition") {
+      worstTier = slot.tier === "error" ? "error" : (worstTier ?? "warn");
+    } else {
+      participating += 1;
+    }
+  }
+  if (worstTier === null) {
+    return { kind: "count", count: vaults.length };
+  }
+  return {
+    kind: "shortfall",
+    participating,
+    total: vaults.length,
+    tier: worstTier,
+  };
+}

@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { escapeMarkdownLabel, parseWikilinkTarget } from "../../lib/markdown";
 import { slugifyHeading } from "../../lib/noteHeadings";
 import { apiFetch, withAccessToken } from "../../api/api";
-import type { ResolveBatchResponse } from "../../types";
+import type { VaultId, VaultResolveBatchResponse } from "../../types";
 
 export type ResolvedWikilink = { slug: string; archived: boolean };
 
@@ -17,8 +17,15 @@ const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
 
 // Resolution results are stable for the life of the page, and every content
 // change re-runs this effect, so without a cache each keystroke-driven commit
-// re-POSTs every target in the note and widens the settling window.
+// re-POSTs every target in the note and widens the settling window. Keyed by
+// `vaultId:target` — wikilinks are always resolved within their own Vault
+// (cross-Vault resolution is ruled out by #62), and the same target string
+// can legitimately resolve differently in different Vaults.
 const resolveCache = new Map<string, ResolvedWikilink | null>();
+
+function cacheKey(vaultId: VaultId, target: string): string {
+  return `${vaultId}:${target}`;
+}
 
 /**
  * Rewrite every wikilink in `markdown` to a markdown link or image.
@@ -28,6 +35,7 @@ const resolveCache = new Map<string, ResolvedWikilink | null>();
  * back to a line in the file.
  */
 export function rewriteWikilinks(
+  vaultId: VaultId,
   markdown: string,
   noteRelativePath: string,
   resolved: Map<string, ResolvedWikilink | null>,
@@ -38,12 +46,20 @@ export function rewriteWikilinks(
       const parsed = parseWikilinkTarget(body);
 
       if (bang === "!") {
-        const source = resolveAssetHref(parsed.target, noteRelativePath);
+        const source = resolveAssetHref(
+          vaultId,
+          parsed.target,
+          noteRelativePath,
+        );
         return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
       }
 
       if (isPdfAssetTarget(parsed.target)) {
-        const source = resolveAssetHref(parsed.target, noteRelativePath);
+        const source = resolveAssetHref(
+          vaultId,
+          parsed.target,
+          noteRelativePath,
+        );
         return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
       }
 
@@ -51,7 +67,9 @@ export function rewriteWikilinks(
       if (hit) {
         const anchor = extractAnchor(parsed.target);
         const hash = anchor ? `#${anchor}` : "";
-        const prefix = hit.archived ? "/__archived__/" : "/n/";
+        const prefix = hit.archived
+          ? "/__archived__/"
+          : `/v/${encodeURIComponent(vaultId)}/n/`;
         const label = wikilinkDisplayLabel(body, parsed.label, hit.archived);
         return `[${escapeMarkdownLabel(label)}](${prefix}${hit.slug}${hash})`;
       }
@@ -70,6 +88,7 @@ export function rewriteWikilinks(
  * it is safe to address blocks by line.
  */
 export function useResolvedWikilinks(
+  vaultId: VaultId,
   markdown: string,
   noteRelativePath: string,
 ): { resolved: string; resolvedFor: string } {
@@ -99,32 +118,36 @@ export function useResolvedWikilinks(
 
       const map = new Map<string, ResolvedWikilink | null>();
       for (const target of uniqueTargets) {
-        if (resolveCache.has(target)) {
-          map.set(target, resolveCache.get(target) ?? null);
+        const key = cacheKey(vaultId, target);
+        if (resolveCache.has(key)) {
+          map.set(target, resolveCache.get(key) ?? null);
         }
       }
       const missing = uniqueTargets.filter(
-        (target) => !resolveCache.has(target),
+        (target) => !resolveCache.has(cacheKey(vaultId, target)),
       );
 
       if (missing.length > 0) {
         try {
-          const res = await apiFetch("/api/resolve-batch", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
+          const res = await apiFetch(
+            `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ targets: missing }),
             },
-            body: JSON.stringify({ targets: missing }),
-          });
+          );
 
           if (res.ok) {
-            const json = (await res.json()) as ResolveBatchResponse;
+            const json = (await res.json()) as VaultResolveBatchResponse;
             for (const result of json.results) {
               const resolved = result.slug
                 ? { slug: result.slug, archived: result.archived }
                 : null;
               map.set(result.target, resolved);
-              resolveCache.set(result.target, resolved);
+              resolveCache.set(cacheKey(vaultId, result.target), resolved);
             }
           }
         } catch {
@@ -132,7 +155,12 @@ export function useResolvedWikilinks(
         }
       }
 
-      const rewritten = rewriteWikilinks(markdown, noteRelativePath, map);
+      const rewritten = rewriteWikilinks(
+        vaultId,
+        markdown,
+        noteRelativePath,
+        map,
+      );
 
       if (!cancelled) {
         setState({ resolved: rewritten, resolvedFor: markdown });
@@ -142,12 +170,13 @@ export function useResolvedWikilinks(
     return () => {
       cancelled = true;
     };
-  }, [markdown, noteRelativePath]);
+  }, [vaultId, markdown, noteRelativePath]);
 
   return state;
 }
 
 export function resolveAssetHref(
+  vaultId: VaultId,
   rawTarget: string,
   noteRelativePath: string,
 ): string {
@@ -164,7 +193,9 @@ export function resolveAssetHref(
   }
 
   const encoded = normalized.split("/").map(encodeURIComponent).join("/");
-  return withAccessToken(`/vault-assets/${encoded}${suffix}`);
+  return withAccessToken(
+    `/api/v1/vaults/${encodeURIComponent(vaultId)}/assets/${encoded}${suffix}`,
+  );
 }
 
 function isPdfAssetTarget(target: string): boolean {
