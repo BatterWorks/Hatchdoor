@@ -394,17 +394,18 @@ button.side-head[data-open="true"] .side-caret {
   font-variation-settings:
     "wdth" 100,
     "wght" 700;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   letter-spacing: 0.01em;
   text-transform: none;
 }
 
-/* Depth is carried by exactly two devices, and both descend. Size separates a
-   Vault from its contents — the head is the only thing in the tree set above
-   reading size; folders and notes stay at 0.9rem because they are what you
-   actually read, and shrinking them to manufacture a third step would cost
-   legibility to say something weight already says. The caret shrinks with
-   depth for the same reason: a child marker larger than its parent's reads as
+/* Depth is carried by weight and by the caret, not by size. The whole tree
+   sits at one reading size — a Vault head at 0.9rem alongside its folders and
+   notes, and alongside `RECENTLY VIEWED`'s rows: nothing here is chrome, it is
+   all your own text, and setting the head above the rest made it shout. What
+   separates a head from its contents is 700 weight and the hot rail when it is
+   open. The caret still shrinks with depth: a child marker larger than its
+   parent's reads as
    the child outranking it. Scoped to the accordion so §05's chrome heads
    (`SCOPE`, `RECENTLY VIEWED`) keep the smaller shared caret. */
 .vault-accordion-head .side-caret {
@@ -420,6 +421,15 @@ button.side-head[data-open="true"] .side-caret {
    reason. */
 .vault-accordion-head {
   margin-bottom: 0.5rem;
+  /* The open head's 3px rail sat almost against the caret, reading as one
+     thick marker rather than a rail and a triangle. The rail moves out, not
+     the caret: the head reaches 0.35rem further left than its own column and
+     pays that back as padding, so the triangle keeps the left edge it shares
+     with the folders below it. Carried on every head, open or not, so nothing
+     shifts as you fold it. */
+  margin-left: -0.35rem;
+  width: calc(100% + 0.35rem);
+  padding-left: 0.65rem;
 }
 
 /* The space belongs to the group, not to every head. An unfolded head owns the

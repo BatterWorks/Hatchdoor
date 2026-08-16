@@ -723,12 +723,17 @@
     color: var(--ink);
   }
   /* Vault accordion head (§29) — a Vault name keeps its own capitalisation,
-     and outranks its contents in both size and caret. */
-  .vault-accordion-head { margin-bottom: 0.5rem; }
+     and outranks its contents by weight and caret, not by size. */
+  .vault-accordion-head {
+    margin-bottom: 0.5rem;
+    margin-left: -0.35rem;
+    width: calc(100% + 0.35rem);
+    padding-left: 0.65rem;
+  }
   .vault-accordion-head[data-open="true"] { margin-bottom: 0.2rem; }
   .vault-accordion-head .side-label {
     font-variation-settings: "wdth" 100, "wght" 700;
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     letter-spacing: 0.01em;
     text-transform: none;
   }
@@ -1271,6 +1276,7 @@
     box-shadow: var(--shadow-overlay);
     padding: 1rem;
   }
+  .search-panel--faceted { width: min(calc(59rem + 0.75rem + 1px), 100%); }
   .search-panel-head {
     display: flex;
     align-items: center;
@@ -1313,7 +1319,7 @@
 
   /* Facet rail (#119, #144) — the dialog's own Vault filter, never the browsing scope. */
   .search-body { display: flex; align-items: flex-start; gap: 1rem; }
-  .search-facet-rail { flex: 0 0 auto; width: 9rem; display: flex; flex-direction: column; gap: 0.1rem; margin-top: 0.5rem; }
+  .search-facet-rail { flex: 0 0 auto; width: calc(12rem + 0.75rem + 1px); display: flex; flex-direction: column; gap: 0.1rem; margin-top: 0.5rem; padding-right: 0.75rem; border-right: 1px solid var(--rule); }
   .search-facet-row { display: flex; align-items: center; justify-content: space-between; gap: 0.45rem; width: 100%; padding: 0.32rem 0.4rem; border: 0; background: transparent; font-family: var(--font-display); font-size: 0.82rem; color: var(--ink-soft); text-align: left; cursor: pointer; }
   .search-facet-row.is-selected { color: var(--ink); font-weight: 600; background: var(--hot-soft); box-shadow: inset 3px 0 0 var(--hot); }
   .search-facet-row[aria-disabled="true"] { cursor: not-allowed; color: var(--muted); }
@@ -1574,13 +1580,23 @@
     border-bottom: 1px solid var(--rule); font-size: 0.82rem;
   }
   .set-index-item[data-active="true"] { color: var(--hot); }
+  .set-index-group {
+    margin: 0.9rem 0 0.35rem; font-family: var(--font-display); font-size: 0.68rem;
+    font-variation-settings: "wdth" 85, "wght" 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .set-index-vault { grid-template-columns: 1fr auto; align-items: start; }
+  .set-index-vault[data-off="true"] { color: var(--muted); }
+  .set-index-add { grid-template-columns: auto 1fr; color: var(--hot); }
+  .set-index-add::before { content: "+"; font-family: var(--font-mono); color: var(--hot); }
   .set-index-num { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
   .set-index-count { font-family: var(--font-mono); font-size: 0.66rem; color: var(--muted); }
   .set-eyebrow {
     font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.2em;
     text-transform: uppercase; color: var(--hot); margin: 0 0 0.35rem;
   }
-  .set-row { border-bottom: 1px solid var(--rule); padding: 0.9rem 0; display: grid; grid-template-columns: 1fr auto; gap: 1.5rem; align-items: start; }
+  .set-row { border-bottom: 1px solid var(--rule); padding: 0.9rem 0; display: grid; grid-template-columns: 1fr 21.5rem; gap: 1.5rem; align-items: center; }
+  .set-row > :last-child { justify-self: end; }
   .set-row-label { font-size: 0.9rem; }
   .set-row-help { font-size: 0.78rem; color: var(--muted); margin: 0.25rem 0 0; max-width: 46ch; line-height: 1.6; }
   .set-row-class { font-size: 0.74rem; color: var(--warn-fg); margin: 0.35rem 0 0; }
@@ -1599,7 +1615,7 @@
   .set-segmented span {
     font-family: var(--font-mono); font-size: 0.7rem; letter-spacing: 0.08em;
     text-transform: uppercase; padding: 0.3rem 0.7rem; color: var(--ink-soft);
-    border-right: 1px solid var(--rule-strong);
+    white-space: nowrap; border-right: 1px solid var(--rule-strong);
   }
   .set-segmented span:last-child { border-right: none; }
   .set-segmented span[data-on="true"] { background: var(--hot); color: #fff; }
@@ -1901,7 +1917,9 @@
 
       <p class="blurb"><b>The index is centred optically, not geometrically.</b> It is always lining digits &mdash; ascent only, no descender &mdash; while the title beside it hangs about two pixels below their shared baseline. <span class="key">align-items: center</span> lines the two <i>boxes</i> up exactly and still leaves the digits reading high by half that descender, so <span class="key">.idx</span> takes a <span class="key">translateY(0.1em)</span> correction, in em so it survives a resize. The residual is content-dependent &mdash; a title full of descenders sits lower than an all-caps one &mdash; so the target is the face&rsquo;s typical profile, never any single string&rsquo;s ink.</p>
 
-      <p class="blurb"><b>Depth is carried by two devices, and both descend.</b> Size separates a Vault from its contents: the accordion head is the only row in the tree set above reading size, at <span class="key">0.95rem</span>. Folders and notes both stay at <span class="key">0.9rem</span> and separate by weight and marker instead &mdash; <span class="key">wght 500</span> with a caret against <span class="key">wght 400</span> with the mono index &mdash; because they are what you actually read, and buying a third size step by shrinking them would cost legibility to say something weight already says. Carets shrink the same way: <span class="key">6&times;10</span> at a Vault head, <span class="key">6&times;6</span> at a folder. A child marker larger than its parent&rsquo;s reads as the child outranking it, which is what an <span class="key">8&times;8</span> folder caret under a <span class="key">5&times;8</span> head was doing.</p>
+      <p class="blurb"><b>Depth is carried by weight and by the caret, not by size.</b> The whole tree sits at one reading size: <span class="key">0.9rem</span> for a Vault head, for the folders and notes beneath it, and for <span class="key">RECENTLY VIEWED</span>&rsquo;s rows above it. None of this is chrome &mdash; it is all the operator&rsquo;s own text, and setting the head above the rest made it shout. What separates a head from its contents is <span class="key">wght 700</span> and, when it is open, the hot rail; folders and notes separate from each other the same way, <span class="key">wght 500</span> with a caret against <span class="key">wght 400</span> with the mono index. Buying a size step here would cost legibility to say something weight already says. Carets shrink the same way: <span class="key">6&times;10</span> at a Vault head, <span class="key">6&times;6</span> at a folder. A child marker larger than its parent&rsquo;s reads as the child outranking it, which is what an <span class="key">8&times;8</span> folder caret under a <span class="key">5&times;8</span> head was doing.</p>
+
+      <p class="blurb"><b>An open head&rsquo;s hot rail sits outside the tree&rsquo;s left edge, not inside it.</b> The head reaches <span class="key">0.35rem</span> further left than its own column and pays it straight back as padding, so the rail clears the caret instead of crowding it into one thick marker, and the caret keeps the left edge it shares with the folders below. The offset is carried by every head, open or closed &mdash; put it on the open state alone and the row slides sideways as you fold it.</p>
 
       <p class="blurb"><b>Row rhythm descends with depth too:</b> <span class="key">26px</span> between Vault heads, <span class="key">24.5px</span> between folders, <span class="key">23.9px</span> between notes. Pitch alone is not what the eye reads &mdash; before this the three were within 2px of each other and the tree still felt slack, because a head fills its box with large bold type while a note puts small light type in the same box, and the emptier box reads as looser. Rows are sized by the ratio of ink to box, not by matching numbers.</p>
       <p class="blurb">Section heads take a label, a rule, and a mono count. A collapsible section adds the same caret the folder rows use, so a foldable thing reads the same way wherever it appears. Section numerals are optional &mdash; use them only where the order carries meaning.</p>
@@ -2143,7 +2161,8 @@
           <p>Search highlight: the word <span class="search-hit">orchard</span> appears 5 times, and <span class="search-hit active">this is the active match</span>.</p>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
+      <p class="blurb"><b>A link shaped like a button must pay off the prose link rule.</b> <span class="key">.note-body a</span> outweighs a bare component class, so a button inside the body &mdash; the PDF preview&rsquo;s <span class="key">Open PDF</span> &mdash; inherits the 2px hot rail (wanted: it is still a link) along with a <span class="key">1px</span> bottom padding and the body&rsquo;s <span class="key">1.45</span> line-height (not wanted: together they set the label high in a box 5px taller than it should be). Any such button restores its own <span class="key">padding-block</span> and <span class="key">line-height: 1</span> under a type-qualified selector, less <span class="key">1px</span> off the bottom for the rail it is standing on.</p>
+      <div class="tag-row"><span class="key">.note-body p</span><span class="key">a</span><span class="key">a:hover</span><span class="key">.note-body a.ui-button</span><span class="key">em</span><span class="key">strong</span><span class="key">code (inline)</span><span class="key">.ty-broken</span><span class="key">.search-hit</span><span class="key">.search-hit.active</span></div>
     </section>
 
     <!-- ───────── LISTS ───────── -->
@@ -2379,10 +2398,10 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <p class="blurb">The sidebar decides what you are browsing; the dialog decides what you are looking at right now. Selecting a facet (or the phone&rsquo;s <code>Scope</code> field) narrows only the results in view, changes no ranking, and dies the moment the dialog closes. No future surface may adopt either as a scope control (#119).</p>
 
       <h4 class="doc-sub" style="font-size:0.86rem;">Desktop &mdash; the facet rail</h4>
-      <p class="blurb">A narrow column beside the results: every Vault the search reached, each ending in #116&rsquo;s own count-or-condition slot. <code>All results</code> is the permanent widening row. A Vault that answered with nothing reads <code>0</code>, inert; a Vault that did not answer keeps its row, reading <code>no answer</code> in error ink, <code>aria-disabled</code> rather than removed. Order is Vault-management order, never re-sorted by count or condition (#117). Absent when scope is narrowed or at one enabled Vault &mdash; there is nothing to filter across, and the Scope zone is already on screen behind the overlay.</p>
+      <p class="blurb">A 12rem column beside the results, divided from them by a hairline rule: every Vault the search reached, each ending in #116&rsquo;s own count-or-condition slot. The width is what a Vault name needs when it shares its row with <code>no answer</code>; narrower, and every <code>Git &mdash; &hellip;</code> name truncated to the same stub. The rail is <b>added to the panel, never carved out of it</b>: a faceted panel widens by exactly the rail, its rule and its gap, so a result row is the same width whether or not there is anything to filter across. <code>All results</code> is the permanent widening row. A Vault that answered with nothing reads <code>0</code>, inert; a Vault that did not answer keeps its row, reading <code>no answer</code> in error ink, <code>aria-disabled</code> rather than removed. Order is Vault-management order, never re-sorted by count or condition (#117). Absent when scope is narrowed or at one enabled Vault &mdash; there is nothing to filter across, and the Scope zone is already on screen behind the overlay.</p>
       <div class="stage" style="padding:0; overflow:hidden;">
         <div class="search-overlay">
-          <div class="search-panel">
+          <div class="search-panel search-panel--faceted">
             <div class="search-panel-head">
               <h2>Search vault</h2>
               <button class="icon-btn" title="Close">✕</button>
@@ -2410,7 +2429,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
           </div>
         </div>
       </div>
-      <div class="tag-row"><span class="key">.search-body</span><span class="key">.search-facet-rail</span><span class="key">.search-facet-row</span><span class="key">.search-facet-row.is-selected</span><span class="key">.search-facet-row[aria-disabled]</span><span class="key">.search-facet-label</span><span class="key">.search-main</span></div>
+      <div class="tag-row"><span class="key">.search-panel--faceted</span><span class="key">.search-body</span><span class="key">.search-facet-rail</span><span class="key">.search-facet-row</span><span class="key">.search-facet-row.is-selected</span><span class="key">.search-facet-row[aria-disabled]</span><span class="key">.search-facet-label</span><span class="key">.search-main</span></div>
 
       <h4 class="doc-sub" style="font-size:0.86rem;">Phone &mdash; the field strip</h4>
       <p class="blurb">Below 920px a rail cannot be a column, so the same filter becomes the <code>Scope</code> field of a field strip under the input, beside <code>Mode</code>, using §18&rsquo;s documented field grammar. Same filter, same semantics, different form. The phone keeps <code>Scope</code> even when the sidebar&rsquo;s browsing scope is narrowed &mdash; the panel covers the Scope zone here, and the map&rsquo;s always-visible-scope rule needs the field to carry it regardless of whether there is anything left to switch to.</p>
@@ -3051,15 +3070,25 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="doc-section-num">§32</div>
       <h2>Settings</h2>
       <p class="blurb">The first page-level surface in the system, settled by the Variant B prototype (issue&nbsp;#58). <b>An index of sections on the left, one section at a time on the right.</b> It sits inside <span class="key">.note-pane</span>, which already owns the gutter, so the page adds no outer padding of its own &mdash; only a deep bottom margin so the last row clears the fold.</p>
+      <p class="blurb"><b>The index is the collection</b> (issue&nbsp;#120, Variant B). Every Vault is a settings section like any other, listed under a <span class="key">Vaults</span> group above the instance sections under <span class="key">This server</span>. There is no third level: selecting a Vault opens it in the same right-hand pane the other sections use, so a Vault is never a page inside a page. <span class="key">+ Add a Vault</span> is the last row of the collection rather than a link beneath it &mdash; underlined, it made the one row you cannot select the loudest thing in the list.</p>
+      <p class="blurb">A Vault row is a name column and a status column, ending in §27&rsquo;s count-or-condition slot. <b>The status hangs from the name&rsquo;s first line</b>, not from the middle of the row: centred, it floated halfway down a wrapped name and the right-hand column read as scattered marks rather than a column. <b>Names wrap in full and are never truncated</b> &mdash; three Vaults called <span class="key">Git &mdash; unreachable remote</span>, <span class="key">Git &mdash; clones cleanly</span> and <span class="key">Git &mdash; auth refused</span> all ellipsise to the same stub, and this index is where you identify a Vault. The column is <span class="key">17rem</span> for the same reason: at 15rem an ordinary name plus a condition pill took three lines.</p>
+      <p class="blurb"><b>A Vault section saves where every other section saves</b> &mdash; the button sits in the section head, not at the foot of the form. Its destructive action states its consequence in place, before the click: disconnecting forgets the Vault and never deletes the notes, the folder, or its history. That sentence is the whole guarantee the word &ldquo;disconnect&rdquo; does not make on its own.</p>
+
       <p class="blurb">Two devices are new here and are what make the page work. <b>The plaque</b> pulls settings that cannot be edited out of the form entirely, instead of showing them as disabled inputs. <b>The console</b> is a fixed strip of live state at the top of a section, so the reader is never editing blind.</p>
 
       <div class="stage">
         <div class="set-layout">
           <nav class="set-index">
-            <div class="set-index-item"><span class="set-index-num">01</span><span>Vault</span><span class="set-index-count">04</span></div>
-            <div class="set-index-item" data-active="true"><span class="set-index-num">02</span><span>Indexing</span><span class="set-index-count">03</span></div>
-            <div class="set-index-item"><span class="set-index-num">03</span><span>Agents</span><span class="set-index-count">05</span></div>
-            <div class="set-index-item"><span class="set-index-num">04</span><span>Versioning</span><span class="set-index-count">07</span></div>
+            <p class="set-index-group">Vaults</p>
+            <div class="set-index-item set-index-vault"><span>Kitchen</span><span class="set-index-count">126</span></div>
+            <div class="set-index-item set-index-vault"><span>Work</span><span class="set-index-count">412</span></div>
+            <div class="set-index-item set-index-vault"><span>Field Station</span><span class="vault-slot-condition vault-tier-error">unavailable</span></div>
+            <div class="set-index-item set-index-vault" data-off="true"><span>Work (old employer)</span><span class="set-index-count">paused</span></div>
+            <div class="set-index-item set-index-add"><span>Add a Vault</span></div>
+            <p class="set-index-group">This server</p>
+            <div class="set-index-item" data-active="true"><span class="set-index-num">01</span><span>Notes handling</span><span class="set-index-count">1/2</span></div>
+            <div class="set-index-item"><span class="set-index-num">02</span><span>Agent access (MCP)</span><span class="set-index-count">0/4</span></div>
+            <div class="set-index-item"><span class="set-index-num">03</span><span>Uploads</span><span class="set-index-count">0/2</span></div>
           </nav>
 
           <div>
@@ -3110,9 +3139,11 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <p class="blurb"><b>Why a plaque and not a disabled field.</b> A value pinned by an environment variable is authoritative for the process (<a href="../adr/README.md">ADR-14</a>), so no amount of clicking will change it. Rendering it as a greyed-out input invites the attempt and reads as a fault; lifting it into a dashed plaque, with its source stated once in the heading, says <i>this is configuration, not a control</i>. The plaque collapses its top margin when a section has no editable rows at all, so a fully pinned section does not open with a gap.</p>
       <p class="blurb"><b>Consequences are declared before they are accepted, not after.</b> A row whose change forces a rebuild carries <span class="key">.settings-row-class</span> in <span class="key">--warn-fg</span> &mdash; the same ink a warning callout uses, so the weight of the word matches the weight elsewhere in the system. The save itself is refused with a machine-readable consequence and re-offered through a confirmation modal, and consents accumulate rather than being asked one at a time.</p>
+      <p class="blurb"><b>Every control hangs off the row&rsquo;s right edge and centres on the row&rsquo;s own band.</b> Left-aligned in the control column, a two-option segmented group and a four-option one ended in different places and the column read as ragged; pinned to the top of a row whose label side runs to three lines of prose, a control read as belonging to the rule above it. The column is sized to the widest control the page has &mdash; <span class="key">21.5rem</span>, a four-option group on one line &mdash; because a segment that wraps stops reading as one of a set of choices. A numeric field is sized to what it holds and sets its value <span class="key">text-align: right</span>, so the number grows leftward out of the unit beside it: <span class="key">4.25rem</span> for a schedule that caps at four digits, where <span class="key">8rem</span> promised a value ten times longer than any it takes.</p>
+
       <p class="blurb"><b>The toggle&rsquo;s travel is derived, not typed.</b> The track is 2.4rem with a 1px border each side and the knob is 1rem inset by 1px, so the on-position is <span class="key">calc(2.4rem - 1rem - 4px)</span>. Writing a rounded literal there leaves the knob fractionally past its resting inset, which on a 1px-bordered control reads as a wobble.</p>
 
-      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
+      <div class="tag-row"><span class="key">.settings-layout</span><span class="key">.settings-index</span><span class="key">.settings-index-item</span><span class="key">.settings-index-group</span><span class="key">.settings-vault-index-item</span><span class="key">.settings-vault-index-add</span><span class="key">.settings-vault-disconnect-note</span><span class="key">.settings-eyebrow</span><span class="key">.settings-console</span><span class="key">.settings-row</span><span class="key">.settings-row-help</span><span class="key">.settings-row-class</span><span class="key">.settings-toggle-track</span><span class="key">.settings-toggle-knob</span><span class="key">.settings-segmented</span><span class="key">.settings-plaque</span><span class="key">.settings-notice</span><span class="key">.settings-modal</span></div>
     </section>
 
   </main>
