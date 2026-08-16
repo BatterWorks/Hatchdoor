@@ -1,7 +1,13 @@
+use std::io::Read;
 use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+
+/// Asset serving is intentionally bounded until a streaming response primitive
+/// is introduced. It keeps direct `<img>` and PDF responses from turning one
+/// request into an unbounded in-memory allocation.
+const MAX_ASSET_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Shared response shape for a resolved, in-bounds asset/attachment file,
 /// used by the Vault-scoped route in `handlers/vault_content.rs`.
@@ -30,6 +36,32 @@ pub(crate) fn asset_response(content_type: &'static str, bytes: Vec<u8>) -> Resp
     }
 
     (StatusCode::OK, headers, bytes).into_response()
+}
+
+pub(crate) fn read_asset_bytes(path: &FsPath) -> Result<Vec<u8>, AssetReadError> {
+    read_asset_bytes_with_limit(path, MAX_ASSET_RESPONSE_BYTES)
+}
+
+fn read_asset_bytes_with_limit(path: &FsPath, maximum: u64) -> Result<Vec<u8>, AssetReadError> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        AssetReadError::Io(format!(
+            "failed opening asset '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    file.take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            AssetReadError::Io(format!(
+                "failed reading asset '{}': {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() as u64 > maximum {
+        return Err(AssetReadError::TooLarge);
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn resolve_asset_path(
@@ -140,6 +172,11 @@ pub(crate) fn asset_error_parts(
             StatusCode::NOT_FOUND,
             format!("Asset not found: {requested_path}"),
         ),
+        AssetPathError::TooLarge => (
+            "asset_too_large",
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("Asset is too large to serve: {requested_path}"),
+        ),
         AssetPathError::Internal => (
             "internal_error",
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -154,6 +191,12 @@ pub(crate) enum AssetPathError {
     Forbidden,
     NotFound,
     Internal,
+    TooLarge,
+}
+
+pub(crate) enum AssetReadError {
+    TooLarge,
+    Io(String),
 }
 
 #[cfg(test)]
@@ -191,6 +234,19 @@ mod tests {
             content_type_for_path(FsPath::new("Attachments/manual.pdf")),
             "application/pdf"
         );
+    }
+
+    #[test]
+    fn read_asset_bytes_rejects_files_past_the_response_cap() {
+        let tmp = TempDir::new().expect("temp dir");
+        let path = tmp.path().join("large.png");
+        let file = std::fs::File::create(&path).expect("file");
+        file.set_len(5).expect("set sparse length");
+
+        assert!(matches!(
+            read_asset_bytes_with_limit(&path, 4),
+            Err(AssetReadError::TooLarge)
+        ));
     }
 
     #[test]

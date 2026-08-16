@@ -174,6 +174,18 @@ fn capability_unavailable_error(vault_id: VaultId) -> ApiError {
 }
 
 fn write_error_response(vault_id: VaultId, error: WriteError) -> Response {
+    // A partially-applied multi-phase mutation needs operator action, so its
+    // message must survive rather than collapse into the generic sanitized
+    // internal error every other `Io` failure gets.
+    if let Some(message) = error.recovery_message() {
+        return VaultApiError::new(
+            "write_recovery_required",
+            message.to_string(),
+            Some(vault_id),
+            false,
+        )
+        .respond(StatusCode::INTERNAL_SERVER_ERROR);
+    }
     match error {
         WriteError::Conflict(message) => {
             VaultApiError::new("write_conflict", message, Some(vault_id), true)
@@ -912,6 +924,18 @@ pub async fn vault_scoped_upload_attachment_handler(
         Err(error) => return respond(bad_request_error(error)),
     };
 
+    // Bind the live setting before consuming a field. The static router guard
+    // only protects the process-wide maximum because it cannot inspect the
+    // snapshot selected for this request. Attachment size stays an
+    // instance-wide setting (issue #62), not per-Vault.
+    let snapshot = state.runtime_snapshot();
+    let max_attachment_bytes = match AppState::runtime_mcp_config(&snapshot) {
+        Ok(config) => config.max_attachment_bytes,
+        Err(error) => {
+            return crate::handlers::vaults::internal_error_response(error, Some(vault_id));
+        }
+    };
+
     let mut target_relative_path: Option<String> = None;
     let mut file_bytes: Option<Vec<u8>> = None;
     while let Some(field) = match multipart.next_field().await {
@@ -928,7 +952,7 @@ pub async fn vault_scoped_upload_attachment_handler(
     } {
         let name = field.name().unwrap_or("").to_string();
         if name == "target_relative_path" {
-            let value = match field.text().await {
+            let value = match read_multipart_field(field, MAX_TARGET_RELATIVE_PATH_BYTES).await {
                 Ok(value) => value,
                 Err(error) => {
                     return VaultApiError::new(
@@ -940,9 +964,21 @@ pub async fn vault_scoped_upload_attachment_handler(
                     .respond(StatusCode::BAD_REQUEST);
                 }
             };
+            let value = match String::from_utf8(value) {
+                Ok(value) => value,
+                Err(_) => {
+                    return VaultApiError::new(
+                        "invalid_write_input",
+                        "target_relative_path must be valid UTF-8".to_string(),
+                        Some(vault_id),
+                        false,
+                    )
+                    .respond(StatusCode::BAD_REQUEST);
+                }
+            };
             target_relative_path = Some(value);
         } else if name == "file" {
-            let bytes = match field.bytes().await {
+            let bytes = match read_multipart_field(field, max_attachment_bytes).await {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     return VaultApiError::new(
@@ -954,7 +990,7 @@ pub async fn vault_scoped_upload_attachment_handler(
                     .respond(StatusCode::BAD_REQUEST);
                 }
             };
-            file_bytes = Some(bytes.to_vec());
+            file_bytes = Some(bytes);
         }
     }
 
@@ -985,15 +1021,6 @@ pub async fn vault_scoped_upload_attachment_handler(
         Ok(guard) => guard,
         Err(error) => return vault_read_error_response(error),
     };
-    // Attachment size limit stays an instance-wide setting (issue #62), not
-    // per-Vault.
-    let snapshot = state.runtime_snapshot();
-    let max_attachment_bytes = match AppState::runtime_mcp_config(&snapshot) {
-        Ok(config) => config.max_attachment_bytes,
-        Err(error) => {
-            return crate::handlers::vaults::internal_error_response(error, Some(vault_id));
-        }
-    };
     let vault_path = control.vault_path().to_path_buf();
     let outcome = match run_write_op(move || {
         import_attachment_bytes(
@@ -1011,6 +1038,33 @@ pub async fn vault_scoped_upload_attachment_handler(
     };
 
     attachment_outcome_response(vault_id, outcome)
+}
+
+/// Field names are protocol metadata, never a second unbounded upload body.
+const MAX_TARGET_RELATIVE_PATH_BYTES: u64 = 16 * 1024;
+
+/// Consume multipart fields incrementally. Axum's convenient `text`/`bytes`
+/// methods collect a whole field before returning, which would let a lowered
+/// live attachment limit be bypassed until allocation had already happened.
+async fn read_multipart_field(
+    mut field: axum::extract::multipart::Field<'_>,
+    max_bytes: u64,
+) -> Result<Vec<u8>, String> {
+    let capacity = usize::try_from(max_bytes.min(64 * 1024)).unwrap_or(64 * 1024);
+    let mut output = Vec::with_capacity(capacity);
+    while let Some(chunk) = field.chunk().await.map_err(|error| error.body_text())? {
+        let next_len = output
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| "multipart field is too large".to_string())?;
+        if next_len as u64 > max_bytes {
+            return Err(format!(
+                "multipart field exceeds the {max_bytes}-byte limit"
+            ));
+        }
+        output.extend_from_slice(&chunk);
+    }
+    Ok(output)
 }
 
 fn attachment_outcome_response(vault_id: VaultId, outcome: AttachmentOutcome) -> Response {

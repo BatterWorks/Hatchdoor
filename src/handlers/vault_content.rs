@@ -26,9 +26,10 @@ use crate::api_types::{ResolveBatchRequest, ResolveQuery, ResolveTargetResult};
 use crate::app_state::{AppState, run_blocking};
 use crate::handlers::api::MAX_RESOLVE_BATCH;
 use crate::handlers::assets::{
-    AssetPathError, asset_error_parts, asset_response, content_type_for_path, resolve_asset_path,
+    AssetPathError, AssetReadError, asset_error_parts, asset_response, content_type_for_path,
+    read_asset_bytes, resolve_asset_path,
 };
-use crate::handlers::downloads::{NoteExport, build_note_export, download_response};
+use crate::handlers::downloads::{ExportError, NoteExport, build_note_export, download_response};
 use crate::handlers::vaults::{
     VaultApiError, internal_error_response, json_rejection_response, parse_vault_id,
     query_rejection_response,
@@ -198,6 +199,7 @@ enum DownloadOutcome {
     NotFound,
     ReadError(VaultReadError),
     ExportError(String),
+    TooLarge,
     Export(NoteExport),
 }
 
@@ -228,7 +230,8 @@ pub async fn vault_scoped_note_download_handler(
         };
         Ok(match build_note_export(&vault_root, &note.note) {
             Ok(export) => DownloadOutcome::Export(export),
-            Err(message) => DownloadOutcome::ExportError(message),
+            Err(ExportError::TooLarge) => DownloadOutcome::TooLarge,
+            Err(ExportError::Failed(message)) => DownloadOutcome::ExportError(message),
         })
     })
     .await;
@@ -243,6 +246,13 @@ pub async fn vault_scoped_note_download_handler(
         DownloadOutcome::NotFound => note_not_found_response(vault_id, &slug),
         DownloadOutcome::ReadError(error) => vault_read_error_response(error),
         DownloadOutcome::ExportError(message) => internal_error_response(message, Some(vault_id)),
+        DownloadOutcome::TooLarge => VaultApiError::new(
+            "note_export_too_large",
+            "Note export exceeds the server download size limit".to_string(),
+            Some(vault_id),
+            false,
+        )
+        .respond(StatusCode::PAYLOAD_TOO_LARGE),
     }
 }
 
@@ -392,12 +402,16 @@ pub async fn vault_scoped_asset_handler(
             Err(kind) => return Ok(AssetOutcome::PathError(kind)),
         };
         let content_type = content_type_for_path(&asset_path);
-        std::fs::read(&asset_path)
-            .map(|bytes| AssetOutcome::Bytes {
+        // Bounded read: an asset is buffered whole to build the response, so a
+        // single request must not turn into an unbounded allocation.
+        match read_asset_bytes(&asset_path) {
+            Ok(bytes) => Ok(AssetOutcome::Bytes {
                 content_type,
                 bytes,
-            })
-            .map_err(|error| format!("failed reading asset '{}': {error}", asset_path.display()))
+            }),
+            Err(AssetReadError::TooLarge) => Ok(AssetOutcome::PathError(AssetPathError::TooLarge)),
+            Err(AssetReadError::Io(error)) => Err(error),
+        }
     })
     .await;
 

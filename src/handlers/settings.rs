@@ -127,6 +127,7 @@ impl PatchRefusal {
 struct PatchPlan {
     reindex_changed: bool,
     git_config: Option<crate::git::GitConfig>,
+    initialize_local_repo: Option<crate::git::GitConfig>,
 }
 
 /// The paths a git-touching save needs to preflight a mode change and (for a
@@ -345,11 +346,23 @@ async fn patch_settings_with_git_lifecycle(
         cache_db_path: state.cache_db_path.clone(),
         settings_file_path: state.runtime_config.settings_path().to_path_buf(),
     };
-    let result = state
-        .runtime_config
-        .validate_and_save(request.updates.clone(), |snapshot| {
-            decide_patch(snapshot, &request, Some(git_paths))
-        });
+    let init_cache_db_path = git_paths.cache_db_path.clone();
+    let init_settings_file_path = git_paths.settings_file_path.clone();
+    let result = state.runtime_config.validate_and_save_then(
+        request.updates.clone(),
+        |snapshot| decide_patch(snapshot, &request, Some(git_paths)),
+        |plan, _saved| {
+            let Some(config) = &plan.initialize_local_repo else {
+                return Ok(());
+            };
+            crate::git::init_local_repo(config, &init_cache_db_path, &init_settings_file_path)
+                .map_err(|error| {
+                    PatchRefusal::Internal(format!(
+                        "Local versioning setup failed after the setting was saved; Hatchdoor restored the previous setting: {error}"
+                    ))
+                })
+        },
+    );
 
     match result {
         Ok((plan, saved)) => {
@@ -405,6 +418,7 @@ fn decide_patch(
         return Ok(PatchPlan {
             reindex_changed,
             git_config: None,
+            initialize_local_repo: None,
         });
     };
     let vault_path = git_paths.vault_path;
@@ -430,6 +444,7 @@ fn decide_patch(
         });
     }
 
+    let mut initialize_local_repo = None;
     if let Some(config) = &git_config {
         let preflight = match config.mode {
             crate::git::GitMode::Local => crate::git::validate_local_repo(config),
@@ -440,20 +455,7 @@ fn decide_patch(
                 if !request.confirmed("git_init") {
                     return Err(PatchRefusal::Confirmation { kind: "git_init" });
                 }
-                // Confirmed: create the local history now, still inside the
-                // atomic decision, so a later persist failure cannot leave a
-                // freshly-created .git folder behind an unsaved setting.
-                crate::git::init_local_repo(
-                    config,
-                    &git_paths.cache_db_path,
-                    &git_paths.settings_file_path,
-                )
-                .map_err(|error| {
-                    PatchRefusal::Validation(vec![FieldError::on(
-                        "HATCHDOOR_GIT_SYNC_ENABLED",
-                        error.to_string(),
-                    )])
-                })?;
+                initialize_local_repo = Some(config.clone());
             } else {
                 return Err(PatchRefusal::Validation(vec![FieldError::on(
                     "HATCHDOOR_GIT_SYNC_ENABLED",
@@ -466,6 +468,7 @@ fn decide_patch(
     Ok(PatchPlan {
         reindex_changed,
         git_config,
+        initialize_local_repo,
     })
 }
 
@@ -734,6 +737,43 @@ mod tests {
         assert_eq!(
             errors[0].key, None,
             "the refusal spans two fields (enabled + token), so it belongs to neither alone"
+        );
+    }
+
+    #[test]
+    fn failed_settings_persistence_does_not_initialize_local_versioning() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).expect("vault");
+        let settings_parent = temp.path().join("settings-parent-is-a-file");
+        std::fs::write(&settings_parent, "not a directory").expect("block settings parent");
+        let runtime = RuntimeConfig::load(
+            settings_parent.join("settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration loads before its first save");
+        let request = PatchSettingsRequest {
+            updates: BTreeMap::from([("HATCHDOOR_GIT_SYNC_ENABLED".into(), "local".into())]),
+            confirm: vec!["git_init".into()],
+        };
+        let git_paths = GitPaths {
+            vault_path: vault.clone(),
+            cache_db_path: vault.join(".hatchdoor-cache.sqlite3"),
+            settings_file_path: settings_parent.join("settings.json"),
+        };
+
+        let result = runtime.validate_and_save(request.updates.clone(), |snapshot| {
+            decide_patch(snapshot, &request, Some(git_paths))
+        });
+
+        assert!(
+            result.is_err(),
+            "the intentionally blocked settings write fails"
+        );
+        assert!(
+            !vault.join(".git").exists(),
+            "a failed settings persistence must not initialize a surprise repository"
         );
     }
 }

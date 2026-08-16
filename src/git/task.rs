@@ -62,6 +62,11 @@ pub struct GitSyncHandle {
     /// Wakes the task promptly when `stop_requested` changes, instead of
     /// waiting for the next record or retry timer.
     shutdown: Arc<Notify>,
+    /// A final-drain failure is delivered separately from the task join because
+    /// the worker deliberately stays alive after such a failure. Settings must
+    /// not replace it, and later writes must still have a task to retry against.
+    stop_failure: Arc<StdMutex<Option<String>>>,
+    stop_completed: Arc<Notify>,
 }
 
 impl GitSyncHandle {
@@ -97,23 +102,101 @@ impl GitSyncHandle {
     /// together): the caller only installs a replacement task once `stop`
     /// truly returns `Ok`.
     pub async fn stop(&self, timeout: Duration) -> Result<(), String> {
-        self.status.write().await.state = "stopping".to_string();
-        self.stop_requested.store(true, Ordering::SeqCst);
-        self.shutdown.notify_one();
         let mut task = self.task.lock().await;
         let Some(join) = task.as_mut() else {
             return Ok(());
         };
-        match tokio::time::timeout(timeout, join).await {
-            Ok(Ok(())) => {
+        self.stop_failure
+            .lock()
+            .expect("git stop result poisoned")
+            .take();
+        self.status.write().await.state = "stopping".to_string();
+        self.stop_requested.store(true, Ordering::SeqCst);
+        self.shutdown.notify_one();
+
+        enum StopWait {
+            Task(Result<(), tokio::task::JoinError>),
+            DrainFailed(String),
+        }
+        let wait = async {
+            loop {
+                if let Some(message) = self
+                    .stop_failure
+                    .lock()
+                    .expect("git stop result poisoned")
+                    .take()
+                {
+                    return StopWait::DrainFailed(message);
+                }
+                let completed = self.stop_completed.notified();
+                tokio::pin!(completed);
+                if let Some(message) = self
+                    .stop_failure
+                    .lock()
+                    .expect("git stop result poisoned")
+                    .take()
+                {
+                    return StopWait::DrainFailed(message);
+                }
+                tokio::select! {
+                    result = &mut *join => return StopWait::Task(result),
+                    _ = &mut completed => {}
+                }
+            }
+        };
+
+        match tokio::time::timeout(timeout, wait).await {
+            Ok(StopWait::Task(Ok(()))) => {
                 task.take();
                 self.sender.lock().expect("git task sender poisoned").take();
                 Ok(())
             }
-            Ok(Err(error)) => Err(format!("Versioning task failed while stopping: {error}")),
+            Ok(StopWait::Task(Err(error))) => {
+                task.take();
+                self.sender.lock().expect("git task sender poisoned").take();
+                Err(format!("Versioning task failed while stopping: {error}"))
+            }
+            Ok(StopWait::DrainFailed(message)) => Err(message),
             Err(_) => {
-                self.stop_requested.store(false, Ordering::SeqCst);
-                Err("Versioning is still draining its current sync. Retry shortly.".to_string())
+                if self
+                    .stop_requested
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    self.status.write().await.state = "running".to_string();
+                    self.shutdown.notify_one();
+                    Err("Versioning is still draining its current sync. Retry shortly.".to_string())
+                } else {
+                    // The worker claimed the request only after its bounded
+                    // drain completed. It can no longer block on Git work, so
+                    // finish receiving the already-decided result rather than
+                    // misreporting a timeout at the handoff boundary.
+                    loop {
+                        if let Some(message) = self
+                            .stop_failure
+                            .lock()
+                            .expect("git stop result poisoned")
+                            .take()
+                        {
+                            return Err(message);
+                        }
+                        if join.is_finished() {
+                            return match join.await {
+                                Ok(()) => {
+                                    task.take();
+                                    self.sender.lock().expect("git task sender poisoned").take();
+                                    Ok(())
+                                }
+                                Err(error) => {
+                                    task.take();
+                                    self.sender.lock().expect("git task sender poisoned").take();
+                                    Err(format!("Versioning task failed while stopping: {error}"))
+                                }
+                            };
+                        }
+                        self.stop_completed.notified().await;
+                    }
+                }
             }
         }
     }
@@ -137,6 +220,10 @@ pub fn spawn_sync_task(
     let shutdown = Arc::new(Notify::new());
     let task_stop_requested = stop_requested.clone();
     let task_shutdown = shutdown.clone();
+    let stop_failure = Arc::new(StdMutex::new(None));
+    let stop_completed = Arc::new(Notify::new());
+    let task_stop_failure = stop_failure.clone();
+    let task_stop_completed = stop_completed.clone();
 
     // Decide up front whether to flush drift accumulated while versioning was
     // off: uncommitted working-tree edits in either mode, or commits stranded
@@ -157,6 +244,8 @@ pub fn spawn_sync_task(
             startup_flush,
             task_stop_requested,
             task_shutdown,
+            task_stop_failure,
+            task_stop_completed,
         )
         .await;
     });
@@ -167,15 +256,18 @@ pub fn spawn_sync_task(
         task: Arc::new(Mutex::new(Some(task))),
         stop_requested,
         shutdown,
+        stop_failure,
+        stop_completed,
     }
 }
 
 /// What made `next_event` return.
 enum NextEvent {
     Record(WriteRecord),
-    /// The channel closed (handle dropped) or a stop was requested and is
-    /// still in effect.
-    Shutdown,
+    StopRequested,
+    /// Every handle was dropped, so no caller remains to observe a drain
+    /// result or enqueue more work.
+    ChannelClosed,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -189,17 +281,24 @@ async fn run_loop(
     startup_flush: bool,
     stop_requested: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
+    stop_failure: Arc<StdMutex<Option<String>>>,
+    stop_completed: Arc<Notify>,
 ) {
     status.write().await.state = "running".to_string();
     let mut batch: Vec<WriteRecord> = Vec::new();
     // When a sync fails transiently, `retry_after` holds the backoff before the
     // next unprompted re-attempt (empty batch). `None` means nothing to retry.
     let mut retry_after: Option<Duration> = None;
+    // A failed attempt still owns durable working-tree drift or unpushed
+    // history. A later stop must re-attempt that work even when no record is
+    // left in the channel; otherwise retrying a settings replacement could
+    // acknowledge the previous drain failure without ever recovering it.
+    let mut must_drain = false;
 
     // Immediately flush any drift accumulated while versioning was off, rather
     // than waiting for the first write to trigger a debounced sync.
-    if startup_flush
-        && run_one_sync_with_message(
+    if startup_flush {
+        let result = run_one_sync_with_message(
             &config,
             &vault_lock,
             &status,
@@ -207,9 +306,13 @@ async fn run_loop(
             Vec::new(),
             STARTUP_DRIFT_MESSAGE.to_string(),
         )
-        .await
-    {
-        retry_after = Some(RETRY_BASE);
+        .await;
+        retry_after = result
+            .as_ref()
+            .err()
+            .is_some_and(is_transient)
+            .then_some(RETRY_BASE);
+        must_drain = result.is_err();
     }
 
     loop {
@@ -224,23 +327,74 @@ async fn run_loop(
             &status,
             &ops,
             &mut retry_after,
+            &mut must_drain,
             &stop_requested,
             &shutdown,
         )
         .await
         {
             NextEvent::Record(record) => record,
-            NextEvent::Shutdown => break,
+            NextEvent::StopRequested => {
+                let mut trailing = Vec::new();
+                while let Ok(record) = receiver.try_recv() {
+                    trailing.push(record);
+                }
+                let result = if trailing.is_empty() && !must_drain {
+                    Ok(())
+                } else {
+                    update_pending(&status, trailing.len()).await;
+                    run_one_sync(&config, &vault_lock, &status, &ops, trailing).await
+                };
+                must_drain = result.is_err();
+                update_pending(&status, 0).await;
+                if finish_stop_attempt(
+                    &status,
+                    &stop_requested,
+                    &stop_failure,
+                    &stop_completed,
+                    result,
+                )
+                .await
+                {
+                    return;
+                }
+                continue;
+            }
+            NextEvent::ChannelClosed => {
+                let mut trailing = Vec::new();
+                while let Ok(record) = receiver.try_recv() {
+                    trailing.push(record);
+                }
+                if !trailing.is_empty() || must_drain {
+                    let _ = run_one_sync(&config, &vault_lock, &status, &ops, trailing).await;
+                }
+                update_pending(&status, 0).await;
+                status.write().await.state = "disabled".to_string();
+                return;
+            }
         };
         batch.push(first);
         update_pending(&status, batch.len()).await;
 
         // Debounce: keep extending the quiet window while records keep arriving.
+        let mut stop_during_debounce = false;
         loop {
+            if stop_requested.load(Ordering::SeqCst) {
+                stop_during_debounce = true;
+                break;
+            }
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
             let timer = tokio::time::sleep(debounce);
             tokio::pin!(timer);
             tokio::select! {
                 _ = &mut timer => break,
+                _ = &mut notified => {
+                    if stop_requested.load(Ordering::SeqCst) {
+                        stop_during_debounce = true;
+                        break;
+                    }
+                }
                 maybe = receiver.recv() => match maybe {
                     Some(record) => {
                         batch.push(record);
@@ -251,7 +405,41 @@ async fn run_loop(
             }
         }
 
-        let failed = run_one_sync(
+        if stop_during_debounce {
+            while let Ok(record) = receiver.try_recv() {
+                batch.push(record);
+            }
+            update_pending(&status, batch.len()).await;
+            let result = run_one_sync(
+                &config,
+                &vault_lock,
+                &status,
+                &ops,
+                std::mem::take(&mut batch),
+            )
+            .await;
+            update_pending(&status, 0).await;
+            retry_after = result
+                .as_ref()
+                .err()
+                .is_some_and(is_transient)
+                .then_some(RETRY_BASE);
+            must_drain = result.is_err();
+            if finish_stop_attempt(
+                &status,
+                &stop_requested,
+                &stop_failure,
+                &stop_completed,
+                result,
+            )
+            .await
+            {
+                return;
+            }
+            continue;
+        }
+
+        let result = run_one_sync(
             &config,
             &vault_lock,
             &status,
@@ -261,32 +449,83 @@ async fn run_loop(
         .await;
         // A fresh write already reset the debounce; start any new backoff from
         // the base rather than compounding a prior one.
-        retry_after = failed.then_some(RETRY_BASE);
+        retry_after = result
+            .as_ref()
+            .err()
+            .is_some_and(is_transient)
+            .then_some(RETRY_BASE);
+        must_drain = result.is_err();
         update_pending(&status, 0).await;
-    }
 
-    // A stop was requested while we were mid-batch (or right as we returned to
-    // the top of the loop) and any records that arrived in that window are
-    // still sitting in the channel: drain them synchronously and commit once
-    // more before the task truly exits, rather than silently dropping them.
-    let mut trailing = Vec::new();
-    while let Ok(record) = receiver.try_recv() {
-        trailing.push(record);
+        if stop_requested.load(Ordering::SeqCst) {
+            let mut trailing = Vec::new();
+            while let Ok(record) = receiver.try_recv() {
+                trailing.push(record);
+            }
+            let final_result = if trailing.is_empty() {
+                result
+            } else {
+                update_pending(&status, trailing.len()).await;
+                run_one_sync(&config, &vault_lock, &status, &ops, trailing).await
+            };
+            must_drain = final_result.is_err();
+            update_pending(&status, 0).await;
+            if finish_stop_attempt(
+                &status,
+                &stop_requested,
+                &stop_failure,
+                &stop_completed,
+                final_result,
+            )
+            .await
+            {
+                return;
+            }
+        }
     }
-    if !trailing.is_empty() {
-        run_one_sync(&config, &vault_lock, &status, &ops, trailing).await;
+}
+
+async fn finish_stop_attempt(
+    status: &Arc<RwLock<GitSyncStatus>>,
+    stop_requested: &Arc<AtomicBool>,
+    stop_failure: &Arc<StdMutex<Option<String>>>,
+    stop_completed: &Arc<Notify>,
+    result: Result<(), GitError>,
+) -> bool {
+    match result {
+        Ok(()) => {
+            status.write().await.state = "disabled".to_string();
+            if stop_requested
+                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                status.write().await.state = "running".to_string();
+                return false;
+            }
+            stop_completed.notify_one();
+            true
+        }
+        Err(error) => {
+            status.write().await.state = "running".to_string();
+            if stop_requested
+                .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                return false;
+            }
+            *stop_failure.lock().expect("git stop result poisoned") = Some(format!(
+                "Versioning final drain failed; the existing task remains active: {error}"
+            ));
+            stop_completed.notify_one();
+            false
+        }
     }
-    // Matches the frontend's `GitStatus.state` union (never surfaced beyond
-    // this point in practice: the caller removes this handle from `AppState`
-    // as soon as `stop` returns `Ok`, replacing or clearing it).
-    status.write().await.state = "disabled".to_string();
 }
 
 /// Await the next queued write, a withdrawable stop request, or (when a
-/// previous sync failed transiently) a retry backoff timer. Returns
-/// `NextEvent::Shutdown` when the channel closes (the handle was dropped) or
-/// when a stop is currently requested; a stop that is later withdrawn (a
-/// timed-out `GitSyncHandle::stop`) simply lets this keep waiting normally.
+/// previous sync failed transiently) a retry backoff timer. A stop request is
+/// distinguishable from channel closure so a timed-out, withdrawn stop can
+/// return to normal work after its in-flight drain finishes.
 #[allow(clippy::too_many_arguments)]
 async fn next_event(
     receiver: &mut mpsc::UnboundedReceiver<WriteRecord>,
@@ -295,12 +534,13 @@ async fn next_event(
     status: &Arc<RwLock<GitSyncStatus>>,
     ops: &Arc<SyncOps>,
     retry_after: &mut Option<Duration>,
+    must_drain: &mut bool,
     stop_requested: &Arc<AtomicBool>,
     shutdown: &Arc<Notify>,
 ) -> NextEvent {
     loop {
         if stop_requested.load(Ordering::SeqCst) {
-            return NextEvent::Shutdown;
+            return NextEvent::StopRequested;
         }
 
         let notified = shutdown.notified();
@@ -312,7 +552,7 @@ async fn next_event(
                     maybe = receiver.recv() => {
                         return match maybe {
                             Some(record) => NextEvent::Record(record),
-                            None => NextEvent::Shutdown,
+                            None => NextEvent::ChannelClosed,
                         };
                     }
                     _ = &mut notified => continue,
@@ -325,13 +565,18 @@ async fn next_event(
                     maybe = receiver.recv() => {
                         return match maybe {
                             Some(record) => NextEvent::Record(record),
-                            None => NextEvent::Shutdown,
+                            None => NextEvent::ChannelClosed,
                         };
                     }
                     _ = &mut notified => continue,
                     _ = &mut timer => {
-                        let failed = run_one_sync(config, vault_lock, status, ops, Vec::new()).await;
-                        *retry_after = failed.then(|| (delay * 2).min(RETRY_MAX));
+                        let result = run_one_sync(config, vault_lock, status, ops, Vec::new()).await;
+                        *must_drain = result.is_err();
+                        *retry_after = result
+                            .as_ref()
+                            .err()
+                            .is_some_and(is_transient)
+                            .then(|| (delay * 2).min(RETRY_MAX));
                     }
                 }
             }
@@ -415,7 +660,7 @@ async fn run_one_sync(
     status: &Arc<RwLock<GitSyncStatus>>,
     ops: &Arc<SyncOps>,
     batch: Vec<WriteRecord>,
-) -> bool {
+) -> Result<(), GitError> {
     let message = build_commit_message(&batch);
     run_one_sync_with_message(config, vault_lock, status, ops, batch, message).await
 }
@@ -434,7 +679,7 @@ async fn run_one_sync_with_message(
     ops: &Arc<SyncOps>,
     batch: Vec<WriteRecord>,
     message: String,
-) -> bool {
+) -> Result<(), GitError> {
     let mut paths: Vec<PathBuf> = batch
         .iter()
         .flat_map(|r| r.affected_paths.clone())
@@ -473,7 +718,7 @@ async fn run_one_sync_with_message(
                     info!(committed, "git versioning: committed locally")
                 }
             }
-            false
+            Ok(())
         }
         Err(err) => {
             guard.last_ok = false;
@@ -482,7 +727,6 @@ async fn run_one_sync_with_message(
             // non-fast-forward) and worth an automatic retry. A conflict, dirty
             // tree, or validation error needs the remote or a human to change
             // first, so hammering it would just spin.
-            let transient = matches!(err, GitError::Remote(_) | GitError::Other(_));
             match &err {
                 GitError::Conflict { .. } => warn!("git sync conflict: {message}"),
                 GitError::DirtyWorkingTree { .. } => warn!("git sync skipped: {message}"),
@@ -490,9 +734,13 @@ async fn run_one_sync_with_message(
             }
             guard.last_error = Some(message);
             guard.last_error_kind = Some(err.kind().to_string());
-            transient
+            Err(err)
         }
     }
+}
+
+fn is_transient(error: &GitError) -> bool {
+    matches!(error, GitError::Remote(_) | GitError::Other(_))
 }
 
 async fn update_pending(status: &Arc<RwLock<GitSyncStatus>>, pending: usize) {
@@ -877,6 +1125,96 @@ mod tests {
         assert_eq!(commits.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn stop_preempts_an_armed_debounce_and_drains_once() {
+        let commits = Arc::new(AtomicUsize::new(0));
+        let committed = commits.clone();
+        let handle = spawn_sync_task(
+            unused_config(60),
+            Arc::new(Mutex::new(())),
+            SyncOps {
+                commit: Box::new(move |_config, _paths, _message| {
+                    committed.fetch_add(1, Ordering::SeqCst);
+                    Ok(CommitOutcome {
+                        committed: true,
+                        needs_remote: false,
+                    })
+                }),
+                fetch: Box::new(|_| Ok(())),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(|_| Ok(())),
+            },
+        );
+        let status = handle.status();
+        handle.record(WriteRecord {
+            op: "update".into(),
+            target: "note".into(),
+            affected_paths: vec![PathBuf::from("/vault/note.md")],
+            summary: None,
+        });
+        while status.read().await.pending != 1 {
+            tokio::task::yield_now().await;
+        }
+
+        handle
+            .stop(Duration::from_secs(5))
+            .await
+            .expect("stop should preempt the 60-second debounce");
+        assert_eq!(commits.load(Ordering::SeqCst), 1, "one final drain");
+    }
+
+    #[tokio::test]
+    async fn failed_final_drain_refuses_stop() {
+        let commits = Arc::new(AtomicUsize::new(0));
+        let attempted = commits.clone();
+        let handle = spawn_sync_task(
+            unused_config(60),
+            Arc::new(Mutex::new(())),
+            SyncOps {
+                commit: Box::new(move |_config, _paths, _message| {
+                    if attempted.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(GitError::Other("injected final-drain failure".into()))
+                    } else {
+                        Ok(CommitOutcome {
+                            committed: true,
+                            needs_remote: false,
+                        })
+                    }
+                }),
+                fetch: Box::new(|_| Ok(())),
+                integrate: Box::new(|_| Ok(())),
+                push: Box::new(|_| Ok(())),
+            },
+        );
+        handle.record(WriteRecord {
+            op: "update".into(),
+            target: "note".into(),
+            affected_paths: vec![PathBuf::from("/vault/note.md")],
+            summary: None,
+        });
+
+        let result = handle.stop(Duration::from_secs(2)).await;
+        assert!(
+            result.is_err(),
+            "replacement must not be authorized after a failed final drain"
+        );
+        let status = handle.status();
+        let status = status.read().await;
+        assert_eq!(status.state, "running", "the old task remains active");
+        assert!(!status.last_ok);
+        assert_eq!(status.last_error_kind.as_deref(), Some("other"));
+        drop(status);
+
+        // Retrying stop must itself re-attempt the failed durable work even
+        // though the first drain consumed its channel record. Only that
+        // successful retry may spend the handle and authorize replacement.
+        handle
+            .stop(Duration::from_secs(2))
+            .await
+            .expect("a successful retry may stop the old task");
+        assert_eq!(commits.load(Ordering::SeqCst), 2);
+    }
+
     /// S3 regression: `stop` timing out while a sync is genuinely still
     /// running must not permanently strand the handle. Once the in-flight
     /// sync finishes, the handle must keep accepting `record()` calls and a
@@ -939,6 +1277,11 @@ mod tests {
         // still blocking.
         let result = handle.stop(Duration::from_millis(50)).await;
         assert!(result.is_err(), "stop should time out while sync is stuck");
+        assert_eq!(
+            handle.status().read().await.state,
+            "running",
+            "a withdrawn stop must restore the observable lifecycle"
+        );
 
         // Let the first (slow) commit finish.
         release_commit.store(true, Ordering::SeqCst);

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::http::{HeaderValue, StatusCode, header};
@@ -7,6 +7,11 @@ use axum::response::Response;
 use zip::write::SimpleFileOptions;
 
 use crate::vault::Note;
+
+/// Note downloads are assembled in memory so Markdown links can be rewritten
+/// into a self-contained archive. Bound every intermediate buffer rather than
+/// allowing an arbitrarily large note or asset set to exhaust the process.
+const MAX_NOTE_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Shared response shape for a built [`NoteExport`], used by the Vault-scoped
 /// route in `handlers/vault_content.rs`.
@@ -37,6 +42,12 @@ pub(crate) struct NoteExport {
     pub(crate) bytes: Vec<u8>,
 }
 
+#[derive(Debug)]
+pub(crate) enum ExportError {
+    TooLarge,
+    Failed(String),
+}
+
 fn download_filename_for_note(note: &Note) -> String {
     let from_path = note
         .relative_path
@@ -51,9 +62,15 @@ fn download_filename_for_note(note: &Note) -> String {
     }
 }
 
-pub(crate) fn build_note_export(vault_root: &FsPath, note: &Note) -> Result<NoteExport, String> {
+pub(crate) fn build_note_export(
+    vault_root: &FsPath,
+    note: &Note,
+) -> Result<NoteExport, ExportError> {
     let markdown_filename = download_filename_for_note(note);
     let markdown = clean_markdown_export(&note.content);
+    if markdown.len() > MAX_NOTE_EXPORT_BYTES {
+        return Err(ExportError::TooLarge);
+    }
     let assets = export_assets(vault_root, note, &markdown, &markdown_filename);
     if assets.is_empty() {
         return Ok(NoteExport {
@@ -476,40 +493,105 @@ fn build_zip_export(
     markdown_filename: &str,
     markdown: &str,
     assets: &[ExportAsset],
-) -> Result<Vec<u8>, String> {
-    let cursor = Cursor::new(Vec::new());
-    let mut writer = zip::ZipWriter::new(cursor);
+) -> Result<Vec<u8>, ExportError> {
+    let mut writer = zip::ZipWriter::new(LimitedExportWriter::new(MAX_NOTE_EXPORT_BYTES));
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     writer
         .start_file(markdown_filename, options)
-        .map_err(|error| format!("failed to add markdown to export zip: {error}"))?;
-    writer
-        .write_all(markdown.as_bytes())
-        .map_err(|error| format!("failed to write markdown to export zip: {error}"))?;
+        .map_err(|error| {
+            ExportError::Failed(format!("failed to add markdown to export zip: {error}"))
+        })?;
+    writer.write_all(markdown.as_bytes()).map_err(|error| {
+        ExportError::Failed(format!("failed to write markdown to export zip: {error}"))
+    })?;
 
     for asset in assets {
-        let bytes = std::fs::read(&asset.source_path).map_err(|error| {
-            format!(
-                "failed reading asset '{}' for export: {error}",
-                asset.source_path.display()
-            )
-        })?;
+        let bytes = read_export_asset(&asset.source_path)?;
         writer
             .start_file(&asset.zip_path, options)
-            .map_err(|error| format!("failed to add asset to export zip: {error}"))?;
+            .map_err(|error| {
+                ExportError::Failed(format!("failed to add asset to export zip: {error}"))
+            })?;
         writer.write_all(&bytes).map_err(|error| {
-            format!(
+            ExportError::Failed(format!(
                 "failed to write asset '{}' to export zip: {error}",
                 asset.source_path.display()
-            )
+            ))
         })?;
     }
 
     writer
         .finish()
-        .map(|cursor| cursor.into_inner())
-        .map_err(|error| format!("failed to finish export zip: {error}"))
+        .map(LimitedExportWriter::into_inner)
+        .map_err(|error| ExportError::Failed(format!("failed to finish export zip: {error}")))
+}
+
+fn read_export_asset(path: &FsPath) -> Result<Vec<u8>, ExportError> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        ExportError::Failed(format!(
+            "failed opening asset '{}' for export: {error}",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    file.take((MAX_NOTE_EXPORT_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            ExportError::Failed(format!(
+                "failed reading asset '{}' for export: {error}",
+                path.display()
+            ))
+        })?;
+    if bytes.len() > MAX_NOTE_EXPORT_BYTES {
+        return Err(ExportError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+struct LimitedExportWriter {
+    cursor: Cursor<Vec<u8>>,
+    maximum: usize,
+}
+
+impl LimitedExportWriter {
+    fn new(maximum: usize) -> Self {
+        Self {
+            cursor: Cursor::new(Vec::new()),
+            maximum,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.cursor.into_inner()
+    }
+}
+
+impl Write for LimitedExportWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let next_len = usize::try_from(self.cursor.position())
+            .ok()
+            .and_then(|position| position.checked_add(buf.len()))
+            .ok_or_else(|| {
+                std::io::Error::other("note export exceeds the server download size limit")
+            })?;
+        if next_len > self.maximum {
+            return Err(std::io::Error::other(
+                "note export exceeds the server download size limit",
+            ));
+        }
+        self.cursor.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for LimitedExportWriter {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.cursor.seek(position)
+    }
 }
 
 fn escape_markdown_label(input: &str) -> String {
@@ -697,5 +779,13 @@ mod tests {
             .read_to_end(&mut asset)
             .expect("asset bytes");
         assert_eq!(asset, b"png-bytes");
+    }
+
+    #[test]
+    fn limited_export_writer_refuses_to_grow_past_its_bound() {
+        let mut writer = LimitedExportWriter::new(3);
+        writer.write_all(b"abc").expect("fill limit");
+        assert!(writer.write_all(b"d").is_err());
+        assert_eq!(writer.into_inner(), b"abc");
     }
 }

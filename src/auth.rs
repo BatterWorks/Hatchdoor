@@ -99,9 +99,10 @@ pub(crate) struct WebOrLiveMcpToken {
 /// `access_token` query parameter — the routes it guards are hit by
 /// out-of-band HTTP clients (e.g. `curl`), not `<img>`/download navigations.
 ///
-/// Accepts a matching MCP bearer token only while MCP is enabled. This keeps a
-/// runtime MCP disable as a complete revocation of that credential, while MCP
-/// write mode does not affect the attachment route's authorization.
+/// Accepts a matching MCP bearer token only while MCP and MCP writes are both
+/// enabled. This keeps runtime disablement as an immediate revocation of that
+/// credential's attachment-write capability. A matching web bearer token is
+/// independent of MCP write mode.
 pub(crate) async fn require_web_or_live_mcp_token(
     State(tokens): State<WebOrLiveMcpToken>,
     request: Request,
@@ -120,22 +121,24 @@ pub(crate) async fn require_web_or_live_mcp_token(
         Err(_) => return unauthorized(),
     };
     let configured = tokens.web.is_some() || mcp.bearer_token.is_some();
-    let authorized = match presented {
-        Some(presented) => {
-            let matches_web = tokens.web.as_deref().is_some_and(|expected| {
-                constant_time_eq(presented.as_bytes(), expected.as_bytes())
-            });
-            let matches_mcp = mcp.enabled
-                && mcp.bearer_token.as_deref().is_some_and(|expected| {
-                    constant_time_eq(presented.as_bytes(), expected.as_bytes())
-                });
-            matches_web || matches_mcp
-        }
-        None => false,
-    };
+    let matches_web = presented.is_some_and(|presented| {
+        tokens
+            .web
+            .as_deref()
+            .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+    });
+    let matches_mcp = presented.is_some_and(|presented| {
+        mcp.enabled
+            && mcp
+                .bearer_token
+                .as_deref()
+                .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+    });
 
-    if !configured || authorized {
+    if !configured || matches_web || (matches_mcp && mcp.write_enabled) {
         next.run(request).await
+    } else if matches_mcp {
+        forbidden()
     } else {
         unauthorized()
     }
@@ -189,6 +192,16 @@ fn unauthorized() -> Response {
         [(header::WWW_AUTHENTICATE, "Bearer")],
         axum::Json(ErrorResponse {
             error: "Unauthorized".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+fn forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        axum::Json(ErrorResponse {
+            error: "MCP writes are disabled".to_string(),
         }),
     )
         .into_response()

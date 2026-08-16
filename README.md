@@ -624,9 +624,9 @@ mount. Two paths cover the size/compatibility trade-off:
 
 - **`POST /api/v1/vaults/{vault_id}/attachments`** (multipart) — the default. Used by the web UI and
   by any agent that can make an HTTP request (e.g. shell out to `curl`).
-  Accepts either the web bearer token or the MCP bearer token, so an MCP agent
-  can reuse its existing credential. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES`
-  (default 10 MiB).
+  Accepts the web bearer token regardless of MCP write mode. An MCP agent can
+  reuse its MCP bearer token only while MCP and MCP writes are currently
+  enabled. Capped by `HATCHDOOR_MAX_ATTACHMENT_BYTES` (default 10 MiB).
 - **`import_attachment` MCP tool** — the fallback, for MCP clients that cannot
   make an out-of-band HTTP request. Sends the file bytes base64-encoded inline;
   works with any MCP client, but base64 rides inside the JSON-RPC message and

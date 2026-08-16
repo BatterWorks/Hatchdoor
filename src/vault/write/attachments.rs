@@ -6,14 +6,14 @@ use crate::vault::LayerMap;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
+use super::fs_ops::{MutationJournal, atomic_write_bytes};
 use super::paths::{
     create_parent_dir_inside_root, ensure_allowed_attachment_path,
     ensure_existing_path_inside_root, normalize_attachment_relative_path,
     normalize_staged_filename, resolve_existing_attachment_path, resolve_new_attachment_path,
     unique_trash_attachment_relative_path, vault_relative_file_path,
 };
-use super::rewrites::{apply_rewrites, rollback_rewrites};
-use super::types::{AttachmentInfo, AttachmentOutcome, WriteError};
+use super::types::{AttachmentInfo, AttachmentOutcome, MutationPhase, WriteError};
 
 pub fn list_note_attachments(
     vault_root: &Path,
@@ -74,12 +74,7 @@ pub fn import_attachment_bytes(
     // behind after the response reports an error.
     let layers = LayerMap::collect(vault_root).map_err(WriteError::Io)?;
 
-    fs::write(&target_path, bytes).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to write attachment '{}': {error}",
-            target_path.display()
-        ))
-    })?;
+    atomic_write_bytes(&target_path, bytes)?;
 
     // No caller-supplied index here (imports do not rebuild one), so use the
     // marker snapshot collected before the write to report the new asset's layer.
@@ -98,40 +93,32 @@ pub fn move_attachment(
     source_relative_path: &str,
     target_relative_path: &str,
 ) -> Result<AttachmentOutcome, WriteError> {
+    move_attachment_with_hook(
+        vault_root,
+        index,
+        source_relative_path,
+        target_relative_path,
+        |_| Ok(()),
+    )
+}
+
+fn move_attachment_with_hook(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    target_relative_path: &str,
+    after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
     let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
-    if target_path.exists() {
-        return Err(WriteError::Conflict(format!(
-            "Destination attachment already exists: {}",
-            normalize_attachment_relative_path(target_relative_path)?
-        )));
-    }
-    ensure_allowed_attachment_path(&source_path)?;
-    ensure_allowed_attachment_path(&target_path)?;
-    create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
-
-    let rewrites =
-        asset_reference_rewrite_plan(vault_root, index, "", &source_path, &target_path, &[])?;
-    let rewritten = apply_rewrites(rewrites)?;
-    let rewritten_notes = rewritten.len();
-    fs::rename(&source_path, &target_path).map_err(|error| {
-        rollback_rewrites(vault_root, index, &target_path, &source_path);
-        WriteError::Io(format!(
-            "failed to move attachment '{}' to '{}': {error}",
-            source_path.display(),
-            target_path.display()
-        ))
-    })?;
-    let mut affected_paths = rewritten;
-    affected_paths.push(source_path.clone());
-    affected_paths.push(target_path.clone());
-    Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, &target_path, &index.layers)?,
-        rewritten_notes,
-        trashed_path: None,
-        cleanup_warning: None,
-        affected_paths,
-    })
+    move_attachment_by_paths_with_hook(
+        vault_root,
+        index,
+        &source_path,
+        &target_path,
+        None,
+        after_phase,
+    )
 }
 
 pub fn rename_attachment(
@@ -143,7 +130,9 @@ pub fn rename_attachment(
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
     let filename = normalize_staged_filename(new_filename)?;
     let target_path = source_path.parent().unwrap_or(vault_root).join(filename);
-    move_attachment_by_paths(vault_root, index, &source_path, &target_path)
+    move_attachment_by_paths_with_hook(vault_root, index, &source_path, &target_path, None, |_| {
+        Ok(())
+    })
 }
 
 pub fn delete_attachment(
@@ -157,41 +146,32 @@ pub fn delete_attachment(
     let trash_path = vault_root.join(&trash_relative);
     ensure_allowed_attachment_path(&trash_path)?;
     create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
-    let rewrites =
-        asset_reference_rewrite_plan(vault_root, index, "", &source_path, &trash_path, &[])?;
-
-    let rewritten = apply_rewrites(rewrites)?;
-    let rewritten_notes = rewritten.len();
-    fs::rename(&source_path, &trash_path).map_err(|error| {
-        rollback_rewrites(vault_root, index, &trash_path, &source_path);
-        WriteError::Io(format!(
-            "failed to trash attachment '{}' to '{}': {error}",
-            source_path.display(),
-            trash_path.display()
-        ))
-    })?;
-    let mut affected_paths = rewritten;
-    affected_paths.push(source_path.clone());
-    affected_paths.push(trash_path.clone());
-    Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, &trash_path, &index.layers)?,
-        rewritten_notes,
-        trashed_path: Some(trash_relative),
-        cleanup_warning: None,
-        affected_paths,
-    })
+    move_attachment_by_paths_with_hook(
+        vault_root,
+        index,
+        &source_path,
+        &trash_path,
+        Some(trash_relative),
+        |_| Ok(()),
+    )
 }
 
-fn move_attachment_by_paths(
+fn move_attachment_by_paths_with_hook(
     vault_root: &Path,
     index: &VaultIndex,
     source_path: &Path,
     target_path: &Path,
+    trashed_path: Option<String>,
+    mut after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
 ) -> Result<AttachmentOutcome, WriteError> {
     if target_path.exists() {
+        let target = target_path
+            .strip_prefix(vault_root)
+            .unwrap_or(target_path)
+            .display();
         return Err(WriteError::Conflict(format!(
             "Destination attachment already exists: {}",
-            target_path.display()
+            target
         )));
     }
     ensure_existing_path_inside_root(vault_root, source_path)?;
@@ -200,26 +180,54 @@ fn move_attachment_by_paths(
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
-    let rewritten = apply_rewrites(rewrites)?;
+    let mut journal = MutationJournal::new(vault_root);
+    if let Err(error) = journal.move_file(MutationPhase::Asset, source_path, target_path) {
+        return Err(journal.rollback(error));
+    }
+    if let Err(error) = after_phase(MutationPhase::Asset) {
+        return Err(journal.rollback(error));
+    }
+
+    let had_rewrites = !rewrites.is_empty();
+    let rewritten = match journal.apply_rewrites(rewrites) {
+        Ok(rewritten) => rewritten,
+        Err(error) => return Err(journal.rollback(error)),
+    };
+    if had_rewrites && let Err(error) = after_phase(MutationPhase::Rewrite) {
+        return Err(journal.rollback(error));
+    }
     let rewritten_notes = rewritten.len();
-    fs::rename(source_path, target_path).map_err(|error| {
-        rollback_rewrites(vault_root, index, target_path, source_path);
-        WriteError::Io(format!(
-            "failed to move attachment '{}' to '{}': {error}",
-            source_path.display(),
-            target_path.display()
-        ))
-    })?;
+    let attachment = match attachment_info(vault_root, target_path, &index.layers) {
+        Ok(attachment) => attachment,
+        Err(error) => return Err(journal.rollback(error)),
+    };
     let mut affected_paths = rewritten;
     affected_paths.push(source_path.to_path_buf());
     affected_paths.push(target_path.to_path_buf());
     Ok(AttachmentOutcome {
-        attachment: attachment_info(vault_root, target_path, &index.layers)?,
+        attachment,
         rewritten_notes,
-        trashed_path: None,
+        trashed_path,
         cleanup_warning: None,
         affected_paths,
     })
+}
+
+#[cfg(test)]
+pub(super) fn move_attachment_with_failure(
+    vault_root: &Path,
+    index: &VaultIndex,
+    source_relative_path: &str,
+    target_relative_path: &str,
+    after_phase: impl FnMut(MutationPhase) -> Result<(), WriteError>,
+) -> Result<AttachmentOutcome, WriteError> {
+    move_attachment_with_hook(
+        vault_root,
+        index,
+        source_relative_path,
+        target_relative_path,
+        after_phase,
+    )
 }
 
 fn attachment_info(

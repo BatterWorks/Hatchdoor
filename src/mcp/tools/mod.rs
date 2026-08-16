@@ -43,26 +43,16 @@ pub async fn handle_tools_call(
     // cache tools at connection time need no restart once setup completes.
     if !state.startup.is_ready() && !is_collection_management_tool(name) {
         return match name {
-            "accept_gemma_terms" => {
-                state
-                    .model_setup
-                    .accept_gemma()
-                    .map_err(JsonRpcFailure::internal)?;
-                crate::server::spawn_model_startup(state, crate::model_setup::SelectedModel::Gemma);
-                Ok(tool_success(
-                    json!({ "accepted": true, "model": crate::model_setup::GEMMA_MODEL_ID }),
-                ))
-            }
-            "decline_gemma_terms" => {
-                state
-                    .model_setup
-                    .decline_gemma()
-                    .map_err(JsonRpcFailure::internal)?;
-                crate::server::spawn_model_startup(state, crate::model_setup::SelectedModel::Nomic);
-                Ok(tool_success(
-                    json!({ "accepted": false, "model": crate::model_setup::NOMIC_MODEL_ID }),
-                ))
-            }
+            "accept_gemma_terms" => select_model_tool(
+                state,
+                crate::model_setup::SelectedModel::Gemma,
+                json!({ "accepted": true, "model": crate::model_setup::GEMMA_MODEL_ID }),
+            ),
+            "decline_gemma_terms" => select_model_tool(
+                state,
+                crate::model_setup::SelectedModel::Nomic,
+                json!({ "accepted": false, "model": crate::model_setup::NOMIC_MODEL_ID }),
+            ),
             _ => Ok(tool_error(
                 "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
             )),
@@ -172,6 +162,23 @@ pub async fn handle_tools_call(
     }
 }
 
+fn select_model_tool(
+    state: AppState,
+    selected: crate::model_setup::SelectedModel,
+    success: Value,
+) -> Result<Value, JsonRpcFailure> {
+    match crate::server::select_model_and_start(state, selected) {
+        Ok(()) => Ok(tool_success(success)),
+        Err(crate::server::ModelChoiceError::AlreadyActive) => Ok(tool_error(
+            "A search model setup is already active. Changing models after setup begins is not supported."
+                .to_string(),
+        )),
+        Err(crate::server::ModelChoiceError::Persist(error)) => {
+            Err(JsonRpcFailure::internal(error))
+        }
+    }
+}
+
 fn model_setup_status_payload(state: &AppState) -> Value {
     json!({
         "state": state.startup.status(),
@@ -271,4 +278,84 @@ pub(super) fn write_tool_annotations(destructive: bool, idempotent: bool) -> Val
         "idempotentHint": idempotent,
         "openWorldHint": false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    use super::*;
+    use crate::embed::{Embedder, StubEmbedder};
+    use crate::startup::StartupTracker;
+
+    /// The lifecycle test only exercises model-setup claiming, so no Vault is
+    /// registered: `ready_vault` stays `None` and nothing under test reads it.
+    fn setup_state_with_claimed_lifecycle() -> (AppState, TempDir) {
+        let tmp = TempDir::new().expect("temp dir");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
+        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let state = AppState {
+            cache_db_path: tmp.path().join("cache.sqlite3"),
+            vault_registry: crate::vault_registry::VaultRegistryStore::new(
+                tmp.path().join("state/vaults.json"),
+            ),
+            vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
+            vault_work,
+            managed_git,
+            legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
+            startup_sqlite: Arc::new(
+                crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
+            ),
+            ready_vault: Arc::new(RwLock::new(None)),
+            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vault_events,
+            mcp_tools_changed,
+            embedder,
+            runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
+            model_setup: Arc::new(crate::model_setup::ModelSetup::new(
+                tmp.path().join("models"),
+            )),
+            model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            startup_git_config: Arc::new(None),
+            web_auth_enabled: false,
+            demo_mode: false,
+            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            git_sync: Arc::new(RwLock::new(None)),
+            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
+            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
+            runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
+            startup: StartupTracker::terms_required(),
+        };
+        (state, tmp)
+    }
+
+    #[tokio::test]
+    async fn claimed_model_setup_refuses_mcp_choice_without_persisting_it() {
+        let (state, _tmp) = setup_state_with_claimed_lifecycle();
+
+        let outcome = handle_tools_call(
+            state.clone(),
+            Some(json!({ "name": "decline_gemma_terms", "arguments": {} })),
+            &McpConfig::disabled(),
+        )
+        .await
+        .expect("tool result");
+
+        assert_eq!(outcome["isError"], true);
+        assert_eq!(
+            state
+                .model_setup
+                .selected()
+                .expect("selection after refusal"),
+            crate::model_setup::SelectedModel::TermsRequired,
+            "a lost MCP lifecycle claim must not persist a choice the runtime did not adopt"
+        );
+    }
 }

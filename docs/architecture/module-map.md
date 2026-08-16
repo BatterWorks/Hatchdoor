@@ -489,8 +489,9 @@ registry cutover is unsupported.
 `require_web_token`, and `require_web_or_live_mcp_token`. Hatchdoor's internal
 attachment middleware binds the MCP token from the current runtime snapshot
 instead of retaining a token captured at startup; it accepts that token only
-while MCP itself is enabled. Disabling MCP at runtime immediately revokes that
-token for attachment uploads; MCP write mode does not affect this authorization.
+while MCP and MCP writes are enabled. Disabling MCP or MCP writes at runtime
+immediately revokes that credential's attachment-upload capability; web-token
+admission remains independent of MCP write mode.
 
 **Consumers:** `server.rs` and protected HTTP routes.
 
@@ -908,24 +909,43 @@ superseding ADR-05.
 
 **Public contract:** `GitMode` (`off`/`local`/`remote` through the existing
 runtime setting), `GitConfig`, write-record/message types, sync outcomes and
-errors, lifecycle status, repository operations, `GitSyncHandle`, `SyncOps`,
-and `spawn_sync_task`. The crate-private `parse_mode` and `non_empty_setting`
-helpers keep startup and one-time migration interpretation identical.
-`resolve_commit_identity` (issue #130) resolves one Vault's own configured
-`VaultCommitIdentity` (`vault_registry.rs`) if set, else the instance-wide
+errors (including `GitError::ManualRecovery` for repository operations that
+cannot be proven Hatchdoor-owned), lifecycle status, repository operations,
+`GitSyncHandle`, `SyncOps`, and `spawn_sync_task`. The crate-private
+`parse_mode` and `non_empty_setting` helpers keep startup and one-time
+migration interpretation identical. `resolve_commit_identity` (issue #130)
+resolves one Vault's own configured `VaultCommitIdentity`
+(`vault_registry.rs`) if set, else the instance-wide
 `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` defaults; runtime
 composition's `dispatch_managed_git_turn` calls it once per turn, before
 dispatching to any of the branches below, so every commit this boundary makes
 for a Vault — managed-Git, existing-Git remote-sync, or existing-Git
-Local-history — honors that Vault's own identity. Local
-mode commits without network access and discovers an enclosing existing
-checkout while staging only the configured Vault subtree; remote mode
-retains the safe fetch/integrate/push phases. The settings HTTP boundary owns
-the preflight → bounded drain → replacement protocol and exposes it through
-`GET /api/git-status`. `GitSyncHandle::stop` timing out withdraws its stop
-request rather than leaving the handle dead: the still-running task keeps
-accepting and committing records, and only a `stop` that truly returns `Ok`
-lets a caller install a replacement task. Spawning a task flushes any
+Local-history — honors that Vault's own identity. Local mode commits without
+network access and discovers an enclosing existing checkout while staging only
+the configured Vault subtree; remote mode retains the safe
+fetch/integrate/push phases.
+Automatic recovery requires a persisted Hatchdoor merge marker whose fresh
+nonce remains bound to the current merge's Git-managed operation metadata and
+whose index, Git-relevant tracked-worktree identity (content, type, and
+executable status), and cleanup-sensitive merge metadata were predicted from
+the immutable parent commits before the live merge began. The isolated
+checkout supplies the worktree prediction; exact `MERGE_HEAD`, `MERGE_MODE`,
+and full `MERGE_MSG` bytes are bound into the Active marker after adding the
+nonce. A live merge must match those predictions before its marker becomes
+Active, and every later reset or commit rechecks them; no post-merge
+observation can become ownership evidence. Unknown, malformed, stale,
+replayed, mismatched, chmodded, or manually changed operation state is
+preserved for manual recovery. Local-history turns skip this recovery path
+entirely rather than acting on state they did not create, and
+`classify_local_history_error` reports an encountered `ManualRecovery` as the
+non-retryable `existing_git_local_history_manual_recovery_required`.
+The settings HTTP boundary owns the preflight → bounded drain → replacement
+protocol and exposes it through `GET /api/git-status`.
+`GitSyncHandle::stop` preempts debounce and returns `Ok` only after one
+successful final drain. A timeout withdraws its stop request, and a failed
+final drain keeps the old task/status active: either way the task continues
+accepting records, and only a `stop` that truly returns `Ok` lets a caller
+install a replacement task. Spawning a task flushes any
 drift accumulated while versioning was off (uncommitted working-tree changes
 in either mode, or unpushed commits in remote mode) under its own
 distinguishable commit message. `init_local_repo` takes the vault's configured
@@ -1330,6 +1350,17 @@ mutations share a path with a read (`PUT`/`DELETE .../notes/{slug}` alongside
 unlike `vault_content.rs`'s exact reads and `vault_collection_reads.rs`'s
 one-or-all reads, which are pure reads and stay reachable in demo mode.
 
+`vault_write.rs` binds one live configuration snapshot *before* consuming any
+attachment multipart field and reads each field incrementally against its
+fail-closed byte limit, so lowering the limit takes effect on the next request
+rather than after the bytes are already buffered; an invalid pinned upload
+limit never falls back to a larger default. A `WriteError` carrying recovery
+guidance is reported as `write_recovery_required` rather than collapsing into
+the sanitized generic internal error. `vault_content.rs` bounds Vault asset
+and generated note-download responses so these convenience endpoints are not
+unbounded transfer buffers; an over-limit asset or export receives the shared
+`VaultApiError` shape and `413 Payload Too Large`.
+
 **Consumed dependencies:** `AppState`, HTTP wire types, vault reads,
 `vault/write`, Search, cache queries, Git status, auth, and — for `vaults.rs`
 only — the Vault collection registry's mutation/load operations,
@@ -1383,6 +1414,15 @@ the same shared collection shapes as HTTP; `create_vault` is the only zero-ID
 exception because the registry atomically generates its immutable ID. MCP
 returns shared domain failures as structured error tool results. No
 scope-less/default/sole-Vault tool remains reachable.
+
+Each MCP request validates its live configuration, token, and Origin before
+the body is collected. Read-only MCP accepts only the small ordinary JSON-RPC
+request bound; write-enabled requests may use the current base64-attachment
+allowance plus bounded JSON framing. Invalid pinned attachment limits fail
+closed rather than widening to defaults. JSON-RPC replies are also bounded; an
+oversized reply becomes a bounded protocol error rather than an unbounded
+response buffer. Because the read tools delegate to the `/api/v1` handlers,
+those handlers' own blocking-work offload covers the tool path too.
 
 **Consumed dependencies:** `AppState`, the Vault discovery/content/collection
 read/write HTTP adapters as shared contract producers, Vault registry/runtime,
@@ -2289,7 +2329,11 @@ frontend typecheck, then full frontend checks.
 
 **Contract and responsibility:** shared primitives, global tokens/base rules,
 style aggregation, topbar/shell styles, and cross-feature responsive overrides.
-`icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
+The tokens in `base.css` are governed by
+[`docs/design/design-system.html`](../design/design-system.html), which is
+authoritative for visual decisions across every feature stylesheet; a component
+the system does not yet cover gets its section added by the change that ships
+it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
 and paint with `currentColor`, so callers control them through font-size and
 color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `VaultPrefix` (#140) is
 the one marked-path-root primitive every flattened, scope-spanning surface
@@ -2306,7 +2350,8 @@ features. `App.css` remains an aggregation/composition stylesheet; feature
 styles should migrate only as part of a declared boundary pilot.
 
 **Validation:** affected component/App tests, responsive manual or screenshot
-review when layout changes, and full frontend checks.
+review when layout changes, `python3 docs/design/palette.py` when a `base.css`
+accent or token changes, and full frontend checks.
 
 ### Small shared browser utilities
 

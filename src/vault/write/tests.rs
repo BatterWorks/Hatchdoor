@@ -279,6 +279,23 @@ fn update_note_requires_matching_hash() {
     assert_eq!(fs::read_to_string(path).expect("read"), "new\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn attachment_overwrite_rejects_a_symlink_destination_without_touching_its_target() {
+    use std::os::unix::fs::symlink;
+
+    let vault = TempDir::new().expect("vault");
+    let sentinel = vault.path().join("outside.txt");
+    fs::write(&sentinel, "do not change").expect("sentinel");
+    symlink(&sentinel, vault.path().join("image.png")).expect("attachment link");
+
+    let error = import_attachment_bytes(vault.path(), "image.png", b"new image", 1024, true)
+        .expect_err("an overwrite must not follow a symlink destination");
+
+    assert!(matches!(error, WriteError::Conflict(_) | WriteError::Io(_)));
+    assert_eq!(fs::read_to_string(&sentinel).unwrap(), "do not change");
+}
+
 #[test]
 fn write_quality_normalizes_safe_markdown_formatting() {
     let tmp = TempDir::new().expect("tempdir");
@@ -680,4 +697,229 @@ fn delete_note_does_not_move_already_trashed_attachment_again() {
             .exists()
     );
     assert!(root.join(".hatchdoor-trash/Notes/Target.md").exists());
+}
+
+#[test]
+fn note_move_compensates_failures_after_every_completed_phase() {
+    use super::types::MutationPhase;
+
+    for failed_phase in [
+        MutationPhase::Note,
+        MutationPhase::Asset,
+        MutationPhase::Rewrite,
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Notes")).expect("notes");
+        fs::write(root.join("Notes/Target.md"), "body\n![](image.png)").expect("target");
+        fs::write(root.join("Notes/image.png"), "original asset").expect("asset");
+        fs::write(
+            root.join("Backlink.md"),
+            "See [[Target]] and ![](Notes/image.png)",
+        )
+        .expect("backlink");
+        let index = build(root);
+        let entry = index.find_by_slug("target").expect("target");
+
+        let error = super::notes::move_or_rename_note_with_failure(
+            root,
+            &index,
+            entry,
+            "Archive/Target.md",
+            &content_hash("body\n![](image.png)"),
+            |completed| {
+                if completed == failed_phase {
+                    Err(WriteError::Io(format!(
+                        "injected failure after {completed:?} phase"
+                    )))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("injected phase failure must abort the mutation");
+
+        let WriteError::Io(message) = error else {
+            panic!("expected injected I/O error");
+        };
+        assert!(message.contains("rollback succeeded"));
+        assert_eq!(
+            fs::read_to_string(root.join("Notes/Target.md")).expect("restored note"),
+            "body\n![](image.png)"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Notes/image.png")).expect("restored asset"),
+            "original asset"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Backlink.md")).expect("restored backlink"),
+            "See [[Target]] and ![](Notes/image.png)"
+        );
+        assert!(!root.join("Archive/Target.md").exists());
+        assert!(!root.join("Archive/image.png").exists());
+    }
+}
+
+#[test]
+fn attachment_move_compensates_failures_after_every_completed_phase() {
+    use super::types::MutationPhase;
+
+    for failed_phase in [MutationPhase::Asset, MutationPhase::Rewrite] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join("Media")).expect("media");
+        fs::write(root.join("Media/image.png"), "original asset").expect("asset");
+        fs::write(root.join("Note.md"), "![](Media/image.png)").expect("note");
+        let index = build(root);
+
+        let error = super::attachments::move_attachment_with_failure(
+            root,
+            &index,
+            "Media/image.png",
+            "Archive/image.png",
+            |completed| {
+                if completed == failed_phase {
+                    Err(WriteError::Io(format!(
+                        "injected failure after {completed:?} phase"
+                    )))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .expect_err("injected phase failure must abort the mutation");
+
+        let WriteError::Io(message) = error else {
+            panic!("expected injected I/O error");
+        };
+        assert!(message.contains("rollback succeeded"));
+        assert_eq!(
+            fs::read_to_string(root.join("Media/image.png")).expect("restored asset"),
+            "original asset"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("Note.md")).expect("restored reference"),
+            "![](Media/image.png)"
+        );
+        assert!(!root.join("Archive/image.png").exists());
+    }
+}
+
+#[test]
+fn note_delete_compensates_a_failure_after_rewrites() {
+    use super::types::MutationPhase;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body ![](asset.pdf)").expect("target");
+    fs::write(root.join("asset.pdf"), "original asset").expect("asset");
+    fs::write(
+        root.join("Backlink.md"),
+        "before [[Target]] after ![](asset.pdf)",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let error = super::notes::delete_note_with_failure(
+        root,
+        &index,
+        entry,
+        &content_hash("body ![](asset.pdf)"),
+        |completed| {
+            if completed == MutationPhase::Rewrite {
+                Err(WriteError::Io(
+                    "injected failure after delete rewrites".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("late delete failure must abort");
+
+    let WriteError::Io(message) = error else {
+        panic!("expected injected I/O error");
+    };
+    assert!(message.contains("rollback succeeded"));
+    assert_eq!(
+        fs::read_to_string(root.join("Target.md")).expect("restored note"),
+        "body ![](asset.pdf)"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("asset.pdf")).expect("restored asset"),
+        "original asset"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("restored backlink"),
+        "before [[Target]] after ![](asset.pdf)"
+    );
+    assert!(!root.join(".hatchdoor-trash/Target.md").exists());
+    assert!(!root.join(".hatchdoor-trash/asset.pdf").exists());
+}
+
+#[test]
+fn compensation_failure_surfaces_bounded_recovery_details_and_continues_rollback() {
+    use super::types::MutationPhase;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), "body\n![](image.png)").expect("target");
+    fs::write(root.join("Notes/image.png"), "original asset").expect("asset");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[Target]] and ![](Notes/image.png)",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+    let backlink = root.join("Backlink.md");
+
+    let error = super::notes::move_or_rename_note_with_failure(
+        root,
+        &index,
+        entry,
+        "Archive/Target.md",
+        &content_hash("body\n![](image.png)"),
+        |completed| {
+            if completed == MutationPhase::Rewrite {
+                fs::write(&backlink, "manual concurrent edit")
+                    .expect("simulate external replacement");
+                Err(WriteError::Io(
+                    "injected failure after rewrite phase".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("incomplete compensation must be reported");
+
+    let WriteError::Io(message) = error else {
+        panic!("expected recovery-required I/O error");
+    };
+    assert!(message.contains("recovery required"));
+    assert!(message.contains("Backlink.md"));
+    assert!(message.contains("restore rewritten note"));
+    assert!(
+        !message.contains(&root.display().to_string()),
+        "adapter-visible details must not contain the absolute vault root: {message}"
+    );
+
+    assert_eq!(
+        fs::read_to_string(root.join("Notes/Target.md")).expect("restored note"),
+        "body\n![](image.png)"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Notes/image.png")).expect("restored asset"),
+        "original asset"
+    );
+    assert!(!root.join("Archive/Target.md").exists());
+    assert!(!root.join("Archive/image.png").exists());
+    assert_eq!(
+        fs::read_to_string(backlink).expect("manual edit preserved"),
+        "manual concurrent edit",
+        "compensation must not overwrite a concurrent manual edit"
+    );
 }
