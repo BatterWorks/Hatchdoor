@@ -286,7 +286,6 @@ export function AppTopbar({
               className="icon-button"
               onClick={onToggleDrawer}
               aria-label="Toggle explorer"
-              style={{ marginRight: "0.5rem" }}
             >
               <MenuIcon />
             </button>
