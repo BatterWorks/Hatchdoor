@@ -68,10 +68,98 @@ describe("VaultCreationDialog — opening", () => {
 
     expect(screen.getByRole("dialog", { name: "Add a Vault" })).toBeVisible();
     expect(screen.getByLabelText("Vault name")).toBeVisible();
+    expect(
+      screen.getByLabelText("Ignore these files and folders"),
+    ).toBeVisible();
     expect(screen.getByLabelText("Folder path")).toBeVisible();
     for (const label of ["No Git", "Local history", "Pull-only", "Two-way"]) {
       expect(screen.getByRole("button", { name: label })).toBeVisible();
     }
+  });
+});
+
+describe("VaultCreationDialog — exclusion patterns", () => {
+  it("sends normalized exclude_patterns from the initial create request", async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    mockRoutes({
+      "/api/v1/vaults GET": () =>
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults POST": (init) => {
+        postedBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
+      },
+    });
+
+    render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Field notes" },
+    });
+    fireEvent.change(screen.getByLabelText("Folder path"), {
+      target: { value: "/notes" },
+    });
+    fireEvent.change(
+      screen.getByLabelText("Ignore these files and folders"),
+      { target: { value: " node_modules , .git ,, dist " } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
+
+    await vi.waitFor(() => expect(postedBody).not.toBeNull());
+    expect(postedBody).toEqual({
+      expected_registry_revision: 5,
+      name: "Field notes",
+      source: { type: "local", path: "/notes" },
+      exclude_patterns: ["node_modules", ".git", "dist"],
+    });
+  });
+
+  it("omits exclude_patterns entirely when the field is left empty", async () => {
+    let postedBody: Record<string, unknown> | null = null;
+    mockRoutes({
+      "/api/v1/vaults GET": () =>
+        json({
+          registry_revision: 5,
+          collection_revision: 5,
+          vaults: [],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults POST": (init) => {
+        postedBody = JSON.parse(init!.body as string);
+        return json(
+          {
+            vault: CREATED_VAULT,
+            registry_revision: 6,
+            collection_revision: 6,
+          },
+          { status: 201 },
+        );
+      },
+    });
+
+    render(<VaultCreationDialog onClose={() => {}} onCreated={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText("Vault name"), {
+      target: { value: "Field notes" },
+    });
+    fireEvent.change(screen.getByLabelText("Folder path"), {
+      target: { value: "/notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create Vault" }));
+
+    await vi.waitFor(() => expect(postedBody).not.toBeNull());
+    expect(postedBody).not.toHaveProperty("exclude_patterns");
   });
 });
 

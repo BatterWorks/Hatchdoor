@@ -222,6 +222,17 @@ export function clampPollMinutes(raw: string): number {
   return Math.min(MAX_POLL_MINUTES, Math.max(MIN_POLL_MINUTES, parsed));
 }
 
+/** The comma-separated `exclude_patterns` input parser shared by the create
+ * (issue #157) and edit flows, so a pattern list typed either place is
+ * normalized identically rather than by two independently maintained
+ * `split(",").map(trim).filter(Boolean)` calls. */
+export function parseExcludePatterns(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export type GitFailureTier = "warn" | "error";
 export type GitFailureDescription = {
   label: string;
