@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### ⚠️ Breaking changes — action required on upgrade
+- **A read-only MCP token can no longer upload attachments over HTTP.** The
+  multipart attachment endpoint now accepts an MCP bearer token only while MCP
+  and MCP writes are both currently enabled. Previously it accepted that token
+  whenever MCP was enabled, including in read-only mode, while the
+  `import_attachment` MCP tool already refused: the same credential performing
+  the same action got two different answers depending on which surface it came
+  through. Disabling MCP, or MCP write mode, is now an immediate revocation of
+  that credential's upload capability, checked per request.
+  Unaffected: the web bearer token, which still works regardless of MCP write
+  mode; the web UI's own paste and drop upload, which uses it; and deployments
+  with no token configured, where the route stays open as before.
+  **Action:** if an agent uploads attachments over HTTP using the MCP bearer
+  token, either enable MCP write mode or move that workflow to the web bearer
+  token. Call `get_attachment_import_config` to see the methods and limits
+  currently available to a session.
+
 ### Added
 - A **New note** button now sits at the bottom of the sidebar, always reachable
   without scrolling. The per-folder `+` stays for creating in a specific folder.
@@ -38,8 +55,9 @@
 - Opening a note highlighted it in up to three sidebar lists at once. The
   highlight is now canonical in the folder tree only.
 
-No upgrade action required. Nothing changes on disk, in configuration, or in the
-API; the cache is not rebuilt.
+Nothing changes on disk or in configuration, and the cache is not rebuilt. The
+one upgrade action is the attachment authorization change above; it applies only
+if an agent uploads over HTTP with the MCP bearer token.
 
 ## v2.4.0 - 2026-07-27
 
