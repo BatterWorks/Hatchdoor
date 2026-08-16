@@ -493,30 +493,6 @@ pub async fn refresh_now(state: &AppState) -> Result<(), (StatusCode, Json<Error
     run_reindex(state, None).await.map_err(internal_error)
 }
 
-/// Refresh a watcher-dirty vault only when no completed refresh has already
-/// incorporated the generation observed with that dirty signal. The generation
-/// check intentionally happens *after* waiting for `refresh_lock`: an
-/// application write can hold that lock longer than the watcher debounce, and
-/// must not be followed by a duplicate watcher reindex once it completes.
-///
-/// Returns `Ok(true)` only when this call performed a full reindex.
-pub async fn refresh_if_changed_since(
-    state: &AppState,
-    observed_revision: u64,
-) -> Result<bool, (StatusCode, Json<ErrorResponse>)> {
-    let _refresh_guard = state.refresh_lock.lock().await;
-    let current_revision = state.vault_revision.load(Ordering::SeqCst);
-    if current_revision != observed_revision {
-        debug!(
-            observed_revision,
-            current_revision, "Watcher refresh already incorporated"
-        );
-        return Ok(false);
-    }
-    run_reindex(state, None).await.map_err(internal_error)?;
-    Ok(true)
-}
-
 /// Start the versioning task selected at startup if it is not already active.
 /// A watcher recovery calls this before it releases readiness, so recovering a
 /// broken initial index cannot leave the HTTP/MCP process ready without its
@@ -672,7 +648,6 @@ pub fn test_embedder() -> Arc<dyn Embedder> {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::time::Duration;
     use tempfile::tempdir;
 
     use crate::git::{GitConfig, GitMode};
@@ -988,64 +963,6 @@ mod tests {
             .stop(std::time::Duration::from_secs(1))
             .await
             .expect("stop test Git task");
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn watcher_signal_waiting_behind_an_application_refresh_does_not_reindex_twice() {
-        // An application write can emit its filesystem signal long before its
-        // guaranteed refresh releases `refresh_lock`. The watcher reaches its
-        // debounce deadline in that interval, then must re-check the generation
-        // *after* it acquires the lock rather than blindly running a second pass.
-        let dir = tempdir().expect("temp dir");
-        let vault_path = dir.path().join("vault");
-        std::fs::create_dir_all(&vault_path).expect("create vault");
-        std::fs::write(vault_path.join("Home.md"), "home").expect("write note");
-        let state = state_with_vault(vault_path.clone());
-        std::fs::write(vault_path.join("Written.md"), "written").expect("application write");
-        let signal_revision = state.vault_revision.load(Ordering::SeqCst);
-        let refresh_started = Arc::new(tokio::sync::Notify::new());
-        let release_refresh = Arc::new(tokio::sync::Notify::new());
-        let application_state = state.clone();
-        let application_started = refresh_started.clone();
-        let application_release = release_refresh.clone();
-        let application_refresh = tokio::spawn(async move {
-            let _refresh_guard = application_state.refresh_lock.lock().await;
-            application_started.notify_one();
-            application_release.notified().await;
-            run_reindex(&application_state, None)
-                .await
-                .expect("application refresh");
-        });
-        refresh_started.notified().await;
-
-        tokio::time::advance(crate::vault_watcher::WATCH_DEBOUNCE + Duration::from_millis(1)).await;
-        let watcher_state = state.clone();
-        let watcher_refresh = tokio::spawn(async move {
-            refresh_if_changed_since(&watcher_state, signal_revision)
-                .await
-                .expect("watcher refresh")
-        });
-        tokio::task::yield_now().await;
-
-        release_refresh.notify_one();
-        application_refresh.await.expect("application task");
-        assert!(
-            !watcher_refresh.await.expect("watcher task"),
-            "the watcher signal was incorporated by the in-flight application refresh"
-        );
-        assert_eq!(state.vault_revision.load(Ordering::SeqCst), 1);
-        assert!(
-            state
-                .ready_vault()
-                .await
-                .expect("ready vault")
-                .cache
-                .sqlite
-                .read_note_by_slug("written")
-                .expect("read note")
-                .is_some(),
-            "the sole application refresh incorporated the write"
-        );
     }
 
     #[tokio::test]
