@@ -2357,9 +2357,9 @@ The tokens in `base.css` are governed by
 [`docs/design/design-system.html`](../design/design-system.html), which is
 authoritative for visual decisions across every feature stylesheet; a component
 the system does not yet cover gets its section added by the change that ships
-it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to `1em`
-and paint with `currentColor`, so callers control them through font-size and
-color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `VaultPrefix` (#140) is
+it. `icons.tsx` holds the inlined Material Symbols (Sharp) set; icons size to
+`1em` and paint with `currentColor`, so callers control them through font-size
+and color. Attribution lives in `THIRD_PARTY_NOTICES.md`. `VaultPrefix` (#140) is
 the one marked-path-root primitive every flattened, scope-spanning surface
 uses for Vault provenance — hot ink, a middot instead of a folder `/`, and
 never eliding; consumers give the adjacent title or path the shrinking room
