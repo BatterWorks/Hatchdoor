@@ -716,6 +716,13 @@ ID_EMPTY="44444444-4444-4444-8444-444444444444"
 ID_MISSING="55555555-5555-4555-8555-555555555555"
 ID_DISABLED="66666666-6666-4666-8666-666666666666"
 ID_GIT_BROKEN="77777777-7777-4777-8777-777777777777"
+ID_GIT_OK="88888888-8888-4888-8888-888888888888"
+ID_GIT_AUTH="99999999-9999-4999-8999-999999999999"
+
+# Real repositories on the lab Forgejo. The three Git fixtures fail (or not) in
+# genuinely different code paths: a bad hostname never resolves, a private repo
+# resolves and is refused, and the public one must actually clone and index.
+FORGEJO_BASE="https://forgejo.batterlan.cc/battermanz"
 
 reset_tree
 
@@ -738,7 +745,9 @@ case "$profile" in
             "$(vault_entry "$ID_EMPTY" '"Empty"' "$vaults_dir/empty" true)" \
             "$(vault_entry "$ID_MISSING" '"Missing path"' "$vaults_dir/does-not-exist" true)" \
             "$(vault_entry "$ID_DISABLED" '"Disabled"' "$vaults_dir/disabled" false)" \
-            "$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://forgejo.invalid/hatchdoor-dev/nope.git" true)"
+            "$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://forgejo.invalid/hatchdoor-dev/nope.git" true)" \
+            "$(git_vault_entry "$ID_GIT_OK" '"Git — clones cleanly"' "$FORGEJO_BASE/hatchdoor-dev-vault-ok.git" true)" \
+            "$(git_vault_entry "$ID_GIT_AUTH" '"Git — auth refused"' "$FORGEJO_BASE/hatchdoor-dev-vault-private.git" true)"
         ;;
     broken)
         build_readonly
@@ -749,7 +758,9 @@ case "$profile" in
             "$(vault_entry "$ID_EMPTY" '"Empty"' "$vaults_dir/empty" true)" \
             "$(vault_entry "$ID_MISSING" '"Missing path"' "$vaults_dir/does-not-exist" true)" \
             "$(vault_entry "$ID_DISABLED" '"Disabled"' "$vaults_dir/disabled" false)" \
-            "$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://forgejo.invalid/hatchdoor-dev/nope.git" true)"
+            "$(git_vault_entry "$ID_GIT_BROKEN" '"Git — unreachable remote"' "https://forgejo.invalid/hatchdoor-dev/nope.git" true)" \
+            "$(git_vault_entry "$ID_GIT_OK" '"Git — clones cleanly"' "$FORGEJO_BASE/hatchdoor-dev-vault-ok.git" true)" \
+            "$(git_vault_entry "$ID_GIT_AUTH" '"Git — auth refused"' "$FORGEJO_BASE/hatchdoor-dev-vault-private.git" true)"
         ;;
     *)
         echo "unknown profile '$profile' (expected: clean, messy, broken)" >&2
