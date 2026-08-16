@@ -59,7 +59,6 @@ export type UploadAttachmentFn = (
 
 export type NoteAttachmentUpload = {
   embedPath: string;
-  gitSyncWarning?: string;
 };
 
 /**
@@ -89,7 +88,6 @@ export async function uploadNoteAttachment(
           outcome.attachment.relative_path,
           noteRelativePath,
         ),
-        gitSyncWarning: outcome.git_sync_warning ?? undefined,
       };
     } catch (error) {
       attempt += 1;

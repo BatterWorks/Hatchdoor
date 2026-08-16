@@ -30,10 +30,11 @@ Use Hatchdoor MCP as the operational layer for this Markdown vault. Prefer Hatch
 
 ## Discovery
 
-Use `search_notes` first for most questions.
+Start with `list_vaults` and retain immutable `vault_id` values. There is no
+selected or default Vault. Every collection read uses `scope` (one Vault ID or
+`all`); every exact read and mutation uses one `vault_id`.
 
-Use `query_notes` when exact tags, paths, or frontmatter properties define the
-request without a content query. Request only the properties needed for the task.
+Use `search_notes` first for most questions.
 
 Use semantic search for ideas, topics, decisions, projects, and natural-language retrieval.
 
@@ -45,7 +46,7 @@ Use `get_note` only after a search or wikilink resolution identifies the note yo
 
 Use `get_note_links` when backlinks or outgoing links matter.
 
-Use `get_tree` only when the task is specifically about folder structure or broad navigation.
+Use `get_tree` only when the task is specifically about folder structure or broad navigation. Collection responses may be partial; branch on structured error `code`, not message text.
 
 ## Writing
 
@@ -65,15 +66,17 @@ For new notes:
 
 For attachments:
 
+- Call `get_attachment_import_config` with the target `vault_id` first: it
+  reports the available methods, their byte limits, and allowed extensions.
 - Use Hatchdoor attachment import tools.
 - Prefer local Markdown image syntax: `![Alt text](file-name.jpg)`.
 - Use safe lowercase ASCII filenames with hyphens.
 
 ## Git sync
 
-If Hatchdoor git sync is enabled, write tools may commit and push vault changes automatically.
-
-After writes, use `get_git_sync_status` when available. If sync reports a conflict or unpushed changes, stop and tell the user.
+If Hatchdoor Git sync is enabled, inspect the target Vault's Git status through
+`list_vaults`. Use `sync_vault` or `retry_vault` only for an eligible managed-Git
+Vault and always pass its `vault_id`.
 
 Do not run manual `git add`, `git commit`, or `git push` in the vault unless the user explicitly asks or Hatchdoor reports that automatic sync is disabled.
 ````

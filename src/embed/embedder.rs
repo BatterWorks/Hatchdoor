@@ -2,6 +2,12 @@ use std::sync::{Arc, RwLock};
 
 use tokenizers::{Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace};
 
+/// Identity reported by [`RuntimeEmbedder`] while no model is installed yet.
+/// It names no real embedding space, so it must never be compared against a
+/// stored identity as if it were one — see
+/// [`crate::cache::SqliteCache::reset_if_embedder_changed`].
+pub const PENDING_IDENTITY: &str = "model-setup-pending-768";
+
 /// In-process text embedder. Loaded once at startup, shared via Arc.
 #[allow(dead_code)]
 pub trait Embedder: Send + Sync {
@@ -18,6 +24,15 @@ pub trait Embedder: Send + Sync {
     /// it with their model id.
     fn identity(&self) -> String {
         format!("unknown-{}", self.embedding_dim())
+    }
+
+    /// Whether this embedder can actually embed right now. Concrete embedders
+    /// own a loaded model by construction and are always ready; only
+    /// [`RuntimeEmbedder`] can be an empty slot, before first-run model setup
+    /// completes. Callers that would otherwise build an index against a model
+    /// that does not exist yet must check this first.
+    fn is_ready(&self) -> bool {
+        true
     }
 
     /// Count tokens using the exact tokenizer bundled with this embedder.
@@ -100,10 +115,14 @@ impl Embedder for RuntimeEmbedder {
         768
     }
 
+    fn is_ready(&self) -> bool {
+        self.active().is_ok()
+    }
+
     fn identity(&self) -> String {
         self.active()
             .map(|embedder| embedder.identity())
-            .unwrap_or_else(|_| "model-setup-pending-768".to_string())
+            .unwrap_or_else(|_| PENDING_IDENTITY.to_string())
     }
 
     fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {

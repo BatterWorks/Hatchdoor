@@ -53,9 +53,9 @@ describe("applyWikilinkSelection", () => {
 
 describe("matchNoteCandidates", () => {
   const candidates = [
-    { title: "Project Plan", slug: "project-plan" },
-    { title: "Projection", slug: "projection" },
-    { title: "Recipes", slug: "recipes" },
+    { vault_id: "vault-1", title: "Project Plan", slug: "project-plan" },
+    { vault_id: "vault-1", title: "Projection", slug: "projection" },
+    { vault_id: "vault-1", title: "Recipes", slug: "recipes" },
   ];
 
   it("filters case-insensitively by substring", () => {

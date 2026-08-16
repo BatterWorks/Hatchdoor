@@ -1,8 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::search::SearchMode;
-use crate::vault::{ModifiedNote, Note, NoteLinks};
-
 #[derive(Debug, Serialize)]
 pub struct TagStat {
     pub tag: String,
@@ -100,34 +97,14 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct NoteResponse {
-    pub note: Note,
-}
-
-#[derive(Debug, Serialize)]
-pub struct NoteLinksResponse {
-    pub links: NoteLinks,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct ResolveQuery {
     pub target: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ResolveResponse {
-    pub slug: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct ResolveBatchRequest {
     pub targets: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ResolveBatchResponse {
-    pub results: Vec<ResolveTargetResult>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,33 +114,14 @@ pub struct ResolveTargetResult {
     pub archived: bool,
 }
 
+/// Still consumed by `src/mcp/tools/read.rs`'s own refresh tool over the
+/// legacy shared-core call (#103, unaffected by #101's HTTP route removal).
 #[derive(Debug, Serialize)]
 pub struct RefreshResponse {
     pub refreshed: bool,
 }
 
-#[derive(Debug, Serialize)]
-pub struct VaultEventResponse {
-    pub revision: u64,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct RecentlyModifiedQuery {
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RecentlyModifiedResponse {
-    pub notes: Vec<ModifiedNote>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SearchQuery {
-    pub q: String,
-    #[serde(default)]
-    pub mode: Option<SearchMode>,
-    #[serde(default)]
-    pub limit: Option<usize>,
-    #[serde(default)]
-    pub per_note_cap: Option<usize>,
 }

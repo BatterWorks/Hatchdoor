@@ -38,6 +38,11 @@ pub struct BuildOptions {
     /// Production keeps the conservative one-input default; eval can raise this
     /// to measure whether ONNX batching improves build throughput.
     pub embedding_batch_size: usize,
+    /// When false, build every structural row (notes, links, tags, headings,
+    /// chunk text) but embed nothing. This is the structure-only pass that
+    /// publishes a browsable Vault ahead of its vectors; it reuses the existing
+    /// per-note `embed` path rather than adding a second build.
+    pub embed: bool,
 }
 
 impl Default for BuildOptions {
@@ -46,6 +51,7 @@ impl Default for BuildOptions {
             chunk: ChunkOptions::default(),
             context: true,
             embedding_batch_size: 1,
+            embed: true,
         }
     }
 }
@@ -60,6 +66,14 @@ pub enum UpsertOutcome {
         content: String,
     },
     Unchanged,
+    /// The file could not be read as text: non-UTF-8 bytes, a permission
+    /// change, or a delete racing the scan that listed it. Reported rather
+    /// than returned as `Err` so one unreadable file cannot abort indexing
+    /// for the whole Vault — the same tradeoff the per-note embedding
+    /// failure path below already makes.
+    Unreadable {
+        reason: String,
+    },
 }
 
 const FIRST_PROGRESS_LOG_AFTER: Duration = Duration::from_secs(10);
@@ -119,6 +133,25 @@ impl SqliteCache {
         on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
         embed_layers: bool,
         opts: &BuildOptions,
+    ) -> Result<(), String> {
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.replace_with_options_unlocked(index, embedder, on_progress, embed_layers, opts, None)
+    }
+
+    /// Callers hold `snapshot_model_epoch`. `build_stamp` carries the metadata a
+    /// stamped build records; it is written inside the populate transaction so a
+    /// metadata failure cannot leave readers on a split generation.
+    fn replace_with_options_unlocked(
+        &self,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        embed_layers: bool,
+        opts: &BuildOptions,
+        build_stamp: Option<BuildStamp>,
     ) -> Result<(), String> {
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
@@ -189,6 +222,19 @@ impl SqliteCache {
                 .entry(dir.clone())
                 .or_insert_with(|| name.clone());
         }
+        let effective_markers_json = serde_json::to_string(&effective_markers)
+            .map_err(|e| format!("failed serializing marker set: {e}"))?;
+        let layer_catalog: Vec<crate::search::LayerInfo> = index
+            .layers
+            .layer_names()
+            .into_iter()
+            .map(|name| {
+                let description = index.layers.description(&name).map(str::to_string);
+                crate::search::LayerInfo { name, description }
+            })
+            .collect();
+        let layer_catalog_json = serde_json::to_string(&layer_catalog)
+            .map_err(|e| format!("failed serializing layer catalog: {e}"))?;
 
         let current_paths = entries
             .iter()
@@ -218,6 +264,8 @@ impl SqliteCache {
         let mut chunks_embedded: usize = 0;
         let mut chunks_reused: usize = 0;
         let mut per_note_failures: usize = 0;
+        let mut unreadable_notes: usize = 0;
+        let mut last_unreadable_reason: Option<String> = None;
         let mut notes_changed: usize = 0;
         let mut notes_unchanged: usize = 0;
         let mut metrics = IndexingMetrics::default();
@@ -233,8 +281,9 @@ impl SqliteCache {
             let upsert_outcome = upsert_note_if_changed(&tx, entry, now, force_note_refresh)?;
             metrics.note_sync += note_sync_started.elapsed();
             // A demoted note is embedded only when the flag allows it; a
-            // default-surface note is always embedded.
-            let embed_this_note = embed_layers || entry.layer.is_none();
+            // default-surface note is always embedded. A structure-only build
+            // (`opts.embed == false`) embeds neither.
+            let embed_this_note = opts.embed && (embed_layers || entry.layer.is_none());
             match upsert_outcome {
                 UpsertOutcome::Wrote { slug, content } => {
                     match prepare_note_for_embedding(
@@ -256,7 +305,32 @@ impl SqliteCache {
                     }
                 }
                 UpsertOutcome::Unchanged => notes_unchanged += 1,
+                UpsertOutcome::Unreadable { reason } => {
+                    per_note_failures += 1;
+                    unreadable_notes += 1;
+                    last_unreadable_reason = Some(reason);
+                    tracing::warn!(
+                        path = %entry.relative_path,
+                        "Skipping unreadable note; the rest of the Vault still indexes"
+                    );
+                }
             }
+        }
+
+        // Tolerating individual unreadable files must not extend to a Vault
+        // that has become unreadable as a whole — an unmounted volume or a
+        // revoked permission would otherwise publish an empty index over a
+        // good one. Losing every note the scan just listed is that case, so it
+        // stays fatal and the prior snapshot is retained as stale. A Vault
+        // that legitimately holds no notes has nothing to lose and succeeds.
+        if !entries.is_empty() && unreadable_notes == entries.len() {
+            return Err(format!(
+                "every note in the Vault became unreadable during indexing ({} of {}); \
+                 the previous index is kept. Last error: {}",
+                unreadable_notes,
+                entries.len(),
+                last_unreadable_reason.unwrap_or_else(|| "unknown".to_string())
+            ));
         }
 
         let total_chunks_to_embed: usize = prepared_notes
@@ -337,47 +411,30 @@ impl SqliteCache {
             tracing::debug!(removed, "Swept orphan chunk vectors");
         }
 
+        // A cache refresh is one generation. Its metadata participates in the
+        // same transaction as notes and every derived row so a metadata-write
+        // failure cannot make readers observe a split generation.
+        let embedder_id = build_stamp
+            .as_ref()
+            .map(|stamp| stamp.embedder_id.clone())
+            .unwrap_or_else(|| embedder.identity());
+        set_metadata_in_transaction(&tx, "embedder_id", &embedder_id)?;
+        set_metadata_in_transaction(&tx, "marker_set_hash", &marker_set_hash)?;
+        set_metadata_in_transaction(&tx, "marker_set", &effective_markers_json)?;
+        set_metadata_in_transaction(&tx, "embed_layers", embed_layers_value)?;
+        set_metadata_in_transaction(&tx, "layer_catalog", &layer_catalog_json)?;
+        if let Some(stamp) = build_stamp {
+            set_metadata_in_transaction(
+                &tx,
+                "build_duration_secs",
+                &format!("{:.3}", stamp.started_at.elapsed().as_secs_f64()),
+            )?;
+        }
+
         let commit_started = Instant::now();
         tx.commit()
             .map_err(|e| format!("failed to commit SQLite cache refresh: {e}"))?;
         metrics.commit = commit_started.elapsed();
-
-        // Release the writer lock before set_metadata re-acquires it, otherwise
-        // this self-deadlocks (the guard `conn` still holds the same Mutex).
-        drop(conn);
-
-        // Record which model produced these vectors so a future build with a
-        // different model triggers reset_if_embedder_changed above.
-        self.set_metadata("embedder_id", &embedder.identity())?;
-
-        // Record the marker set so the next reindex can detect a change and force
-        // the reclassification above, and the resolved marker directories so it
-        // can detect a vanished marker and refuse to promote its notes.
-        self.set_metadata("marker_set_hash", &marker_set_hash)?;
-        let effective_markers_json = serde_json::to_string(&effective_markers)
-            .map_err(|e| format!("failed serializing marker set: {e}"))?;
-        self.set_metadata("marker_set", &effective_markers_json)?;
-        // Persist the embed-layers flag so a future flip is detected and forces a
-        // demoted-layer re-embed / vector drop above.
-        self.set_metadata("embed_layers", embed_layers_value)?;
-
-        // Persist the layer catalog (names + descriptions) so the MCP tool-list
-        // builder can generate the `layers` enum and its per-value docs at
-        // request time, when only the SQLite cache is reachable and the
-        // in-memory LayerMap is gone. Uses the freshly discovered markers, so a
-        // vanished-and-retained marker's layer is not advertised for selection.
-        let layer_catalog: Vec<crate::search::LayerInfo> = index
-            .layers
-            .layer_names()
-            .into_iter()
-            .map(|name| {
-                let description = index.layers.description(&name).map(str::to_string);
-                crate::search::LayerInfo { name, description }
-            })
-            .collect();
-        let layer_catalog_json = serde_json::to_string(&layer_catalog)
-            .map_err(|e| format!("failed serializing layer catalog: {e}"))?;
-        self.set_metadata("layer_catalog", &layer_catalog_json)?;
 
         let elapsed = started_at.elapsed();
         let failure_summary = if per_note_failures == 0 {
@@ -438,13 +495,37 @@ impl SqliteCache {
         embedder_id: &str,
         opts: &BuildOptions,
     ) -> Result<(), String> {
-        let started = std::time::Instant::now();
-        self.replace_from_index_with_options(index, embedder, opts)?;
-        let secs = started.elapsed().as_secs_f64();
-        self.set_metadata("embedder_id", embedder_id)?;
-        self.set_metadata("build_duration_secs", &format!("{secs:.3}"))?;
-        Ok(())
+        let _epoch = self
+            .snapshot_model_epoch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.replace_with_options_unlocked(
+            index,
+            embedder,
+            None,
+            true,
+            opts,
+            Some(BuildStamp {
+                embedder_id: embedder_id.to_string(),
+                started_at: Instant::now(),
+            }),
+        )
     }
+}
+
+struct BuildStamp {
+    embedder_id: String,
+    started_at: Instant,
+}
+
+fn set_metadata_in_transaction(tx: &Transaction<'_>, key: &str, value: &str) -> Result<(), String> {
+    tx.execute(
+        "INSERT INTO metadata(key, value) VALUES (?1, ?2) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .map_err(|error| format!("set build metadata '{key}': {error}"))?;
+    Ok(())
 }
 
 #[derive(Default)]
@@ -929,6 +1010,10 @@ fn cached_note_state(
 /// whose chunks/vectors disagree with its content. The empty string can never
 /// equal a real content hash, so change-detection will always re-fire.
 fn invalidate_note_content_hash(tx: &Transaction<'_>, slug: &str) -> Result<(), String> {
+    // The note row has already switched to the new Markdown content. Remove the
+    // old derived rows before committing that fact, otherwise search could pair
+    // the changed note with chunks/vectors built from the previous body.
+    replace_chunks_for_note(tx, slug, None, &[], None, None)?;
     tx.execute(
         "UPDATE notes SET content_hash = '' WHERE slug = ?1",
         params![slug],
@@ -1048,11 +1133,20 @@ fn upsert_note_if_changed(
     indexed_at: i64,
     force_layer_refresh: bool,
 ) -> Result<UpsertOutcome, String> {
-    let snapshot = file_snapshot(&entry.path)?;
+    let snapshot = match file_snapshot(&entry.path) {
+        Ok(snapshot) => snapshot,
+        Err(reason) => return Ok(UpsertOutcome::Unreadable { reason }),
+    };
     let cached = cached_note_state(tx, &entry.relative_path)?;
 
-    let content = fs::read_to_string(&entry.path)
-        .map_err(|error| format!("failed reading note '{}': {error}", entry.path.display()))?;
+    let content = match fs::read_to_string(&entry.path) {
+        Ok(content) => content,
+        Err(error) => {
+            return Ok(UpsertOutcome::Unreadable {
+                reason: format!("failed reading note '{}': {error}", entry.path.display()),
+            });
+        }
+    };
     let hash = content_hash(&content);
 
     // When the marker set changed, the note's `layer` may differ even though its
@@ -2351,6 +2445,9 @@ mod chunk_integration_tests {
         fn embedding_dim(&self) -> usize {
             self.inner.embedding_dim()
         }
+        fn identity(&self) -> String {
+            self.inner.identity()
+        }
         fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
             self.inner.token_count(text, add_special_tokens)
         }
@@ -2399,6 +2496,157 @@ mod chunk_integration_tests {
             note_chunk_count(&cache, "a") > 0,
             "note must be re-chunked once the embedder recovers, not stuck Unchanged"
         );
+    }
+
+    #[test]
+    fn changed_note_embed_failure_never_leaves_old_chunks_current() {
+        let dir = make_vault(&[("a.md", "# A\n\nold searchable body")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let working = StubEmbedder::new(384);
+        let initial = VaultIndex::build(dir.path()).expect("initial index");
+        cache
+            .replace_from_index_with_embedder(&initial, &working)
+            .expect("initial populate");
+        assert!(
+            note_chunk_count(&cache, "a") > 0,
+            "precondition: old chunks exist"
+        );
+
+        std::fs::write(
+            dir.path().join("a.md"),
+            "# A\n\nnew body whose embedding fails",
+        )
+        .expect("change note");
+        let changed = VaultIndex::build(dir.path()).expect("changed index");
+        let failing = FailingEmbedder {
+            inner: StubEmbedder::new(384),
+        };
+        cache
+            .replace_from_index_with_embedder(&changed, &failing)
+            .expect("a per-note failure remains recoverable");
+
+        assert_eq!(
+            note_chunk_count(&cache, "a"),
+            0,
+            "a changed note with failed embeddings must not publish old chunks as current"
+        );
+    }
+
+    #[test]
+    fn metadata_write_failure_rolls_back_the_entire_refresh_generation() {
+        let dir = make_vault(&[("a.md", "# Old\n\nold body")]);
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder = StubEmbedder::new(384);
+        let initial = VaultIndex::build(dir.path()).expect("initial index");
+        cache
+            .replace_from_index_with_embedder(&initial, &embedder)
+            .expect("initial populate");
+
+        std::fs::write(dir.path().join("a.md"), "# New\n\nnew body").expect("change note");
+        let changed = VaultIndex::build(dir.path()).expect("changed index");
+        {
+            let conn = cache.connection().expect("connection");
+            conn.execute_batch(
+                r#"
+                CREATE TRIGGER fail_marker_metadata
+                BEFORE UPDATE OF value ON metadata
+                WHEN NEW.key = 'marker_set_hash'
+                BEGIN
+                  SELECT RAISE(ABORT, 'simulated metadata failure');
+                END;
+                "#,
+            )
+            .expect("install metadata failure trigger");
+        }
+
+        assert!(
+            cache
+                .replace_from_index_with_embedder(&changed, &embedder)
+                .is_err(),
+            "injected generation metadata failure must fail the refresh"
+        );
+        let note = cache
+            .read_note_by_slug("a")
+            .expect("read cache")
+            .expect("prior note remains");
+        assert_eq!(
+            note.content, "# Old\n\nold body",
+            "metadata failure must not publish new note rows without matching metadata"
+        );
+    }
+
+    #[test]
+    fn stamped_metadata_failure_rolls_back_the_entire_refresh_generation() {
+        for failed_key in ["embedder_id", "build_duration_secs"] {
+            let dir = make_vault(&[("a.md", "# Old\n\nold body")]);
+            let cache = SqliteCache::in_memory(384).expect("open");
+            let embedder = StubEmbedder::new(384);
+            let stamp = embedder.identity();
+            let initial = VaultIndex::build(dir.path()).expect("initial index");
+            cache
+                .replace_from_index_with_options_stamped(
+                    &initial,
+                    &embedder,
+                    &stamp,
+                    &BuildOptions::default(),
+                )
+                .expect("initial stamped populate");
+            let prior_duration = cache
+                .get_metadata("build_duration_secs")
+                .expect("read prior duration");
+
+            std::fs::write(dir.path().join("a.md"), "# New\n\nnew body").expect("change note");
+            let changed = VaultIndex::build(dir.path()).expect("changed index");
+            {
+                let conn = cache.connection().expect("connection");
+                conn.execute_batch(&format!(
+                    r#"
+                    CREATE TRIGGER fail_stamped_metadata
+                    BEFORE UPDATE OF value ON metadata
+                    WHEN NEW.key = '{failed_key}'
+                    BEGIN
+                      SELECT RAISE(ABORT, 'simulated stamped metadata failure');
+                    END;
+                    "#,
+                ))
+                .expect("install stamped metadata failure trigger");
+            }
+
+            assert!(
+                cache
+                    .replace_from_index_with_options_stamped(
+                        &changed,
+                        &embedder,
+                        &stamp,
+                        &BuildOptions::default(),
+                    )
+                    .is_err(),
+                "injected {failed_key} failure must fail the stamped refresh"
+            );
+            let note = cache
+                .read_note_by_slug("a")
+                .expect("read cache")
+                .expect("prior note remains");
+            assert_eq!(
+                note.content, "# Old\n\nold body",
+                "{failed_key} failure must not publish new rows without the full stamped generation"
+            );
+            assert_eq!(
+                cache
+                    .get_metadata("embedder_id")
+                    .expect("read embedder id")
+                    .as_deref(),
+                Some(stamp.as_str()),
+                "{failed_key} failure must retain the prior embedder stamp"
+            );
+            assert_eq!(
+                cache
+                    .get_metadata("build_duration_secs")
+                    .expect("read duration"),
+                prior_duration,
+                "{failed_key} failure must retain the prior duration stamp"
+            );
+        }
     }
 
     /// Wraps a StubEmbedder with a caller-chosen identity and a call counter, so
@@ -2498,6 +2746,29 @@ mod chunk_integration_tests {
             .query_row("SELECT COUNT(*) FROM chunk_vectors", [], |r| r.get(0))
             .expect("count");
         assert_eq!(vector_count, chunk_count);
+    }
+
+    #[test]
+    fn non_utf8_note_is_skipped_without_failing_the_vault() {
+        // A single unreadable file used to abort the whole indexing turn, so a
+        // Vault holding one binary `.md` had no search index at all.
+        let dir = make_vault(&[("a.md", "# A\n\nbody A"), ("b.md", "# B\n\nbody B")]);
+        std::fs::write(dir.path().join("binary.md"), [0xff_u8, 0xfe, 0x00, 0x9c])
+            .expect("write binary note");
+
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(dir.path()).expect("build");
+
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("indexing must succeed despite the unreadable note");
+
+        let conn = cache.connection().expect("conn");
+        let note_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(note_count, 2, "the two readable notes still index");
     }
 
     #[test]
@@ -2800,6 +3071,7 @@ mod chunk_integration_tests {
             },
             context: true,
             embedding_batch_size: 1,
+            embed: true,
         };
         small_cache
             .replace_from_index_with_options(&index, &embedder, &opts)
@@ -2823,6 +3095,7 @@ mod chunk_integration_tests {
             chunk: ChunkOptions::default(),
             context: false,
             embedding_batch_size: 1,
+            embed: true,
         };
         cache
             .replace_from_index_with_options(&index, &embedder, &opts)

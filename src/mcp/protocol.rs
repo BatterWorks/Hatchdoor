@@ -1,8 +1,13 @@
-use axum::Json;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::body::Body;
+use axum::http::{StatusCode, header};
+use axum::response::Response;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::Write;
+
+/// MCP replies are JSON, not a bulk-transfer channel. Keep a hard ceiling so a
+/// broad tree/query result cannot allocate an unbounded serialized response.
+pub const MAX_JSONRPC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct JsonRpcRequest {
@@ -59,15 +64,14 @@ impl JsonRpcFailure {
 }
 
 pub fn jsonrpc_success_response(id: Value, result: Value) -> Response {
-    (
+    jsonrpc_response(
         StatusCode::OK,
-        Json(json!({
+        json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": result,
-        })),
+        }),
     )
-        .into_response()
 }
 
 pub fn jsonrpc_error_response(
@@ -76,18 +80,84 @@ pub fn jsonrpc_error_response(
     code: i64,
     message: String,
 ) -> Response {
-    (
+    jsonrpc_response(
         status,
-        Json(json!({
+        json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {
                 "code": code,
                 "message": message,
             }
-        })),
+        }),
     )
-        .into_response()
+}
+
+fn jsonrpc_response(status: StatusCode, payload: Value) -> Response {
+    match bounded_json_bytes(&payload) {
+        Ok(body) => {
+            let mut response = Response::new(Body::from(body));
+            *response.status_mut() = status;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            response
+        }
+        Err(_) => {
+            let fallback = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"MCP response exceeds the server response size limit"}}"#;
+            let mut response = Response::new(Body::from(&fallback[..]));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            response
+        }
+    }
+}
+
+fn bounded_json_bytes(payload: &Value) -> Result<Vec<u8>, serde_json::Error> {
+    let mut writer = LimitedJsonWriter::new(MAX_JSONRPC_RESPONSE_BYTES);
+    serde_json::to_writer(&mut writer, payload)?;
+    Ok(writer.into_inner())
+}
+
+struct LimitedJsonWriter {
+    bytes: Vec<u8>,
+    maximum: usize,
+}
+
+impl LimitedJsonWriter {
+    fn new(maximum: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            maximum,
+        }
+    }
+
+    fn into_inner(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+impl Write for LimitedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let next_len = self.bytes.len().checked_add(bytes.len()).ok_or_else(|| {
+            std::io::Error::other("MCP response exceeds the server response size limit")
+        })?;
+        if next_len > self.maximum {
+            return Err(std::io::Error::other(
+                "MCP response exceeds the server response size limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The `notifications/tools/list_changed` JSON-RPC notification (no `id`), sent
@@ -102,7 +172,12 @@ pub fn tools_list_changed_notification() -> Value {
 }
 
 pub fn tool_success(payload: Value) -> Value {
-    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+    let text = match bounded_json_bytes(&payload) {
+        Ok(bytes) => String::from_utf8(bytes).expect("JSON serialization is valid UTF-8"),
+        Err(_) => {
+            return tool_error("Tool response exceeds the server response size limit".to_string());
+        }
+    };
     json!({
         "content": [
             {
@@ -127,6 +202,18 @@ pub fn tool_error(message: String) -> Value {
     })
 }
 
+/// A domain failure returned by a tool.  Unlike a JSON-RPC invalid-params
+/// error, this preserves the shared Vault API's stable error object so agents
+/// can branch on `code` rather than matching human text.
+pub fn tool_structured_error(payload: Value) -> Value {
+    let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": payload,
+        "isError": true
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +226,16 @@ mod tests {
         // A notification carries no id (it expects no response) and no params.
         assert!(notification.get("id").is_none());
         assert!(notification.get("params").is_none());
+    }
+
+    #[test]
+    fn oversized_success_response_is_replaced_with_a_bounded_error() {
+        let response = jsonrpc_success_response(
+            Value::from(1),
+            json!({
+                "payload": "x".repeat(MAX_JSONRPC_RESPONSE_BYTES)
+            }),
+        );
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

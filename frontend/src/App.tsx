@@ -1,12 +1,19 @@
 import {
   useCallback,
+  useMemo,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
 } from "react";
-import { Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import {
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 
 import "./App.css";
 import "./noteEnhancements.css";
@@ -19,14 +26,16 @@ import {
   LAST_NOTE_KEY,
   NOTE_PROPERTIES_COLLAPSED_KEY,
   RECENT_NOTES_KEY,
+  SCOPE_ZONE_COLLAPSED_KEY,
   SIDEBAR_WIDTH_KEY,
 } from "./app/constants";
-import { ExplorerPane } from "./app/ExplorerPane";
+import { ExplorerPane, type StartupProgress } from "./app/ExplorerPane";
 import {
   clampSidebarWidth,
   getStoredNumber,
   getStoredRecentNotes,
-  getStoredString,
+  clearStoredLastNote,
+  getStoredLastNote,
   getStoredExpandedFolders,
   isEditableTarget,
 } from "./lib/storage";
@@ -41,15 +50,36 @@ import { GraphPage } from "./components/graph/GraphPage";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { StatsPage } from "./components/StatsPage";
 import { StateBlock } from "./components/ui";
+import { StartWithNoVaultsDialog } from "./components/StartWithNoVaultsDialog";
 import { useNoteActions } from "./hooks/useNoteActions";
 import { useVaultTree } from "./hooks/useVaultTree";
+import {
+  resolvePrimaryVaultId,
+  useVaultDiscovery,
+  useVaultNoteCounts,
+  useVaultScope,
+} from "./hooks/useVaultScope";
+import { describeScopeSlot, scopeName } from "./app/vaultSlotLogic";
 import { useWriteMode } from "./hooks/useWriteMode";
 import { pruneNoteDrafts } from "./lib/writeDrafts";
-import type { ActiveNoteMeta, RecentNote } from "./types";
+import { isDemoReadOnlyError } from "./api/writeApi";
+import type { ActiveNoteMeta, RecentNote, VaultScope } from "./types";
 import { StartupGate } from "./startup/StartupGate";
+import {
+  useStartupStatus,
+  type StartupStatus,
+} from "./startup/useStartupStatus";
 import { SearchDialog, useSearch } from "./features/search";
 
-export function VaultApp() {
+function VaultWorkspace({
+  startupStatus,
+  onRetryModelSetup,
+  discovery,
+}: {
+  startupStatus: StartupStatus | null;
+  onRetryModelSetup: () => void;
+  discovery: ReturnType<typeof useVaultDiscovery>;
+}) {
   const [drawerOpen, setDrawerOpen] = useState<boolean>(() => {
     return window.localStorage.getItem(DRAWER_OPEN_KEY) === "1";
   });
@@ -65,6 +95,8 @@ export function VaultApp() {
     Record<string, boolean>
   >(() => getStoredExpandedFolders());
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const [scopeSheetOpen, setScopeSheetOpen] = useState(false);
+  const [startWithNoVaultsOpen, setStartWithNoVaultsOpen] = useState(false);
   const [mobileDrawerTop, setMobileDrawerTop] = useState(0);
   const [visualViewportHeight, setVisualViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
@@ -75,27 +107,80 @@ export function VaultApp() {
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
+  const [scope, setScope] = useVaultScope();
+  const {
+    vaults,
+    demoMode,
+    loading: vaultsLoading,
+    recovery: registryRecovery,
+    legacyMigrationRecovery,
+    loadVaults,
+  } = discovery;
+  const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
+
   const {
     tree,
+    vaultTrees,
     loadingTree,
     treeError,
-    treeIsStale,
     modifiedNotes,
+    modifiedNotesPartial,
+    modifiedNotesMissingVaults,
     vaultRevision,
-    folderPaths,
+    folderPathsByVault,
     noteCandidates,
     loadTree,
     loadModifiedNotes,
-    refreshVault,
-  } = useVaultTree();
+  } = useVaultTree(scope);
+  const vaultNoteCounts = useVaultNoteCounts(vaults.length > 1, vaultRevision);
+  // Every enabled Vault, whatever the browsing scope: a note can be created in
+  // a Vault that is not currently being browsed, and the picker says so.
+  const dialogVaults = useMemo(
+    () =>
+      vaults.map((vault) => ({
+        vaultId: vault.vault_id,
+        name: vault.name,
+      })),
+    [vaults],
+  );
+  const refreshVault = useCallback(async () => {
+    await loadTree();
+    await loadModifiedNotes();
+  }, [loadModifiedNotes, loadTree]);
   const {
     writeEnabled,
-    settingsEnabled,
     writeWarnings,
     setWriteWarnings,
     writeNotice,
     setWriteNotice,
-  } = useWriteMode();
+  } = useWriteMode(primaryVaultId);
+  // `demoMode` defaults to `false` until Vault discovery's fetch resolves
+  // (#152) — the same gap the "/settings" route itself guards below.
+  // Without `!vaultsLoading` here, the sidebar footer's Settings link would
+  // render and stay clickable for that entire fetch on a demo instance.
+  const settingsEnabled = !vaultsLoading && !demoMode;
+  // A demo_read_only refusal is the one write error rendered in the app's
+  // own words rather than the server's (#152). `writeEnabled` already stays
+  // false in demo mode — `write-capabilities` itself 403s under the same
+  // `demo_guard` every mutation route carries — so every write affordance
+  // this flag gates (New note, Edit, attachment drop) is already absent.
+  // This handler is the defense-in-depth backstop for any write attempt
+  // that reaches the server anyway: one sentence in the shared notice
+  // strip, no retry, and a fresh discovery fetch — "the app re-asks the
+  // server what it is permitted to do."
+  const handleDemoRefusal = useCallback(
+    (error: unknown): boolean => {
+      if (!isDemoReadOnlyError(error)) {
+        return false;
+      }
+      setWriteNotice(
+        "This is a public read-only demo, so that change was not saved.",
+      );
+      void loadVaults();
+      return true;
+    },
+    [loadVaults, setWriteNotice],
+  );
   const {
     searchOpen,
     setSearchOpen,
@@ -104,24 +189,36 @@ export function VaultApp() {
     searchIncludeContent,
     setSearchIncludeContent,
     searchResults,
+    searchPartial,
+    searchMissingVaultNames,
+    searchParticipants,
+    searchInitialVaultFilter,
     searchLoading,
     searchError,
     searchInputRef,
     openSearchForTag,
-  } = useSearch();
+  } = useSearch(scope);
   const {
     noteActionDialog,
     noteActionError,
     noteActionInitialFolder,
+    noteActionInitialVaultId,
     openCreateDialog,
     openActionDialog,
     closeNoteActionDialog,
     handleCreateNote,
+    restoreCreateDraft,
     handleRenameNote,
     handleMoveNote,
     handleArchiveNote,
     handleDeleteNote,
-  } = useNoteActions({ activeNote, refreshVault, setWriteNotice });
+  } = useNoteActions({
+    activeNote,
+    vaults,
+    refreshVault,
+    setWriteNotice,
+    onDemoRefusal: handleDemoRefusal,
+  });
 
   const resizingRef = useRef<{ startX: number; startWidth: number } | null>(
     null,
@@ -133,8 +230,23 @@ export function VaultApp() {
   const [recentCollapsed, setRecentCollapsed] = useState<boolean>(
     () => window.localStorage.getItem(RECENT_NOTES_COLLAPSED_KEY) === "1",
   );
+  // The Scope zone remembers whether it is folded away, same as Recently
+  // viewed; default expanded per the design spec.
+  const [scopeZoneCollapsed, setScopeZoneCollapsed] = useState<boolean>(
+    () => window.localStorage.getItem(SCOPE_ZONE_COLLAPSED_KEY) === "1",
+  );
   const restoredExplorerScrollRef = useRef(false);
   const restoredLastNoteRef = useRef(false);
+  // The `v` shortcut's keyboard-accessible route to the Scope zone/sheet
+  // (#146). `scopeFocusRequestId` is a bare counter: bumping it asks
+  // whichever surface is on screen to (re)focus its current scope row.
+  // `scopeShortcutOriginRef` remembers where focus was before the zone/sheet
+  // opened, so `Escape` without picking can give it back.
+  const [scopeFocusRequestId, setScopeFocusRequestId] = useState(0);
+  const scopeShortcutOriginRef = useRef<HTMLElement | null>(null);
+  const [scopeLiveMessage, setScopeLiveMessage] = useState("");
+  const announcedScopeRef = useRef<VaultScope | null>(null);
+  const announcedScopeSlotRef = useRef(false);
 
   useEffect(() => {
     // Drafts only bridge an interrupted edit; drop ones older than a week.
@@ -182,6 +294,7 @@ export function VaultApp() {
       setDrawerOpen(false);
     }
     setActionsMenuOpen(false);
+    setScopeSheetOpen(false);
   }, [location.pathname, isMobile]);
 
   useLayoutEffect(() => {
@@ -251,7 +364,10 @@ export function VaultApp() {
 
     setRecentNotes((prev) => {
       const withoutCurrent = prev.filter(
-        (item) => item.slug !== activeNote.slug,
+        (item) =>
+          !(
+            item.vaultId === activeNote.vaultId && item.slug === activeNote.slug
+          ),
       );
       const next: RecentNote[] = [
         { ...activeNote, viewedAt: Date.now() },
@@ -265,20 +381,89 @@ export function VaultApp() {
     if (!activeNote) {
       return;
     }
-    window.localStorage.setItem(LAST_NOTE_KEY, activeNote.slug);
+    window.localStorage.setItem(
+      LAST_NOTE_KEY,
+      JSON.stringify({ vaultId: activeNote.vaultId, slug: activeNote.slug }),
+    );
   }, [activeNote]);
 
   useEffect(() => {
     if (restoredLastNoteRef.current || location.pathname !== "/") {
       return;
     }
-    restoredLastNoteRef.current = true;
-    const lastSlug = getStoredString(LAST_NOTE_KEY);
-    if (!lastSlug) {
+    // Discovery still in flight means `vaults` is a temporary `[]`, which
+    // would read as "the stored Vault is gone" for every stored note. Wait for
+    // the real list before judging it.
+    if (vaultsLoading) {
       return;
     }
-    navigate(`/n/${encodeURIComponent(lastSlug)}`, { replace: true });
-  }, [location.pathname, navigate]);
+    restoredLastNoteRef.current = true;
+    // Malformed or pre-#137 slug-only stored state resolves to null and is
+    // ignored, same as before.
+    const last = getStoredLastNote();
+    if (!last) {
+      return;
+    }
+    // A Vault that has left the collection cannot be restored into: the note
+    // route resolves to "Vault definition was not found", and because the
+    // landing redirect runs again on every visit, the reader is pinned to that
+    // error with no way back short of editing the URL. Forget it instead.
+    if (!vaults.some((vault) => vault.vault_id === last.vaultId)) {
+      clearStoredLastNote();
+      return;
+    }
+    navigate(
+      `/v/${encodeURIComponent(last.vaultId)}/n/${encodeURIComponent(last.slug)}`,
+      { replace: true },
+    );
+  }, [location.pathname, navigate, vaults, vaultsLoading]);
+
+  const handleScopeZoneCollapsedChange = useCallback((next: boolean) => {
+    setScopeZoneCollapsed(next);
+    window.localStorage.setItem(SCOPE_ZONE_COLLAPSED_KEY, next ? "1" : "0");
+  }, []);
+
+  // Give focus back to wherever `v` was pressed (#146) — read once, then
+  // cleared, so a later `Escape` with no shortcut in flight is a no-op.
+  const restoreScopeFocusOrigin = useCallback(() => {
+    const origin = scopeShortcutOriginRef.current;
+    scopeShortcutOriginRef.current = null;
+    origin?.focus();
+  }, []);
+
+  // `v` — the keyboard route to the Scope zone/sheet (#146). Wide, it
+  // unfolds the zone for good and focuses the current row; narrow, it opens
+  // the sheet with focus on the current row. Pressing it again while already
+  // open just re-homes focus — harmless, not a toggle.
+  const handleScopeShortcut = useCallback(() => {
+    if (vaults.length <= 1) {
+      return;
+    }
+    const activeElement =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    // A repeat `v` press while focus already sits on a scope row (wide) or
+    // inside the sheet (narrow) must stay harmless — it must not clobber the
+    // origin with the row itself, or `Escape` would "restore" focus to where
+    // it already is instead of back to wherever `v` was first pressed.
+    const alreadyInScopeUi =
+      activeElement?.closest(".scope-zone, .scope-sheet") != null;
+    if (isMobile) {
+      setScopeSheetOpen((prev) => {
+        if (!prev && !alreadyInScopeUi) {
+          scopeShortcutOriginRef.current = activeElement;
+        }
+        return true;
+      });
+    } else {
+      if (!alreadyInScopeUi) {
+        scopeShortcutOriginRef.current = activeElement;
+      }
+      handleScopeZoneCollapsedChange(false);
+    }
+    setScopeFocusRequestId((id) => id + 1);
+  }, [vaults.length, isMobile, handleScopeZoneCollapsedChange]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -304,12 +489,89 @@ export function VaultApp() {
       if (event.key === "/" && !isEditableTarget(event.target)) {
         event.preventDefault();
         setSearchOpen(true);
+        return;
+      }
+
+      if (
+        event.key.toLowerCase() === "v" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !isEditableTarget(event.target) &&
+        !noteActionDialog &&
+        !searchOpen &&
+        !actionsMenuOpen
+      ) {
+        event.preventDefault();
+        handleScopeShortcut();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openCreateDialog, setSearchOpen, writeEnabled]);
+  }, [
+    openCreateDialog,
+    setSearchOpen,
+    writeEnabled,
+    handleScopeShortcut,
+    noteActionDialog,
+    searchOpen,
+    actionsMenuOpen,
+  ]);
+
+  // The shell's polite scope live region (#146): announces the scope name
+  // the instant a pick lands, then its count-or-condition in the same
+  // breath if already known, or as a short second sentence once it resolves
+  // — never a value that is not yet known.
+  const scopeSlotDescription = describeScopeSlot(
+    scope,
+    vaults,
+    vaultNoteCounts,
+    demoMode,
+  );
+
+  useEffect(() => {
+    // Discovery still in flight means `vaults` is a temporary `[]`, not a
+    // real "zero Vaults" answer — announcing off it would read a value the
+    // shell does not actually have yet. Wait it out.
+    if (vaultsLoading || announcedScopeRef.current === scope) {
+      return;
+    }
+    // The baseline scope discovery lands with, on mount, is not a pick —
+    // record it silently so the first genuine scope change is the first
+    // announcement.
+    const isInitialBaseline = announcedScopeRef.current === null;
+    announcedScopeRef.current = scope;
+    if (isInitialBaseline) {
+      announcedScopeSlotRef.current = Boolean(scopeSlotDescription);
+      return;
+    }
+    const name = scopeName(scope, vaults);
+    if (scopeSlotDescription) {
+      announcedScopeSlotRef.current = true;
+      setScopeLiveMessage(`${name}. ${scopeSlotDescription}`);
+    } else {
+      announcedScopeSlotRef.current = false;
+      setScopeLiveMessage(name);
+    }
+    // Only a genuine scope change (or discovery finally landing) should
+    // restart the announcement; `vaults` and `scopeSlotDescription` are read
+    // for their value at that moment, not watched for their own updates
+    // (the effect below owns that).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scope, vaultsLoading]);
+
+  useEffect(() => {
+    if (
+      vaultsLoading ||
+      announcedScopeSlotRef.current ||
+      !scopeSlotDescription
+    ) {
+      return;
+    }
+    announcedScopeSlotRef.current = true;
+    setScopeLiveMessage(scopeSlotDescription);
+  }, [scopeSlotDescription, vaultsLoading]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -349,6 +611,22 @@ export function VaultApp() {
     restoredExplorerScrollRef.current = true;
   }, [tree]);
 
+  // The scope-change motion policy (#147): the explorer returns to the top
+  // the instant the browsing scope changes — never on mount (the restore
+  // effect above owns that) and never on the accordion's own unfold, which
+  // deliberately never touches scope.
+  const previousScopeRef = useRef(scope);
+  useEffect(() => {
+    if (previousScopeRef.current === scope) {
+      return;
+    }
+    previousScopeRef.current = scope;
+    const container = explorerScrollRef.current;
+    if (container) {
+      container.scrollTop = 0;
+    }
+  }, [scope]);
+
   const copyNoteLink = useCallback(async () => {
     if (!activeNote) {
       return;
@@ -366,7 +644,7 @@ export function VaultApp() {
       return;
     }
     const url = withAccessToken(
-      `/api/note/${encodeURIComponent(activeNote.slug)}/download`,
+      `/api/v1/vaults/${encodeURIComponent(activeNote.vaultId)}/notes/${encodeURIComponent(activeNote.slug)}/download`,
     );
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -390,10 +668,11 @@ export function VaultApp() {
     >
       <AppTopbar
         activeNote={activeNote}
+        vaults={vaults}
+        scope={scope}
         writeEnabled={writeEnabled}
         isMobile={isMobile}
         isOnline={isOnline}
-        treeIsStale={treeIsStale}
         actionsMenuOpen={actionsMenuOpen}
         topbarRef={topbarRef}
         theme={theme}
@@ -411,7 +690,31 @@ export function VaultApp() {
         onArchiveNote={() => openActionDialog("archive")}
         onDeleteNote={() => openActionDialog("delete")}
         onCycleTheme={cycleTheme}
+        onScopeChange={setScope}
+        viewingVaultId={activeNote?.vaultId}
+        vaultNoteCounts={vaultNoteCounts}
+        scopeSheetOpen={scopeSheetOpen}
+        onToggleScopeSheet={() =>
+          setScopeSheetOpen((prev) => {
+            const next = !prev;
+            if (next) {
+              scopeShortcutOriginRef.current =
+                document.activeElement instanceof HTMLElement
+                  ? document.activeElement
+                  : null;
+            }
+            return next;
+          })
+        }
+        onCloseScopeSheet={() => setScopeSheetOpen(false)}
+        scopeFocusRequestId={scopeFocusRequestId}
+        onRestoreScopeFocus={restoreScopeFocusOrigin}
+        demoMode={demoMode}
       />
+
+      <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+        {scopeLiveMessage}
+      </div>
 
       {writeWarnings.length > 0 || writeNotice ? (
         <div className="write-notice" role="status">
@@ -439,15 +742,19 @@ export function VaultApp() {
         <ExplorerPane
           explorerScrollRef={explorerScrollRef}
           drawerOpen={drawerOpen}
+          isMobile={isMobile}
           writeEnabled={writeEnabled}
           settingsEnabled={settingsEnabled}
           onCreateNoteInFolder={openCreateDialog}
           locationPathname={location.pathname}
           recentNotes={recentNotes}
           modifiedNotes={modifiedNotes}
+          modifiedNotesPartial={modifiedNotesPartial}
+          modifiedNotesMissingVaults={modifiedNotesMissingVaults}
           loadingTree={loadingTree}
           treeError={treeError}
           tree={tree}
+          vaultTrees={vaultTrees}
           expandedFolders={expandedFolders}
           recentCollapsed={recentCollapsed}
           onRecentCollapsedChange={(next) => {
@@ -457,6 +764,16 @@ export function VaultApp() {
               next ? "1" : "0",
             );
           }}
+          vaults={vaults}
+          scope={scope}
+          onScopeChange={setScope}
+          viewingVaultId={activeNote?.vaultId}
+          vaultNoteCounts={vaultNoteCounts}
+          scopeZoneCollapsed={scopeZoneCollapsed}
+          onScopeZoneCollapsedChange={handleScopeZoneCollapsedChange}
+          scopeFocusRequestId={scopeFocusRequestId}
+          onRestoreScopeFocus={restoreScopeFocusOrigin}
+          startupProgress={deriveStartupProgress(startupStatus)}
           onExpandedFoldersChange={setExpandedFolders}
           onCloseDrawer={() => setDrawerOpen(false)}
           onRefreshTree={() => {
@@ -469,6 +786,7 @@ export function VaultApp() {
               String(current),
             );
           }}
+          demoMode={demoMode}
         />
 
         {!isMobile ? (
@@ -511,12 +829,75 @@ export function VaultApp() {
           className={`note-pane${location.pathname === "/graph" ? " graph-host" : ""}`}
         >
           <Routes>
-            <Route path="/" element={<EmptyState />} />
+            <Route
+              path="/"
+              element={
+                vaultsLoading ? null : registryRecovery ? (
+                  <BrokenStartState
+                    message={registryRecovery.message}
+                    onTryAgain={() => void loadVaults()}
+                  />
+                ) : legacyMigrationRecovery ? (
+                  <BrokenStartState
+                    message={legacyMigrationRecovery.message}
+                    onTryAgain={() => void loadVaults()}
+                    onStartWithNoVaults={() => setStartWithNoVaultsOpen(true)}
+                  />
+                ) : vaults.length === 0 ? (
+                  <ZeroVaultState
+                    demoMode={demoMode}
+                    onAddVault={() =>
+                      navigate("/settings", {
+                        state: { openVaultCreation: true },
+                      })
+                    }
+                  />
+                ) : (
+                  <EmptyState />
+                )
+              }
+            />
             <Route path="/stats" element={<StatsPage />} />
             <Route path="/graph" element={<GraphPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
             <Route
-              path="/n/:slug"
+              path="/settings"
+              element={
+                // `demoMode` defaults to `false` until Vault discovery's
+                // fetch resolves — same transient gap the "/" route below
+                // already guards against zero-Vault vs. broken-registry.
+                // Rendering `null` through that gap keeps a demo visitor who
+                // opens this route directly (bookmark, shared link, reload)
+                // from ever seeing SettingsPage begin its own mount, even
+                // for one frame (#152).
+                vaultsLoading ? null : demoMode ? (
+                  // Settings is an operator surface, absent rather than
+                  // disabled in demo mode (#152) — same posture the backend
+                  // already takes by not registering these routes at all.
+                  // Silent, like every other withheld operator affordance:
+                  // no explanation, just back to the ordinary workspace.
+                  <Navigate to="/" replace />
+                ) : (
+                  <SettingsPage
+                    vaults={vaults}
+                    onVaultDiscoveryRefresh={loadVaults}
+                    onRestoreCreateDraft={(
+                      targetVaultId,
+                      folder,
+                      name,
+                      content,
+                    ) =>
+                      restoreCreateDraft(
+                        targetVaultId,
+                        folder ? `${folder}/${name}` : name,
+                        content,
+                      )
+                    }
+                  />
+                )
+              }
+            />
+            <Route
+              path="/v/:vaultId/n/:slug"
               element={
                 <NotePage
                   onActiveNoteChange={setActiveNote}
@@ -526,7 +907,10 @@ export function VaultApp() {
                   writeEnabled={writeEnabled}
                   editRequestId={editRequestId}
                   onWriteNotice={setWriteNotice}
+                  onDemoRefusal={handleDemoRefusal}
+                  demoMode={demoMode}
                   noteCandidates={noteCandidates}
+                  vaults={vaults}
                 />
               }
             />
@@ -549,7 +933,15 @@ export function VaultApp() {
           loading={searchLoading}
           error={searchError}
           results={searchResults}
+          partial={searchPartial}
+          missingVaultNames={searchMissingVaultNames}
+          participants={searchParticipants}
+          initialVaultFilter={searchInitialVaultFilter}
+          vaults={vaults}
+          scope={scope}
           inputRef={searchInputRef}
+          startupStatus={startupStatus}
+          onRetryModelSetup={onRetryModelSetup}
           onClose={() => setSearchOpen(false)}
           onQueryChange={setSearchQuery}
           onIncludeContentChange={setSearchIncludeContent}
@@ -564,7 +956,9 @@ export function VaultApp() {
               params.set("m", selection.matchKind);
             }
             const suffix = params.toString();
-            navigate(`/n/${selection.slug}${suffix ? `?${suffix}` : ""}`);
+            navigate(
+              `/v/${encodeURIComponent(selection.vaultId)}/n/${selection.slug}${suffix ? `?${suffix}` : ""}`,
+            );
           }}
         />
       ) : null}
@@ -573,11 +967,13 @@ export function VaultApp() {
         <NoteActionsDialog
           kind={noteActionDialog}
           error={noteActionError}
-          folderPaths={folderPaths}
+          vaults={dialogVaults}
+          folderPathsByVault={folderPathsByVault}
+          initialVaultId={noteActionInitialVaultId}
           initialFolder={noteActionInitialFolder}
           onClose={closeNoteActionDialog}
-          onCreate={(relativePath, content) =>
-            void handleCreateNote(relativePath, content)
+          onCreate={(targetVaultId, relativePath) =>
+            void handleCreateNote(targetVaultId, relativePath)
           }
           onRename={(newTitle) => void handleRenameNote(newTitle)}
           onMove={(targetFolder) => void handleMoveNote(targetFolder)}
@@ -585,12 +981,74 @@ export function VaultApp() {
           onDelete={() => void handleDeleteNote()}
         />
       ) : null}
+
+      {startWithNoVaultsOpen ? (
+        <StartWithNoVaultsDialog
+          onClose={() => setStartWithNoVaultsOpen(false)}
+          onConfirmed={() => {
+            setStartWithNoVaultsOpen(false);
+            void loadVaults();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
 
+/** The test-facing workspace composition still owns discovery when it is
+ * mounted directly. The production `App` lifts discovery above `StartupGate`
+ * so a broken registry is known before that gate can decide to lock the
+ * workspace (#150). */
+export function VaultApp({
+  startupStatus,
+  onRetryModelSetup,
+}: {
+  startupStatus: StartupStatus | null;
+  onRetryModelSetup: () => void;
+}) {
+  const discovery = useVaultDiscovery();
+  return (
+    <VaultWorkspace
+      startupStatus={startupStatus}
+      onRetryModelSetup={onRetryModelSetup}
+      discovery={discovery}
+    />
+  );
+}
+
+/** The Scope zone's own reading of the shrunk startup gate's progress
+ * (#150): `null` outside `scanning`/`indexing`, since every other state
+ * already renders the ordinary aggregate slot. */
+function deriveStartupProgress(
+  status: StartupStatus | null,
+): StartupProgress | undefined {
+  if (status?.state === "scanning") {
+    return { label: "Scanning", percent: null };
+  }
+  if (status?.state === "indexing") {
+    return { label: `Indexing ${status.percent}%`, percent: status.percent };
+  }
+  return undefined;
+}
+
 export function App() {
   const [authRequired, setAuthRequired] = useState(false);
+  const discovery = useVaultDiscovery();
+  const hasRegistryRecovery = Boolean(
+    discovery.recovery || discovery.legacyMigrationRecovery,
+  );
+  const hasNoVaults =
+    !discovery.loading &&
+    !discovery.error &&
+    !hasRegistryRecovery &&
+    discovery.vaults.length === 0;
+  // The startup route is neither useful nor permitted to poll while the
+  // workspace is a zero-Vault or broken-registry recovery surface (#150).
+  // Resolve discovery first so either condition can win before a model step
+  // ever has a chance to gate the page.
+  const startup = useStartupStatus(
+    !discovery.loading && !hasRegistryRecovery && !hasNoVaults,
+  );
 
   useEffect(() => {
     onUnauthorized(() => setAuthRequired(true));
@@ -608,8 +1066,21 @@ export function App() {
           }}
         />
       ) : null}
-      <StartupGate>
-        <VaultApp />
+      <StartupGate
+        status={startup.status}
+        connectionIssue={startup.connectionIssue}
+        hasSteppedPastGate={startup.hasSteppedPastGate}
+        discoveryLoading={discovery.loading}
+        hasRegistryRecovery={hasRegistryRecovery}
+        hasNoVaults={hasNoVaults}
+        onAcceptGemma={() => void startup.acceptGemma()}
+        onDeclineGemma={() => void startup.declineGemma()}
+      >
+        <VaultWorkspace
+          startupStatus={startup.status}
+          onRetryModelSetup={() => void startup.retryModelSetup()}
+          discovery={discovery}
+        />
       </StartupGate>
     </>
   );
@@ -620,6 +1091,61 @@ function EmptyState() {
     <StateBlock
       title="Notes Explorer"
       description="Select any note from the explorer to start reading."
+    />
+  );
+}
+
+/** The zero-Vault workspace (#150): a genuine "nothing added yet" instance,
+ * indistinguishable whether it is a brand-new install or one just emptied
+ * out — driven purely by `vaults.length === 0`, never a first-visit flag.
+ * The action opens the same creation flow #148 wires into the Settings
+ * index (#153) — this route has no room for the flow itself, so it
+ * navigates there and asks it to open immediately. Absent rather than
+ * disabled in demo mode, matching every other operator affordance. */
+function ZeroVaultState({
+  demoMode,
+  onAddVault,
+}: {
+  demoMode: boolean;
+  onAddVault: () => void;
+}) {
+  return (
+    <StateBlock
+      title="No Vaults Yet"
+      description={
+        demoMode
+          ? "This demo has no Vaults loaded."
+          : "Add a Vault to start browsing and searching your notes."
+      }
+      actionLabel={demoMode ? undefined : "Add a Vault"}
+      onAction={demoMode ? undefined : onAddVault}
+    />
+  );
+}
+
+/** A broken start (#150): the registry file itself is unreadable, or a
+ * failed legacy import needs recovery. Both open the ordinary workspace
+ * with this same documented error block rather than a full-screen gate. */
+function BrokenStartState({
+  message,
+  onTryAgain,
+  onStartWithNoVaults,
+}: {
+  message: string;
+  onTryAgain: () => void;
+  onStartWithNoVaults?: () => void;
+}) {
+  return (
+    <StateBlock
+      tone="error"
+      title="Vault Registry Unavailable"
+      description={`${message} Nothing was changed, and your Markdown is untouched.`}
+      actionLabel="Try again"
+      onAction={onTryAgain}
+      secondaryActionLabel={
+        onStartWithNoVaults ? "Start with no Vaults" : undefined
+      }
+      onSecondaryAction={onStartWithNoVaults}
     />
   );
 }

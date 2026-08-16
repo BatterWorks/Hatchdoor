@@ -36,6 +36,23 @@ export function UiToolbar({
   );
 }
 
+/**
+ * A Vault declaring itself as a marked path root (#140): the Vault name in
+ * hot ink followed by a middot, never a `/`, so it reads as visibly not a
+ * folder segment. Inert — a plain span, never a click target — and never
+ * elides; callers give the adjacent title or path the shrinking room instead.
+ */
+export function VaultPrefix({ name }: { name: string }) {
+  return (
+    <span className="path-vault">
+      {name}
+      <span className="path-sep" aria-hidden="true">
+        ·
+      </span>
+    </span>
+  );
+}
+
 export function StatusBadge({
   tone,
   text,
@@ -51,20 +68,44 @@ export function StateBlock({
   description,
   actionLabel,
   onAction,
+  secondaryActionLabel,
+  onSecondaryAction,
+  tone,
 }: {
   title: string;
   description: string;
   actionLabel?: string;
   onAction?: () => void;
+  /** A second, non-primary action alongside `actionLabel` — e.g. a broken
+   * start's `Try again` plus a confirmed recovery action (#150). Only
+   * offered together with `actionLabel`/`onAction`; never alone. */
+  secondaryActionLabel?: string;
+  onSecondaryAction?: () => void;
+  /** The documented §23 error variant (red heading) — a genuine failure,
+   * never the plain empty shell used for "nothing here yet". */
+  tone?: "error";
 }) {
   return (
-    <UiPanel className="state-block ui-empty-state">
+    <UiPanel
+      className={`state-block ui-empty-state${tone === "error" ? " error" : ""}`}
+    >
       <h2>{title}</h2>
       <p>{description}</p>
       {actionLabel && onAction ? (
-        <UiButton className="close-note" onClick={onAction}>
-          {actionLabel}
-        </UiButton>
+        secondaryActionLabel && onSecondaryAction ? (
+          <div className="modal-actions">
+            <UiButton className="close-note" onClick={onAction}>
+              {actionLabel}
+            </UiButton>
+            <UiButton onClick={onSecondaryAction}>
+              {secondaryActionLabel}
+            </UiButton>
+          </div>
+        ) : (
+          <UiButton className="close-note" onClick={onAction}>
+            {actionLabel}
+          </UiButton>
+        )
       ) : null}
     </UiPanel>
   );

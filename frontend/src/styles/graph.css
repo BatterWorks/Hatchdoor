@@ -142,6 +142,18 @@
   margin: 0;
 }
 
+/* ── NOT-DRAWN LINE (#143) ───────────────────────────────────── */
+/* One trailing line naming every Vault that contributed no island — never a
+   banner, matching the tone `.explorer-changes-partial` (#141) already set
+   for a partial collection read. Always warn ink, regardless of the named
+   Vault's own condition tier (#118's resolution). */
+.graph-not-drawn {
+  margin: 0.4rem 0 0;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  color: var(--warn-fg);
+}
+
 /* ── CANVAS WRAP ─────────────────────────────────────────────── */
 .graph-canvas-wrap {
   flex: 1;

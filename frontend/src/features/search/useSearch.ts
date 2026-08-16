@@ -2,28 +2,58 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
+import { missingVaultNames } from "../../lib/vaultParticipants";
+import type {
+  VaultId,
+  VaultParticipant,
+  VaultReadProjection,
+  VaultScope,
+} from "../../types";
 import type { SearchResponse, SearchResult } from "./types";
 
 /**
  * Command-palette search state: open/query/mode plus the debounced fetch and
  * focus-management effects. `setSearchOpen` is exposed so the shell's global
- * keyboard shortcuts can open the dialog.
+ * keyboard shortcuts can open the dialog. `scope` is the browsing scope
+ * (#137: state/storage only, no chrome) — the dialog's own Keyword-mode
+ * toggle and Vault filter (#144) are lenses over the answer, never the
+ * browsing scope itself (#119).
  */
-export function useSearch() {
+export function useSearch(scope: VaultScope) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIncludeContent, setSearchIncludeContent] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchPartial, setSearchPartial] = useState(false);
+  const [searchMissingVaultNames, setSearchMissingVaultNames] = useState<
+    string[]
+  >([]);
+  const [searchParticipants, setSearchParticipants] = useState<
+    VaultParticipant[]
+  >([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+  // Pre-fills the dialog's own Vault filter from where a tag tap happened
+  // (#144). Read once by the dialog on open and cleared the moment it
+  // closes, so a later plain open never inherits a stale preselection.
+  const [searchInitialVaultFilter, setSearchInitialVaultFilter] = useState<
+    VaultId | undefined
+  >(undefined);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const prevFocusRef = useRef<Element | null>(null);
 
-  const openSearchForTag = useCallback((tag: string) => {
+  const openSearchForTag = useCallback((tag: string, vaultId: VaultId) => {
     setSearchQuery(`#${tag}`);
     setSearchIncludeContent(true);
+    setSearchInitialVaultFilter(vaultId);
     setSearchOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (!searchOpen) {
+      setSearchInitialVaultFilter(undefined);
+    }
+  }, [searchOpen]);
 
   useEffect(() => {
     if (searchOpen) {
@@ -48,6 +78,9 @@ export function useSearch() {
     const query = searchQuery.trim();
     if (query.length < 2) {
       setSearchResults([]);
+      setSearchPartial(false);
+      setSearchMissingVaultNames([]);
+      setSearchParticipants([]);
       setSearchLoading(false);
       setSearchError(null);
       return;
@@ -64,17 +97,28 @@ export function useSearch() {
             limit: "30",
             per_note_cap: "2",
           });
-          const res = await apiFetch(`/api/search?${params.toString()}`);
+          const res = await apiFetch(
+            `/api/v1/vaults/${encodeURIComponent(scope)}/search?${params.toString()}`,
+          );
           if (!res.ok) {
             throw new Error(await readErrorMessage(res, "Search failed"));
           }
-          const json = (await res.json()) as SearchResponse;
+          const projection =
+            (await res.json()) as VaultReadProjection<SearchResponse>;
           if (!cancelled) {
-            setSearchResults(json.results);
+            setSearchResults(projection.data.results);
+            setSearchPartial(projection.partial);
+            setSearchMissingVaultNames(
+              missingVaultNames(projection.participants),
+            );
+            setSearchParticipants(projection.participants);
           }
         } catch (error) {
           if (!cancelled) {
             setSearchResults([]);
+            setSearchPartial(false);
+            setSearchMissingVaultNames([]);
+            setSearchParticipants([]);
             setSearchError(
               error instanceof Error ? error.message : "Unknown search error",
             );
@@ -91,7 +135,7 @@ export function useSearch() {
       cancelled = true;
       window.clearTimeout(id);
     };
-  }, [searchIncludeContent, searchOpen, searchQuery]);
+  }, [scope, searchIncludeContent, searchOpen, searchQuery]);
 
   return {
     searchOpen,
@@ -101,6 +145,10 @@ export function useSearch() {
     searchIncludeContent,
     setSearchIncludeContent,
     searchResults,
+    searchPartial,
+    searchMissingVaultNames,
+    searchParticipants,
+    searchInitialVaultFilter,
     searchLoading,
     searchError,
     searchInputRef,

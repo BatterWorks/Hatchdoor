@@ -325,6 +325,8 @@ pub struct RuntimeConfig {
     snapshot: Arc<ArcSwap<ConfigSnapshot>>,
     stored_values: Arc<Mutex<BTreeMap<String, String>>>,
     store: Arc<SettingsStore>,
+    #[cfg(test)]
+    _test_directory: Option<Arc<tempfile::TempDir>>,
 }
 
 impl RuntimeConfig {
@@ -351,6 +353,8 @@ impl RuntimeConfig {
             snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
             stored_values: Arc::new(Mutex::new(stored_values)),
             store: Arc::new(store),
+            #[cfg(test)]
+            _test_directory: None,
         })
     }
 
@@ -374,8 +378,39 @@ impl RuntimeConfig {
         &self,
         updates: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Arc<ConfigSnapshot>, String> {
-        self.validate_and_save(updates, |_current| Ok(()))
+        self.validate_and_save_then(updates, |_current| Ok(()), |_value, _saved| Ok(()))
             .map(|((), snapshot)| snapshot)
+    }
+
+    /// Remove values that a one-time migration has copied into a durable
+    /// domain record. Environment pins and unrelated stored settings remain
+    /// untouched. When none of the requested keys are stored, this is a
+    /// read-only no-op and does not create `settings.json`.
+    pub fn remove_stored<S>(
+        &self,
+        keys: impl IntoIterator<Item = S>,
+    ) -> Result<Arc<ConfigSnapshot>, String>
+    where
+        S: AsRef<str>,
+    {
+        let mut stored_values = self
+            .stored_values
+            .lock()
+            .map_err(|_| "configuration save lock was poisoned".to_string())?;
+        let mut next_values = stored_values.clone();
+        let mut changed = false;
+        for key in keys {
+            changed |= next_values.remove(key.as_ref()).is_some();
+        }
+        if !changed {
+            return Ok(self.snapshot.load_full());
+        }
+
+        self.store.persist(&next_values)?;
+        let next_snapshot = Arc::new(resolve(&self.environment, &next_values, &self.defaults));
+        self.snapshot.store(next_snapshot.clone());
+        *stored_values = next_values;
+        Ok(next_snapshot)
     }
 
     /// Validate against the *current* snapshot and persist in the same
@@ -397,6 +432,23 @@ impl RuntimeConfig {
     where
         E: From<String>,
     {
+        self.validate_and_save_then(updates, decide, |_value, _saved| Ok(()))
+    }
+
+    /// Persist a validated next configuration, complete a bounded setup action,
+    /// then publish the new snapshot. If setup fails, restore the prior durable
+    /// settings before returning the action failure. This is for setup whose
+    /// filesystem effects must never happen before the selected setting is
+    /// durable, such as initializing local Git versioning.
+    pub(crate) fn validate_and_save_then<T, E>(
+        &self,
+        updates: impl IntoIterator<Item = (String, String)>,
+        decide: impl FnOnce(&ConfigSnapshot) -> Result<T, E>,
+        after_persist: impl FnOnce(&T, &ConfigSnapshot) -> Result<(), E>,
+    ) -> Result<(T, Arc<ConfigSnapshot>), E>
+    where
+        E: From<String>,
+    {
         let mut stored_values = self
             .stored_values
             .lock()
@@ -408,6 +460,14 @@ impl RuntimeConfig {
         next_values.extend(updates);
         self.store.persist(&next_values).map_err(E::from)?;
         let next_snapshot = Arc::new(resolve(&self.environment, &next_values, &self.defaults));
+        if let Err(error) = after_persist(&value, &next_snapshot) {
+            self.store.persist(&stored_values).map_err(|restore_error| {
+                E::from(format!(
+                    "settings setup failed and Hatchdoor could not restore the previous settings: {restore_error}"
+                ))
+            })?;
+            return Err(error);
+        }
         self.snapshot.store(next_snapshot.clone());
         *stored_values = next_values;
         Ok((value, next_snapshot))
@@ -415,17 +475,15 @@ impl RuntimeConfig {
 
     #[cfg(test)]
     pub fn for_tests() -> Self {
-        static NEXT_TEST_STORE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = NEXT_TEST_STORE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self::load(
-            std::env::temp_dir().join(format!(
-                "hatchdoor-settings-test-{}-{sequence}.json",
-                std::process::id()
-            )),
+        let directory = Arc::new(tempfile::tempdir().expect("test settings directory"));
+        let mut config = Self::load(
+            directory.path().join("settings.json"),
             Environment::empty(),
             live_settings_defaults(),
         )
-        .expect("test runtime configuration")
+        .expect("test runtime configuration");
+        config._test_directory = Some(directory);
+        config
     }
 }
 
@@ -496,6 +554,53 @@ mod tests {
     }
 
     #[test]
+    fn test_runtime_configs_own_distinct_storage_that_cleans_up_during_unwind() {
+        let mut directories = Vec::new();
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let first = RuntimeConfig::for_tests();
+            let second = RuntimeConfig::for_tests();
+            assert_ne!(first.settings_path(), second.settings_path());
+
+            for (config, archive_prefix) in [(&first, "first/"), (&second, "second/")] {
+                directories.push(
+                    config
+                        .settings_path()
+                        .parent()
+                        .expect("test settings directory")
+                        .to_path_buf(),
+                );
+                config
+                    .save([(
+                        "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                        archive_prefix.to_string(),
+                    )])
+                    .expect("save isolated fixture");
+                assert_eq!(
+                    config
+                        .snapshot()
+                        .required("HATCHDOOR_ARCHIVE_PREFIX")
+                        .expect("archive prefix"),
+                    archive_prefix
+                );
+            }
+
+            panic!("exercise fixture cleanup during unwind");
+        }));
+
+        assert!(unwind.is_err());
+        assert_eq!(directories.len(), 2);
+        assert_ne!(directories[0], directories[1]);
+        for directory in directories {
+            assert_ne!(directory, std::env::temp_dir());
+            assert!(
+                !directory.exists(),
+                "test settings directory survived fixture drop: {}",
+                directory.display()
+            );
+        }
+    }
+
+    #[test]
     fn stored_values_survive_a_restart() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
@@ -516,6 +621,65 @@ mod tests {
             .expect("setting");
         assert_eq!(setting.value, "archive/");
         assert_eq!(setting.source, SettingSource::Stored);
+    }
+
+    #[test]
+    fn migration_cleanup_removes_only_selected_stored_values() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let defaults = BTreeMap::from([
+            ("HATCHDOOR_EXCLUDE".to_string(), "".to_string()),
+            (
+                "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                "90-archive/".to_string(),
+            ),
+        ]);
+        let config =
+            RuntimeConfig::load(&path, Environment::empty(), defaults.clone()).expect("load");
+        config
+            .save([
+                ("HATCHDOOR_EXCLUDE".to_string(), "private/**".to_string()),
+                (
+                    "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+                    "archive/".to_string(),
+                ),
+            ])
+            .expect("save fixtures");
+
+        let snapshot = config
+            .remove_stored(["HATCHDOOR_EXCLUDE"])
+            .expect("remove migrated value");
+        assert_eq!(
+            snapshot
+                .setting("HATCHDOOR_EXCLUDE")
+                .expect("exclude")
+                .source,
+            SettingSource::Default
+        );
+        assert_eq!(
+            snapshot
+                .setting("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("archive")
+                .source,
+            SettingSource::Stored
+        );
+
+        let restarted = RuntimeConfig::load(&path, Environment::empty(), defaults)
+            .expect("restart after cleanup");
+        assert_eq!(
+            restarted
+                .snapshot()
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("archive"),
+            "archive/"
+        );
+        assert_eq!(
+            restarted
+                .snapshot()
+                .required("HATCHDOOR_EXCLUDE")
+                .expect("exclude"),
+            ""
+        );
     }
 
     #[test]
@@ -642,6 +806,52 @@ mod tests {
                 .expect("new setting")
                 .value,
             "archive/"
+        );
+    }
+
+    #[test]
+    fn setup_runs_only_after_the_next_settings_are_durable_and_a_failure_restores_them() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let config = RuntimeConfig::load(&path, Environment::empty(), defaults()).expect("load");
+        let updates = [(
+            "HATCHDOOR_ARCHIVE_PREFIX".to_string(),
+            "archive/".to_string(),
+        )];
+
+        let result: Result<_, String> = config.validate_and_save_then(
+            updates,
+            |_current| Ok(()),
+            |_value, _saved| {
+                let durable = RuntimeConfig::load(&path, Environment::empty(), defaults())
+                    .expect("read persisted setting during setup");
+                assert_eq!(
+                    durable
+                        .snapshot()
+                        .required("HATCHDOOR_ARCHIVE_PREFIX")
+                        .expect("stored setting"),
+                    "archive/"
+                );
+                Err("forced post-persist setup failure".to_string())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            config
+                .snapshot()
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("live setting remains old"),
+            "90-archive/"
+        );
+        let restarted = RuntimeConfig::load(&path, Environment::empty(), defaults())
+            .expect("restored durable setting");
+        assert_eq!(
+            restarted
+                .snapshot()
+                .required("HATCHDOOR_ARCHIVE_PREFIX")
+                .expect("restored setting"),
+            "90-archive/"
         );
     }
 

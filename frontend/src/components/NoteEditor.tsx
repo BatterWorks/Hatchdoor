@@ -42,6 +42,11 @@ type NoteEditorProps = {
     onKeepDraft: () => void;
   } | null;
   onUploadAttachment?: (file: File) => Promise<string>;
+  /** A demo_read_only refusal on an attachment upload takes over entirely
+   * (#152): the app's own sentence lands in the shared notice strip instead
+   * of this editor's own inline attachment notice. Returns whether the
+   * error was a demo refusal. */
+  onDemoRefusal?: (error: unknown) => boolean;
   onChange: (nextContent: string) => void;
   onSave: () => void | Promise<void>;
   onCancel: () => void;
@@ -63,6 +68,7 @@ export function NoteEditor({
   noteCandidates = [],
   conflictReview,
   onUploadAttachment,
+  onDemoRefusal,
   onChange,
   onSave,
   onCancel,
@@ -192,6 +198,10 @@ export function NoteEditor({
       const relativePath = await onUploadAttachment(file);
       insertAttachmentAtCaret(relativePath, textarea);
     } catch (error) {
+      if (onDemoRefusal?.(error)) {
+        setAttachmentNotice(null);
+        return;
+      }
       const message = error instanceof Error ? error.message : "Upload failed.";
       setAttachmentNotice({ tone: "error", message });
     }
@@ -536,7 +546,7 @@ function AutocompleteList({
       aria-label="Link suggestions"
     >
       {items.map((note, index) => (
-        <li key={note.slug} role="presentation">
+        <li key={`${note.vault_id}:${note.slug}`} role="presentation">
           <button
             type="button"
             role="option"

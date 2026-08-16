@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import appCss from "./App.css?raw";
-import noteActionsSource from "./components/NoteActionsDialog.tsx?raw";
 import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
+import noteContentCss from "./styles/note-content.css?raw";
 import noteEditorSource from "./components/NoteEditor.tsx?raw";
 import wikilinksSource from "./components/note-page/wikilinks.ts?raw";
 import mainSource from "./main.tsx?raw";
@@ -59,7 +59,18 @@ describe("client audit launch contracts", () => {
     expect(noteEditorSource).toMatch(
       /className="note-editor-textarea"[^>]*dir="auto"/s,
     );
-    expect(noteActionsSource).toMatch(/<textarea[^>]*dir="auto"/s);
+  });
+
+  it("gives trailing scroll space only to notes long enough to scroll", () => {
+    // A screenful of empty scroll below every note, however short, is what
+    // this replaced: the space is for reaching an end-of-note heading, which
+    // a note that does not scroll has no need of.
+    expect(noteContentCss).toMatch(
+      /\.note-content\s*{[^}]*padding-bottom:\s*3rem/s,
+    );
+    expect(noteContentCss).toMatch(
+      /\.note-content\[data-tail="true"\]\s*{[^}]*padding-bottom:\s*max\(3rem,\s*calc\(100dvh/s,
+    );
   });
 
   it("lets KaTeX display equations scroll horizontally in read view", () => {
@@ -99,7 +110,7 @@ describe("client audit launch contracts", () => {
 
   it("guards touch-sticky hover styles behind hover-capable media queries", () => {
     expect(topbarCss).toMatch(
-      /@media\s*\(hover:\s*hover\)\s*{[^}]*\.topbar-mobile-path:hover/s,
+      /@media\s*\(hover:\s*hover\)\s*{[^}]*\.topbar-scope-trigger:hover/s,
     );
     expect(explorerCss).toMatch(
       /@media\s*\(hover:\s*hover\)\s*{[^}]*\.note-link:hover/s,

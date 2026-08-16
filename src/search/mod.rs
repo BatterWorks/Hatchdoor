@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::cache::SqliteCache;
@@ -11,6 +12,7 @@ use crate::vault::{NoteMetadata, NoteSummary};
 pub mod assemble;
 pub mod layer_selection;
 pub mod retrieve;
+pub mod vault_scoped;
 
 pub use layer_selection::{LayerInfo, LayerSelection};
 pub use retrieve::ChunkHit;
@@ -167,11 +169,28 @@ pub fn run(
         ..req
     };
     let mode = req.mode;
+    // One pinned snapshot for the whole compound read: the assembled response
+    // draws rows from more than one query, and separate autocommit reads could
+    // combine revisions.
+    let mut snapshot = cache.read_snapshot()?;
+    let response = run_on(cache, &snapshot, embedder, req, mode)?;
+    snapshot.commit()?;
+    Ok(response)
+}
+
+fn run_on(
+    cache: &SqliteCache,
+    conn: &Connection,
+    embedder: &dyn Embedder,
+    req: SearchRequest,
+    mode: SearchMode,
+) -> Result<SearchResponse, String> {
     if let Some(tag_prefix) = tag_prefix_query(&req.query) {
         let mut filters = req.filters;
         filters.tag_prefixes.push(tag_prefix.clone());
-        let results = query_notes(
+        let results = query_notes_on(
             cache,
+            conn,
             &filters,
             &req.include_properties,
             req.limit,
@@ -193,9 +212,26 @@ pub fn run(
         .collect();
         return Ok(SearchResponse { mode, results });
     }
-    let hits = retrieve::retrieve(cache, embedder, &req)?;
-    let results = assemble::assemble(cache, hits, &req.include_properties)?;
+    let hits = retrieve::retrieve_on(cache, conn, embedder, &req)?;
+    #[cfg(test)]
+    run_after_retrieve_hook();
+    let results = assemble::assemble_on(cache, conn, hits, &req.include_properties)?;
     Ok(SearchResponse { mode, results })
+}
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_RETRIEVE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn run_after_retrieve_hook() {
+    AFTER_RETRIEVE_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 pub fn query_notes(
@@ -205,10 +241,22 @@ pub fn query_notes(
     limit: usize,
     layers: &LayerSelection,
 ) -> Result<Vec<NoteSummary>, String> {
+    let conn = cache.read()?;
+    query_notes_on(cache, &conn, filters, include_properties, limit, layers)
+}
+
+fn query_notes_on(
+    cache: &SqliteCache,
+    conn: &Connection,
+    filters: &NoteFilters,
+    include_properties: &[String],
+    limit: usize,
+    layers: &LayerSelection,
+) -> Result<Vec<NoteSummary>, String> {
     // Honor the caller's layer selection: an omitted/default selection returns
     // the default surface only, so demoted notes never leak from query_notes.
     Ok(cache
-        .note_summaries(layers)?
+        .note_summaries_on(conn, layers)?
         .into_iter()
         .filter(|note| filters.matches(note))
         .take(limit)
@@ -219,8 +267,9 @@ pub fn query_notes(
         .collect())
 }
 
-pub(crate) fn matching_note_slugs(
+pub(crate) fn matching_note_slugs_on(
     cache: &SqliteCache,
+    conn: &Connection,
     filters: &NoteFilters,
     layers: &LayerSelection,
 ) -> Result<Option<HashSet<String>>, String> {
@@ -231,7 +280,7 @@ pub(crate) fn matching_note_slugs(
     // metadata pre-filter never widens the layer scope of a search.
     Ok(Some(
         cache
-            .note_summaries(layers)?
+            .note_summaries_on(conn, layers)?
             .into_iter()
             .filter(|note| filters.matches(note))
             .map(|note| note.slug)
@@ -338,6 +387,56 @@ mod tests {
         assert_eq!(resp.mode, SearchMode::Keyword);
         assert_eq!(resp.results.len(), 1);
         assert_eq!(resp.results[0].note_slug, "alpha");
+    }
+
+    #[test]
+    fn compound_search_response_uses_one_snapshot_across_a_concurrent_write() {
+        let dir = tempfile::tempdir().expect("temp cache directory");
+        let vault = TempDir::new().expect("vault");
+        std::fs::write(vault.path().join("Alpha.md"), "# Alpha\n\nneedle body")
+            .expect("write note");
+        let cache = std::sync::Arc::new(
+            SqliteCache::open(dir.path().join("cache.sqlite3"), 384).expect("open cache"),
+        );
+        let embedder: std::sync::Arc<dyn Embedder> = std::sync::Arc::new(StubEmbedder::new(384));
+        let index = VaultIndex::build(vault.path()).expect("build index");
+        cache
+            .replace_from_index_with_embedder(&index, embedder.as_ref())
+            .expect("populate");
+
+        let writer_cache = cache.clone();
+        super::AFTER_RETRIEVE_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                writer_cache
+                    .connection()
+                    .expect("writer connection")
+                    .execute(
+                        "UPDATE notes SET title = 'New title' WHERE slug = 'alpha'",
+                        [],
+                    )
+                    .expect("concurrent writer commits");
+            }));
+        });
+        let response = run(
+            cache.as_ref(),
+            embedder.as_ref(),
+            SearchRequest {
+                query: "needle".to_string(),
+                mode: SearchMode::Keyword,
+                limit: 10,
+                per_note_cap: 2,
+                filters: Default::default(),
+                include_properties: Vec::new(),
+                layers: crate::search::LayerSelection::default_surface(),
+            },
+        )
+        .expect("compound search");
+
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            response.results[0].note_title, "Alpha",
+            "retrieve and assemble must read the same pre-write cache generation"
+        );
     }
 
     #[test]

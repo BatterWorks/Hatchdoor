@@ -25,7 +25,9 @@
 .topbar-brand {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  /* Wide enough that the drawer toggle reads as its own control beside the
+     wordmark rather than part of it, now that no border says so. */
+  gap: 0.9rem;
   color: var(--ink);
   text-decoration: none;
   flex-shrink: 0;
@@ -80,6 +82,17 @@
   margin: 0 0.35rem;
 }
 
+/* Read-only echo of the open note's Vault or the selected scope (#138). No
+   scope control lives here — that is the sidebar Scope zone's job alone. */
+.topbar-crumb-scope {
+  flex: 0 0 auto;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 10rem;
+}
+
 .topbar-crumb-here {
   color: var(--ink);
   font-variation-settings:
@@ -91,12 +104,33 @@
   text-overflow: ellipsis;
 }
 
-/* Actions — col 3 */
+/* Actions — col 3.
+ *
+ * A hairline between each control. The boxes these replaced drew four sides
+ * where one line does the work, and a rule is what separates things
+ * everywhere else in this chrome — the topbar's own underline, the meta row's,
+ * the sidebar's edge. It sits in the gap rather than on either control, so a
+ * pressed button's ink square never paints over it. */
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.95rem;
   flex-shrink: 0;
+}
+
+.topbar-actions > * + * {
+  position: relative;
+}
+
+.topbar-actions > * + *::before {
+  content: "";
+  position: absolute;
+  left: -0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 1.15rem;
+  background: var(--rule-strong);
 }
 
 /* Search trigger button */
@@ -143,11 +177,17 @@
   border-radius: var(--radius-pill);
 }
 
-/* Icon button — square, 2.1rem */
+/* Icon button — square, 2.1rem.
+ *
+ * No border of its own. Rules in this chrome separate zones — the topbar's
+ * own underline, the meta row's — and a box drawn around each glyph was
+ * repeating structure the row already had, three times over, next to the
+ * wordmark. The square arrives on contact instead: the hit area is unchanged,
+ * it is simply not drawn until it is used. */
 .icon-button {
   width: 2.1rem;
   height: 2.1rem;
-  border: 1px solid var(--rule);
+  border: 1px solid transparent;
   background: transparent;
   color: var(--ink-soft);
   cursor: pointer;
@@ -170,6 +210,27 @@
     background: var(--ink);
     color: var(--bg);
   }
+}
+
+/* A menu is open and this is what opened it. Without a resting border there is
+   nothing else tying the popover to its trigger, and an idle-looking trigger
+   above an open menu reads as though the two are unrelated. */
+.icon-button[aria-expanded="true"] {
+  background: var(--ink);
+  color: var(--bg);
+}
+
+/* Optical alignment at the row's ends. A glyph sits centred in a hit area
+   wider than itself, so with the border gone the icon reads as indented
+   against everything below it — the meta row's text on the left, the note's
+   own measure on the right. The hit area keeps its size and slides outward by
+   the inset instead. */
+.topbar-brand > .icon-button:first-child {
+  margin-inline-start: -0.5rem;
+}
+
+.topbar-actions > *:last-child {
+  margin-inline-end: -0.5rem;
 }
 
 .icon-button:focus-visible {
@@ -283,35 +344,131 @@
   background: var(--rule);
 }
 
-/* Mobile meta row (below topbar) */
+/* Mobile meta row (below topbar) — the scope row (#145). Below 920px this is
+   the only on-screen place scope is legible; the note path left the chrome
+   entirely (the note's own Vault property row and title already say where it
+   is, and the magnifier in col 3 is the same search entry point the path
+   button used to be). */
 .topbar-mobile-meta {
   display: none;
   border-bottom: 1px solid var(--rule);
   background: var(--paper);
   padding: 0.32rem 0.75rem;
+  position: relative;
 }
 
-.topbar-mobile-path {
+.topbar-scope-trigger {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
   background: transparent;
   border: 0;
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-variation-settings:
-    "wdth" 96,
-    "wght" 400;
-  font-size: 0.82rem;
-  line-height: 1.28;
   padding: 0.12rem 0.2rem;
-  width: 100%;
   text-align: left;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   cursor: pointer;
 }
 
 @media (hover: hover) {
-  .topbar-mobile-path:hover {
+  .topbar-scope-trigger:hover {
     background: var(--paper-2);
   }
+}
+
+/* Truncation priority under width pressure, in a fixed order (#145): the
+   rule collapses first (a `flex-shrink` two orders of magnitude past the
+   name's claims nearly all the shrinkage before the name loses a pixel),
+   then the Vault name ellipsizes, and the status word never truncates
+   (`flex-shrink: 0` — it keeps its natural size no matter how tight the row
+   gets, the same "count/condition over path" priority the sidebar Scope
+   zone slot already carries). */
+.topbar-scope-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 96,
+    "wght" 500;
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+.topbar-scope-rule {
+  flex: 0 1 auto;
+  flex-shrink: 999;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--tertiary);
+  margin: 0 0.3rem;
+}
+
+.topbar-scope-viewing {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-sans);
+  font-size: 0.68rem;
+  color: var(--muted);
+  margin-right: 0.4rem;
+}
+
+.topbar-scope-slot {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  margin-left: auto;
+  padding-left: 0.4rem;
+}
+
+/* Bottom sheet picker (#145) — the only other chrome besides the desktop
+   Scope zone (#138) that calls `onScopeChange`. Reuses the Scope zone's own
+   `.scope-row`/`.scope-row-label`/`.is-selected` grammar from
+   `layout-explorer.css` for every row's look; only the touch height and the
+   sheet's own positioning are this component's to own. */
+.scope-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-bg);
+  z-index: 60;
+}
+
+.scope-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--bg);
+  border-top: 1px solid var(--rule-strong);
+  box-shadow: var(--shadow-overlay);
+  padding: 0.5rem 0 calc(0.5rem + env(safe-area-inset-bottom));
+  z-index: 70;
+  transform: translateY(100%);
+  transition: transform 160ms ease;
+}
+
+.scope-sheet[data-open="true"] {
+  transform: translateY(0);
+}
+
+.scope-sheet-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The 46px touch height is this sheet's own convention, distinct from the
+   44px floor the rest of mobile chrome uses (`responsive.css`) — a fuller
+   list of short taps earns the couple of extra pixels. */
+.scope-sheet .scope-row {
+  min-height: 46px;
+  padding-left: 1rem;
+  padding-right: 1rem;
 }

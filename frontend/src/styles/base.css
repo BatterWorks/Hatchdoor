@@ -227,3 +227,17 @@ a:hover {
   flex-direction: column;
   overflow: hidden;
 }
+
+/* Screen-reader-only content — present in the accessibility tree, invisible
+   on screen. Used by the shell's polite scope live region (#146). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

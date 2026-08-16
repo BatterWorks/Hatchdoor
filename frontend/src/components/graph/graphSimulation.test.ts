@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import type { GraphData } from "../../types";
+import type { GraphData, VaultGraph } from "../../types";
 import {
+  buildIslandGraphs,
   buildSimulationGraph,
+  computeIslandCenters,
+  islandRadiusEstimate,
   createGraphSimulation,
+  createIslandSimulation,
   hitTest,
   nodeRadius,
+  settleSimulationSync,
   type SimNode,
 } from "./graphSimulation";
 
@@ -14,16 +19,36 @@ function sequenceRandom(values: number[]): () => number {
   return () => values[i++ % values.length];
 }
 
+const VAULT_ID = "vault-1";
+
 const DATA: GraphData = {
   nodes: [
-    { slug: "a", title: "Alpha", primary_tag: "topic/x", backlink_count: 3 },
-    { slug: "b", title: "Bravo", primary_tag: null, backlink_count: 0 },
-    { slug: "c", title: "Charlie", primary_tag: "topic/y", backlink_count: 1 },
+    {
+      vault_id: VAULT_ID,
+      slug: "a",
+      title: "Alpha",
+      primary_tag: "topic/x",
+      backlink_count: 3,
+    },
+    {
+      vault_id: VAULT_ID,
+      slug: "b",
+      title: "Bravo",
+      primary_tag: null,
+      backlink_count: 0,
+    },
+    {
+      vault_id: VAULT_ID,
+      slug: "c",
+      title: "Charlie",
+      primary_tag: "topic/y",
+      backlink_count: 1,
+    },
   ],
   edges: [
-    { source: "a", target: "b" },
-    { source: "b", target: "c" },
-    { source: "a", target: "ghost" }, // dangler — target missing
+    { vault_id: VAULT_ID, source_slug: "a", target_slug: "b" },
+    { vault_id: VAULT_ID, source_slug: "b", target_slug: "c" },
+    { vault_id: VAULT_ID, source_slug: "a", target_slug: "ghost" }, // dangler — target missing
   ],
 };
 
@@ -85,10 +110,235 @@ describe("createGraphSimulation", () => {
   });
 });
 
+describe("settleSimulationSync", () => {
+  it("stops the simulation's own timer and leaves it at rest", () => {
+    const { nodes, links } = buildSimulationGraph(DATA, {
+      random: sequenceRandom([0.5]),
+    });
+    const sim = createGraphSimulation(nodes, links);
+    try {
+      settleSimulationSync(sim);
+      expect(sim.alpha()).toBeLessThanOrEqual(sim.alphaMin());
+    } finally {
+      sim.stop();
+    }
+  });
+
+  it("moves nodes off their initial scatter position — the layout actually ran", () => {
+    const { nodes, links } = buildSimulationGraph(DATA, {
+      random: sequenceRandom([0.1, 0.9, 0.3]),
+    });
+    const initial = nodes.map((n) => ({ x: n.x, y: n.y }));
+    const sim = createGraphSimulation(nodes, links);
+    try {
+      settleSimulationSync(sim);
+      const moved = nodes.some(
+        (n, i) => n.x !== initial[i].x || n.y !== initial[i].y,
+      );
+      expect(moved).toBe(true);
+      for (const n of nodes) {
+        expect(Number.isFinite(n.x)).toBe(true);
+        expect(Number.isFinite(n.y)).toBe(true);
+      }
+    } finally {
+      sim.stop();
+    }
+  });
+
+  it("leaves no running timer behind — node positions hold after it returns", () => {
+    vi.useFakeTimers();
+    try {
+      const { nodes, links } = buildSimulationGraph(DATA, {
+        random: sequenceRandom([0.1, 0.9, 0.3]),
+      });
+      const sim = createGraphSimulation(nodes, links);
+      try {
+        settleSimulationSync(sim);
+        const settled = nodes.map((n) => ({ x: n.x, y: n.y }));
+        // If d3-force's own timer were still scheduled, advancing past
+        // several animation-frame intervals would keep perturbing alpha
+        // and node positions.
+        vi.advanceTimersByTime(2000);
+        expect(nodes.map((n) => ({ x: n.x, y: n.y }))).toEqual(settled);
+      } finally {
+        sim.stop();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+const VAULT_A = "vault-a";
+const VAULT_B = "vault-b";
+
+const VAULT_GRAPHS: VaultGraph[] = [
+  {
+    vault_id: VAULT_A,
+    vault_name: "Alpha Vault",
+    nodes: [
+      {
+        vault_id: VAULT_A,
+        slug: "a1",
+        title: "A1",
+        primary_tag: null,
+        backlink_count: 0,
+      },
+      {
+        vault_id: VAULT_A,
+        slug: "a2",
+        title: "A2",
+        primary_tag: null,
+        backlink_count: 2,
+      },
+    ],
+    edges: [{ vault_id: VAULT_A, source_slug: "a1", target_slug: "a2" }],
+  },
+  {
+    vault_id: VAULT_B,
+    vault_name: "Beta Vault",
+    nodes: [
+      {
+        vault_id: VAULT_B,
+        slug: "b1",
+        title: "B1",
+        primary_tag: null,
+        backlink_count: 0,
+      },
+    ],
+    edges: [],
+  },
+];
+
+describe("computeIslandCenters", () => {
+  it("returns an empty array for zero islands", () => {
+    expect(computeIslandCenters([])).toEqual([]);
+  });
+
+  it("centers a single island on the origin", () => {
+    expect(computeIslandCenters([10])).toEqual([{ cx: 0, cy: 0 }]);
+  });
+
+  it("packs three islands on a grid in the given order, never sorted by count", () => {
+    const centers = computeIslandCenters([1, 100, 1]);
+    expect(centers).toHaveLength(3);
+    // 2x2 grid (ceil(sqrt(3)) = 2 cols): index 0 and 1 share the top row,
+    // index 2 starts the next row — regardless of the middle island's size.
+    expect(centers[0].cy).toBe(centers[1].cy);
+    expect(centers[0].cx).toBeLessThan(centers[1].cx);
+    expect(centers[2].cy).toBeGreaterThan(centers[0].cy);
+  });
+
+  it("is deterministic for the same input", () => {
+    expect(computeIslandCenters([3, 5, 2])).toEqual(
+      computeIslandCenters([3, 5, 2]),
+    );
+  });
+
+  it("never overlaps two islands, however lopsided the Vault sizes", () => {
+    // The failing shape from #118's review: one large Vault beside several
+    // tiny ones overlapped its neighbours by up to 120px under one uniform
+    // spacing, so both captions and both enclosures became unreadable.
+    const counts = [2, 3, 2, 0, 2, 49];
+    const centers = computeIslandCenters(counts);
+    for (let i = 0; i < counts.length; i++) {
+      for (let j = i + 1; j < counts.length; j++) {
+        const distance = Math.hypot(
+          centers[i].cx - centers[j].cx,
+          centers[i].cy - centers[j].cy,
+        );
+        const needed =
+          islandRadiusEstimate(counts[i]) + islandRadiusEstimate(counts[j]);
+        expect(distance).toBeGreaterThanOrEqual(needed);
+      }
+    }
+  });
+
+  it("sizes each column to its own widest island, not to the largest anywhere", () => {
+    // 2x2: column 0 holds both 1-node Vaults, column 1 holds the 400-node one.
+    // The all-small column must stay narrow instead of inheriting its
+    // neighbour's width, which one uniform spacing gave it.
+    const centers = computeIslandCenters([1, 400, 1, 1]);
+    const totalWidth = 2 * (centers[1].cx - centers[0].cx);
+    const smallColumnWidth = 2 * (centers[0].cx + totalWidth / 2);
+    const largeColumnWidth = totalWidth - smallColumnWidth;
+    expect(smallColumnWidth).toBeLessThan(largeColumnWidth);
+  });
+
+  it("grows spacing with the largest island's node count", () => {
+    const tight = computeIslandCenters([1, 1]);
+    const spread = computeIslandCenters([1, 400]);
+    const tightGap = Math.abs(tight[1].cx - tight[0].cx);
+    const spreadGap = Math.abs(spread[1].cx - spread[0].cx);
+    expect(spreadGap).toBeGreaterThan(tightGap);
+  });
+});
+
+describe("buildIslandGraphs", () => {
+  it("builds one island per Vault, in the given order, with its own node count", () => {
+    const { islands } = buildIslandGraphs(VAULT_GRAPHS, {
+      random: sequenceRandom([0.5]),
+    });
+    expect(islands.map((i) => i.vaultId)).toEqual([VAULT_A, VAULT_B]);
+    expect(islands[0].vaultName).toBe("Alpha Vault");
+    expect(islands[0].nodeCount).toBe(2);
+    expect(islands[1].nodeCount).toBe(1);
+    // Packed on a grid, not stacked on the same spot.
+    expect(
+      islands[1].cx !== islands[0].cx || islands[1].cy !== islands[0].cy,
+    ).toBe(true);
+  });
+
+  it("centers each island's nodes on its own grid center, not the shared origin", () => {
+    const { islands } = buildIslandGraphs(VAULT_GRAPHS, {
+      random: sequenceRandom([0.5]), // (0.5-0.5)*spread = 0 scatter offset
+    });
+    for (const island of islands) {
+      for (const node of island.nodes) {
+        expect(node.x).toBeCloseTo(island.cx);
+        expect(node.y).toBeCloseTo(island.cy);
+        expect(node.islandCx).toBe(island.cx);
+        expect(node.islandCy).toBe(island.cy);
+      }
+    }
+  });
+
+  it("flattens every island's nodes and links", () => {
+    const { nodes, links } = buildIslandGraphs(VAULT_GRAPHS, {
+      random: sequenceRandom([0.5]),
+    });
+    expect(nodes).toHaveLength(3);
+    expect(links).toHaveLength(1);
+    expect(links[0].source.slug).toBe("a1");
+    expect(links[0].target.slug).toBe("a2");
+  });
+});
+
+describe("createIslandSimulation", () => {
+  it("registers link, charge, x, y, and collide forces — no shared center force", () => {
+    const { nodes, links } = buildIslandGraphs(VAULT_GRAPHS, {
+      random: sequenceRandom([0.5]),
+    });
+    const sim = createIslandSimulation(nodes, links);
+    try {
+      expect(sim.force("link")).toBeTruthy();
+      expect(sim.force("charge")).toBeTruthy();
+      expect(sim.force("x")).toBeTruthy();
+      expect(sim.force("y")).toBeTruthy();
+      expect(sim.force("collide")).toBeTruthy();
+      expect(sim.force("center")).toBeUndefined();
+      expect(sim.nodes()).toHaveLength(3);
+    } finally {
+      sim.stop();
+    }
+  });
+});
+
 describe("hitTest", () => {
   const identity = { x: 0, y: 0, k: 1 };
   const nodes: SimNode[] = [
     {
+      vault_id: VAULT_ID,
       slug: "a",
       title: "Alpha",
       primary_tag: null,
@@ -97,6 +347,7 @@ describe("hitTest", () => {
       y: 0,
     },
     {
+      vault_id: VAULT_ID,
       slug: "b",
       title: "Bravo",
       primary_tag: null,

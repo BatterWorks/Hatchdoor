@@ -13,8 +13,10 @@ import type { UnitType } from "./BlockInput";
 import { PdfPreview } from "./PdfPreview";
 import { flattenText } from "./text";
 import { resolveAssetHref } from "./wikilinks";
+import type { VaultId } from "../../types";
 
 export function createNoteMarkdownComponents(
+  vaultId: VaultId,
   noteRelativePath: string,
   headingIdsBySourceLine: Map<number, string>,
   options: { editable?: boolean } = {},
@@ -58,7 +60,10 @@ export function createNoteMarkdownComponents(
       if (typeof href === "string" && href.startsWith("/__archived__/")) {
         const slug = href.slice("/__archived__/".length);
         return (
-          <a className="archived-link" href={`/n/${slug}`}>
+          <a
+            className="archived-link"
+            href={`/v/${encodeURIComponent(vaultId)}/n/${slug}`}
+          >
             {children}
           </a>
         );
@@ -71,7 +76,7 @@ export function createNoteMarkdownComponents(
         );
       }
       if (typeof href === "string" && isPdfHref(href)) {
-        const source = resolveAssetHref(href, noteRelativePath);
+        const source = resolveAssetHref(vaultId, href, noteRelativePath);
         const label = flattenText(children).trim() || "PDF";
         return (
           <a
@@ -103,7 +108,7 @@ export function createNoteMarkdownComponents(
       // and detaching the preview from it. Decided from the source node,
       // because by the time children are React elements they carry the mapped
       // img component as their type, not PdfPreview.
-      if (holdsOnlyPdfEmbed(props.node, noteRelativePath)) {
+      if (holdsOnlyPdfEmbed(vaultId, props.node, noteRelativePath)) {
         return <>{props.children}</>;
       }
       return <p>{props.children}</p>;
@@ -111,7 +116,7 @@ export function createNoteMarkdownComponents(
     img(props: { src?: string; alt?: string }) {
       const source =
         typeof props.src === "string"
-          ? resolveAssetHref(props.src, noteRelativePath)
+          ? resolveAssetHref(vaultId, props.src, noteRelativePath)
           : props.src;
       if (typeof source === "string" && isPdfHref(source)) {
         return <PdfPreview src={source} label={props.alt ?? "PDF"} />;
@@ -283,6 +288,7 @@ type MarkdownElementNode = {
 };
 
 function holdsOnlyPdfEmbed(
+  vaultId: VaultId,
   node: MarkdownElementNode | undefined,
   noteRelativePath: string,
 ): boolean {
@@ -299,7 +305,9 @@ function holdsOnlyPdfEmbed(
     return false;
   }
 
-  return isPdfHref(resolveAssetHref(only.properties.src, noteRelativePath));
+  return isPdfHref(
+    resolveAssetHref(vaultId, only.properties.src, noteRelativePath),
+  );
 }
 
 function isPdfHref(href: string): boolean {

@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { useState } from "react";
 import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,11 +20,13 @@ function FrontmatterHarness({
   onSaveContent,
   uploadAttachment,
   conflictReview,
+  onDemoRefusal,
 }: {
   initialContent: string;
   onSaveContent: (content: string) => void;
   uploadAttachment?: (file: File) => Promise<string>;
   conflictReview?: ComponentProps<typeof NoteEditor>["conflictReview"];
+  onDemoRefusal?: (error: unknown) => boolean;
 }) {
   const [content, setContent] = useState(initialContent);
 
@@ -32,6 +40,7 @@ function FrontmatterHarness({
       onCancel={() => {}}
       onUploadAttachment={uploadAttachment}
       conflictReview={conflictReview}
+      onDemoRefusal={onDemoRefusal}
     />
   );
 }
@@ -158,6 +167,37 @@ describe("NoteEditor attachment uploads", () => {
     await screen.findByText("Inserted attachment: Attachments/report.pdf");
     expect(uploadAttachment).toHaveBeenCalledWith(file);
     expect(textarea).toHaveValue("# Body\n![[Attachments/report.pdf]]");
+  });
+
+  it("defers a demo_read_only upload refusal to onDemoRefusal instead of its own inline notice (#152)", async () => {
+    const demoError = new Error(
+      "This is a public read-only demo instance; mutations and Vault-control operations are disabled.",
+    ) as Error & { code?: string };
+    demoError.code = "demo_read_only";
+    const uploadAttachment = vi.fn().mockRejectedValue(demoError);
+    const onDemoRefusal = vi.fn().mockReturnValue(true);
+
+    render(
+      <FrontmatterHarness
+        initialContent={"# Body\n"}
+        onSaveContent={() => {}}
+        uploadAttachment={uploadAttachment}
+        onDemoRefusal={onDemoRefusal}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", {
+      name: "Markdown content",
+    }) as HTMLTextAreaElement;
+    textarea.setSelectionRange(7, 7);
+    const file = new File(["png-bytes"], "pasted.png", { type: "image/png" });
+    fireEvent.paste(textarea, { clipboardData: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onDemoRefusal).toHaveBeenCalledWith(demoError);
+    });
+    expect(screen.queryByText(/Upload failed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(demoError.message)).not.toBeInTheDocument();
   });
 
   it("names what it accepts instead of uploading an unsupported file", async () => {

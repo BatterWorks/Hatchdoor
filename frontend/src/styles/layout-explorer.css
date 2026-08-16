@@ -31,13 +31,213 @@
   padding: 1.25rem 1rem 1.5rem;
 }
 
+/* Scope zone — Vault scope, readable and changeable in exactly one place on
+   the desktop (#138). Pinned above the rail, never scrolling with the notes.
+   Absent entirely at one enabled Vault: the "imposes nothing" requirement. */
+.scope-zone {
+  flex: 0 0 auto;
+  padding: 0.6rem 0.5rem 0.7rem;
+  border-bottom: 1px solid var(--rule);
+  /* One step lighter than the sidebar's own --bg, so the pinned zone lifts off
+     the scrolling navigation instead of running into it. Holds in both themes:
+     --paper is the lighter neighbour of --bg in light, and of the near-black
+     ground in dark. */
+  background: var(--paper);
+}
+
+/* Scoped by the parent on purpose: `.side-head` is declared later in this file
+   at equal specificity, so a bare `.scope-zone-head` loses the cascade and the
+   head keeps side-head's 0.7rem bottom margin — which is what made the
+   collapsed zone taller than it reads. */
+.scope-zone .scope-zone-head {
+  margin-bottom: 0;
+  cursor: pointer;
+}
+
+.scope-zone .scope-zone-head[data-open="true"] {
+  margin-bottom: 0.45rem;
+}
+
+/* `v` keycap after the SCOPE label (#146) — wide screens only, since the
+   zone itself never renders on mobile. */
+.scope-zone-keycap {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  padding: 0.02rem 0.32rem;
+  border-radius: var(--radius-pill);
+}
+
+/* Collapsed head names the current scope in place of the usual mono count. */
+.scope-zone-current {
+  flex: 0 0 auto;
+  max-width: 9rem;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+}
+
+.scope-zone-viewing-line {
+  margin: 0 0 0 1.05rem;
+  padding-bottom: 0.15rem;
+  font-family: var(--font-sans);
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.scope-zone-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.32rem 0.35rem;
+  border: 0;
+  background: transparent;
+  font-family: var(--font-display);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 400;
+  font-size: 0.82rem;
+  color: var(--ink-soft);
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .scope-row:hover {
+    color: var(--ink);
+    background: var(--paper-2);
+  }
+}
+
+.scope-row:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+}
+
+/* The current scope's documented active treatment — the same hot rail,
+   hot-soft background, and bolding `.note-link.active-note` uses. */
+.scope-row.is-selected {
+  color: var(--ink);
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 600;
+  background: var(--hot-soft);
+  box-shadow: inset 3px 0 0 var(--hot);
+}
+
+.scope-row-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Marks the open note's own Vault row, separately from the selected scope. */
+.scope-row-viewing {
+  flex: 0 0 auto;
+  font-family: var(--font-sans);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  color: var(--muted);
+  border: 1px solid var(--rule-strong);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+}
+
+/* Per-Vault count-or-condition slot (#116, amended by #117): one trailing
+   reading, never a count and a condition together. `.side-count` (§05)
+   carries the healthy note count and the All-Vaults/collapsed-head
+   aggregate as-is. Severity is carried by shape as well as hue, since
+   --warn-fg and --err-fg are not reliably tellable apart at this size: the
+   amber tier stays plain ink, the red tier takes a bordered ground and
+   medium weight. */
+.vault-slot-condition,
+.vault-slot-shortfall {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  white-space: nowrap;
+}
+
+.vault-tier-warn {
+  color: var(--warn-fg);
+}
+
+.vault-tier-error {
+  color: var(--err-fg);
+}
+
+/* The red tier's bordered ground and medium weight belong to the slot's own
+   word or aggregate reading. The collapsed head's scope name sits beside
+   that reading and takes the worst ink present (#117) — colour only, no
+   ground, so the Vault name it names does not itself read as an alarm. */
+.vault-slot-condition.vault-tier-error,
+.vault-slot-shortfall.vault-tier-error {
+  background: var(--err-bg);
+  border: 1px solid var(--err-border);
+  font-weight: 600;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+}
+
+/* Indexing: moving, not stuck — a muted shimmer, no word, no warning. Search
+   keeps answering from the previous snapshot throughout (#116). Also stands
+   in for a first index that has never published a snapshot. */
+.vault-slot-indexing {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.vault-slot-indexing-bar {
+  width: 1.6rem;
+  height: 0.6rem;
+  background: linear-gradient(
+    90deg,
+    var(--paper-2),
+    var(--paper),
+    var(--paper-2)
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.2s linear infinite;
+}
+
+/* Browsable but not yet searchable: the count the Vault already has, trailed
+   by the same shimmer the indexing slot uses at half width. Nothing is wrong,
+   so it takes no tier colour — it reads as the indexing slot resolving. */
+.vault-slot-pending-search {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.vault-slot-pending-search .vault-slot-indexing-bar {
+  width: 0.8rem;
+}
+
 /* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */
 .explorer-rail {
   display: flex;
   align-items: center;
   gap: 0.15rem;
   flex: 0 0 auto;
-  padding: 0.6rem 0.75rem;
+  padding: 0.35rem 0.5rem;
   border-bottom: 1px solid var(--rule);
 }
 
@@ -45,8 +245,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 2.1rem;
-  height: 2.1rem;
+  width: 1.9rem;
+  height: 1.9rem;
   border: 1px solid transparent;
   border-radius: 0;
   background: transparent;
@@ -107,6 +307,15 @@
   font-family: var(--font-sans);
   font-size: 0.76rem;
   color: var(--muted);
+}
+
+/* Tells the truth about a partial read (#141): never a banner, just this
+   trailing line below the last row, in warn ink. */
+.explorer-changes-partial {
+  margin: 0.35rem 0 0 0.45rem;
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  color: var(--warn-fg);
 }
 
 /* Section head — `RECENT · ──── · 04`, per §05. */
@@ -170,24 +379,129 @@ button.side-head[data-open="true"] .side-caret {
   border-left-color: var(--hot);
 }
 
+/* Vault accordion head (#142) — the explorer under `all` with more than one
+   enabled Vault. Reuses the documented section head (`.side-head`); unfolded
+   takes the same active treatment `.scope-row.is-selected` and
+   `.note-link.active-note` use, folded stays plain. An unavailable Vault's
+   head takes the same disabled-but-focusable precedent as
+   `.explorer-rail-item.is-disabled` — dimmed, not removed. */
+/* A Vault name is the operator's own text, not a label this app wrote, so it
+   keeps the capitalisation it was given — the same reason §22's inline editor
+   resets `text-transform`. Uppercasing it also collapsed the one signal that
+   tells these heads apart from `RECENTLY VIEWED` and `SCOPE` above them: caps
+   mean a heading Hatchdoor owns, sentence case means your data. */
+.vault-accordion-head .side-label {
+  font-variation-settings:
+    "wdth" 100,
+    "wght" 700;
+  font-size: 0.9rem;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+/* Depth is carried by weight and by the caret, not by size. The whole tree
+   sits at one reading size — a Vault head at 0.9rem alongside its folders and
+   notes, and alongside `RECENTLY VIEWED`'s rows: nothing here is chrome, it is
+   all your own text, and setting the head above the rest made it shout. What
+   separates a head from its contents is 700 weight and the hot rail when it is
+   open. The caret still shrinks with depth: a child marker larger than its
+   parent's reads as
+   the child outranking it. Scoped to the accordion so §05's chrome heads
+   (`SCOPE`, `RECENTLY VIEWED`) keep the smaller shared caret. */
+.vault-accordion-head .side-caret {
+  border-top-width: 5px;
+  border-bottom-width: 5px;
+  border-left-width: 6px;
+}
+
+/* Row rhythm descends with depth: a Vault head is a group boundary and keeps
+   the most air, folders less, notes least. `.side-head`'s 0.7rem is sized for
+   the tree's standalone sections, and between stacked Vault heads it reads as
+   a gap rather than as separation. Parent-scoped for the usual cascade
+   reason. */
+.vault-accordion-head {
+  margin-bottom: 0.5rem;
+  /* The open head's 3px rail sat almost against the caret, reading as one
+     thick marker rather than a rail and a triangle. The rail moves out, not
+     the caret: the head reaches 0.35rem further left than its own column and
+     pays that back as padding, so the triangle keeps the left edge it shares
+     with the folders below it. Carried on every head, open or not, so nothing
+     shifts as you fold it. */
+  margin-left: -0.35rem;
+  width: calc(100% + 0.35rem);
+  padding-left: 0.65rem;
+}
+
+/* The space belongs to the group, not to every head. An unfolded head owns the
+   tree directly beneath it, so it closes right up; the gap moves below the
+   tree instead, where it separates one Vault from the next. Carrying it under
+   every head put a folder further from its own Vault than from the following
+   one — proximity claiming the opposite of the nesting. */
+.vault-accordion-head[data-open="true"] {
+  margin-bottom: 0.2rem;
+}
+
+.explorer-nav > .tree.root-tree {
+  margin-bottom: 0.5rem;
+}
+
+.vault-accordion-head[data-open="true"] {
+  background: var(--hot-soft);
+  box-shadow: inset 3px 0 0 var(--hot);
+}
+
+.vault-accordion-head[data-open="true"] .side-label {
+  color: var(--hot);
+}
+
+.vault-accordion-head[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (hover: hover) {
+  .vault-accordion-head[aria-disabled="true"]:hover {
+    background: transparent;
+  }
+}
+
 /* Mono index on note rows. Folders carry the caret, notes carry this. */
 .idx {
   font-family: var(--font-mono);
   font-size: 0.62rem;
   color: var(--muted);
   flex: 0 0 auto;
+  /* Optical, not geometric. The index is always lining digits — ascent only,
+     no descender — while the title beside it hangs ~2px below the shared
+     baseline. Centring the boxes therefore leaves the digits sitting high by
+     half that descender. Nudged down by it so the two read as centred on each
+     other; in em so it holds if the row is ever resized. */
+  transform: translateY(0.1em);
 }
 
 .active-note .idx {
   color: var(--hot);
 }
 
-/* Recent notes panel */
+/* Recent notes panel. Hatchdoor's own standing list, so it lines up with the
+   Scope zone's head rather than with the Vault accordion — the negative
+   margins cancel `.explorer-nav`'s 1rem inset back to the zone's 0.5rem, so
+   `RECENTLY VIEWED` and `SCOPE` share one left edge and one rule width. The
+   accordion keeps the deeper inset: headings this app owns sit at the outer
+   edge, the Vaults you named sit one step in. */
 .recent-notes {
-  margin: 0 0 1.5rem;
+  margin: 0 -0.5rem 0.75rem;
   border: 0;
+  border-bottom: 1px solid var(--rule);
   background: transparent;
-  padding: 0;
+  padding: 0 0 0.5rem;
+}
+
+/* This head sits directly on its own short list, so it does not need the
+   0.7rem `.side-head` keeps for the tree's taller sections. Parent-scoped
+   because `.side-head` is declared later at equal specificity. */
+.recent-notes .side-head {
+  margin-bottom: 0.35rem;
 }
 
 /* Note links in sidebar */
@@ -195,7 +509,7 @@ button.side-head[data-open="true"] .side-caret {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.22rem 0.45rem;
+  padding: 0.14rem 0.45rem;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 100,
@@ -203,7 +517,7 @@ button.side-head[data-open="true"] .side-caret {
   font-size: 0.9rem;
   color: var(--ink-soft);
   text-decoration: none;
-  line-height: 1.4;
+  line-height: 1.35;
   position: relative;
   width: 100%;
 }
@@ -260,16 +574,16 @@ button.side-head[data-open="true"] .side-caret {
   display: flex;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.28rem 0.4rem;
+  padding: 0.16rem 0.4rem;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 98,
     "wght" 500;
-  font-size: 0.92rem;
+  font-size: 0.9rem;
   color: var(--ink-soft);
   cursor: pointer;
   text-decoration: none;
-  line-height: 1.4;
+  line-height: 1.35;
   list-style: none;
   min-height: unset;
   border-radius: 0;
@@ -287,8 +601,8 @@ button.side-head[data-open="true"] .side-caret {
 .folder-item summary::before {
   content: "";
   display: block;
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   background: var(--muted);
   clip-path: polygon(0 0, 100% 50%, 0 100%);
   transition: transform 180ms var(--ease);

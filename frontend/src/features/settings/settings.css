@@ -57,8 +57,12 @@
   outline-offset: 1px;
 }
 
+/* Sized for what it holds: at most four digits (1440 minutes) plus the number
+   spinner. An 8rem field promised a value ten times longer than any it takes. */
 .settings-input-short {
-  width: 8rem;
+  width: 4.25rem;
+  /* A quantity, so it grows leftward from the unit that follows it. */
+  text-align: right;
 }
 
 .settings-unit {
@@ -171,7 +175,9 @@
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 15rem 1fr;
+  /* 17rem, not 15: the index carries Vault names now, and each one may end in
+     a condition pill wide enough to push an ordinary name onto three lines. */
+  grid-template-columns: 17rem 1fr;
   gap: 2rem;
   align-items: start;
   max-width: 1000px;
@@ -187,6 +193,99 @@
 .settings-index nav {
   display: grid;
   margin-top: 0.6rem;
+}
+
+.settings-index-group {
+  margin: 0.8rem 0.55rem 0.35rem;
+  font-family: var(--font-display);
+  font-size: 0.68rem;
+  font-variation-settings:
+    "wdth" 85,
+    "wght" 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* A Vault name is the operator's own text and can be any length, so the row
+   is a name column and a status column rather than a flex line. The status
+   hangs from the name's first line — centred, it floated halfway down a
+   wrapped name and the right-hand column read as scattered marks instead of a
+   column. Names still wrap in full: truncating these to `Git — …` would make
+   three different Vaults read identically. */
+.settings-index .settings-vault-index-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 1.9rem;
+}
+
+.settings-index .settings-vault-index-item > :nth-child(2) {
+  /* The slot's ink is smaller than the name's, so matched tops read as the
+     slot sitting high. */
+  margin-top: 0.12rem;
+}
+.settings-vault-index-item[data-paused="true"] {
+  color: var(--muted);
+}
+.settings-vault-index-item[data-recovery="true"] {
+  color: var(--err-fg);
+  box-shadow: inset 3px 0 0 var(--err-fg);
+}
+/* The `+` takes the numeral column the instance sections use, so the add row
+   lines up with the Vault names above it rather than sitting under them. */
+.settings-vault-index-add::before {
+  content: "+";
+  font-family: var(--font-mono);
+  color: var(--hot);
+}
+.settings-vault-index-add .settings-index-title {
+  color: var(--hot);
+}
+
+.settings-vault-paused {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+}
+.settings-vault-needs-attention {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  color: var(--err-fg);
+}
+
+.settings-vault-detail .settings-sec-head {
+  margin-bottom: 0.6rem;
+}
+.settings-vault-condition {
+  margin: 0 0 1.3rem;
+  font-size: 0.88rem;
+  line-height: 1.5;
+}
+.settings-vault-detail .settings-sec-actions {
+  justify-content: flex-end;
+  margin: 1rem 0 1.5rem;
+}
+.settings-vault-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  border-top: 1px solid var(--rule);
+  padding-top: 1.2rem;
+}
+.settings-vault-disconnect-note {
+  margin: 0.6rem 0 0;
+  max-width: 34rem;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.settings-btn-danger {
+  color: var(--err-fg);
+  border-color: var(--err-border);
 }
 
 .settings-index-item {
@@ -277,6 +376,13 @@
   margin-bottom: 1.6rem;
 }
 
+/* The Vault Git sync console (#149) carries one live-state cell rather than
+   SettingsPage's two — its cell doesn't need to share the row with a
+   sibling. */
+.settings-git-console {
+  grid-template-columns: 1fr;
+}
+
 .settings-console-cell {
   padding: 0.7rem 0.9rem;
   border-right: 1px solid var(--rule);
@@ -314,6 +420,64 @@
   height: 100%;
   background: var(--hot);
   transition: width 0.6s linear;
+}
+
+/* The console condition block (#149's fourth owed design-system addition):
+   healthy and broken are the same strip with different contents, so nothing
+   jumps position when a Vault's Git sync fails. Spans the console's full
+   width as its third grid child, under the two live-state cells. */
+.settings-console-strip {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 0.9rem;
+  border-top: 1px solid var(--rule);
+}
+
+.settings-console-strip p {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  flex: 1 1 20rem;
+}
+
+.settings-console-strip[data-tier="warn"] {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+}
+
+.settings-console-strip[data-tier="error"] {
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+
+.settings-console-files {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  flex-basis: 100%;
+}
+
+/* The one condition allowed to persist across visits (#149/#121): a Vault
+   whose identity edit saved but whose final un-pause failed. */
+.settings-recovery-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  border-left: 3px solid var(--err-fg);
+  background: var(--err-bg);
+  color: var(--err-fg);
+  padding: 0.6rem 0.8rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin-bottom: 1rem;
 }
 
 /* ── section ────────────────────────────────────────────────────────────── */
@@ -366,11 +530,32 @@
 
 .settings-row {
   display: grid;
-  grid-template-columns: 1fr 20rem;
+  /* The control column fits the widest control this page has: a four-option
+     segmented group on one line. At 20rem it overhung its own track. */
+  grid-template-columns: 1fr 21.5rem;
   gap: 1.4rem;
   padding: 0.9rem 0;
   border-bottom: 1px solid var(--rule);
-  align-items: start;
+  /* The control centres on the band its own row occupies, rather than hanging
+     from the label's first line: the label side is two or three lines of
+     prose, and a control pinned to the top of a tall row read as belonging to
+     the rule above it. */
+  align-items: center;
+}
+
+/* Every control hangs off the row's right edge, whatever its natural width.
+   Left-aligned in a 20rem column, a two-button segmented group and a four-
+   button one ended in different places and the column read as ragged rather
+   than as a column of controls. */
+.settings-row > :nth-child(2) {
+  justify-self: end;
+}
+
+/* A control that is itself a stack — a segmented group with a token field
+   under it — keeps its own layout and only its contents move right. */
+.settings-row > :nth-child(2) .settings-inline,
+.settings-row > :nth-child(2) .settings-segmented {
+  justify-content: flex-end;
 }
 
 .settings-row.has-error {
@@ -379,7 +564,11 @@
   padding-left: 0.7rem;
 }
 
+/* Both carry `display: block` because a Vault's rows build them from spans
+   inside a label element, where the instance sections use div and p — without
+   it the help ran on from the end of the label as one sentence. */
 .settings-row-label {
+  display: block;
   font-family: var(--font-display);
   font-variation-settings:
     "wdth" 92,
@@ -388,11 +577,26 @@
 }
 
 .settings-row-help {
+  display: block;
   font-size: 0.8rem;
   color: var(--muted);
   line-height: 1.5;
   margin: 0.25rem 0 0;
   max-width: 52ch;
+}
+
+/* The token's state — a word beside the label, not buried in the help line
+   (#149/#121: "its state is a word beside the label, saved or none"). */
+.settings-token-state {
+  margin-left: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: lowercase;
+  color: var(--muted);
+}
+
+.settings-token-state-warn {
+  color: var(--warn-fg);
 }
 
 /* A fact about the setting rather than an instruction: quieter than the help,
@@ -476,7 +680,12 @@
   font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  padding: 0.4rem 0.6rem;
+  /* One line per option, always: a four-option group in a 20rem column broke
+     `LOCAL HISTORY` and `TWO-WAY` across two lines, and a segment that wraps
+     stops reading as one of a set of choices. The tighter side padding is
+     what buys the fourth option its room. */
+  white-space: nowrap;
+  padding: 0.4rem 0.5rem;
   border: none;
   border-right: 1px solid var(--rule);
   background: var(--paper);
@@ -513,6 +722,26 @@
   text-transform: uppercase;
   color: var(--muted);
   margin: 0 0 0.6rem;
+}
+
+.settings-plaque-head-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.settings-plaque-head-row .settings-plaque-head {
+  margin-bottom: 0;
+}
+
+/* The plaque's one affordance that opens repository, branch and folder into
+   fields (#149/#121) — sized to the row rather than the wide default. */
+.settings-plaque-field {
+  width: 16rem;
+  max-width: 100%;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.78rem;
 }
 
 .settings-plaque dl {
@@ -583,6 +812,14 @@
   padding: 1.2rem 1.3rem;
 }
 
+/* The creation flow (#153) has more rows than the plain confirmation
+   dialogs this class is otherwise used for, so it alone scrolls internally
+   rather than overflowing the viewport on short screens. */
+.settings-modal-form {
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
 .settings-modal h3 {
   font-family: var(--font-display);
   font-variation-settings:
@@ -637,4 +874,40 @@
     grid-template-columns: 1fr;
     gap: 0.6rem;
   }
+}
+
+/* ── unsaved drafts (#151) ──────────────────────────────────────────────── */
+
+.settings-drafts-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-draft-row {
+  margin: 0;
+}
+
+.settings-draft-preview {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 0.8rem;
+}
+
+.settings-draft-destination {
+  padding: 0;
+  border: none;
+}
+
+.settings-draft-no-note {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  margin: 0.6rem 0;
+}
+
+.settings-draft-actions {
+  justify-content: flex-end;
+  margin: 0.8rem 0 0;
 }
