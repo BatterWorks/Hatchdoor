@@ -8,9 +8,8 @@ use notify::{
     event::{MetadataKind, ModifyKind},
 };
 use tokio::sync::{broadcast, mpsc, watch};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::app_state::{AppState, refresh_if_changed_since};
 use crate::vault::ExcludeMatcher;
 use crate::vault_registry::VaultId;
 
@@ -139,128 +138,6 @@ async fn run_vault_change_watcher(
         }
     }
     info!(%vault_id, "Vault watcher stopped");
-}
-
-pub fn spawn_vault_watcher(state: AppState, vault_path: PathBuf, cache_db_path: PathBuf) {
-    tokio::spawn(async move {
-        if let Err(error) = run_vault_watcher(state, vault_path, cache_db_path).await {
-            warn!("Vault watcher disabled: {error}");
-        }
-    });
-}
-
-async fn run_vault_watcher(
-    state: AppState,
-    vault_path: PathBuf,
-    cache_db_path: PathBuf,
-) -> Result<(), String> {
-    // `watch` holds one monotonically increasing dirty generation instead of
-    // queueing one allocation per filesystem event. The notify callback runs
-    // independently of reindexing, so it can always overwrite the pending
-    // signal while a rebuild owns `refresh_lock`.
-    let (dirty_tx, mut dirty_rx) = watch::channel(0_u64);
-    let callback_state = state.clone();
-    let callback_cache_path = cache_db_path.clone();
-    let callback_vault_path = vault_path.clone();
-    let mut watcher = RecommendedWatcher::new(
-        move |result| {
-            let event = match result {
-                Ok(event) => event,
-                Err(error) => {
-                    warn!("Vault watcher event error: {error}");
-                    return;
-                }
-            };
-            let scan_config = match callback_state.live_scan_config() {
-                Ok(scan_config) => scan_config,
-                Err(error) => {
-                    warn!(
-                        "Vault watcher could not load the current exclude configuration: {error}"
-                    );
-                    return;
-                }
-            };
-            if should_refresh_for_event(
-                &event,
-                &callback_cache_path,
-                &callback_vault_path,
-                &scan_config.exclude,
-            ) {
-                dirty_tx.send_modify(|generation| *generation = generation.wrapping_add(1));
-            }
-        },
-        Config::default(),
-    )
-    .map_err(|error| format!("failed to create watcher: {error}"))?;
-
-    watcher
-        .watch(&vault_path, RecursiveMode::Recursive)
-        .map_err(|error| format!("failed to watch {}: {error}", vault_path.display()))?;
-    info!(vault_path = %vault_path.display(), "Vault watcher started");
-
-    while dirty_rx.changed().await.is_ok() {
-        // Generation is captured before the debounce. If an application write
-        // completes its guaranteed refresh during that interval, its new cache
-        // revision proves this filesystem notification was already incorporated
-        // and the watcher avoids serializing a duplicate full reindex behind it.
-        let dirty_revision = state
-            .vault_revision
-            .load(std::sync::atomic::Ordering::SeqCst);
-        let deadline =
-            debounce_dirty_signals(&mut dirty_rx, WATCH_DEBOUNCE, WATCH_MAX_DEBOUNCE).await;
-        debug!(?deadline, "Vault watcher dirty signals coalesced");
-
-        // The watcher is deliberately started once with the server lifecycle,
-        // including while initial model setup is still running. Initial indexing
-        // already incorporates those changes; only a failed startup may use a
-        // filesystem signal to recover readiness.
-        let startup_state = state.startup.status().state;
-        if !state.startup.is_ready() && startup_state != "failed" {
-            continue;
-        }
-        match refresh_if_changed_since(&state, dirty_revision).await {
-            Ok(true) => {}
-            Ok(false) => {
-                debug!(dirty_revision, "Vault watcher event already incorporated");
-            }
-            Err((status, body)) => {
-                error!(
-                    status = status.as_u16(),
-                    error = %body.0.error,
-                    "Vault watcher refresh failed"
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DebounceDeadline {
-    Quiet,
-    Maximum,
-}
-
-async fn debounce_dirty_signals(
-    dirty_rx: &mut watch::Receiver<u64>,
-    debounce: Duration,
-    maximum: Duration,
-) -> DebounceDeadline {
-    let maximum_deadline = tokio::time::Instant::now() + maximum;
-    let mut quiet_deadline = tokio::time::Instant::now() + debounce;
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(quiet_deadline) => return DebounceDeadline::Quiet,
-            _ = tokio::time::sleep_until(maximum_deadline) => return DebounceDeadline::Maximum,
-            changed = dirty_rx.changed() => {
-                if changed.is_err() {
-                    return DebounceDeadline::Quiet;
-                }
-                quiet_deadline = tokio::time::Instant::now() + debounce;
-            }
-        }
-    }
 }
 
 async fn debounce_events(
@@ -529,58 +406,6 @@ mod tests {
             dir.path(),
             &default_exclude()
         ));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn debounce_dirty_signals_waits_for_a_quiet_period() {
-        let (tx, mut rx) = watch::channel(0_u64);
-        tx.send_replace(1);
-        rx.changed().await.expect("first dirty signal");
-
-        let debounce = tokio::spawn(async move {
-            debounce_dirty_signals(
-                &mut rx,
-                Duration::from_millis(10),
-                Duration::from_millis(30),
-            )
-            .await
-        });
-        tokio::time::advance(Duration::from_millis(10)).await;
-
-        assert_eq!(
-            debounce.await.expect("debounce task"),
-            DebounceDeadline::Quiet
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn debounce_signals_delivers_at_the_maximum_delay_under_continuous_churn() {
-        let (tx, mut rx) = watch::channel(0_u64);
-        tx.send_replace(1);
-        rx.changed().await.expect("first dirty signal");
-
-        let debounce = tokio::spawn(async move {
-            debounce_dirty_signals(
-                &mut rx,
-                Duration::from_millis(10),
-                Duration::from_millis(30),
-            )
-            .await
-        });
-        tokio::task::yield_now().await;
-
-        for generation in 2..=6 {
-            tokio::time::advance(Duration::from_millis(5)).await;
-            tx.send_replace(generation);
-            tokio::task::yield_now().await;
-        }
-        tokio::time::advance(Duration::from_millis(5)).await;
-
-        assert_eq!(
-            debounce.await.expect("debounce task"),
-            DebounceDeadline::Maximum,
-            "continuous events must not postpone the bounded flush"
-        );
     }
 
     #[test]
