@@ -6,7 +6,6 @@ import { detectLineEnding } from "../../lib/sourceMap";
 import type { NoteHeading } from "../../lib/noteHeadings";
 import type { NoteLinks } from "../../types";
 import { UiButton } from "../ui";
-import { jumpToHeading } from "./dom";
 import {
   buildContentWithFrontmatter,
   parseFrontmatterEntries,
@@ -354,7 +353,13 @@ function NoteLinksList({
   );
 }
 
-export function NoteTocDesktop({ headings }: { headings: NoteHeading[] }) {
+export function NoteTocDesktop({
+  headings,
+  onJump,
+}: {
+  headings: NoteHeading[];
+  onJump: (id: string) => void;
+}) {
   if (headings.length === 0) {
     return null;
   }
@@ -369,7 +374,7 @@ export function NoteTocDesktop({ headings }: { headings: NoteHeading[] }) {
               type="button"
               className="note-toc-link"
               data-level={heading.level}
-              onClick={() => jumpToHeading(heading.id)}
+              onClick={() => onJump(heading.id)}
             >
               {heading.text}
             </button>
@@ -380,7 +385,13 @@ export function NoteTocDesktop({ headings }: { headings: NoteHeading[] }) {
   );
 }
 
-export function NoteTocMobile({ headings }: { headings: NoteHeading[] }) {
+export function NoteTocMobile({
+  headings,
+  onJump,
+}: {
+  headings: NoteHeading[];
+  onJump: (id: string) => void;
+}) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
 
   if (headings.length === 0) {
@@ -389,7 +400,7 @@ export function NoteTocMobile({ headings }: { headings: NoteHeading[] }) {
 
   const jumpFromMobileToc = (id: string) => {
     detailsRef.current?.removeAttribute("open");
-    window.requestAnimationFrame(() => jumpToHeading(id));
+    onJump(id);
   };
 
   return (

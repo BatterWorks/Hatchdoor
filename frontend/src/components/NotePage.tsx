@@ -78,7 +78,6 @@ import {
   NoteTocMobile,
   SearchHitNavigator,
 } from "./note-page/sections";
-import { useTailSpace } from "./note-page/useTailSpace";
 import { useResolvedWikilinks } from "./note-page/wikilinks";
 
 const TOUCH_EDIT_HINT_KEY = "hatchdoor.touchEditHintSeen";
@@ -428,10 +427,21 @@ export function NotePage({
 
   const parsed = useMemo(() => parseFrontmatter(note?.content ?? ""), [note]);
 
-  // Short notes end where their text ends; only a note long enough to scroll
-  // carries the trailing space that lets a heading near its end reach the top
-  // of the pane.
-  const { needsTail, contentRef: noteContentRef } = useTailSpace();
+  // A note ends where its text ends — until someone navigates it by heading.
+  // Reaching a heading near the end means scrolling past the end, so the first
+  // jump adds the trailing space that makes that possible, and it stays for as
+  // long as the reader is on this note. It cannot be transient: dropping the
+  // space again would clamp the scroll and pull the heading straight back down.
+  const [tailArmed, setTailArmed] = useState(false);
+  useEffect(() => {
+    setTailArmed(false);
+  }, [note?.slug]);
+
+  // The space has to be in the DOM before the scroll, or the jump clamps short.
+  const jumpToHeadingWithTail = useCallback((id: string) => {
+    setTailArmed(true);
+    window.requestAnimationFrame(() => jumpToHeading(id));
+  }, []);
 
   useEffect(() => {
     if (!note) {
@@ -808,9 +818,9 @@ export function NotePage({
     } else if (matchHeading) {
       const parts = matchHeading.split(" > ");
       const lastSegment = parts[parts.length - 1] ?? matchHeading;
-      jumpToHeading(slugifyHeading(lastSegment));
+      jumpToHeadingWithTail(slugifyHeading(lastSegment));
     }
-  }, [markdown, note?.slug, searchQuery, matchHeading]);
+  }, [markdown, note?.slug, searchQuery, matchHeading, jumpToHeadingWithTail]);
 
   useEffect(() => {
     if (searchHitsRef.current.length === 0) {
@@ -1027,11 +1037,7 @@ export function NotePage({
 
   return (
     <div className="note-page-layout">
-      <article
-        className="note-content"
-        ref={noteContentRef}
-        data-tail={needsTail}
-      >
+      <article className="note-content" data-tail={tailArmed}>
         <div className="note-page-heading">
           <h2 className="note-page-title">{note.title}</h2>
         </div>
@@ -1123,7 +1129,7 @@ export function NotePage({
           onTagSelect={(tag) => onTagSelect(tag, vaultId)}
         />
         <NoteLinksPanel vaultId={vaultId} links={noteLinks} />
-        <NoteTocMobile headings={tocHeadings} />
+        <NoteTocMobile headings={tocHeadings} onJump={jumpToHeadingWithTail} />
         {heldDraftsPresent && !heldDraftsBannerDismissed && !demoMode ? (
           <div className="write-notice" role="status">
             <div className="write-notice-messages">
@@ -1220,7 +1226,7 @@ export function NotePage({
         )}
       </article>
 
-      <NoteTocDesktop headings={tocHeadings} />
+      <NoteTocDesktop headings={tocHeadings} onJump={jumpToHeadingWithTail} />
     </div>
   );
 }
