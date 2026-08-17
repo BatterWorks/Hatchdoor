@@ -217,18 +217,46 @@
   animation: shimmer 1.2s linear infinite;
 }
 
-/* Browsable but not yet searchable: the count the Vault already has, trailed
-   by the same shimmer the indexing slot uses at half width. Nothing is wrong,
-   so it takes no tier colour — it reads as the indexing slot resolving. */
+/* A slot whose reading is still moving — the startup percent/ETA, or a
+   browsable Vault's count while its search is still building. The reading
+   itself is what moves. A light sweeps across
+   the digits rather than across a bar beside them, so the eye tracks the
+   value that is actually changing. `background-clip: text` paints the sweep
+   through the glyphs; the colour underneath stands in wherever that is
+   unsupported, and the animation is dropped entirely for reduced motion. */
+.slot-shimmer-reading {
+  font-variant-numeric: tabular-nums;
+  background: linear-gradient(
+    90deg,
+    var(--muted) 0%,
+    var(--muted) 35%,
+    var(--ink) 50%,
+    var(--muted) 65%,
+    var(--muted) 100%
+  );
+  background-size: 300% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 1.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slot-shimmer-reading {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
+/* Browsable but not yet searchable: the count the Vault already has, carrying
+   the same sweep the startup reading does. Nothing is wrong, so it takes no
+   tier colour — it reads as the indexing bar resolving into a number, and
+   settles when the sweep stops. */
 .vault-slot-pending-search {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-}
-
-.vault-slot-pending-search .vault-slot-indexing-bar {
-  width: 0.8rem;
 }
 
 /* Rail — whole-vault destinations, inside the sidebar so it costs no topbar slot. */

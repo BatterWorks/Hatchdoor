@@ -133,6 +133,14 @@
   background: var(--rule-strong);
 }
 
+/* Except after the desktop search trigger, which draws its own box: the
+   rule beside a bordered control is a second line saying what the first
+   already said. The mobile search icon is borderless, so its neighbour keeps
+   the rule. */
+.topbar-search-trigger + *::before {
+  display: none;
+}
+
 /* Search trigger button */
 .topbar-search-trigger {
   display: inline-flex;

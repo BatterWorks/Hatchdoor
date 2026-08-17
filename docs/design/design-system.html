@@ -494,6 +494,9 @@
     transform: translateY(-50%);
     width: 1px; height: 1.15rem; background: var(--rule-strong);
   }
+  /* Except after a control that draws its own box (the desktop search
+     trigger): the border is already the separation. */
+  .search-trigger + *::before, .topbar-search-trigger + *::before { display: none; }
   .search-trigger {
     display: inline-flex;
     align-items: center;
@@ -1427,6 +1430,18 @@
   .vslot-name { flex: 1 1 auto; font-family: var(--font-display); font-size: 0.86rem; color: var(--ink-soft); }
   .vault-slot-indexing { display: inline-flex; align-items: center; }
   .vault-slot-indexing-bar { width: 1.6rem; height: 0.6rem; background: linear-gradient(90deg, var(--paper-2), var(--paper), var(--paper-2)); background-size: 200% 100%; animation: shimmer 1.2s linear infinite; }
+  .vault-slot-pending-search { display: inline-flex; align-items: center; }
+  .slot-shimmer-reading {
+    font-variant-numeric: tabular-nums;
+    background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 35%, var(--ink) 50%, var(--muted) 65%, var(--muted) 100%);
+    background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: shimmer 1.8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .slot-shimmer-reading { animation: none; background: none; -webkit-text-fill-color: currentColor; }
+  }
   .vault-slot-condition, .vault-slot-shortfall { font-family: var(--font-mono); font-size: 0.62rem; white-space: nowrap; }
   .vault-tier-warn { color: var(--warn-fg); }
   .vault-tier-error { color: var(--err-fg); }
@@ -1916,7 +1931,7 @@
     <section class="doc-section" id="sidebar">
       <div class="doc-section-num">§05</div>
       <h2>Sidebar (Explorer)</h2>
-      <p class="blurb"><b>Four zones:</b> the Scope zone (#138), a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the third scrolls</b> &mdash; scope, rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>).</p>
+      <p class="blurb"><b>Four zones:</b> the Scope zone (#138), a fixed rail of whole-vault destinations, the scrolling note navigation, and the create action pinned at the bottom. <b>Only the third scrolls</b> &mdash; scope, rail and footer never move. The rail lives inside the sidebar rather than the topbar on purpose: the topbar&rsquo;s four mobile slots are a hard budget, and the drawer sits outside it. The Scope zone is the one conditional zone: absent at one enabled Vault and absent below 920px, where the topbar&rsquo;s scope row carries it instead (<a href="#mobile-scope-row">§30</a>). One exception, from #150: at a single Vault it stays on screen while first-run scanning or indexing is running, purely to hold that progress reading (<a href="#vault-slot">§27</a>) &mdash; the zone is where progress is reported, so it outlives its own visibility rule for as long as there is progress to report. At zero Vaults it holds its place too, reading <code>All Vaults</code> with no rows beneath it, in neutral ink.</p>
 
       <p class="blurb"><b>The Scope zone takes <span class="key">--paper</span>, one step lighter than the sidebar&rsquo;s own <span class="key">--bg</span>.</b> It is the only zone with a ground of its own, and it earns one: pinned above a scrolling list, it needs to read as a fixed shelf rather than as the first few rows of the navigation that moves beneath it. The token inverts correctly &mdash; <span class="key">--paper</span> is the lighter neighbour of <span class="key">--bg</span> in both themes &mdash; so the shelf lifts in light and in dark without a second declaration. The rail below it stays on the pane ground; two stacked shelves would be a stripe, not a hierarchy.</p>
 
@@ -2717,6 +2732,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
 
       <h3 class="doc-sub">Separated by a hairline, not by a box</h3>
       <p class="blurb">Where icon buttons sit together in the chrome, a 1px <span class="key">--rule-strong</span> hairline stands between them. It lives in the gap rather than on either control, so a pressed button&rsquo;s ink square never paints over it, and it is the same mark that separates every other zone in the app rather than a new one invented for buttons.</p>
+      <p class="blurb"><b>Not beside a control that draws its own box.</b> The hairline is there because these buttons are borderless; the desktop search trigger is not, so the rule after it is a second line saying what the trigger&rsquo;s own border already said, and it is suppressed (<span class="key">.topbar-search-trigger + *::before</span>). The mobile search icon <i>is</i> borderless, so its neighbour keeps the rule. The test is the control to the left: box, no hairline.</p>
       <div class="stage" style="display:flex; align-items:center;">
         <div class="topbar-actions">
           <button class="icon-btn">&#9906;</button>
@@ -2794,6 +2810,8 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       <div class="stage">
         <div class="vslot-row"><span class="vslot-name">Alpha</span><span class="side-count">126</span></div>
         <div class="vslot-row"><span class="vslot-name">Beta</span><span class="vault-slot-indexing" role="status" aria-label="Indexing"><span class="vault-slot-indexing-bar"></span></span></div>
+        <div class="vslot-row"><span class="vslot-name">Bravo</span><span class="vault-slot-pending-search" role="status" aria-label="445 notes. Browsing is ready. Search for this Vault is still building."><span class="side-count slot-shimmer-reading">445</span></span></div>
+        <div class="vslot-row"><span class="vslot-name">All Vaults</span><span class="vault-slot-indexing" role="status" aria-label="Indexing 42%, 27m left"><span class="side-count slot-shimmer-reading">42%</span></span></div>
         <div class="vslot-row"><span class="vslot-name">Gamma</span><span class="vault-slot-condition vault-tier-warn">stale</span></div>
         <div class="vslot-row"><span class="vslot-name">Delta</span><span class="vault-slot-condition vault-tier-warn">sync failed</span></div>
         <div class="vslot-row"><span class="vslot-name">Echo</span><span class="vault-slot-condition vault-tier-error">sync stopped</span></div>
@@ -2806,6 +2824,8 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <tbody>
           <tr><td class="name">126</td><td class="val">muted, mono</td><td class="val">healthy &mdash; the note count</td></tr>
           <tr><td class="name">shimmer</td><td class="val">muted, moving</td><td class="val">indexing &mdash; search still answers from the previous snapshot. Also covers a first index that has never published one: <code>activation</code> stays <code>active</code> the moment a Vault's directory stats fine, so a never-indexed Vault is distinguishable from one whose directory vanished (only the latter turns <code>activation</code> <code>unavailable</code> too)</td></tr>
+          <tr><td class="name">445, sweeping</td><td class="val">muted, the number itself moving</td><td class="val">browsable but not yet searchable &mdash; the Vault has published its Notes and can be read now, while the embedding pass behind it is still running. Reached only on a first index; a rebuild keeps serving the prior generation instead</td></tr>
+          <tr><td class="name">42% / 27m left, sweeping</td><td class="val">muted, the number itself moving</td><td class="val">first-run indexing, on the <code>All Vaults</code> row and the collapsed head &mdash; the shrunk startup gate&rsquo;s progress (#150), alternating the two readings every 3s. Falls back to the bar while scanning, where no number exists yet</td></tr>
           <tr><td class="name">stale</td><td class="val">warn, plain ink</td><td class="val">indexing failed &mdash; the snapshot is frozen behind the Markdown</td></tr>
           <tr><td class="name">sync failed</td><td class="val">warn, plain ink</td><td class="val">the last Git sync did not succeed &mdash; backoff retry is running</td></tr>
           <tr><td class="name">sync stopped</td><td class="val">error, bordered ground</td><td class="val"><code>dirty_working_copy</code> &mdash; local edits halted integration</td></tr>
@@ -2824,6 +2844,26 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
       (the Vault's own runtime error message where one exists); the word on screen stays the API's
       own, terse.</p>
 
+      <p class="blurb"><b>Where there is a number, the number is what moves.</b> A slot whose reading
+      is still settling carries the sweep through its own glyphs
+      (<code>background-clip: text</code>), never through a second bar beside it: a marker next to a
+      value invites the reader to watch the marker, when the value is the thing changing. The
+      standalone bar survives only where no number exists yet &mdash; a Vault indexing behind its
+      previous snapshot, or a first-run scan. So one Vault's whole first index reads as one thing
+      settling: bar, then moving number, then still number. Under
+      <code>prefers-reduced-motion</code> the sweep is dropped and the reading stands in plain muted
+      ink; the accessible name carries the state in words either way, so nothing depends on the
+      motion.</p>
+
+      <p class="blurb"><b>Two readings, one slot.</b> Where an index reports both a percent and a
+      time estimate, the slot alternates between them every 3s rather than setting them side by side
+      &mdash; the Scope zone's trailing column is one reading wide by rule, and a second reading
+      parked beside the first is the bar problem again in words. The ETA is worded coarsely
+      (<code>under a minute left</code>, <code>27m left</code>, <code>2h left</code>): a
+      second-by-second countdown on a throughput estimate this noisy claims precision the number does
+      not have. The accessible name carries both readings at once, so a screen reader never depends on
+      catching the right half of the cycle.</p>
+
       <p class="blurb">The prototype's coloured status dot is deleted: it is chrome the design system
       does not have, and a mark carrying its meaning only in colour tells a colourblind person nothing
       and everyone else nothing specific. A read-only Vault shows its note count &mdash; the slot
@@ -2835,6 +2875,7 @@ mood        = <span class="str">"calm; not on a Sunday"</span></pre>
         <span class="key">app/vaultSlot.tsx</span><span class="key">app/vaultSlotLogic.ts</span><span class="key">.vault-slot-condition</span><span class="key">.vault-slot-shortfall</span>
         <span class="key">.vault-tier-warn</span><span class="key">.vault-tier-error</span>
         <span class="key">.vault-slot-indexing</span><span class="key">.vault-slot-indexing-bar</span><span class="key">.side-count</span>
+        <span class="key">.vault-slot-pending-search</span><span class="key">.slot-shimmer-reading</span>
       </div>
     </section>
 
