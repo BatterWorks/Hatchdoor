@@ -693,6 +693,28 @@
   cursor: pointer;
 }
 
+/* A choice with a field beneath it — the sign-in group and its token box — is
+   one control, so it reads as one block: the group stretches to the field's
+   own width instead of ending short of it, and the field is set off rather
+   than butted against it. Two right-aligned controls of different widths
+   stacked flush read as two unrelated things that happened to land together. */
+.settings-choice-stack {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.settings-choice-stack .settings-segmented {
+  display: grid;
+  grid-auto-flow: column;
+  /* Equal segments, so the divider between them lands mid-control rather than
+     wherever the longer label happens to end. */
+  grid-auto-columns: 1fr;
+}
+
+.settings-choice-stack .settings-input {
+  max-width: none;
+}
+
 .settings-segmented button:last-child {
   border-right: none;
 }
