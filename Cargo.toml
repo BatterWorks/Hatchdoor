@@ -1,6 +1,6 @@
 [package]
 name = "hatchdoor"
-version = "2.4.0"
+version = "2.5.0"
 edition = "2024"
 default-run = "hatchdoor"
 license = "AGPL-3.0-only"
