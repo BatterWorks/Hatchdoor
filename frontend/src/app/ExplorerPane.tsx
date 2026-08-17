@@ -38,6 +38,11 @@ import type {
   VaultTree,
 } from "../types";
 
+/** How long each face of the alternating startup slot (percent, then time
+ * left) holds before the other takes its place. Long enough to read, short
+ * enough that a reader who glanced at the wrong moment does not wait. */
+const STARTUP_SLOT_FACE_MS = 3_000;
+
 /** How long a scope change holds the outgoing scope's content on screen
  * before giving way to the skeleton (#147). `loadingTree` only toggles on a
  * scope change or first mount — the SSE-driven background tree refresh
@@ -57,21 +62,60 @@ function countNotes(folder: ExplorerFolder): number {
 /** The first-run model-setup/indexing progress the shrunk startup gate no
  * longer blocks on (#150): `percent` is unknown during `scanning`, known
  * during `indexing`. */
-export type StartupProgress = { label: string; percent: number | null };
+export type StartupProgress = {
+  label: string;
+  percent: number | null;
+  /** Time left for this index, already worded ("2m left"); `null` until the
+   * backend has enough throughput to estimate one. */
+  eta: string | null;
+};
 
-/** Reuses the per-Vault "indexing" slot's visual language (an animated bar)
- * rather than inventing a second one, adding only the percent when known. */
+/**
+ * The startup slot's reading is the moving part: the number itself carries
+ * the shimmer, so what the eye tracks is the value that is changing rather
+ * than a separate bar beside it. Where a time estimate exists, the slot
+ * alternates between the percent and it — one slot, two readings, never two
+ * things competing for the same corner.
+ *
+ * A Vault still scanning has neither, so the slot falls back to the
+ * per-Vault indexing bar: something is moving and no number describes it yet.
+ */
 function StartupProgressSlot({ progress }: { progress: StartupProgress }) {
+  const [showEta, setShowEta] = useState(false);
+  const canAlternate = progress.percent !== null && progress.eta !== null;
+
+  useEffect(() => {
+    if (!canAlternate) {
+      setShowEta(false);
+      return;
+    }
+    const timer = window.setInterval(
+      () => setShowEta((prev) => !prev),
+      STARTUP_SLOT_FACE_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [canAlternate]);
+
+  if (progress.percent === null) {
+    return (
+      <span
+        className="vault-slot-indexing"
+        role="status"
+        aria-label={progress.label}
+      >
+        <span className="vault-slot-indexing-bar" aria-hidden="true" />
+      </span>
+    );
+  }
+  const reading =
+    showEta && progress.eta !== null ? progress.eta : `${progress.percent}%`;
   return (
     <span
       className="vault-slot-indexing"
       role="status"
       aria-label={progress.label}
     >
-      {progress.percent !== null ? (
-        <span className="side-count">{progress.percent}%</span>
-      ) : null}
-      <span className="vault-slot-indexing-bar" aria-hidden="true" />
+      <span className="side-count slot-shimmer-reading">{reading}</span>
     </span>
   );
 }

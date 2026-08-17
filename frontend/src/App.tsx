@@ -135,7 +135,11 @@ function VaultWorkspace({
     loadTree,
     loadModifiedNotes,
   } = useVaultTree(scope);
-  const vaultNoteCounts = useVaultNoteCounts(vaults.length > 1, vaultRevision);
+  // Gated on the zone rendering at all, not on more than one Vault: #150's
+  // startup slot keeps the Scope zone on screen at a single Vault too, and
+  // that zone's rows read note counts. Gating at `> 1` left the single-Vault
+  // case with no counts fetched, which the slot rendered as a bare "0".
+  const vaultNoteCounts = useVaultNoteCounts(vaults.length > 0, vaultRevision);
   // Every enabled Vault, whatever the browsing scope: a note can be created in
   // a Vault that is not currently being browsed, and the picker says so.
   const dialogVaults = useMemo(
@@ -1070,12 +1074,36 @@ function deriveStartupProgress(
   status: StartupStatus | null,
 ): StartupProgress | undefined {
   if (status?.state === "scanning") {
-    return { label: "Scanning", percent: null };
+    return { label: "Scanning", percent: null, eta: null };
   }
   if (status?.state === "indexing") {
-    return { label: `Indexing ${status.percent}%`, percent: status.percent };
+    const eta = formatEtaSeconds(status.eta_seconds);
+    return {
+      label: eta
+        ? `Indexing ${status.percent}%, ${eta}`
+        : `Indexing ${status.percent}%`,
+      percent: status.percent,
+      eta,
+    };
   }
   return undefined;
+}
+
+/** The index ETA in the coarsest unit that still says something true: a
+ * second-by-second countdown on an estimate this noisy would read as more
+ * precision than the number has. `null` when the backend has none yet. */
+function formatEtaSeconds(seconds: number | undefined): string | null {
+  if (seconds === undefined || seconds <= 0) {
+    return null;
+  }
+  if (seconds < 60) {
+    return "under a minute left";
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m left`;
+  }
+  return `${Math.round(minutes / 60)}h left`;
 }
 
 export function App() {

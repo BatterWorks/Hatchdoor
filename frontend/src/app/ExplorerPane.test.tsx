@@ -283,7 +283,7 @@ describe("ExplorerPane Scope zone", () => {
   it("keeps the one-Vault Scope zone visible while startup work needs its progress slot (#150)", () => {
     renderPane({
       vaults: [THREE_VAULTS[0]],
-      startupProgress: { label: "Indexing 42%", percent: 42 },
+      startupProgress: { label: "Indexing 42%", percent: 42, eta: null },
     });
 
     expect(screen.getByText("Scope")).toBeInTheDocument();
@@ -339,7 +339,7 @@ describe("ExplorerPane Scope zone", () => {
   it("shows the shrunk startup gate's progress in its own slot instead of the aggregate (#150)", () => {
     renderPane({
       vaults: THREE_VAULTS,
-      startupProgress: { label: "Indexing 42%", percent: 42 },
+      startupProgress: { label: "Indexing 42%", percent: 42, eta: null },
     });
 
     expect(
@@ -350,7 +350,7 @@ describe("ExplorerPane Scope zone", () => {
     renderPane({
       vaults: THREE_VAULTS,
       scopeZoneCollapsed: true,
-      startupProgress: { label: "Indexing 42%", percent: 42 },
+      startupProgress: { label: "Indexing 42%", percent: 42, eta: null },
     });
     const head = document.querySelector(".scope-zone-head") as HTMLElement;
     expect(within(head).getByRole("status")).toHaveAttribute(
@@ -358,6 +358,51 @@ describe("ExplorerPane Scope zone", () => {
       "Indexing 42%",
     );
     expect(within(head).getByText("42%")).toBeInTheDocument();
+  });
+
+  it("alternates the startup slot between the percent and the time left", () => {
+    vi.useFakeTimers();
+    try {
+      renderPane({
+        vaults: THREE_VAULTS,
+        startupProgress: {
+          label: "Indexing 42%, 3m left",
+          percent: 42,
+          eta: "3m left",
+        },
+      });
+
+      const slot = scopeZone().getByRole("radio", { name: /^All Vaults/ });
+      expect(slot).toHaveTextContent("42%");
+      act(() => {
+        vi.advanceTimersByTime(3_000);
+      });
+      expect(slot).toHaveTextContent("3m left");
+      act(() => {
+        vi.advanceTimersByTime(3_000);
+      });
+      expect(slot).toHaveTextContent("42%");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds on the percent while no time estimate exists", () => {
+    vi.useFakeTimers();
+    try {
+      renderPane({
+        vaults: THREE_VAULTS,
+        startupProgress: { label: "Indexing 42%", percent: 42, eta: null },
+      });
+
+      const slot = scopeZone().getByRole("radio", { name: /^All Vaults/ });
+      act(() => {
+        vi.advanceTimersByTime(9_000);
+      });
+      expect(slot).toHaveTextContent("42%");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists All Vaults plus every enabled Vault in Vault-management order", () => {
