@@ -672,8 +672,8 @@ The `HATCHDOOR_GIT_*` family above is the legacy single-vault path. A Vault in
 the registry carries its own versioning, set on that Vault in Settings, and a
 server-wide answer cannot survive a second Vault. On a first start with no
 registry those variables are read once to import an existing single-vault
-deployment. Hatchdoor then refuses the next start until they are removed; on a
-fresh install, set versioning per Vault instead and leave them unset. See
+deployment. Hatchdoor then starts a restricted recovery screen until they are
+removed and the container is restarted; on a fresh install, set versioning per Vault instead and leave them unset. See
 [`docs/migrations/legacy-single-vault.md`](docs/migrations/legacy-single-vault.md).
 
 Use `list_vaults` to inspect each Vault's Git status, and `sync_vault` or

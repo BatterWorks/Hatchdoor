@@ -1736,11 +1736,31 @@ pub(crate) async fn dispatch_vault_index_turn(
 
 /// Execute one Index turn using the immutable embed-layer setting bound by
 /// runtime composition at the turn's start.
+#[cfg(test)]
 pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
     collection: &VaultCollectionRuntime,
     cache: Arc<SqliteCache>,
     embedder: Arc<dyn Embedder>,
     embed_layers: bool,
+    request: VaultWorkRequest,
+) -> Result<(), VaultWorkError> {
+    dispatch_vault_index_turn_with_progress(
+        collection,
+        cache,
+        embedder,
+        embed_layers,
+        None,
+        request,
+    )
+    .await
+}
+
+pub(crate) async fn dispatch_vault_index_turn_with_progress(
+    collection: &VaultCollectionRuntime,
+    cache: Arc<SqliteCache>,
+    embedder: Arc<dyn Embedder>,
+    embed_layers: bool,
+    on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
     request: VaultWorkRequest,
 ) -> Result<(), VaultWorkError> {
     let vault_id = request.vault_id();
@@ -1819,11 +1839,12 @@ pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
                 ),
             }
             indexing_cache
-                .replace_vault_snapshot_with_embed_layers(
+                .replace_vault_snapshot_with_embed_layers_and_progress(
                     vault_id,
                     &index,
                     embedder.as_ref(),
                     embed_layers,
+                    on_progress,
                 )
                 .map_err(|message| {
                     (
@@ -2044,10 +2065,12 @@ where
             RegistryVaultSource::ExistingGit {
                 mode: existing_mode @ (VaultGitMode::PullOnly | VaultGitMode::TwoWay),
                 repository_path,
+                repository_url,
                 branch,
                 ..
             } => {
                 let repository_path = repository_path.clone();
+                let repository_url = repository_url.clone();
                 let vault_path = control_block.vault_path().to_path_buf();
                 let branch = branch.clone();
                 let mode = *existing_mode;
@@ -2089,6 +2112,7 @@ where
                     run_existing_git_remote_turn(
                         repository_path,
                         vault_path,
+                        repository_url,
                         branch,
                         mode,
                         credentials,

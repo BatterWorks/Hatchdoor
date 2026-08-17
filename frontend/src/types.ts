@@ -132,7 +132,7 @@ export type VaultRegistryRecovery = {
  * from `VaultRegistryRecovery`: that one means the persisted registry file
  * itself is unreadable. */
 export type LegacyMigrationRecovery = {
-  code: "legacy_migration_required";
+  code: "legacy_migration_required" | "legacy_environment_cleanup_required";
   message: string;
 };
 

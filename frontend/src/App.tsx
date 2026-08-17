@@ -116,6 +116,9 @@ function VaultWorkspace({
     legacyMigrationRecovery,
     loadVaults,
   } = discovery;
+  const hasRegistryRecovery = Boolean(
+    registryRecovery || legacyMigrationRecovery,
+  );
   const primaryVaultId = resolvePrimaryVaultId(activeNote?.vaultId, vaults);
 
   const {
@@ -839,9 +842,29 @@ function VaultWorkspace({
                   />
                 ) : legacyMigrationRecovery ? (
                   <BrokenStartState
+                    title={
+                      legacyMigrationRecovery.code ===
+                      "legacy_environment_cleanup_required"
+                        ? "Restart Required"
+                        : undefined
+                    }
                     message={legacyMigrationRecovery.message}
-                    onTryAgain={() => void loadVaults()}
-                    onStartWithNoVaults={() => setStartWithNoVaultsOpen(true)}
+                    onTryAgain={
+                      legacyMigrationRecovery.code ===
+                      "legacy_migration_required"
+                        ? () => void loadVaults()
+                        : undefined
+                    }
+                    onStartWithNoVaults={
+                      legacyMigrationRecovery.code ===
+                      "legacy_migration_required"
+                        ? () => setStartWithNoVaultsOpen(true)
+                        : undefined
+                    }
+                    unchangedNotice={
+                      legacyMigrationRecovery.code ===
+                      "legacy_migration_required"
+                    }
                   />
                 ) : vaults.length === 0 ? (
                   <ZeroVaultState
@@ -857,8 +880,26 @@ function VaultWorkspace({
                 )
               }
             />
-            <Route path="/stats" element={<StatsPage />} />
-            <Route path="/graph" element={<GraphPage />} />
+            <Route
+              path="/stats"
+              element={
+                hasRegistryRecovery ? (
+                  <Navigate to="/" replace />
+                ) : (
+                  <StatsPage />
+                )
+              }
+            />
+            <Route
+              path="/graph"
+              element={
+                hasRegistryRecovery ? (
+                  <Navigate to="/" replace />
+                ) : (
+                  <GraphPage />
+                )
+              }
+            />
             <Route
               path="/settings"
               element={
@@ -869,7 +910,7 @@ function VaultWorkspace({
                 // opens this route directly (bookmark, shared link, reload)
                 // from ever seeing SettingsPage begin its own mount, even
                 // for one frame (#152).
-                vaultsLoading ? null : demoMode ? (
+                vaultsLoading ? null : demoMode || hasRegistryRecovery ? (
                   // Settings is an operator surface, absent rather than
                   // disabled in demo mode (#152) — same posture the backend
                   // already takes by not registering these routes at all.
@@ -899,19 +940,25 @@ function VaultWorkspace({
             <Route
               path="/v/:vaultId/n/:slug"
               element={
-                <NotePage
-                  onActiveNoteChange={setActiveNote}
-                  onTagSelect={openSearchForTag}
-                  propertiesCollapsedStorageKey={NOTE_PROPERTIES_COLLAPSED_KEY}
-                  vaultRevision={vaultRevision}
-                  writeEnabled={writeEnabled}
-                  editRequestId={editRequestId}
-                  onWriteNotice={setWriteNotice}
-                  onDemoRefusal={handleDemoRefusal}
-                  demoMode={demoMode}
-                  noteCandidates={noteCandidates}
-                  vaults={vaults}
-                />
+                hasRegistryRecovery ? (
+                  <Navigate to="/" replace />
+                ) : (
+                  <NotePage
+                    onActiveNoteChange={setActiveNote}
+                    onTagSelect={openSearchForTag}
+                    propertiesCollapsedStorageKey={
+                      NOTE_PROPERTIES_COLLAPSED_KEY
+                    }
+                    vaultRevision={vaultRevision}
+                    writeEnabled={writeEnabled}
+                    editRequestId={editRequestId}
+                    onWriteNotice={setWriteNotice}
+                    onDemoRefusal={handleDemoRefusal}
+                    demoMode={demoMode}
+                    noteCandidates={noteCandidates}
+                    vaults={vaults}
+                  />
+                )
               }
             />
           </Routes>
@@ -1127,20 +1174,24 @@ function ZeroVaultState({
  * failed legacy import needs recovery. Both open the ordinary workspace
  * with this same documented error block rather than a full-screen gate. */
 function BrokenStartState({
+  title = "Vault Registry Unavailable",
   message,
   onTryAgain,
   onStartWithNoVaults,
+  unchangedNotice = true,
 }: {
+  title?: string;
   message: string;
-  onTryAgain: () => void;
+  onTryAgain?: () => void;
   onStartWithNoVaults?: () => void;
+  unchangedNotice?: boolean;
 }) {
   return (
     <StateBlock
       tone="error"
-      title="Vault Registry Unavailable"
-      description={`${message} Nothing was changed, and your Markdown is untouched.`}
-      actionLabel="Try again"
+      title={title}
+      description={`${message}${unchangedNotice ? " Nothing was changed, and your Markdown is untouched." : ""}`}
+      actionLabel={onTryAgain ? "Try again" : undefined}
       onAction={onTryAgain}
       secondaryActionLabel={
         onStartWithNoVaults ? "Start with no Vaults" : undefined

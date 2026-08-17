@@ -161,7 +161,10 @@ that production inventory are still checked for stale paths and duplicates.
   definition changes; disabled definitions remain visible with no capabilities
   and no active runtime.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
-  and persistent setup records.
+  and persistent setup records. Once the embedder is installed, startup queues
+  each active Vault through the collection Index coordinator; it does not run a
+  second legacy single-Vault cache build. Startup becomes Ready after every
+  active collection Vault's Index turn settles Ready.
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
   an independently cancellable handle. `run_server()` coalesces those intents
   through the shared `VaultWorkCoordinator` as Index requests. The existing
@@ -215,7 +218,9 @@ that production inventory are still checked for stale paths and duplicates.
   the same worker loop calls. It acquires one Vault's refresh and foreground
   mutation boundaries, builds
   an authoritative Markdown index and isolated candidate cache off the async
-  runtime, atomically publishes only that Vault's shared snapshot, and
+  runtime, publishes a structure-only participating snapshot before vector
+  embedding on a first build so browsing does not wait for semantic search,
+  atomically publishes only that Vault's complete shared snapshot, and
   publishes Ready, Stale, or Unavailable search state without changing another
   Vault's snapshot or status.
   Disabled runtime state becomes externally nonparticipating immediately;
@@ -464,12 +469,12 @@ with no Vaults writes an ordinary revisioned zero-Vault registry.
 
 **Consumers:** startup runtime composition calls this isolated adapter before
 opening the disposable cache and activating Vault runtimes. Safe imports become
-ordinary enabled definitions; recovery activates no Vault and remains in
+ordinary enabled definitions; migration or environment-cleanup recovery activates no Vault and remains in
 `AppState` for later setup/management surfaces.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs`
-turns migrated or now-ignored per-Vault environment keys into one startup
-refusal after a committed import or existing registry;
+turns migrated or now-ignored per-Vault environment keys into a restricted,
+non-secret startup recovery response after a committed import or existing registry;
 `docker-compose.yml`, `.env.example`, `README.md`, and
 `docs/migrations/legacy-single-vault.md` document and persist the registry
 required by the migration contract.
@@ -487,7 +492,9 @@ moves, edits, clones, pulls, commits, pushes, checks out, or merges legacy
 content or Git state. Unsafe conversion leaves all legacy state unchanged and
 returns recovery. After a successful registry commit, non-empty
 `HATCHDOOR_EXCLUDE` and `HATCHDOOR_GIT_*` environment values are named in a
-refusal until removed; `VAULT_PATH` remains valid deployment configuration.
+restricted recovery UI until removed and the process is restarted; health and
+the web shell remain reachable, but Vault runtime activation and mutation are
+withheld. `VAULT_PATH` remains valid deployment configuration.
 The development-only managed-startup variable family is rejected before it can
 silently select another source. Markdown remains authoritative and downgrade
 across the registry cutover is unsupported.
@@ -999,7 +1006,9 @@ and never pushes after conflict. It uses safe checkout transitions and rejects
 outside-Vault dirt rather than overwriting it; the narrowly scoped conflict
 abort is the only hard reset. A non-fast-forward push retries only through one
 bounded fetch-integrate-push graph replay before returning a redacted push-race
-error. Every configured remote and push URL must remain credential-free HTTPS.
+error. The uniquely selected managed remote and its push URL must remain the
+configured credential-free HTTPS repository identity; unrelated remotes in an
+operator-owned `ExistingGit` checkout are outside this boundary and untouched.
 Public HTTPS makes no credential callback; supplied credentials are callback
 input only and remain redacted. This boundary does not acquire, delete,
 schedule, poll, persist status, or repair checkouts.
@@ -1088,6 +1097,12 @@ affected paths and `LocalCommits`' count outward as structured
 Local-history, an `ExistingGit` Vault in `PullOnly`/`TwoWay` mode *is*
 registered with `ManagedGitScheduler` (issue #132) — it has a remote to poll
 on a schedule, unlike Local-history's commit-only-on-local-drift turn.
+For both managed and existing checkouts, `ManagedSyncConfig.repository_url` is
+the remote identity: synchronization requires exactly one fetch remote whose
+URL equals it, and uses that remote name for fetch, tracking refs, merge labels,
+and push. Only that selected remote and its optional push URL are constrained to
+the same credential-free HTTPS identity; unrelated operator-owned remotes in an
+`ExistingGit` checkout are ignored and never contacted.
 
 **Consumed dependencies:** local Git repository through `git2`, the live
 configuration snapshot for startup parsing, and the registry's shared

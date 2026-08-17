@@ -145,6 +145,7 @@ pub fn run_managed_git_turn(
     let sync_config = ManagedSyncConfig {
         repository_path: checkout.repository_path,
         vault_path: checkout.vault_path,
+        repository_url: config.repository_url.clone(),
         branch: checkout.resolved_branch,
         mode: sync_mode,
         credentials,
@@ -186,15 +187,20 @@ pub fn run_managed_git_turn(
 /// remote-sync target.
 ///
 /// Must run from `spawn_blocking`.
+#[allow(clippy::too_many_arguments)] // Existing checkout identity plus sync policy and commit identity.
 pub fn run_existing_git_remote_turn(
     repository_path: PathBuf,
     vault_path: PathBuf,
+    repository_url: Option<String>,
     branch: Option<String>,
     mode: VaultGitMode,
     credentials: Option<HttpsCredentials>,
     author_name: String,
     author_email: String,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
+    let Some(repository_url) = repository_url else {
+        return Err(classify_sync_error(ManagedSyncError::Validation));
+    };
     let sync_mode = match mode {
         VaultGitMode::PullOnly => ManagedSyncMode::PullOnly,
         VaultGitMode::TwoWay => ManagedSyncMode::TwoWay,
@@ -231,6 +237,7 @@ pub fn run_existing_git_remote_turn(
     let sync_config = ManagedSyncConfig {
         repository_path,
         vault_path,
+        repository_url,
         branch,
         mode: sync_mode,
         credentials,
