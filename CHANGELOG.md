@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.5.0 - 2026-08-17
 
 - Attachment embeds written the way Obsidian writes them now render. A bare
   `![[Some document.pdf]]` resolves by filename anywhere in the Vault, rather
