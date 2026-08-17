@@ -2,7 +2,6 @@
 //! checks, and the `serve` run loop. Kept in the library (rather than the binary
 //! root) so the HTTP surface is reachable from integration tests.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -186,8 +185,59 @@ pub fn check_demo_mode_posture(
     Ok(())
 }
 
-/// `check_demo_mode_posture` above only inspects the transitional
-/// `config.vault_source`; it cannot see the durable Vault registry, which is
+/// Refuse to start while per-Vault settings are still set in the environment.
+/// Once the registry owns them, an environment value is silently ignored: the
+/// operator's `.env` and Hatchdoor's actual behavior disagree, and every later
+/// change made in Settings looks overridden by a file that no longer has any
+/// effect. Stopping is the only unambiguous signal.
+///
+/// `VAULT_PATH` is deliberately absent: Compose sets it on every deployment as
+/// the container's vault mount, so refusing on it would refuse every start.
+fn check_legacy_environment_posture(ignored_environment_keys: &[String]) -> Result<(), String> {
+    use crate::config::{LegacyVaultEnvironmentKeyKind, legacy_vault_environment_key_kind};
+
+    let migrated: Vec<&str> = ignored_environment_keys
+        .iter()
+        .map(String::as_str)
+        .filter(|key| {
+            legacy_vault_environment_key_kind(key) == Some(LegacyVaultEnvironmentKeyKind::Migrated)
+        })
+        .collect();
+    let retired = ignored_environment_keys
+        .iter()
+        .filter(|key| {
+            legacy_vault_environment_key_kind(key) == Some(LegacyVaultEnvironmentKeyKind::Retired)
+        })
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if migrated.is_empty() && retired.is_empty() {
+        return Ok(());
+    }
+
+    let mut message = String::new();
+    if !migrated.is_empty() {
+        message.push_str(&format!(
+            "Hatchdoor has taken these settings over from your .env and stores them itself now: {}. \
+             Remove them from your .env and start Hatchdoor again. To change them from now on, use \
+             Settings, or the edit_vault MCP tool.",
+            migrated.join(", ")
+        ));
+    }
+    if !retired.is_empty() {
+        if !message.is_empty() {
+            message.push(' ');
+        }
+        message.push_str(&format!(
+            "{} no longer does anything: Hatchdoor coalesces writes on its own now. Remove it too.",
+            retired.join(", ")
+        ));
+    }
+    Err(message)
+}
+
+/// `check_demo_mode_posture` above only inspects the legacy single-vault Git
+/// sync of `config.vault_source`; it cannot see the durable Vault registry,
+/// which is
 /// loaded afterward and then activated by
 /// `VaultCollectionRuntime::reconcile_and_reconstruct`. A registry Vault
 /// configured for two-way Git sync would otherwise pass startup and later
@@ -943,36 +993,16 @@ pub async fn run_server() {
         VaultSource::Local { vault_path } => {
             GitConfig::from_snapshot(vault_path.clone(), &startup_snapshot)
         }
-        VaultSource::ManagedGit(_) => {
-            let legacy_mode_enabled = startup_snapshot
-                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
-                .is_some_and(|setting| {
-                    !matches!(
-                        setting.value.trim().to_ascii_lowercase().as_str(),
-                        "" | "off" | "false" | "0" | "no"
-                    )
-                });
-            if legacy_mode_enabled {
-                Err("HATCHDOOR_GIT_SYNC_ENABLED cannot be combined with HATCHDOOR_VAULT_SOURCE=git; managed source mode owns Git synchronization".to_string())
-            } else {
-                Ok(None)
-            }
-        }
     }
     .unwrap_or_else(|e| {
         error!("Git sync configuration error: {e}");
         std::process::exit(1);
     });
 
-    let managed_writeback = matches!(
-        &config.vault_source,
-        VaultSource::ManagedGit(source)
-            if source.mode == crate::vault_runtime::ManagedGitMode::Bidirectional
-    );
     if let Err(message) = check_demo_mode_posture(
         config.demo_mode,
         mcp_config.enabled,
-        git_sync_config.is_some() || managed_writeback,
+        git_sync_config.is_some(),
     ) {
         error!("{message}");
         std::process::exit(1);
@@ -984,9 +1014,6 @@ pub async fn run_server() {
     let vault_registry = VaultRegistryStore::at_default_path();
     let legacy_vault_path = match &config.vault_source {
         VaultSource::Local { vault_path } => vault_path.clone(),
-        VaultSource::ManagedGit(_) => std::env::var("VAULT_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("./vault")),
     };
     let migration = migrate_legacy_vault(
         &vault_registry,
@@ -1013,11 +1040,9 @@ pub async fn run_server() {
             state,
             ignored_environment_keys,
         } => {
-            if !ignored_environment_keys.is_empty() {
-                warn!(
-                    keys = ?ignored_environment_keys,
-                    "Ignoring legacy environment Vault settings because the registry already exists"
-                );
+            if let Err(message) = check_legacy_environment_posture(&ignored_environment_keys) {
+                error!("{message}");
+                std::process::exit(1);
             }
             (state, None)
         }
@@ -1031,8 +1056,11 @@ pub async fn run_server() {
             for warning in cleanup_warnings {
                 warn!("{warning}");
             }
-            if !ignored_environment_keys.is_empty() {
-                warn!(keys = ?ignored_environment_keys, "Legacy environment Vault settings were not persisted");
+            // The import is already committed, so this refusal costs the
+            // operator one restart, not the migration.
+            if let Err(message) = check_legacy_environment_posture(&ignored_environment_keys) {
+                error!("Imported your vault. {message}");
+                std::process::exit(1);
             }
             (VaultRegistryState::Ready(snapshot), None)
         }
@@ -1139,12 +1167,10 @@ pub async fn run_server() {
     }
     let runtime = VaultRuntime::new(config.vault_source.clone());
     let startup = StartupTracker::new(runtime);
-    if matches!(config.vault_source, VaultSource::Local { .. }) {
-        if selected_model == SelectedModel::TermsRequired {
-            startup.set_terms_required();
-        } else {
-            startup.set_scanning();
-        }
+    if selected_model == SelectedModel::TermsRequired {
+        startup.set_terms_required();
+    } else {
+        startup.set_scanning();
     }
     let shutdown_vaults = vaults.clone();
     let state = AppState {
@@ -1292,17 +1318,8 @@ pub async fn run_server() {
     // Startup deliberately spawns no watcher of its own: audit findings
     // C01-F02/C01-F03 were detached replacement watchers accumulating from
     // exactly that, with no handle to cancel.
-    match config.vault_source {
-        VaultSource::Local { .. } if selected_model != SelectedModel::TermsRequired => {
-            spawn_model_startup(state.clone(), selected_model);
-        }
-        VaultSource::ManagedGit(_) => {
-            state.startup.runtime().set_unavailable(
-                "managed_vault_not_acquired",
-                "Managed Git vault acquisition is not implemented in this foundation slice.",
-            );
-        }
-        VaultSource::Local { .. } => {}
+    if selected_model != SelectedModel::TermsRequired {
+        spawn_model_startup(state.clone(), selected_model);
     }
 
     axum::serve(listener, app)
@@ -1363,6 +1380,40 @@ fn forward_vault_change_intent(
 mod tests {
     use super::*;
     use crate::app_state::ReadyVault;
+
+    #[test]
+    fn compose_vault_path_alone_never_refuses_a_start() {
+        // Every Compose deployment sets VAULT_PATH; refusing on it would
+        // refuse every one of them.
+        check_legacy_environment_posture(&["VAULT_PATH".to_string()])
+            .expect("VAULT_PATH is not a per-Vault setting");
+    }
+
+    #[test]
+    fn a_settled_registry_refuses_to_start_beside_stale_per_vault_variables() {
+        let message = check_legacy_environment_posture(&[
+            "VAULT_PATH".to_string(),
+            "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
+            "HATCHDOOR_EXCLUDE".to_string(),
+        ])
+        .expect_err("stale per-Vault variables refuse the start");
+        assert!(message.contains("HATCHDOOR_GIT_AUTHOR_EMAIL"), "{message}");
+        assert!(message.contains("HATCHDOOR_EXCLUDE"), "{message}");
+        assert!(!message.contains("VAULT_PATH"), "{message}");
+        assert!(message.contains("Settings"), "{message}");
+    }
+
+    #[test]
+    fn a_retired_debounce_variable_is_named_as_obsolete_rather_than_migrated() {
+        let message =
+            check_legacy_environment_posture(&["HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string()])
+                .expect_err("an obsolete variable still has to go");
+        assert!(
+            message.contains("no longer does anything"),
+            "a retired setting must not be described as taken over: {message}"
+        );
+        assert!(!message.contains("taken these settings over"), "{message}");
+    }
 
     #[tokio::test]
     async fn watcher_index_intents_use_the_shared_fifo_and_lag_requeues_active_vaults() {
@@ -2594,22 +2645,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_managed_vault_keeps_liveness_status_and_spa_available() {
+    async fn unavailable_vault_keeps_liveness_status_and_spa_available() {
         let (_app, _tmp, mut state) = app_for_tests_with_state();
         *state.ready_vault.write().await = None;
-        state.startup = StartupTracker::new(VaultRuntime::new(VaultSource::ManagedGit(
-            crate::vault_runtime::ManagedGitSource {
-                repository_url: "https://example.test/vault.git".to_string(),
-                checkout_path: "/data/repositories/vault".into(),
-                branch: Some("main".to_string()),
-                vault_subdirectory: None,
-                mode: crate::vault_runtime::ManagedGitMode::PullOnly,
-            },
-        )));
-        state.startup.runtime().set_unavailable(
-            "managed_vault_not_acquired",
-            "Managed vault has not been acquired.",
-        );
+        state.startup = StartupTracker::new(VaultRuntime::new(VaultSource::Local {
+            vault_path: "/data/vault".into(),
+        }));
+        state
+            .startup
+            .runtime()
+            .set_unavailable("vault_unreadable", "Vault could not be read.");
         let app = build_router(state, None);
 
         for path in ["/health", "/api/startup-status", "/api/vault-status"] {
@@ -2665,10 +2710,10 @@ mod tests {
         )
         .expect("status json");
         assert_eq!(payload["phase"], "unavailable");
-        assert_eq!(payload["source"], "managed-git");
-        assert_eq!(payload["mode"], "pull-only");
+        assert_eq!(payload["source"], "local");
+        assert_eq!(payload["mode"], "local");
         assert_eq!(payload["capabilities"]["mutate"], false);
-        assert!(!payload.to_string().contains("/data/repositories/vault"));
+        assert!(!payload.to_string().contains("/data/vault"));
     }
 
     #[tokio::test]

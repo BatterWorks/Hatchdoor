@@ -374,10 +374,13 @@ browser session.
 ## Configuration
 
 Copy `.env.example` to `.env`. Its values are all commented out: Docker Compose
-and Hatchdoor supply the ordinary defaults, and Settings owns live
-configuration. A non-empty value for a Settings key in `.env` is an intentional
-**environment pin**: it wins over the saved Settings value for that process.
-Remove the pin and restart to make that setting editable in Settings again.
+and Hatchdoor supply the ordinary defaults, and Settings owns live server
+configuration. A non-empty value for a server-wide Settings key in `.env` is
+an intentional **environment pin**: it wins over the saved Settings value for
+that process. Remove the pin and restart to make that setting editable in
+Settings again. Vault definitions are managed per Vault through Settings, the
+HTTP API, or MCP; their legacy single-Vault environment variables are accepted
+only for the one-time migration described below.
 
 ### Deployment And Environment-Only Values
 
@@ -398,8 +401,6 @@ different container layout.
 | `HATCHDOOR_SETTINGS_FILE` | beside the cache database | Environment-only override for the durable Settings file |
 | `HATCHDOOR_WEB_BEARER_TOKEN` | empty | Environment-only web credential |
 | `HATCHDOOR_DEMO_MODE` | `false` | Environment-only public read-only mode |
-| `HATCHDOOR_GIT_REMOTE` | `origin` | Environment-only remote name for remote versioning |
-| `HATCHDOOR_GIT_BRANCH` | `main` | Environment-only branch; must match the vault's checked-out branch |
 | `RUST_LOG` | `hatchdoor=info,tower_http=info,axum::rejection=warn` | Environment-only logging filter |
 
 ### Settings: Live Values And Environment Pins
@@ -412,10 +413,14 @@ to deliberately keep a value deployment-managed.
 | Settings section | Variables | Apply behavior |
 | --- | --- | --- |
 | Vault | `HATCHDOOR_ARCHIVE_PREFIX` | Applies immediately |
-| Vault | `HATCHDOOR_EXCLUDE`, `HATCHDOOR_EMBED_LAYERS` | Requires confirmation, then rebuilds the search index in the background; search keeps using the previous coherent index until it is ready |
+| Notes handling | `HATCHDOOR_EMBED_LAYERS` | Requires confirmation, then rebuilds the search index in the background; search keeps using the previous coherent index until it is ready |
 | Agent access (MCP) | `HATCHDOOR_MCP_ENABLED`, `HATCHDOOR_MCP_WRITE_ENABLED`, `HATCHDOOR_MCP_BEARER_TOKEN`, `HATCHDOOR_MCP_ALLOWED_ORIGINS` | Applies immediately to new MCP requests |
 | Uploads | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, `HATCHDOOR_MCP_MAX_BASE64_BYTES` | Applies immediately |
-| Versioning | `HATCHDOOR_GIT_SYNC_ENABLED`, `HATCHDOOR_GIT_HTTPS_USERNAME`, `HATCHDOOR_GIT_HTTPS_TOKEN`, `HATCHDOOR_GIT_DEBOUNCE_SECONDS`, `HATCHDOOR_GIT_AUTHOR_NAME`, `HATCHDOOR_GIT_AUTHOR_EMAIL` | Applies immediately after the server safely stops and replaces any active sync task |
+
+`HATCHDOOR_EXCLUDE` and every `HATCHDOOR_GIT_*` variable are import-only
+legacy inputs, not live settings or deployment pins. Keep them for the first
+upgraded start so Hatchdoor can migrate the old Vault, then remove every key
+named by the startup refusal and restart.
 
 Settings saves its live values, including configured MCP and Git tokens, in a
 durable `settings.json` beside the cache database (or at
@@ -643,11 +648,11 @@ The `import_attachment` MCP fallback requires the same explicit `vault_id`.
 
 ## Versioning and Git Sync
 
-Versioning is optional and off by default. In **Settings → Versioning**, choose
-`local` to commit vault changes without a network remote, or `remote` for the
-safe commit/fetch/merge/push flow. Add remote credentials, commit identity, and
-the quiet window there; the server safely replaces any active sync task as it
-applies the saved change. Legacy truthy values still mean `remote`.
+Versioning is configured per Vault. In that Vault's Settings page, choose No
+Git, Local history, Pull-only, or Two-way when the Vault's source supports the
+behavior. Repository identity, branch, Vault subdirectory, credentials, poll
+schedule, and commit identity live on the Vault definition rather than on the
+server.
 
 Local mode can initialise an untouched vault after one explicit confirmation;
 this permanently creates its `.git` history folder and ignores Hatchdoor's
@@ -657,15 +662,19 @@ for one confirmation before future commits stop being sent remotely.
 Requirements:
 
 - Local mode needs only a vault Git repository (Settings can create one).
-- Remote mode additionally requires the checked-out branch to match
-  `HATCHDOOR_GIT_BRANCH`, an existing remote named by `HATCHDOOR_GIT_REMOTE`,
-  and HTTPS username/token credentials.
-- `HATCHDOOR_GIT_BRANCH` and `HATCHDOOR_GIT_REMOTE` are environment-only
-  deployment pins. Set either in `.env` only when its default (`main` or
-  `origin`) is not your vault's checked-out branch or configured remote, then
-  restart the container. Settings never changes them.
+- Pull-only and Two-way additionally require the configured branch and remote
+  repository to match the Vault definition, plus credentials when the remote
+  requires them.
 - Merge conflicts are kept for human resolution on the server; Hatchdoor never
   force-checks out over uncommitted manual vault edits.
+
+The `HATCHDOOR_GIT_*` family above is the legacy single-vault path. A Vault in
+the registry carries its own versioning, set on that Vault in Settings, and a
+server-wide answer cannot survive a second Vault. On a first start with no
+registry those variables are read once to import an existing single-vault
+deployment. Hatchdoor then refuses the next start until they are removed; on a
+fresh install, set versioning per Vault instead and leave them unset. See
+[`docs/migrations/legacy-single-vault.md`](docs/migrations/legacy-single-vault.md).
 
 Use `list_vaults` to inspect each Vault's Git status, and `sync_vault` or
 `retry_vault` (with that `vault_id`) for eligible managed-Git Vaults.
@@ -768,7 +777,7 @@ Check:
 Check:
 
 - The vault is a git repository root.
-- The current branch matches `HATCHDOOR_GIT_BRANCH`.
+- The current branch matches the branch configured on the Vault.
 - The remote exists in the repo config.
 - The HTTPS token can push.
 - There are no merge conflicts waiting for manual resolution.

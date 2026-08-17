@@ -22,13 +22,24 @@
   start.** Your existing vault becomes the first Vault in a registry Hatchdoor
   stores alongside the cache, and the per-vault environment variables it was
   configured with (`HATCHDOOR_EXCLUDE`, the `HATCHDOOR_GIT_*` family) are read
-  once, stored as that Vault's own settings, and ignored from then on. They are
+  once and stored as that Vault's own settings. Hatchdoor then refuses to start
+  until those obsolete environment lines are removed. They are
   per-Vault questions now, and a server-wide answer cannot survive a second
   Vault. Nothing on disk moves and no note is touched; the import only writes
   the registry. If it cannot be proven safe, Hatchdoor starts and says what
   stopped it rather than guessing.
-  **Action:** none, unless you set those variables from a deployment script and
-  expect them to keep taking effect. Change them in Settings instead, per Vault.
+  **Action:** leave the variables in place for the first upgraded start, then
+  remove the variables named by Hatchdoor and start it again. Change them in
+  Settings instead, per Vault.
+- **Hatchdoor will not start while imported per-Vault settings are still set in
+  the environment.** Once your Vault owns them, an `.env` value does nothing:
+  the file and the running server disagree, and every later change made in
+  Settings looks overridden by a line that has no effect. Rather than ignore
+  them quietly, Hatchdoor stops and names each one. `VAULT_PATH` is exempt,
+  since Compose sets it on every deployment.
+  **Action:** start once so the import runs, then delete the named
+  `HATCHDOOR_GIT_*` and `HATCHDOOR_EXCLUDE` lines from your `.env` and start
+  again.
 
 ### Added
 - **Hatchdoor holds more than one Vault.** Add, pause, and disconnect Vaults

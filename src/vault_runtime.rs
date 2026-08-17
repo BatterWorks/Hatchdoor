@@ -83,65 +83,38 @@ fn notify_index_mutation_lock_attempt(vault_id: VaultId) {
     }
 }
 
+/// The server's own startup source. A Git-backed Vault is a registry Vault
+/// (`vault_registry::VaultSource`), acquired and synchronized per Vault; the
+/// process itself only ever holds the one local path it was started with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VaultSource {
     Local { vault_path: PathBuf },
-    ManagedGit(ManagedGitSource),
 }
 
 impl VaultSource {
     pub fn kind(&self) -> VaultSourceKind {
         match self {
             Self::Local { .. } => VaultSourceKind::Local,
-            Self::ManagedGit(_) => VaultSourceKind::ManagedGit,
         }
     }
 
     pub fn mode(&self) -> VaultSourceMode {
         match self {
             Self::Local { .. } => VaultSourceMode::Local,
-            Self::ManagedGit(source) => source.mode.into(),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ManagedGitSource {
-    pub repository_url: String,
-    pub checkout_path: PathBuf,
-    pub branch: Option<String>,
-    pub vault_subdirectory: Option<PathBuf>,
-    pub mode: ManagedGitMode,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ManagedGitMode {
-    PullOnly,
-    Bidirectional,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultSourceKind {
     Local,
-    ManagedGit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultSourceMode {
     Local,
-    PullOnly,
-    Bidirectional,
-}
-
-impl From<ManagedGitMode> for VaultSourceMode {
-    fn from(value: ManagedGitMode) -> Self {
-        match value {
-            ManagedGitMode::PullOnly => Self::PullOnly,
-            ManagedGitMode::Bidirectional => Self::Bidirectional,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -167,22 +140,17 @@ pub struct VaultCapabilities {
 }
 
 impl VaultCapabilities {
+    /// Startup-level capabilities. Git capabilities are per-Vault and derived
+    /// from the registry definition in `collection_capabilities`; the server's
+    /// own local source pulls and pushes nothing.
     fn derive(source_mode: VaultSourceMode, phase: VaultPhase) -> Self {
         let ready = phase == VaultPhase::Ready;
         Self {
             browse: ready,
             search: ready,
-            mutate: ready
-                && matches!(
-                    source_mode,
-                    VaultSourceMode::Local | VaultSourceMode::Bidirectional
-                ),
-            pull: ready
-                && matches!(
-                    source_mode,
-                    VaultSourceMode::PullOnly | VaultSourceMode::Bidirectional
-                ),
-            push: ready && source_mode == VaultSourceMode::Bidirectional,
+            mutate: ready && source_mode == VaultSourceMode::Local,
+            pull: false,
+            push: false,
             retry: false,
         }
     }

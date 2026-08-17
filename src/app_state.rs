@@ -378,7 +378,6 @@ impl AppState {
     pub fn configured_local_vault_path(&self) -> Option<PathBuf> {
         match self.startup.runtime().source() {
             VaultSource::Local { vault_path } => Some(vault_path.clone()),
-            VaultSource::ManagedGit(_) => None,
         }
     }
 }

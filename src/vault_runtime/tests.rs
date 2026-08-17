@@ -179,30 +179,27 @@ fn runtime_error_detail_serializes_as_tagged_json_and_is_omitted_when_absent() {
     );
 }
 
-fn managed(mode: ManagedGitMode) -> VaultSource {
-    VaultSource::ManagedGit(ManagedGitSource {
-        repository_url: "https://example.test/vault.git".to_string(),
-        checkout_path: PathBuf::from("/data/vault"),
-        branch: None,
-        vault_subdirectory: None,
-        mode,
-    })
+fn local_source() -> VaultSource {
+    VaultSource::Local {
+        vault_path: PathBuf::from("/data/vault"),
+    }
 }
 
 #[test]
-fn pull_only_ready_state_never_allows_mutation_or_push() {
-    let runtime = VaultRuntime::ready(managed(ManagedGitMode::PullOnly));
-    let capabilities = runtime.snapshot().capabilities;
+fn startup_source_never_claims_a_git_capability() {
+    // Git is per-Vault and derived from the registry definition; the process
+    // source pulls and pushes nothing regardless of phase.
+    let capabilities = VaultRuntime::ready(local_source()).snapshot().capabilities;
     assert!(capabilities.browse);
     assert!(capabilities.search);
-    assert!(capabilities.pull);
-    assert!(!capabilities.mutate);
+    assert!(capabilities.mutate);
+    assert!(!capabilities.pull);
     assert!(!capabilities.push);
 }
 
 #[test]
 fn unavailable_state_has_no_ready_vault_capabilities() {
-    let runtime = VaultRuntime::new(managed(ManagedGitMode::Bidirectional));
+    let runtime = VaultRuntime::new(local_source());
     runtime.set_unavailable("not_acquired", "Vault has not been acquired");
     let snapshot = runtime.snapshot();
     assert_eq!(snapshot.phase, VaultPhase::Unavailable);

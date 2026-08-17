@@ -126,12 +126,17 @@ that production inventory are still checked for stale paths and duplicates.
   reindex binds before it starts, including `HATCHDOOR_EMBED_LAYERS` for the
   per-Vault disposable candidate cache.
 - `AppConfig` is the environment-derived deployment contract and interprets the
-  live values from the startup `RuntimeConfig` snapshot.
+  live values from the startup `RuntimeConfig` snapshot. Its process-level
+  Vault source is always the local `VAULT_PATH`; Git source identity and Git
+  behavior belong only to registry Vault definitions. The removed,
+  development-only `HATCHDOOR_VAULT_SOURCE`/`HATCHDOOR_VAULT_GIT_*` family is
+  rejected explicitly rather than silently falling back to the local path.
 - `StartupTracker` exposes startup/model/indexing readiness.
-- `VaultRuntime` and its serialized snapshot expose the current configured
-  source, mode, lifecycle phase, and derived capabilities. This is the rebased
-  single-configured-Vault adapter retained for the still-unmigrated application
-  surfaces; it is not the collection authority.
+- `VaultRuntime` and its serialized snapshot expose only the process startup's
+  local source/mode, lifecycle phase, and derived non-Git capabilities. Git
+  source, mode, and capabilities are derived per Vault by
+  `VaultCollectionRuntime`; the startup-status adapter is not collection
+  authority and never serializes a managed-Git source or mode.
 - `VaultCollectionRuntime` reconciles only newer registry snapshots into zero,
   one, or many Vault-ID-keyed `VaultControlBlock` values; an older asynchronous
   reconciliation cannot replace or re-admit work after a newer collection is
@@ -452,15 +457,19 @@ runtime shell and remains usable by the rootless image (ADR-12).
 `start_with_no_vaults`. Inspection returns a deterministic no-deployment,
 existing-registry, imported, or stable `legacy_migration_required` recovery
 outcome. Any existing registry, including an intentionally empty one,
-permanently suppresses legacy import. Confirmed Start with no Vaults writes an
-ordinary revisioned zero-Vault registry.
+permanently suppresses legacy import. A safe import copies legacy exclusions,
+Git behavior, credentials, and commit identity into the ordinary Vault
+definition; the retired write-debounce value has no successor. Confirmed Start
+with no Vaults writes an ordinary revisioned zero-Vault registry.
 
 **Consumers:** startup runtime composition calls this isolated adapter before
 opening the disposable cache and activating Vault runtimes. Safe imports become
 ordinary enabled definitions; recovery activates no Vault and remains in
 `AppState` for later setup/management surfaces.
 
-**Coordination paths:** `src/lib.rs` exports the boundary;
+**Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs`
+turns migrated or now-ignored per-Vault environment keys into one startup
+refusal after a committed import or existing registry;
 `docker-compose.yml`, `.env.example`, `README.md`, and
 `docs/migrations/legacy-single-vault.md` document and persist the registry
 required by the migration contract.
@@ -476,8 +485,12 @@ default does not migrate. Registry persistence completes before migrated
 settings or a recognized disposable cache are removed. Inspection never seeds,
 moves, edits, clones, pulls, commits, pushes, checks out, or merges legacy
 content or Git state. Unsafe conversion leaves all legacy state unchanged and
-returns recovery. Markdown remains authoritative and downgrade across the
-registry cutover is unsupported.
+returns recovery. After a successful registry commit, non-empty
+`HATCHDOOR_EXCLUDE` and `HATCHDOOR_GIT_*` environment values are named in a
+refusal until removed; `VAULT_PATH` remains valid deployment configuration.
+The development-only managed-startup variable family is rejected before it can
+silently select another source. Markdown remains authoritative and downgrade
+across the registry cutover is unsupported.
 
 **Validation:** `cargo test vault_migration`, `cargo test vault_registry`,
 `cargo test runtime_config`, `cargo test cache`,

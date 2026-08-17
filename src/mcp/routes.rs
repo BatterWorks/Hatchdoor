@@ -1541,18 +1541,14 @@ mod tests {
     #[tokio::test]
     async fn write_catalogue_is_governed_by_mcp_permission_not_legacy_startup_state() {
         let (mut state, _tmp) = test_state();
-        state.startup =
-            crate::startup::StartupTracker::new(crate::vault_runtime::VaultRuntime::ready(
-                crate::vault_runtime::VaultSource::ManagedGit(
-                    crate::vault_runtime::ManagedGitSource {
-                        repository_url: "https://example.test/vault.git".to_string(),
-                        checkout_path: "/data/repositories/vault".into(),
-                        branch: None,
-                        vault_subdirectory: None,
-                        mode: crate::vault_runtime::ManagedGitMode::PullOnly,
-                    },
-                ),
-            ));
+        // The write catalogue is governed by the MCP permission below, not by
+        // the process-level startup source, which knows nothing about the
+        // registry Vault that actually serves the write.
+        state.startup = crate::startup::StartupTracker::new(
+            crate::vault_runtime::VaultRuntime::ready(crate::vault_runtime::VaultSource::Local {
+                vault_path: "/data/vault".into(),
+            }),
+        );
 
         let listed = post_json_with_auth(
             state.clone(),

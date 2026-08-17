@@ -6,13 +6,13 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::parse_exclude_patterns;
+use crate::config::{legacy_vault_environment_key_kind, parse_exclude_patterns};
 use crate::git::config::{GitMode, non_empty_setting, parse_mode};
 use crate::runtime_config::{RuntimeConfig, SettingSource};
 use crate::vault_registry::{
-    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, HttpsCredentials, NewVaultDefinition, VaultGitMode,
-    VaultId, VaultRegistryError, VaultRegistrySnapshot, VaultRegistryState, VaultRegistryStore,
-    VaultSource,
+    DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, HttpsCredentials, NewVaultDefinition,
+    VaultCommitIdentity, VaultGitMode, VaultId, VaultRegistryError, VaultRegistrySnapshot,
+    VaultRegistryState, VaultRegistryStore, VaultSource,
 };
 
 const LEGACY_STORED_KEYS: [&str; 9] = [
@@ -185,7 +185,7 @@ pub fn migrate_legacy_vault(
         exclude_patterns,
         https_credentials,
         archive_folder: None,
-        commit_identity: None,
+        commit_identity: legacy_commit_identity(&snapshot),
     };
     let imported = match registry.add(0, definition) {
         Ok(snapshot) => snapshot,
@@ -229,24 +229,37 @@ pub fn migrate_legacy_vault(
     })
 }
 
+/// The commit identity a legacy deployment configured, as an ordinary Vault
+/// definition field. `HATCHDOOR_GIT_DEBOUNCE_SECONDS` has no counterpart here
+/// on purpose: #148's AC4 retired the "wait N seconds after the last edit"
+/// concept with no successor, because the multi-Vault write pipeline coalesces
+/// through a fixed watcher debounce that no per-Vault setting feeds. A value
+/// left over in the environment is obsolete, not unconvertible.
+fn legacy_commit_identity(
+    snapshot: &crate::runtime_config::ConfigSnapshot,
+) -> Option<VaultCommitIdentity> {
+    let configured = |key: &str| {
+        snapshot
+            .setting(key)
+            .filter(|setting| setting.source != SettingSource::Default)
+            .map(|setting| setting.value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let name = configured("HATCHDOOR_GIT_AUTHOR_NAME");
+    let email = configured("HATCHDOOR_GIT_AUTHOR_EMAIL");
+    if name.is_none() && email.is_none() {
+        return None;
+    }
+    Some(VaultCommitIdentity {
+        name: name.unwrap_or_else(|| "Hatchdoor".to_string()),
+        email: email.unwrap_or_else(|| "hatchdoor@localhost".to_string()),
+    })
+}
+
 fn legacy_source(
     vault_path: &Path,
     snapshot: &crate::runtime_config::ConfigSnapshot,
 ) -> Result<(VaultSource, Option<HttpsCredentials>), String> {
-    for (key, default) in [
-        ("HATCHDOOR_GIT_DEBOUNCE_SECONDS", "30"),
-        ("HATCHDOOR_GIT_AUTHOR_NAME", "Hatchdoor"),
-        ("HATCHDOOR_GIT_AUTHOR_EMAIL", "hatchdoor@localhost"),
-    ] {
-        if snapshot.setting(key).is_some_and(|setting| {
-            setting.source != SettingSource::Default && setting.value != default
-        }) {
-            return Err(format!(
-                "legacy setting {key} has no ordinary Vault-definition equivalent; restore its default, correct the deployment, or confirm Start with no Vaults"
-            ));
-        }
-    }
-
     let mode = parse_mode(
         snapshot
             .required("HATCHDOOR_GIT_SYNC_ENABLED")
@@ -470,10 +483,7 @@ fn ignored_legacy_environment_keys(environment: &BTreeMap<String, String>) -> Ve
     environment
         .iter()
         .filter(|(key, value)| {
-            !value.trim().is_empty()
-                && (key.as_str() == "VAULT_PATH"
-                    || key.as_str() == "HATCHDOOR_EXCLUDE"
-                    || key.starts_with("HATCHDOOR_GIT_"))
+            !value.trim().is_empty() && legacy_vault_environment_key_kind(key).is_some()
         })
         .map(|(key, _)| key.clone())
         .collect()
@@ -1275,12 +1285,14 @@ mod tests {
             live_settings_defaults(),
         )
         .expect("runtime configuration");
+        // Remote versioning over a directory that is not a repository at all:
+        // nothing here can be converted into a Vault definition.
         runtime_config
             .save([(
-                "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
-                "Custom Legacy Author".to_string(),
+                "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                "remote".to_string(),
             )])
-            .expect("unsupported legacy setting");
+            .expect("unconvertible legacy setting");
         let settings_before = std::fs::read(&settings_path).expect("settings bytes");
         let cache_before = std::fs::read(&cache_db_path).expect("cache bytes");
         let registry_path = root.path().join("state/vaults.json");
@@ -1299,7 +1311,11 @@ mod tests {
             panic!("expected recovery outcome");
         };
         assert_eq!(recovery.code(), "legacy_migration_required");
-        assert!(recovery.message().contains("HATCHDOOR_GIT_AUTHOR_NAME"));
+        assert!(
+            recovery.message().contains("not a readable repository"),
+            "unexpected message: {}",
+            recovery.message()
+        );
         assert!(!registry_path.exists());
         assert_eq!(
             std::fs::read(&note_path).expect("note retained"),
@@ -1313,5 +1329,55 @@ mod tests {
             std::fs::read(&settings_path).expect("settings retained"),
             settings_before
         );
+    }
+
+    /// A legacy commit identity is an ordinary Vault definition field, and the
+    /// retired debounce concept blocks nothing.
+    #[test]
+    fn legacy_commit_identity_is_imported_and_retired_debounce_is_ignored() {
+        let root = tempdir().expect("temp root");
+        let vault_path = root.path().join("legacy-notes");
+        std::fs::create_dir(&vault_path).expect("Vault directory");
+        std::fs::write(vault_path.join("note.md"), b"# Keep me\n").expect("legacy note");
+        let runtime_config = RuntimeConfig::load(
+            root.path().join("cache/settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+        runtime_config
+            .save([
+                (
+                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                    "Custom Legacy Author".to_string(),
+                ),
+                (
+                    "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
+                    "legacy@example.test".to_string(),
+                ),
+                (
+                    "HATCHDOOR_GIT_DEBOUNCE_SECONDS".to_string(),
+                    "120".to_string(),
+                ),
+            ])
+            .expect("legacy settings");
+
+        let outcome = migrate_legacy_vault(
+            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path,
+                cache_db_path: root.path().join("cache/hatchdoor-cache.sqlite3"),
+                environment: BTreeMap::new(),
+            },
+        )
+        .expect("import outcome");
+        let LegacyMigrationOutcome::Imported { snapshot, .. } = outcome else {
+            panic!("expected import, not recovery");
+        };
+        let definition = snapshot.definitions().next().expect("imported Vault");
+        let identity = definition.commit_identity().expect("imported identity");
+        assert_eq!(identity.name, "Custom Legacy Author");
+        assert_eq!(identity.email, "legacy@example.test");
     }
 }
