@@ -61,6 +61,25 @@ pub fn slugify(input: &str) -> String {
     out
 }
 
+/// Extensions the Vault asset route will serve. The asset index and
+/// `handlers::assets` share this list so wikilink resolution can never name a
+/// path the route would then refuse: a resolved embed that 404s is worse than
+/// an unresolved one, because it looks like a broken file rather than a
+/// broken link.
+pub fn servable_asset_extensions() -> &'static [&'static str] {
+    &[
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "avif", "bmp", "pdf",
+    ]
+}
+
+pub fn is_servable_asset(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            servable_asset_extensions().contains(&extension.to_ascii_lowercase().as_str())
+        })
+}
+
 pub fn relative_note_path_without_ext(root: &Path, path: &Path) -> Option<String> {
     let relative = path.strip_prefix(root).ok()?;
     let as_string = relative.to_str()?.replace('\\', "/");

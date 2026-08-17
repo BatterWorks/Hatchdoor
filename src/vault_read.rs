@@ -109,6 +109,11 @@ pub struct VaultQualifiedLinks {
     pub backlinks: Vec<VaultQualifiedLink>,
 }
 
+/// One batch's resolutions, positionally matching the note targets and the
+/// asset targets that were asked for. Assets carry a Vault-relative path
+/// because they have no slug to name them by.
+pub type ResolvedVaultTargets = (Vec<Option<ResolvedVaultNote>>, Vec<Option<String>>);
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ResolvedVaultNote {
     pub vault_id: VaultId,
@@ -351,8 +356,27 @@ impl<'a> VaultReadCore<'a> {
         vault_id: VaultId,
         raw_targets: &[String],
     ) -> Result<Vec<Option<ResolvedVaultNote>>, VaultReadError> {
+        Ok(self.resolve_batch(vault_id, raw_targets, &[], "")?.0)
+    }
+
+    /// Resolve a note's wikilink targets — notes and assets alike — against one
+    /// authoritative-index build.
+    ///
+    /// Assets resolve separately from notes because they are addressed
+    /// differently: a note has a slug, an asset only ever has a path, and an
+    /// Obsidian-authored embed names it by filename alone (#158). `note_dir` is
+    /// the Vault-relative directory of the note the targets were written in,
+    /// which decides both the relative reading and which of several namesakes
+    /// is nearest; `""` is the Vault root.
+    pub fn resolve_batch(
+        &self,
+        vault_id: VaultId,
+        note_targets: &[String],
+        asset_targets: &[String],
+        note_dir: &str,
+    ) -> Result<ResolvedVaultTargets, VaultReadError> {
         let index = self.authoritative_index(vault_id)?;
-        Ok(raw_targets
+        let notes = note_targets
             .iter()
             .map(|raw_target| {
                 index
@@ -364,7 +388,19 @@ impl<'a> VaultReadCore<'a> {
                         relative_path: note.relative_path.clone(),
                     })
             })
-            .collect())
+            .collect();
+        // Assets carry no layer, so the browse surface has nothing to hide
+        // here: an embed only resolves for a caller already reading the note
+        // that contains it.
+        let assets = asset_targets
+            .iter()
+            .map(|raw_target| {
+                index
+                    .resolve_asset(raw_target, note_dir)
+                    .map(str::to_string)
+            })
+            .collect();
+        Ok((notes, assets))
     }
 
     /// Whether this surface withholds `slug` entirely, so a caller answers the
@@ -1416,6 +1452,36 @@ mod tests {
             .expect("resolve")
             .expect("shared");
         assert_eq!(resolved.vault_id, second);
+    }
+
+    #[test]
+    fn resolve_batch_resolves_asset_targets_by_name_alongside_note_targets() {
+        let workspace = workspace(&[(
+            "First",
+            &[
+                ("97_Notes/Some note.md", "![[Some document.pdf]] [[Shared]]"),
+                ("Shared.md", "# Shared"),
+                ("98_Attachments/Some document.pdf", "pdf"),
+            ],
+        )]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let first = workspace.vault_ids[0];
+
+        let (notes, assets) = reads
+            .resolve_batch(
+                first,
+                &["Shared".to_string()],
+                &["Some document.pdf".to_string(), "Absent.png".to_string()],
+                "97_Notes",
+            )
+            .expect("resolve batch");
+
+        assert_eq!(notes[0].as_ref().expect("shared resolved").slug, "shared");
+        assert_eq!(
+            assets[0].as_deref(),
+            Some("98_Attachments/Some document.pdf")
+        );
+        assert_eq!(assets[1], None);
     }
 
     #[test]

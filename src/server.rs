@@ -3026,6 +3026,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vault_scoped_resolve_batch_resolves_obsidian_style_asset_targets() {
+        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
+        let vault_root = tmp.path().join("obsidian");
+        let vault_id = create_vault_with_files(
+            &app,
+            "Obsidian",
+            &vault_root,
+            &[
+                ("97_Notes/Some note.md", "![[Some document.pdf]]\n"),
+                ("98_Attachments/Some document.pdf", "%PDF-1.4\n"),
+            ],
+            0,
+        )
+        .await;
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/resolve-batch"))
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"targets":[],"asset_targets":["Some document.pdf","Absent.png"],"note_path":"97_Notes/Some note"}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = json_body(response).await;
+        let results = payload["asset_results"]
+            .as_array()
+            .expect("asset results array");
+
+        let found = results
+            .iter()
+            .find(|result| result["target"] == "Some document.pdf")
+            .expect("pdf result");
+        assert_eq!(found["path"], "98_Attachments/Some document.pdf");
+
+        let absent = results
+            .iter()
+            .find(|result| result["target"] == "Absent.png")
+            .expect("absent result");
+        assert!(
+            absent["path"].is_null(),
+            "an unresolvable asset stays null so the client can render it missing"
+        );
+    }
+
+    #[tokio::test]
     async fn vault_scoped_resolve_batch_oversized_json_body_reports_413_not_400() {
         // Finding 3 (#101): `vault_scoped_resolve_batch_handler` imports the
         // shared `json_rejection_response` from `vaults.rs`, which used to

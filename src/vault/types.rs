@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -51,6 +51,14 @@ pub struct VaultIndex {
     #[cfg_attr(not(test), allow(dead_code))]
     pub by_path_title: HashMap<String, String>,
     pub ordered_slugs: Vec<String>,
+    /// Every servable non-Markdown file in the Vault, as a `/`-joined
+    /// Vault-relative path. Notes are addressed by slug; assets have no slug
+    /// and are addressed by path, so the index keeps the paths themselves.
+    pub asset_paths: BTreeSet<String>,
+    /// Lowercased filename to the Vault-relative paths carrying it, sorted.
+    /// This is what makes Obsidian's bare-filename embeds resolvable: they name
+    /// a file, not a location.
+    pub assets_by_name: HashMap<String, Vec<String>>,
     pub outgoing_by_slug: HashMap<String, Vec<String>>,
     pub backlinks_by_slug: HashMap<String, Vec<String>>,
     pub layers: super::layers::LayerMap,

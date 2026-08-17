@@ -105,6 +105,16 @@ pub struct ResolveQuery {
 #[derive(Debug, Deserialize)]
 pub struct ResolveBatchRequest {
     pub targets: Vec<String>,
+    /// Embed and PDF wikilink targets, which resolve to a path rather than a
+    /// slug (#158). Defaulted so a client that only resolves note links keeps
+    /// working unchanged.
+    #[serde(default)]
+    pub asset_targets: Vec<String>,
+    /// Vault-relative path of the note the targets were written in, without the
+    /// `.md` suffix. Asset resolution is relative to its folder; absent, the
+    /// targets are read from the Vault root.
+    #[serde(default)]
+    pub note_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,6 +122,15 @@ pub struct ResolveTargetResult {
     pub target: String,
     pub slug: Option<String>,
     pub archived: bool,
+}
+
+/// One asset target's resolution. `path` is Vault-relative and servable by the
+/// Vault asset route; `None` means nothing matched, which the client renders as
+/// a missing link rather than a URL that would 404.
+#[derive(Debug, Serialize)]
+pub struct ResolveAssetResult {
+    pub target: String,
+    pub path: Option<String>,
 }
 
 /// Still consumed by `src/mcp/tools/read.rs`'s own refresh tool over the

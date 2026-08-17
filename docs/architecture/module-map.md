@@ -576,7 +576,14 @@ synchronized; no automated cross-language schema check currently exists.
 
 **Public contract:** the intentional re-exports from `src/vault.rs`, notably
 `VaultIndex`, note/tree/link types, path normalization helpers, layer and
-exclusion types, and `seed_empty_vault`.
+exclusion types, `is_servable_asset`, and `seed_empty_vault`. `VaultIndex`
+additionally carries an asset index (`asset_paths`, `assets_by_name`) filled by
+the same walk that collects the Markdown files, and `resolve_asset` reads it:
+Obsidian's default link format writes an attachment embed as a bare filename and
+resolves it by searching the vault, so a purely note-relative reading broke every
+embed in a vault using one top-level attachments folder (#158). `is_servable_asset`
+is shared with `handlers/assets.rs`, so resolution can never name a path the
+asset route would refuse.
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
 currently supplies content hashing to the index.
@@ -678,7 +685,13 @@ ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
 a caller passes as the `scope` path segment, rather than serde's derived
 externally-tagged shape. `resolve_wikilinks` resolves every target in a batch
 against one
-authoritative-index build, rather than one build per target. `vault_directory`
+authoritative-index build, rather than one build per target. `resolve_batch`
+generalizes it to note *and* asset targets over that same one build (#158),
+taking the embedding note's Vault-relative directory because an asset target
+resolves relative to the note that names it; assets are returned as
+Vault-relative paths, since an asset has no slug. The browse surface does not
+gate them: assets carry no layer, and an embed only resolves for a caller
+already reading the note that contains it. `vault_directory`
 resolves one Vault's local Markdown directory under the same
 not-found/disabled/unavailable gating as exact reads (reusing
 `VaultControlBlock::ensure_accepting_operations`, widened to `pub(crate)`,
@@ -1294,7 +1307,11 @@ rejection-mapping helpers (`parse_vault_id`, `json_rejection_response`,
 `query_rejection_response`, `internal_error_response`, widened to
 `pub(crate)` for this reuse): `GET .../notes/{slug}`, `GET
 .../notes/{slug}/links`, `GET .../notes/{slug}/download`, `GET .../resolve`,
-`POST .../resolve-batch`, `GET .../assets/{*path}` (serving both embedded
+`POST .../resolve-batch` (whose request additionally takes optional
+`asset_targets` and `note_path`, answered by an `asset_results` array of
+`{target, path}`, `path` null when nothing matched — additive, so a client
+resolving note links only sees exactly what it saw before, and the batch cap
+counts both target lists), `GET .../assets/{*path}` (serving both embedded
 assets and imported attachments, which share one containment rule), and `GET
 .../stats/detail` (#137's rich per-Vault statistics report). Every route but
 the last always inspects the requested Vault's authoritative Markdown
@@ -1905,7 +1922,12 @@ explicitly exempt, and CSS aggregation remains the declared `App.css` seam.
 - `frontend/src/styles/note-content.css`
 
 **Public contract:** `NotePage`, note preview/rendering behavior, safe asset and
-wikilink resolution, heading/search-hit navigation, Markdown transformations,
+wikilink resolution — `useResolvedWikilinks` now sends embed and PDF targets to
+`resolve-batch` as `asset_targets` alongside the note's own path and rewrites
+them to the resolved Vault-relative path (#158), keeping the note-relative
+reading as the fallback for anything unresolved, including the first render
+before the batch returns; its asset cache is keyed by note path as well as
+target, because the same filename in notes at two depths can be two files — heading/search-hit navigation, Markdown transformations,
 note navigation/rendering behavior, the editable-block component map produced by
 `createNoteMarkdownComponents`, the paragraph marker `CalloutOrQuote` uses to
 recognise its own first child, and the soft-break splitter that reconstructs one

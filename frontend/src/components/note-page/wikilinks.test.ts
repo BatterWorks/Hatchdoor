@@ -101,3 +101,68 @@ describe("rewriteWikilinks line counts", () => {
     ).toBe("See [Real Note](/v/vault-1/n/real-note).");
   });
 });
+
+describe("rewriteWikilinks asset resolution", () => {
+  // Obsidian's default link format writes a bare filename and resolves it by
+  // searching the vault, so a note that is not a sibling of the attachment
+  // rendered a broken embed before the server started resolving these (#158).
+  it("uses the server-resolved path for a bare embed target", () => {
+    const assets = new Map([
+      ["Some document.pdf", "98_Attachments/Some document.pdf"],
+    ]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "![[Some document.pdf]]",
+        "97_Notes/Some note.md",
+        new Map(),
+        assets,
+      ),
+    ).toBe(
+      "![Some document\\.pdf](/api/v1/vaults/vault-1/assets/98_Attachments/Some%20document.pdf)",
+    );
+  });
+
+  it("uses the server-resolved path for a bare PDF wikilink", () => {
+    const assets = new Map([["Plan.pdf", "98_Attachments/Plan.pdf"]]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "[[Plan.pdf]]",
+        "97_Notes/Some note.md",
+        new Map(),
+        assets,
+      ),
+    ).toBe("[Plan\\.pdf](/api/v1/vaults/vault-1/assets/98_Attachments/Plan.pdf)");
+  });
+
+  it("keeps the anchor suffix when the target resolves", () => {
+    const assets = new Map([["Plan.pdf", "98_Attachments/Plan.pdf"]]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "![[Plan.pdf#page=3]]",
+        "97_Notes/Some note.md",
+        new Map(),
+        assets,
+      ),
+    ).toBe(
+      "![Plan\\.pdf](/api/v1/vaults/vault-1/assets/98_Attachments/Plan.pdf#page=3)",
+    );
+  });
+
+  it("falls back to the note-relative path when nothing resolved", () => {
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "![[shot.png]]",
+        "97_Notes/Some note.md",
+        new Map(),
+        new Map([["shot.png", null]]),
+      ),
+    ).toBe("![shot\\.png](/api/v1/vaults/vault-1/assets/97_Notes/shot.png)");
+  });
+});

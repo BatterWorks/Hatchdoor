@@ -117,15 +117,9 @@ fn sanitize_asset_path(raw_path: &str) -> Option<PathBuf> {
 }
 
 fn is_allowed_asset_extension(path: &FsPath) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| {
-            matches!(
-                ext.to_ascii_lowercase().as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "bmp" | "pdf"
-            )
-        })
-        .unwrap_or(false)
+    // Shared with the asset index (#158) so wikilink resolution can never name
+    // a path this route then refuses.
+    crate::vault::is_servable_asset(path)
 }
 
 pub(crate) fn content_type_for_path(path: &FsPath) -> &'static str {
