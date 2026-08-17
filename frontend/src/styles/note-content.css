@@ -28,10 +28,9 @@
   word-break: break-word;
 }
 
-/* Trailing scroll range so headings near the end of a note land at the same
-   top position as headings earlier in it. Only for notes that actually scroll
-   — on a short one this was a screenful of nothing to scroll through, below a
-   note that had already ended. */
+/* Trailing scroll range, added only once the reader jumps to a heading, so a
+   heading near the end of the note can still reach the top of the pane. Plain
+   reading never sees it: a note ends where its text ends. */
 .note-content[data-tail="true"] {
   padding-bottom: max(3rem, calc(100dvh - 7rem));
 }

@@ -61,16 +61,17 @@ describe("client audit launch contracts", () => {
     );
   });
 
-  it("gives trailing scroll space only to notes long enough to scroll", () => {
-    // A screenful of empty scroll below every note, however short, is what
-    // this replaced: the space is for reaching an end-of-note heading, which
-    // a note that does not scroll has no need of.
+  it("adds trailing scroll space only once the reader jumps to a heading", () => {
+    // Plain reading ends where the note's text ends; the space exists solely
+    // so an end-of-note heading can reach the top of the pane, and only a
+    // heading jump ever needs that.
     expect(noteContentCss).toMatch(
       /\.note-content\s*{[^}]*padding-bottom:\s*3rem/s,
     );
     expect(noteContentCss).toMatch(
       /\.note-content\[data-tail="true"\]\s*{[^}]*padding-bottom:\s*max\(3rem,\s*calc\(100dvh/s,
     );
+    expect(notePageSource).toMatch(/data-tail=\{tailArmed\}/);
   });
 
   it("lets KaTeX display equations scroll horizontally in read view", () => {

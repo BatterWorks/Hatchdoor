@@ -359,11 +359,19 @@ const x = 1
     expect(tocTarget).toBeDefined();
     fireEvent.click(tocTarget!);
 
-    expect(scrollIntoView).toHaveBeenCalledWith({
-      behavior: "smooth",
-      block: "start",
-      inline: "nearest",
-    });
+    // The jump waits a frame so the trailing scroll space is in the DOM first;
+    // without it the scroll clamps short of an end-of-note heading.
+    await waitFor(() =>
+      expect(scrollIntoView).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "start",
+        inline: "nearest",
+      }),
+    );
+    expect(document.querySelector(".note-content")).toHaveAttribute(
+      "data-tail",
+      "true",
+    );
   });
 
   it("renders frontmatter as compact properties instead of markdown body", async () => {
