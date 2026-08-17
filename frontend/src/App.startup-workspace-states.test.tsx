@@ -265,6 +265,33 @@ describe("VaultApp's zero-Vault and broken-registry note-pane states (#150)", ()
     ).toBeVisible();
   });
 
+  it("explains stale migrated environment settings without exposing Vault actions", async () => {
+    mockDiscovery({
+      registry_revision: 1,
+      collection_revision: 0,
+      vaults: [],
+      legacy_migration_recovery: {
+        code: "legacy_environment_cleanup_required",
+        message:
+          "Your Vault was imported successfully. Remove HATCHDOOR_EXCLUDE from your .env and start Hatchdoor again.",
+      },
+      demo_mode: false,
+    });
+    renderApp();
+
+    expect(await screen.findByText("Restart Required")).toBeVisible();
+    expect(
+      screen.getByText(/Your Vault was imported successfully/),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Start with no Vaults" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nothing was changed/)).not.toBeInTheDocument();
+  });
+
   it("confirming Start with no Vaults calls the endpoint and returns to the ordinary zero-Vault state", async () => {
     let confirmed = false;
     vi.spyOn(globalThis, "fetch").mockImplementation(

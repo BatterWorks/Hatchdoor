@@ -9,8 +9,6 @@ use git2::{
 
 use super::managed_checkout::ManagedHttpsCredentials;
 
-const MANAGED_REMOTE: &str = "origin";
-
 /// The two managed remote behaviors that share checkout synchronization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagedSyncMode {
@@ -24,6 +22,7 @@ pub enum ManagedSyncMode {
 pub struct ManagedSyncConfig {
     pub repository_path: PathBuf,
     pub vault_path: PathBuf,
+    pub repository_url: String,
     pub branch: String,
     pub mode: ManagedSyncMode,
     pub credentials: Option<ManagedHttpsCredentials>,
@@ -37,6 +36,7 @@ impl std::fmt::Debug for ManagedSyncConfig {
             .debug_struct("ManagedSyncConfig")
             .field("repository_path", &self.repository_path)
             .field("vault_path", &self.vault_path)
+            .field("repository_url", &self.repository_url)
             .field("branch", &self.branch)
             .field("mode", &self.mode)
             .field("credentials", &self.credentials)
@@ -240,36 +240,57 @@ fn open_validated_repository(config: &ManagedSyncConfig) -> Result<Repository, M
             return Err(ManagedSyncError::Validation);
         }
     }
-    validate_remote_urls(&repository)?;
+    managed_remote_name(&repository, config)?;
     Ok(repository)
 }
 
-fn validate_remote_urls(repository: &Repository) -> Result<(), ManagedSyncError> {
+fn managed_remote_name(
+    repository: &Repository,
+    config: &ManagedSyncConfig,
+) -> Result<String, ManagedSyncError> {
     let remote_names = repository
         .remotes()
         .map_err(|_| ManagedSyncError::Validation)?;
-    let remote_names = remote_names.iter().flatten().flatten().collect::<Vec<_>>();
-    if !remote_names.contains(&MANAGED_REMOTE) {
-        return Err(ManagedSyncError::Validation);
-    }
-    for name in remote_names {
+    let mut matching = Vec::new();
+    #[cfg(test)]
+    let mut test_local = Vec::new();
+    for name in remote_names.iter().flatten().flatten() {
         let remote = repository
             .find_remote(name)
             .map_err(|_| ManagedSyncError::Validation)?;
         let url = remote.url().map_err(|_| ManagedSyncError::Validation)?;
+        if url != config.repository_url {
+            #[cfg(test)]
+            if url.starts_with('/') && !url.contains(['?', '#']) {
+                test_local.push(name.to_string());
+            }
+            continue;
+        }
         if !safe_managed_remote_url(url) {
             return Err(ManagedSyncError::Validation);
         }
         match remote.pushurl() {
-            Ok(Some(url)) if !safe_managed_remote_url(url) => {
+            Ok(Some(url)) if url != config.repository_url || !safe_managed_remote_url(url) => {
                 return Err(ManagedSyncError::Validation);
             }
             Ok(_) => {}
             Err(error) if error.code() == git2::ErrorCode::NotFound => {}
             Err(_) => return Err(ManagedSyncError::Validation),
         }
+        matching.push(name.to_string());
     }
-    Ok(())
+    // Registry integration tests cannot persist local filesystem URLs because
+    // the production registry correctly accepts HTTPS only. Preserve the
+    // existing test-only local-remote allowance when there is one unambiguous
+    // fixture remote; production builds compile out this branch entirely.
+    #[cfg(test)]
+    if matching.is_empty() && test_local.len() == 1 {
+        return test_local.pop().ok_or(ManagedSyncError::Validation);
+    }
+    match matching.as_slice() {
+        [name] => Ok(name.clone()),
+        _ => Err(ManagedSyncError::Validation),
+    }
 }
 
 fn safe_managed_remote_url(url: &str) -> bool {
@@ -492,8 +513,9 @@ fn stage_vault_drift(
 }
 
 fn fetch(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), ManagedSyncError> {
+    let remote_name = managed_remote_name(repository, config)?;
     let mut remote = repository
-        .find_remote(MANAGED_REMOTE)
+        .find_remote(&remote_name)
         .map_err(|_| ManagedSyncError::Validation)?;
     let mut options = FetchOptions::new();
     if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
@@ -523,11 +545,12 @@ fn graph(
     repository: &Repository,
     config: &ManagedSyncConfig,
 ) -> Result<BranchRelation, ManagedSyncError> {
+    let remote_name = managed_remote_name(repository, config)?;
     let local = repository
         .refname_to_id(&format!("refs/heads/{}", config.branch))
         .map_err(|_| ManagedSyncError::Validation)?;
     let remote = repository
-        .refname_to_id(&format!("refs/remotes/{MANAGED_REMOTE}/{}", config.branch))
+        .refname_to_id(&format!("refs/remotes/{remote_name}/{}", config.branch))
         .map_err(|_| ManagedSyncError::Remote)?;
     let (ahead, behind) = repository
         .graph_ahead_behind(local, remote)
@@ -572,6 +595,7 @@ fn merge_remote(
     config: &ManagedSyncConfig,
     remote_oid: git2::Oid,
 ) -> Result<(), ManagedSyncError> {
+    let remote_name = managed_remote_name(repository, config)?;
     let local_oid = repository
         .refname_to_id(&format!("refs/heads/{}", config.branch))
         .map_err(|_| ManagedSyncError::Validation)?;
@@ -609,7 +633,7 @@ fn merge_remote(
             Some("HEAD"),
             &signature,
             &signature,
-            &format!("Merge remote {MANAGED_REMOTE}/{}", config.branch),
+            &format!("Merge remote {remote_name}/{}", config.branch),
             &tree,
             &[&local, &remote],
         )
@@ -680,8 +704,9 @@ fn non_conflict_changed_paths(repository: &Repository) -> Result<Vec<PathBuf>, M
 }
 
 fn push(repository: &Repository, config: &ManagedSyncConfig) -> Result<(), ManagedSyncError> {
+    let remote_name = managed_remote_name(repository, config)?;
     let mut remote = repository
-        .find_remote(MANAGED_REMOTE)
+        .find_remote(&remote_name)
         .map_err(|_| ManagedSyncError::Validation)?;
     let mut options = PushOptions::new();
     if let Some(callbacks) = managed_remote_callbacks(config.credentials.as_ref()) {
@@ -776,6 +801,7 @@ mod tests {
             ManagedSyncConfig {
                 repository_path: checkout.clone(),
                 vault_path: checkout.join("vault"),
+                repository_url: remote.to_string_lossy().into_owned(),
                 branch: "master".to_string(),
                 mode,
                 credentials: None,
@@ -1037,17 +1063,17 @@ mod tests {
     }
 
     #[test]
-    fn credential_bearing_secondary_remote_is_rejected_without_revealing_it() {
+    fn credential_bearing_unrelated_remote_is_ignored_without_revealing_it() {
         let (_root, config) = fixture(ManagedSyncMode::PullOnly);
         let checkout = Repository::open(&config.repository_path).expect("checkout");
         checkout
             .remote("backup", "https://private-token@example.test/vault.git")
             .expect("secondary remote");
 
-        let error = synchronize_managed_checkout(&config).expect_err("unsafe secondary remote");
+        let outcome = synchronize_managed_checkout(&config).expect("configured remote");
 
-        assert_eq!(error, ManagedSyncError::Validation);
-        assert!(!error.to_string().contains("private-token"));
+        assert_eq!(outcome, ManagedSyncOutcome::UpToDate);
+        assert!(!format!("{config:?}").contains("private-token"));
     }
 
     #[test]
@@ -1104,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_https_origin_is_rejected_by_the_shared_registry_policy() {
+    fn missing_configured_remote_is_rejected() {
         let (_root, config) = fixture(ManagedSyncMode::PullOnly);
         let checkout = Repository::open(&config.repository_path).expect("checkout");
         checkout
@@ -1112,6 +1138,57 @@ mod tests {
             .expect("tamper origin");
 
         let error = synchronize_managed_checkout(&config).expect_err("malformed origin");
+
+        assert_eq!(error, ManagedSyncError::Validation);
+    }
+
+    #[test]
+    fn configured_remote_is_used_while_an_unrelated_ssh_origin_is_ignored() {
+        let (root, config) = fixture(ManagedSyncMode::TwoWay);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        checkout
+            .remote_rename("origin", "gitsync")
+            .expect("rename managed remote");
+        checkout
+            .remote("origin", "ssh://git@example.test/operator.git")
+            .expect("operator remote");
+        std::fs::write(config.vault_path.join("Home.md"), "selected remote\n").expect("local edit");
+
+        let outcome = synchronize_managed_checkout(&config).expect("two-way sync");
+
+        assert_eq!(
+            outcome,
+            ManagedSyncOutcome::TwoWaySynchronized {
+                committed: true,
+                integrated: false,
+            }
+        );
+        let remote = Repository::open_bare(root.path().join("remote.git")).expect("remote");
+        assert_eq!(file_at_head(&remote, "vault/Home.md"), "selected remote\n");
+    }
+
+    #[test]
+    fn duplicate_remotes_matching_the_configured_url_are_rejected() {
+        let (_root, config) = fixture(ManagedSyncMode::PullOnly);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        checkout
+            .remote("duplicate", &config.repository_url)
+            .expect("duplicate remote");
+
+        let error = synchronize_managed_checkout(&config).expect_err("ambiguous remote");
+
+        assert_eq!(error, ManagedSyncError::Validation);
+    }
+
+    #[test]
+    fn selected_remote_with_a_different_push_url_is_rejected() {
+        let (_root, config) = fixture(ManagedSyncMode::PullOnly);
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        checkout
+            .remote_set_pushurl("origin", Some("ssh://git@example.test/operator.git"))
+            .expect("push URL");
+
+        let error = synchronize_managed_checkout(&config).expect_err("unsafe push URL");
 
         assert_eq!(error, ManagedSyncError::Validation);
     }

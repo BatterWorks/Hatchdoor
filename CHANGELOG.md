@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- First startup now makes each Vault browseable from its structure-only cache
+  before vector embedding finishes. Model setup no longer launches a duplicate
+  legacy single-Vault index that held the shared SQLite writer for the entire
+  embedding pass.
+- Existing-Git remote synchronization now selects the unique repository remote
+  matching the Vault's configured HTTPS URL instead of assuming `origin`, so an
+  unrelated operator-owned SSH `origin` no longer blocks a migrated Vault.
+
 ### ⚠️ Breaking changes — action required on upgrade
 - **A read-only MCP token can no longer upload attachments over HTTP.** The
   multipart attachment endpoint now accepts an MCP bearer token only while MCP
@@ -22,8 +30,9 @@
   start.** Your existing vault becomes the first Vault in a registry Hatchdoor
   stores alongside the cache, and the per-vault environment variables it was
   configured with (`HATCHDOOR_EXCLUDE`, the `HATCHDOOR_GIT_*` family) are read
-  once and stored as that Vault's own settings. Hatchdoor then refuses to start
-  until those obsolete environment lines are removed. They are
+  once and stored as that Vault's own settings. Hatchdoor then serves a
+  restricted recovery screen until those obsolete environment lines are removed
+  and the container is restarted. They are
   per-Vault questions now, and a server-wide answer cannot survive a second
   Vault. Nothing on disk moves and no note is touched; the import only writes
   the registry. If it cannot be proven safe, Hatchdoor starts and says what
@@ -31,8 +40,8 @@
   **Action:** leave the variables in place for the first upgraded start, then
   remove the variables named by Hatchdoor and start it again. Change them in
   Settings instead, per Vault.
-- **Hatchdoor will not start while imported per-Vault settings are still set in
-  the environment.** Once your Vault owns them, an `.env` value does nothing:
+- **Hatchdoor will not activate Vaults while imported per-Vault settings are
+  still set in the environment.** Once your Vault owns them, an `.env` value does nothing:
   the file and the running server disagree, and every later change made in
   Settings looks overridden by a line that has no effect. Rather than ignore
   them quietly, Hatchdoor stops and names each one. `VAULT_PATH` is exempt,

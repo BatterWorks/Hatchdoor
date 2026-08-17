@@ -56,8 +56,8 @@ per-Vault cache is rebuilt by the later runtime activation step.
 
 Any existing registry, including an intentional zero-Vault registry,
 permanently suppresses legacy import. Legacy environment values have no effect
-after that point, and are reported together as one refusal rather than silently
-ignored. See [After the import](#after-the-import).
+after that point, and are reported together in a restricted recovery screen
+rather than silently ignored. See [After the import](#after-the-import).
 
 ## Recovery
 
@@ -73,16 +73,17 @@ refused conversion.
 ## After the import
 
 Per-Vault values set in the environment no longer have any effect once the
-registry owns them, so Hatchdoor refuses to start while they are still set,
-naming each one. Remove them from `.env` and start again; change them in
+registry owns them, so Hatchdoor starts only its health, web shell, and recovery
+status while they are still set, naming each one. No Vault runtime or mutation
+surface is activated. Remove them from `.env` and restart; change them in
 Settings or with the `edit_vault` MCP tool from then on. `VAULT_PATH` is exempt,
 because Docker Compose sets it on every deployment as the container's vault
 mount.
 
 The development-only `HATCHDOOR_VAULT_SOURCE` and
 `HATCHDOOR_VAULT_GIT_*` startup-source variables were never part of a released
-deployment contract and are not migrated. If they are present, Hatchdoor
-refuses immediately and names them; remove them and create or edit the
+deployment contract and are not migrated. If they are present, Hatchdoor opens
+the same restricted recovery screen and names them; remove them, restart, and create or edit the
 Git-backed registry Vault instead.
 
 ## Downgrade

@@ -71,23 +71,37 @@ pub enum LegacyMigrationOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LegacyMigrationRecovery {
+    code: &'static str,
     message: String,
 }
 
 impl LegacyMigrationRecovery {
     pub const CODE: &'static str = "legacy_migration_required";
+    pub const ENVIRONMENT_CLEANUP_CODE: &'static str = "legacy_environment_cleanup_required";
 
     pub fn code(&self) -> &'static str {
-        Self::CODE
+        self.code
     }
 
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    pub fn environment_cleanup(message: impl Into<String>) -> Self {
+        Self {
+            code: Self::ENVIRONMENT_CLEANUP_CODE,
+            message: message.into(),
+        }
+    }
+
+    pub fn can_start_with_no_vaults(&self) -> bool {
+        self.code == Self::CODE
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(message: impl Into<String>) -> Self {
         Self {
+            code: Self::CODE,
             message: message.into(),
         }
     }
@@ -344,6 +358,7 @@ fn recovery(
 ) -> LegacyMigrationOutcome {
     LegacyMigrationOutcome::Recovery {
         recovery: LegacyMigrationRecovery {
+            code: LegacyMigrationRecovery::CODE,
             message: message.into(),
         },
         ignored_environment_keys,

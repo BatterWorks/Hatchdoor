@@ -2,6 +2,7 @@
 #![allow(dead_code)] // #92 is the first shared-core consumer of this internal cache seam.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -128,6 +129,23 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         embed_layers: bool,
     ) -> Result<(), String> {
+        self.replace_vault_snapshot_with_embed_layers_and_progress(
+            vault_id,
+            index,
+            embedder,
+            embed_layers,
+            None,
+        )
+    }
+
+    pub(crate) fn replace_vault_snapshot_with_embed_layers_and_progress(
+        &self,
+        vault_id: VaultId,
+        index: &VaultIndex,
+        embedder: &dyn Embedder,
+        embed_layers: bool,
+        on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
+    ) -> Result<(), String> {
         let _epoch = self
             .snapshot_model_epoch
             .lock()
@@ -157,7 +175,7 @@ impl SqliteCache {
             candidate.replace_with_options(
                 index,
                 embedder,
-                None,
+                on_progress,
                 embed_layers,
                 &BuildOptions::default(),
             )?;

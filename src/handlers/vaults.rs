@@ -602,12 +602,12 @@ pub async fn start_with_no_vaults_handler(
         Err(error) => return json_rejection_response(error),
     };
 
-    let recovery_pending = state
+    let recovery = state
         .legacy_migration_recovery
         .read()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_some();
-    if !recovery_pending {
+        .clone();
+    let Some(recovery) = recovery else {
         return VaultApiError::new(
             "legacy_migration_recovery_not_pending",
             "There is no failed legacy import waiting for recovery.",
@@ -615,6 +615,15 @@ pub async fn start_with_no_vaults_handler(
             false,
         )
         .respond(StatusCode::CONFLICT);
+    };
+    if !recovery.can_start_with_no_vaults() {
+        return VaultApiError::new(
+            "legacy_environment_cleanup_required",
+            recovery.message(),
+            None,
+            false,
+        )
+        .respond(StatusCode::SERVICE_UNAVAILABLE);
     }
 
     match crate::vault_migration::start_with_no_vaults(&state.vault_registry, request.confirm) {
@@ -658,28 +667,32 @@ pub async fn list_vaults_handler(State(state): State<AppState>) -> Response {
         Ok(VaultRegistryState::Ready(registry_snapshot)) => {
             let collection_snapshot = state.vaults.snapshot();
             let demo_mode = state.demo_mode;
-            let vaults = registry_snapshot
-                .definitions()
-                .filter(|definition| !demo_mode || definition.enabled())
-                .map(|definition| {
-                    let runtime_snapshot = collection_snapshot
-                        .vaults
-                        .get(&definition.vault_id())
-                        .cloned()
-                        .unwrap_or_else(|| unreconciled_snapshot(&definition));
-                    if demo_mode {
-                        public_vault_summary(&definition, &runtime_snapshot)
-                    } else {
-                        vault_summary(&definition, &runtime_snapshot)
-                    }
-                })
-                .collect();
             let legacy_migration_recovery = state
                 .legacy_migration_recovery
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
                 .map(LegacyMigrationRecoveryInfo::from);
+            let vaults = if legacy_migration_recovery.is_some() {
+                Vec::new()
+            } else {
+                registry_snapshot
+                    .definitions()
+                    .filter(|definition| !demo_mode || definition.enabled())
+                    .map(|definition| {
+                        let runtime_snapshot = collection_snapshot
+                            .vaults
+                            .get(&definition.vault_id())
+                            .cloned()
+                            .unwrap_or_else(|| unreconciled_snapshot(&definition));
+                        if demo_mode {
+                            public_vault_summary(&definition, &runtime_snapshot)
+                        } else {
+                            vault_summary(&definition, &runtime_snapshot)
+                        }
+                    })
+                    .collect()
+            };
             Json(VaultDiscoveryResponse {
                 registry_revision: Some(registry_snapshot.revision()),
                 collection_revision: collection_snapshot.collection_revision,

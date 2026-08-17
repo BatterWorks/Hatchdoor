@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::Extension;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
@@ -18,7 +18,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, warn};
 
-use crate::app_state::{AppState, build_cache_with_sqlite_and_progress};
+use crate::app_state::AppState;
 use crate::auth::{WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_token, require_web_token};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
@@ -52,7 +52,7 @@ use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migra
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
 use crate::vault_runtime::{
     VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
-    dispatch_vault_index_turn_with_embed_layers,
+    dispatch_vault_index_turn_with_progress,
 };
 use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
 
@@ -76,6 +76,7 @@ struct VaultWorkDispatchContext {
     runtime_snapshot: Arc<ConfigSnapshot>,
     author_name: String,
     author_email: String,
+    startup: StartupTracker,
 }
 
 impl VaultWorkDispatchContext {
@@ -99,11 +100,15 @@ impl VaultWorkDispatchContext {
                     .setting("HATCHDOOR_EMBED_LAYERS")
                     .map(|setting| crate::runtime_config::is_truthy(&setting.value))
                     .unwrap_or(true);
-                dispatch_vault_index_turn_with_embed_layers(
+                let progress_startup = self.startup.clone();
+                dispatch_vault_index_turn_with_progress(
                     &self.vaults,
                     self.cache,
                     self.embedder,
                     embed_layers,
+                    Some(Arc::new(move |progress| {
+                        progress_startup.set_indexing(progress);
+                    })),
                     request,
                 )
                 .await
@@ -613,7 +618,44 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 })
                 .on_response(DefaultOnResponse::new().include_headers(false)),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            reject_startup_recovery_mutation,
+        ))
         .with_state(state)
+}
+
+/// Environment-cleanup recovery keeps liveness and read-only explanation
+/// surfaces reachable, but it is not an alternate operating mode. Refuse all
+/// state-changing HTTP/MCP requests until the operator removes the named keys
+/// and restarts, regardless of which inner router would otherwise own them.
+async fn reject_startup_recovery_mutation(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let is_safe_method = matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    );
+    let recovery = state
+        .legacy_migration_recovery
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    if !is_safe_method
+        && let Some(recovery) = recovery
+        && !recovery.can_start_with_no_vaults()
+    {
+        return crate::handlers::vaults::VaultApiError::new(
+            "legacy_environment_cleanup_required",
+            recovery.message(),
+            None,
+            false,
+        )
+        .respond(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    next.run(request).await
 }
 
 async fn startup_status_handler(State(state): State<AppState>) -> Response {
@@ -818,80 +860,11 @@ fn spawn_claimed_model_startup(state: AppState, selected: SelectedModel) {
                 for vault_id in state.vaults.active_vault_ids() {
                     state.vault_work.request(vault_id, VaultWorkKind::Index);
                 }
+                // The Vault collection owns indexing now. Its Index turn
+                // publishes a structure-only generation before embedding, so
+                // browsing becomes available without a second, legacy
+                // single-Vault build contending for the same SQLite writer.
                 tracker.set_scanning();
-                let progress_tracker = tracker.clone();
-                let on_progress = Arc::new(move |progress| progress_tracker.set_indexing(progress));
-                let Some(vault_path) = state.configured_local_vault_path() else {
-                    state.model_setup_started.store(false, Ordering::Release);
-                    state.startup.runtime().set_unavailable(
-                        "managed_vault_not_acquired",
-                        "Managed Git vault acquisition is not implemented in this foundation slice.",
-                    );
-                    return;
-                };
-                let indexing_vault_path = vault_path.clone();
-                let indexing_sqlite = state.startup_sqlite.clone();
-                let indexing_embedder = state.embedder.clone();
-                let index_state = state.clone();
-                let index_result = tokio::task::spawn_blocking(move || {
-                    let runtime_snapshot = index_state.runtime_config.snapshot();
-                    let (scan_config, embed_layers) =
-                        AppState::runtime_index_options(&runtime_snapshot)?;
-                    build_cache_with_sqlite_and_progress(
-                        &indexing_vault_path,
-                        indexing_sqlite,
-                        indexing_embedder.as_ref(),
-                        Some(on_progress),
-                        &scan_config,
-                        embed_layers,
-                    )
-                })
-                .await;
-                match index_result {
-                    Ok(Ok(cache)) => {
-                        state.publish_ready_vault(vault_path.clone(), cache).await;
-                        tracker.set_ready();
-                        info!(
-                            model = model_name,
-                            "Model setup and vault indexing complete"
-                        );
-                        let git_config = GitConfig::from_snapshot(
-                            vault_path.clone(),
-                            &state.runtime_snapshot(),
-                        )
-                        .unwrap_or_else(|error| {
-                            warn!("Git versioning configuration changed before startup: {error}");
-                            None
-                        });
-                        let mut active_git_sync = state.git_sync.write().await;
-                        if active_git_sync.is_none()
-                            && let Some(git_config) = git_config
-                        {
-                            let handle = git::spawn_sync_task(
-                                git_config,
-                                state.vault_write_lock.clone(),
-                                git::SyncOps {
-                                    commit: Box::new(git::commit_local),
-                                    fetch: Box::new(git::fetch_remote),
-                                    integrate: Box::new(git::integrate_fetched),
-                                    push: Box::new(git::push_branch),
-                                },
-                            );
-                            *active_git_sync = Some(handle);
-                            info!("Git sync enabled");
-                        }
-                    }
-                    Ok(Err(error)) => {
-                        state.model_setup_started.store(false, Ordering::Release);
-                        tracker.set_failed();
-                        error!("Failed to index vault after model setup: {error}");
-                    }
-                    Err(error) => {
-                        state.model_setup_started.store(false, Ordering::Release);
-                        tracker.set_failed();
-                        error!("Vault indexing task failed: {error}");
-                    }
-                }
             }
             Ok(Err(error)) => {
                 state.model_setup_started.store(false, Ordering::Release);
@@ -1040,11 +1013,17 @@ pub async fn run_server() {
             state,
             ignored_environment_keys,
         } => {
-            if let Err(message) = check_legacy_environment_posture(&ignored_environment_keys) {
-                error!("{message}");
-                std::process::exit(1);
+            let recovery = check_legacy_environment_posture(&ignored_environment_keys)
+                .err()
+                .map(crate::vault_migration::LegacyMigrationRecovery::environment_cleanup);
+            if let Some(recovery) = &recovery {
+                warn!(
+                    code = recovery.code(),
+                    message = recovery.message(),
+                    "Legacy environment cleanup requires an operator restart"
+                );
             }
-            (state, None)
+            (state, recovery)
         }
         LegacyMigrationOutcome::Imported {
             snapshot,
@@ -1056,13 +1035,21 @@ pub async fn run_server() {
             for warning in cleanup_warnings {
                 warn!("{warning}");
             }
-            // The import is already committed, so this refusal costs the
-            // operator one restart, not the migration.
-            if let Err(message) = check_legacy_environment_posture(&ignored_environment_keys) {
-                error!("Imported your vault. {message}");
-                std::process::exit(1);
+            let recovery = check_legacy_environment_posture(&ignored_environment_keys)
+                .err()
+                .map(|message| {
+                    crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(format!(
+                        "Your Vault was imported successfully. {message}"
+                    ))
+                });
+            if let Some(recovery) = &recovery {
+                warn!(
+                    code = recovery.code(),
+                    message = recovery.message(),
+                    "Imported Vault is waiting for legacy environment cleanup and restart"
+                );
             }
-            (VaultRegistryState::Ready(snapshot), None)
+            (VaultRegistryState::Ready(snapshot), recovery)
         }
         LegacyMigrationOutcome::Recovery {
             recovery,
@@ -1090,6 +1077,8 @@ pub async fn run_server() {
         error!("{message}");
         std::process::exit(1);
     }
+
+    let startup_recovery_active = legacy_migration_recovery.is_some();
 
     let sqlite = Arc::new(
         SqliteCache::open(&config.cache_db_path, 768).unwrap_or_else(|e| {
@@ -1154,20 +1143,29 @@ pub async fn run_server() {
     let git_author_email =
         crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
             .unwrap_or_else(|| "hatchdoor@localhost".to_string());
-    match &registry_state {
-        VaultRegistryState::Ready(snapshot) => {
+    match (&registry_state, legacy_migration_recovery.as_ref()) {
+        (_, Some(recovery)) => warn!(
+            code = recovery.code(),
+            "Startup recovery is active; no Vault runtimes were activated"
+        ),
+        (VaultRegistryState::Ready(snapshot), None) => {
             vaults
                 .reconcile_and_reconstruct(&vault_registry, snapshot, &vault_work, &managed_git)
                 .await
         }
-        VaultRegistryState::Recovery(recovery) => warn!(
+        (VaultRegistryState::Recovery(recovery), None) => warn!(
             message = recovery.message(),
             "Vault registry requires operator recovery; no Vault runtimes were activated"
         ),
     }
     let runtime = VaultRuntime::new(config.vault_source.clone());
     let startup = StartupTracker::new(runtime);
-    if selected_model == SelectedModel::TermsRequired {
+    if startup_recovery_active {
+        startup.runtime().set_unavailable(
+            "startup_recovery_required",
+            "Startup recovery is required before Vaults can be activated",
+        );
+    } else if selected_model == SelectedModel::TermsRequired {
         startup.set_terms_required();
     } else {
         startup.set_scanning();
@@ -1231,6 +1229,8 @@ pub async fn run_server() {
         let dispatch_cache = state.startup_sqlite.clone();
         let dispatch_embedder = state.embedder.clone();
         let dispatch_runtime_config = state.runtime_config.clone();
+        let dispatch_startup = state.startup.clone();
+        let dispatch_model_setup_started = state.model_setup_started.clone();
         async move {
             while let Some(outcome) = vault_worker
                 .run_next(|request| {
@@ -1243,6 +1243,7 @@ pub async fn run_server() {
                     let runtime_snapshot = dispatch_runtime_config.snapshot();
                     let author_name = git_author_name.clone();
                     let author_email = git_author_email.clone();
+                    let startup = dispatch_startup.clone();
                     VaultWorkDispatchContext {
                         vaults,
                         registry,
@@ -1253,11 +1254,26 @@ pub async fn run_server() {
                         runtime_snapshot,
                         author_name,
                         author_email,
+                        startup,
                     }
                     .dispatch(request)
                 })
                 .await
             {
+                if outcome.request.kind() == VaultWorkKind::Index {
+                    match &outcome.result {
+                        Ok(()) if collection_indexes_ready(&dispatch_vaults) => {
+                            dispatch_startup.set_ready();
+                            dispatch_model_setup_started.store(false, Ordering::Release);
+                            info!("Vault collection indexing complete");
+                        }
+                        Err(error) if error.code() != "embedder_not_ready" => {
+                            dispatch_startup.set_failed();
+                            dispatch_model_setup_started.store(false, Ordering::Release);
+                        }
+                        _ => {}
+                    }
+                }
                 if let Err(error) = outcome.result {
                     // Repair remains expected until its dedicated packet;
                     // Index and Git failures are actionable per-Vault status.
@@ -1318,7 +1334,7 @@ pub async fn run_server() {
     // Startup deliberately spawns no watcher of its own: audit findings
     // C01-F02/C01-F03 were detached replacement watchers accumulating from
     // exactly that, with no handle to cancel.
-    if selected_model != SelectedModel::TermsRequired {
+    if !startup_recovery_active && selected_model != SelectedModel::TermsRequired {
         spawn_model_startup(state.clone(), selected_model);
     }
 
@@ -1374,6 +1390,16 @@ fn forward_vault_change_intent(
         }
         Err(tokio::sync::broadcast::error::RecvError::Closed) => false,
     }
+}
+
+fn collection_indexes_ready(vaults: &VaultCollectionRuntime) -> bool {
+    let active = vaults.active_vault_ids();
+    !active.is_empty()
+        && active.into_iter().all(|vault_id| {
+            vaults.runtime(vault_id).is_some_and(|runtime| {
+                runtime.snapshot().search == crate::vault_runtime::VaultSearchStatus::Ready
+            })
+        })
 }
 
 #[cfg(test)]
@@ -1478,6 +1504,43 @@ mod tests {
             &coordinator,
             &vaults,
         ));
+    }
+
+    #[test]
+    fn startup_readiness_follows_collection_index_completion() {
+        let directory = tempfile::tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let snapshot = registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Startup Vault".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add Vault");
+        let vault_id = snapshot
+            .definitions()
+            .next()
+            .expect("Vault definition")
+            .vault_id();
+        let vaults = VaultCollectionRuntime::new();
+        vaults.reconcile(&registry, &snapshot);
+
+        assert!(!collection_indexes_ready(&vaults));
+        vaults
+            .runtime(vault_id)
+            .expect("active Vault")
+            .set_search_status(crate::vault_runtime::VaultSearchStatus::Ready, None)
+            .expect("publish ready search status");
+        assert!(collection_indexes_ready(&vaults));
     }
 
     #[test]
@@ -1852,6 +1915,7 @@ mod tests {
                         runtime_snapshot: captured,
                         author_name: "Hatchdoor".to_string(),
                         author_email: "hatchdoor@example.test".to_string(),
+                        startup: StartupTracker::scanning(),
                     }
                     .dispatch(request)
                 }
@@ -5900,6 +5964,53 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = json_body(response).await;
         assert_eq!(body["code"], "legacy_migration_recovery_not_pending");
+    }
+
+    #[tokio::test]
+    async fn environment_cleanup_recovery_hides_vaults_and_refuses_mutations() {
+        let (app, _tmp, state) = app_for_tests_with_web_auth(None);
+        *state
+            .legacy_migration_recovery
+            .write()
+            .expect("recovery lock") = Some(
+            crate::vault_migration::LegacyMigrationRecovery::environment_cleanup(
+                "Remove HATCHDOOR_EXCLUDE and restart.",
+            ),
+        );
+
+        let discovery = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let body = json_body(discovery).await;
+        assert_eq!(body["vaults"], serde_json::json!([]));
+        assert_eq!(
+            body["legacy_migration_recovery"]["code"],
+            "legacy_environment_cleanup_required"
+        );
+
+        let mutation = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/vaults/start-with-no-vaults")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"confirm":true}"#))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(mutation.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            json_body(mutation).await["code"],
+            "legacy_environment_cleanup_required"
+        );
     }
 
     #[tokio::test]
