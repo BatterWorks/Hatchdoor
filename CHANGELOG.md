@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Attachment embeds written the way Obsidian writes them now render. A bare
+  `![[Some document.pdf]]` resolves by filename anywhere in the Vault, rather
+  than only next to the note, so a vault using a single top-level attachments
+  folder no longer shows broken images and PDFs. Note-relative paths keep
+  working, a leading `/` reads from the Vault root, and where a filename is
+  carried by several files the one nearest the note wins.
 - First startup now makes each Vault browseable from its structure-only cache
   before vector embedding finishes. Model setup no longer launches a duplicate
   legacy single-Vault index that held the shared SQLite writer for the entire

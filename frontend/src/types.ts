@@ -293,6 +293,13 @@ export type VaultResolveBatchResponse = {
     slug: string | null;
     archived: boolean;
   }>;
+  // Vault-relative asset paths for the request's `asset_targets` (#158).
+  // Optional so a response from a server predating asset resolution still
+  // parses, leaving embeds on their note-relative reading.
+  asset_results?: Array<{
+    target: string;
+    path: string | null;
+  }>;
 };
 
 export type TagStat = { tag: string; note_count: number };

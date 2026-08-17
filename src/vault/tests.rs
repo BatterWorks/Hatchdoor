@@ -395,3 +395,121 @@ fn build_with_config_honours_user_supplied_exclude_patterns() {
         "Scratch should be excluded"
     );
 }
+
+#[test]
+fn resolve_asset_finds_a_bare_filename_anywhere_in_the_vault() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("97_Notes")).expect("dirs");
+    fs::create_dir_all(dir.path().join("98_Attachments")).expect("dirs");
+    fs::write(
+        dir.path().join("97_Notes/Some note.md"),
+        "![[Some document.pdf]]",
+    )
+    .expect("note");
+    fs::write(dir.path().join("98_Attachments/Some document.pdf"), b"pdf").expect("asset");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(
+        index.resolve_asset("Some document.pdf", "97_Notes"),
+        Some("98_Attachments/Some document.pdf")
+    );
+}
+
+#[test]
+fn resolve_asset_prefers_the_notes_own_folder_over_a_distant_namesake() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("projects")).expect("dirs");
+    fs::create_dir_all(dir.path().join("98_Attachments")).expect("dirs");
+    fs::write(dir.path().join("projects/diagram.png"), b"near").expect("asset");
+    fs::write(dir.path().join("98_Attachments/diagram.png"), b"far").expect("asset");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(
+        index.resolve_asset("diagram.png", "projects"),
+        Some("projects/diagram.png")
+    );
+    assert_eq!(
+        index.resolve_asset("diagram.png", ""),
+        Some("98_Attachments/diagram.png")
+    );
+}
+
+#[test]
+fn resolve_asset_reads_a_leading_slash_as_vault_root_relative() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("a/b/98_Attachments")).expect("dirs");
+    fs::create_dir_all(dir.path().join("98_Attachments")).expect("dirs");
+    fs::write(dir.path().join("98_Attachments/plan.pdf"), b"root").expect("asset");
+    // A namesake the note-relative reading would reach first, so the assertion
+    // fails if the leading slash is not honoured.
+    fs::write(dir.path().join("a/b/98_Attachments/plan.pdf"), b"near").expect("asset");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(
+        index.resolve_asset("/98_Attachments/plan.pdf", "a/b"),
+        Some("98_Attachments/plan.pdf")
+    );
+}
+
+#[test]
+fn resolve_asset_still_honours_relative_paths_written_for_hatchdoor() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("97_Notes/inline")).expect("dirs");
+    fs::create_dir_all(dir.path().join("inline")).expect("dirs");
+    fs::create_dir_all(dir.path().join("98_Attachments")).expect("dirs");
+    fs::write(dir.path().join("98_Attachments/shot.png"), b"png").expect("asset");
+    // Same relative path from the note's folder and from the Vault root, so the
+    // note's own folder has to win for the first assertion to hold.
+    fs::write(dir.path().join("97_Notes/inline/near.png"), b"near").expect("asset");
+    fs::write(dir.path().join("inline/near.png"), b"root").expect("asset");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(
+        index.resolve_asset("inline/near.png", "97_Notes"),
+        Some("97_Notes/inline/near.png")
+    );
+    assert_eq!(
+        index.resolve_asset("../98_Attachments/shot.png", "97_Notes"),
+        Some("98_Attachments/shot.png")
+    );
+    assert_eq!(
+        index.resolve_asset("98_Attachments/shot.png", "97_Notes"),
+        Some("98_Attachments/shot.png")
+    );
+}
+
+#[test]
+fn resolve_asset_rejects_targets_that_escape_the_vault_root() {
+    let dir = tempdir().expect("temp dir");
+    fs::create_dir_all(dir.path().join("notes")).expect("dirs");
+    fs::write(dir.path().join("notes/secret.png"), b"png").expect("asset");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(index.resolve_asset("../../notes/secret.png", "notes"), None);
+}
+
+#[test]
+fn resolve_asset_returns_none_for_an_absent_or_unservable_target() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("notes.txt"), b"text").expect("file");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(index.resolve_asset("missing.png", ""), None);
+    assert_eq!(index.resolve_asset("notes.txt", ""), None);
+}
+
+#[test]
+fn resolve_asset_ignores_anchors_and_query_suffixes_on_the_target() {
+    let dir = tempdir().expect("temp dir");
+    fs::write(dir.path().join("plan.pdf"), b"pdf").expect("asset");
+
+    let index = VaultIndex::build(dir.path()).expect("index");
+
+    assert_eq!(index.resolve_asset("plan.pdf#page=3", ""), Some("plan.pdf"));
+}

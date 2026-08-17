@@ -23,8 +23,21 @@ const WIKILINK_PATTERN = /(!?)\[\[([^\]\r\n]+)\]\]/g;
 // can legitimately resolve differently in different Vaults.
 const resolveCache = new Map<string, ResolvedWikilink | null>();
 
+// Assets resolve relative to the note that embeds them, so the same target in
+// two notes at different depths can legitimately be two different files. The
+// note's path is part of the key for exactly that reason.
+const assetResolveCache = new Map<string, string | null>();
+
 function cacheKey(vaultId: VaultId, target: string): string {
   return `${vaultId}:${target}`;
+}
+
+function assetCacheKey(
+  vaultId: VaultId,
+  noteRelativePath: string,
+  target: string,
+): string {
+  return `${vaultId}:${noteRelativePath}:${target}`;
 }
 
 /**
@@ -39,6 +52,7 @@ export function rewriteWikilinks(
   markdown: string,
   noteRelativePath: string,
   resolved: Map<string, ResolvedWikilink | null>,
+  resolvedAssets: Map<string, string | null> = new Map(),
 ): string {
   return markdown.replace(
     WIKILINK_PATTERN,
@@ -46,19 +60,21 @@ export function rewriteWikilinks(
       const parsed = parseWikilinkTarget(body);
 
       if (bang === "!") {
-        const source = resolveAssetHref(
+        const source = assetHref(
           vaultId,
           parsed.target,
           noteRelativePath,
+          resolvedAssets,
         );
         return `![${escapeMarkdownLabel(parsed.label)}](${source})`;
       }
 
       if (isPdfAssetTarget(parsed.target)) {
-        const source = resolveAssetHref(
+        const source = assetHref(
           vaultId,
           parsed.target,
           noteRelativePath,
+          resolvedAssets,
         );
         return `[${escapeMarkdownLabel(parsed.label)}](${source})`;
       }
@@ -107,14 +123,24 @@ export function useResolvedWikilinks(
 
     void (async () => {
       const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
+      const isAsset = (match: RegExpMatchArray) =>
+        match[1] === "!" || isPdfAssetTarget(parseWikilinkTarget(match[2]).target);
       const rawTargets = matches
-        .filter(
-          (m) =>
-            m[1] !== "!" && !isPdfAssetTarget(parseWikilinkTarget(m[2]).target),
-        )
+        .filter((m) => !isAsset(m))
         .map((m) => parseWikilinkTarget(m[2]).target)
         .filter((target) => target.length > 0);
       const uniqueTargets = [...new Set(rawTargets)];
+      // Assets are sent by path part: the server resolves a file, and a
+      // `#page=3` suffix addresses the viewer rather than naming a different
+      // one.
+      const uniqueAssetTargets = [
+        ...new Set(
+          matches
+            .filter(isAsset)
+            .map((m) => splitPathSuffix(parseWikilinkTarget(m[2]).target)[0])
+            .filter((target) => target.length > 0),
+        ),
+      ];
 
       const map = new Map<string, ResolvedWikilink | null>();
       for (const target of uniqueTargets) {
@@ -127,7 +153,21 @@ export function useResolvedWikilinks(
         (target) => !resolveCache.has(cacheKey(vaultId, target)),
       );
 
-      if (missing.length > 0) {
+      const assetMap = new Map<string, string | null>();
+      for (const target of uniqueAssetTargets) {
+        const key = assetCacheKey(vaultId, noteRelativePath, target);
+        if (assetResolveCache.has(key)) {
+          assetMap.set(target, assetResolveCache.get(key) ?? null);
+        }
+      }
+      const missingAssets = uniqueAssetTargets.filter(
+        (target) =>
+          !assetResolveCache.has(
+            assetCacheKey(vaultId, noteRelativePath, target),
+          ),
+      );
+
+      if (missing.length > 0 || missingAssets.length > 0) {
         try {
           const res = await apiFetch(
             `/api/v1/vaults/${encodeURIComponent(vaultId)}/resolve-batch`,
@@ -136,7 +176,11 @@ export function useResolvedWikilinks(
               headers: {
                 "Content-Type": "application/json",
               },
-              body: JSON.stringify({ targets: missing }),
+              body: JSON.stringify({
+                targets: missing,
+                asset_targets: missingAssets,
+                note_path: noteRelativePath,
+              }),
             },
           );
 
@@ -149,6 +193,13 @@ export function useResolvedWikilinks(
               map.set(result.target, resolved);
               resolveCache.set(cacheKey(vaultId, result.target), resolved);
             }
+            for (const result of json.asset_results ?? []) {
+              assetMap.set(result.target, result.path);
+              assetResolveCache.set(
+                assetCacheKey(vaultId, noteRelativePath, result.target),
+                result.path,
+              );
+            }
           }
         } catch {
           // Leave unresolved values as null fallback.
@@ -160,6 +211,7 @@ export function useResolvedWikilinks(
         markdown,
         noteRelativePath,
         map,
+        assetMap,
       );
 
       if (!cancelled) {
@@ -193,6 +245,35 @@ export function resolveAssetHref(
   }
 
   const encoded = normalized.split("/").map(encodeURIComponent).join("/");
+  return withAccessToken(
+    `/api/v1/vaults/${encodeURIComponent(vaultId)}/assets/${encoded}${suffix}`,
+  );
+}
+
+/**
+ * The href for one wikilink asset target.
+ *
+ * Prefers the path the server resolved for it, which is what makes Obsidian's
+ * bare-filename embeds work from a note that is not the attachment's sibling
+ * (#158). Falls back to the note-relative reading when nothing resolved, so a
+ * target the server has not answered for yet — the first render of a note,
+ * before the batch returns — renders exactly as it did before.
+ */
+function assetHref(
+  vaultId: VaultId,
+  rawTarget: string,
+  noteRelativePath: string,
+  resolvedAssets: Map<string, string | null>,
+): string {
+  // Keyed by the path part, the way the target is sent for resolution: the
+  // suffix rides along from the written target instead, because `#page=3` on a
+  // PDF embed addresses the viewer rather than the file.
+  const [pathPart, suffix] = splitPathSuffix(rawTarget);
+  const resolvedPath = resolvedAssets.get(pathPart);
+  if (!resolvedPath) {
+    return resolveAssetHref(vaultId, rawTarget, noteRelativePath);
+  }
+  const encoded = resolvedPath.split("/").map(encodeURIComponent).join("/");
   return withAccessToken(
     `/api/v1/vaults/${encodeURIComponent(vaultId)}/assets/${encoded}${suffix}`,
   );

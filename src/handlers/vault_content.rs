@@ -22,7 +22,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
-use crate::api_types::{ResolveBatchRequest, ResolveQuery, ResolveTargetResult};
+use crate::api_types::{
+    ResolveAssetResult, ResolveBatchRequest, ResolveQuery, ResolveTargetResult,
+};
 use crate::app_state::{AppState, run_blocking};
 use crate::handlers::api::MAX_RESOLVE_BATCH;
 use crate::handlers::assets::{
@@ -51,11 +53,27 @@ pub struct VaultResolveResponse {
 pub struct VaultResolveBatchResponse {
     pub vault_id: VaultId,
     pub results: Vec<ResolveTargetResult>,
+    /// Empty unless the request carried `asset_targets` (#158), so a client
+    /// resolving note links only sees exactly what it saw before.
+    pub asset_results: Vec<ResolveAssetResult>,
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+/// The Vault-relative folder containing `note_path`, `""` at the Vault root.
+/// Backslashes are folded first so a client that sends a Windows-style path
+/// does not resolve every asset from the root.
+fn note_parent_dir(note_path: &str) -> String {
+    let normalized = note_path.replace('\\', "/");
+    let mut parts = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    parts.pop();
+    parts.join("/")
+}
 
 fn bad_request(error: VaultApiError) -> Response {
     error.respond(StatusCode::BAD_REQUEST)
@@ -306,7 +324,7 @@ pub async fn vault_scoped_resolve_batch_handler(
         Ok(payload) => payload,
         Err(error) => return json_rejection_response(error),
     };
-    if payload.targets.len() > MAX_RESOLVE_BATCH {
+    if payload.targets.len() + payload.asset_targets.len() > MAX_RESOLVE_BATCH {
         return VaultApiError::new(
             "resolve_batch_too_large",
             format!("Too many targets (max {MAX_RESOLVE_BATCH})"),
@@ -331,13 +349,30 @@ pub async fn vault_scoped_resolve_batch_handler(
 
     let result = run_blocking(move || {
         let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        // One authoritative-index build for the whole batch: `resolve_wikilinks`
-        // resolves every target against it, rather than paying a full Vault
-        // scan per target the way looping `resolve_wikilink` would.
-        let resolved = match core.resolve_wikilinks(vault_id, &payload.targets) {
+        // One authoritative-index build for the whole batch: `resolve_batch`
+        // resolves every target — note and asset alike — against it, rather
+        // than paying a full Vault scan per target the way looping
+        // `resolve_wikilink` would.
+        let note_dir = payload
+            .note_path
+            .as_deref()
+            .map(note_parent_dir)
+            .unwrap_or_default();
+        let (resolved, resolved_assets) = match core.resolve_batch(
+            vault_id,
+            &payload.targets,
+            &payload.asset_targets,
+            &note_dir,
+        ) {
             Ok(resolved) => resolved,
             Err(error) => return Ok(Err(error)),
         };
+        let asset_results = payload
+            .asset_targets
+            .into_iter()
+            .zip(resolved_assets)
+            .map(|(target, path)| ResolveAssetResult { target, path })
+            .collect::<Vec<_>>();
         let results = payload
             .targets
             .into_iter()
@@ -355,14 +390,18 @@ pub async fn vault_scoped_resolve_batch_handler(
                 },
             })
             .collect::<Vec<_>>();
-        Ok(Ok(results))
+        Ok(Ok((results, asset_results)))
     })
     .await;
 
     match result {
-        Ok(Ok(results)) => (
+        Ok(Ok((results, asset_results))) => (
             StatusCode::OK,
-            Json(VaultResolveBatchResponse { vault_id, results }),
+            Json(VaultResolveBatchResponse {
+                vault_id,
+                results,
+                asset_results,
+            }),
         )
             .into_response(),
         Ok(Err(error)) => vault_read_error_response(error),
