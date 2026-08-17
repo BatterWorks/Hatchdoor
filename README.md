@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://hatchdoor.battercloud.cc"><img alt="Live demo" src="https://img.shields.io/badge/live_demo-hatchdoor.battercloud.cc-e4572e"></a>
+  <a href="https://docs-hatchdoor.battercloud.cc"><img alt="Documentation" src="https://img.shields.io/badge/docs-docs--hatchdoor.battercloud.cc-6f42c1"></a>
   <a href="https://hub.docker.com/r/battermanz/hatchdoor"><img alt="Docker Hub" src="https://img.shields.io/docker/v/battermanz/hatchdoor?sort=semver&label=docker%20hub&color=2496ed"></a>
   <a href="https://github.com/BattermanZ/Hatchdoor/blob/main/Dockerfile"><img alt="Rootless and distroless image" src="https://img.shields.io/badge/image-rootless_%26_distroless-2ea44f"></a>
   <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
@@ -41,7 +42,8 @@ under close human review, with tests and a documented safety model.
 </p>
 
 <p align="center">
-  <b><a href="https://hatchdoor.battercloud.cc">&#9654;&nbsp; Try the live demo</a></b>, a read-only public vault.
+  <b><a href="https://hatchdoor.battercloud.cc">&#9654;&nbsp; Try the live demo</a></b>, a read-only public vault, or
+  read the <b><a href="https://docs-hatchdoor.battercloud.cc">user documentation</a></b> for setup and usage guides.
 </p>
 
 <details>
@@ -859,6 +861,9 @@ docker push battermanz/hatchdoor:latest
 
 ## Project Docs
 
+- [User documentation](https://docs-hatchdoor.battercloud.cc): setup, configuration,
+  and day-to-day usage guides for running Hatchdoor, hosted in a Hatchdoor
+  vault itself.
 - [Documentation index](docs/README.md): architecture, collaboration, roadmap,
   research, maintenance, and historical records.
 - [Product roadmap](docs/roadmap/product-roadmap.md): draft overall product direction
