@@ -1,6 +1,9 @@
 # Vault Lifecycle & Multi-Vault Roadmap
 
-- Status: Draft for discussion
+- Status: Draft for discussion. Phase 1 (guided setup, managed Git vaults,
+  product-managed vault collection) and the core of Phase 2 (multi-vault
+  configuration, vault-aware navigation and search, MCP vault scoping) shipped
+  in v2.5.0; see the completion checklists below for what each phase covers.
 - Audience: Hatchdoor maintainers, contributors, and product collaborators
 - Horizon: Product direction; no delivery dates are committed
 - Scope: One workstream of the [Hatchdoor product roadmap](product-roadmap.md) —

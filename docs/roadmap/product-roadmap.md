@@ -73,8 +73,9 @@ and manage vaults from the product, and eventually run several at once.
 Direction: detailed in the
 [vault lifecycle & multi-vault roadmap](vault-lifecycle.md).
 
-_Horizon: ongoing; managed Git vault support is in active development (see the
-[vault lifecycle & multi-vault roadmap](vault-lifecycle.md) for status)._
+_Horizon: ongoing; multi-vault management and managed/Git-backed vaults shipped
+in v2.5.0 (see the [vault lifecycle & multi-vault roadmap](vault-lifecycle.md)
+for what remains)._
 
 ### Adopt the 2026-07-28 MCP specification
 
