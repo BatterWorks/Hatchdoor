@@ -911,7 +911,7 @@ export function VaultSettingsDetail({
                       : "No sign-in removes any stored token."}
                   </span>
                 </span>
-                <div>
+                <div className="settings-choice-stack">
                   <div
                     className="settings-segmented"
                     role="group"

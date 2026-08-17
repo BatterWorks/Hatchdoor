@@ -299,7 +299,7 @@ export function VaultCreationDialog({
               <span>
                 <span className="settings-row-label">Sign-in</span>
               </span>
-              <div>
+              <div className="settings-choice-stack">
                 <div
                   className="settings-segmented"
                   role="group"
