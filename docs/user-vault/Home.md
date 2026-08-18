@@ -54,6 +54,7 @@ Guides, Reference, and Concepts will grow from this starting point.
 - [[How to organize a Vault with layers]]
 - [[How to run an LLM wiki in Hatchdoor]]
 - [[How to import and work with attachments]]
+- [[How to edit notes with the live editor]]
 - [[How to troubleshoot common problems]]
 
 **Reference**
@@ -69,6 +70,7 @@ Guides, Reference, and Concepts will grow from this starting point.
 
 **Concepts**
 
+- [[What Hatchdoor is]]
 - [[The layer system]]
 - [[How indexing and search work]]
 - [[The security model]]

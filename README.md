@@ -216,7 +216,8 @@ The runtime image is **distroless and rootless**. It is built on
 `gcr.io/distroless/cc-debian13:nonroot`, ships no shell or package manager, and
 runs as an unprivileged `nonroot` user. Hatchdoor also runs unchanged under
 Podman (rootless included); swap `docker` / `docker compose` for `podman` /
-`podman compose`.
+`podman compose` **and** the image tag for `podman-latest` (or
+`podman-<version>`) — the `latest` tag above is Docker-only.
 
 Docker Compose mounts:
 

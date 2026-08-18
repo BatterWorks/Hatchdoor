@@ -10,7 +10,8 @@ to find and read a note, explicitly permit one small write, and inspect the
 result in the Web UI.
 
 Hatchdoor is not a hosted sync service and does not replace your Markdown app.
-It is the agent-first operating layer for notes you keep in ordinary files.
+It is the agent-first operating layer for notes you keep in ordinary files —
+see [[What Hatchdoor is]] for the full picture.
 
 ## What you need
 

@@ -41,6 +41,8 @@ Like PARA, the second brain concept is tool-agnostic — Forte's own examples sp
 
 Ordinary Markdown files are already the kind of durable, portable store the practice asks for — nothing about capturing, distilling, or expressing requires a specific app, only a place that persists. What Hatchdoor adds is a second party who can act on that store: an MCP-connected agent can capture material into a note on request, distill an existing page by rewriting or trimming it, and draft the expressive output — a summary, a report — directly from what's already there, all under the same guarded read/write tools described in [[MCP tools reference]]. The human still decides what's worth keeping and reviews what changed, in the Web UI; the agent does more of the mechanical work of Organize and Distill than a second brain built for a human alone ever could.
 
+Next, find out [[Why keep a second brain]]?
+
 ---
 
 Related: [[The PARA method (external reference)]] · [[The Zettelkasten method (external reference)]] · [[Why keep a second brain]] · [[MCP tools reference]]

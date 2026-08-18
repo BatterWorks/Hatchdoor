@@ -22,8 +22,10 @@ filename, command, or ID.
 > Browser search and agent search complement each other. Search in the Web UI when you want to scan results; ask the agent when you want a controlled research or editing workflow.
 
 The UI can also edit notes when the Vault is writable. **New note** creates a
-Markdown file; **Edit** and **Save** change one. If those controls are absent,
-the Vault is read-only or the deployment is in demo mode.
+Markdown file; click any paragraph, heading, list item, or table row to edit
+it in place — see [[How to edit notes with the live editor]] for the full
+rundown. If those controls are absent, the Vault is read-only or the
+deployment is in demo mode.
 
 Hatchdoor understands wikilinks and refreshes its index when Markdown or
 attachments change. Keep the Markdown files portable: you can still open them
