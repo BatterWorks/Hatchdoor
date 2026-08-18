@@ -7,7 +7,7 @@ frontend/dist
 /data
 /models
 /vault
-/demo-vault
+/demo-vaults
 /.fastembed_cache
 .claude/
 .superpowers/

@@ -55,6 +55,30 @@ Direction:
 _Horizon: unversioned ("at some point"), but high-value for trust and safety.
 Some conflict-diff scaffolding already exists in the frontend._
 
+### Vault integrity checks for agent-maintained wikis (lint)
+
+**Problem:** the layer system was built for the agent-wiki pattern — raw
+material demoted into its own layer, an agent ingesting into it and querying
+the curated surface (see the "LLM wiki" research note under
+[`docs/research/karpathy-llm-wiki/`](../research/karpathy-llm-wiki/)) — but
+that pattern's third leg, **lint**, has no home in Hatchdoor today. Nothing
+surfaces orphaned notes, broken wikilinks, or a layer whose marker vanished
+while its notes are still tagged with it; a Vault an agent maintains
+unattended can silently drift out of shape. The building blocks partially
+exist (`build_layer_diagnostics` in `src/handlers/diagnostics.rs`), but the
+route and MCP tool that once exposed it (`/api/diagnostics`,
+`layer_diagnostics`) were both retired in the multi-vault rewrite with no
+Vault-scoped replacement.
+
+Direction: design and ship a Vault-scoped integrity surface — an MCP tool and
+matching HTTP endpoint — covering at minimum: orphaned notes (no backlinks in
+or out), broken wikilinks, layer markers with vanished declarations (notes
+still tagged with a layer no marker claims), and disagreeing layer
+descriptions. Read-only to start; whether it becomes agent-callable as
+routine wiki maintenance, a Web UI diagnostics panel, or both is still open.
+
+_Horizon: unversioned ("at some point"). No implementation started._
+
 ### Onboarding experience
 
 **Problem:** a first-time user lands in Hatchdoor with no onboarding.

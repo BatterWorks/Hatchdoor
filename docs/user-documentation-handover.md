@@ -69,13 +69,14 @@ The current Vault is only the getting-started foundation. It still needs a broad
 ## Release and deployment work still required
 
 - Review every page against the final v2.5.0 behavior and terminology before publication.
-- Provision the dedicated read-only documentation instance.
-- Mount or deploy `docs/user-vault` into that instance.
-- Preserve its Vault registry and stable Vault UUID.
-- Configure the root-to-Home reverse-proxy redirect.
+- ~~Provision the dedicated read-only documentation instance.~~ Done: a `HATCHDOOR_DEMO_MODE=true` instance is deployed and public. (Infra specifics — host, deploy stack, internal domain — deliberately kept out of this repo; see private ops notes.)
+- ~~Mount or deploy `docs/user-vault` into that instance.~~ Done, and syncs itself: the Vault is registered as **`managed_git`**, `pull_only`, pointed at this repo's public GitHub URL (branch `main`, `vault_subdirectory: docs/user-vault`), polling every **15 minutes** (deliberately short for now, while the doc set is still being iterated on; revisit once it stabilizes). Hatchdoor clones and refreshes it itself — no rsync, no filesystem watcher (that's disabled for git-backed Vaults; freshness comes from the poll instead).
+- Preserve its Vault registry and stable Vault UUID so the root redirect and any direct note links keep working across future config changes.
+- ~~Configure the root-to-Home reverse-proxy redirect.~~ Done: `/` redirects to `/v/<vault-id>/n/home`.
 - Confirm public navigation, direct note links, mobile rendering, search, and read-only behavior.
-- Define and document the initial manual publication checklist.
-- Later, automate publication without allowing the deployed instance to overwrite the canonical repository files.
+- **Publishing is now push-and-wait, not a manual step**: merge/push to `main` and the site picks it up within the poll interval. `HATCHDOOR_DEMO_MODE=true` blocks the Sync/Retry API and the Settings UI's Vault controls (`403 demo_read_only`), so there is currently no way to force an immediate pull short of restarting the instance out-of-band.
+- **Changing the Vault's `branch` field requires a full re-clone, not just editing the registry**: the managed-checkout validator checks the existing local checkout against the configured branch and fails closed if they disagree, silently falling back to a stale local-style read (`git: unavailable`, `watcher: running`) instead of failing loudly. After changing `branch`, the existing checkout must also be discarded so it clones fresh.
+- Later, automate publication (e.g. a low-privilege endpoint or webhook that triggers a pull) without allowing the deployed instance to overwrite the canonical repository files — mutation stays impossible either way since `capabilities.mutate` is false for a git-sourced Vault.
 - Decide how documentation for older Hatchdoor versions will be retained once releases move beyond v2.5.0.
 
 ## Important constraints
