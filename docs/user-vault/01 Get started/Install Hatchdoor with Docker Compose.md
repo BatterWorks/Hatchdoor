@@ -12,7 +12,7 @@ Create `compose.yaml` with this complete content:
 ```yaml
 services:
   hatchdoor:
-    image: battermanz/hatchdoor:2.5.0
+    image: battermanz/hatchdoor:latest
     container_name: hatchdoor
     env_file:
       - .env
@@ -40,6 +40,9 @@ services:
 
 > [!note]
 > `HOST: 0.0.0.0` makes Hatchdoor reachable through Docker's internal network. The `127.0.0.1:42824:42824` port mapping keeps it accessible only from the machine running Docker.
+
+> [!tip]
+> Using Podman instead of Docker? Everything on this page works unchanged — swap `docker` / `docker compose` for `podman` / `podman compose`, but also change the image to `battermanz/hatchdoor:podman-latest` (or `podman-<version>`); the plain `latest` tag above is Docker-only. The `chown` step further down needs `podman unshare` too — see the note there.
 
 ## Optional: expose Hatchdoor to your LAN
 
@@ -74,6 +77,12 @@ mkdir -p data/cache data/state models
 chmod 700 data/cache data/state models
 sudo chown -R 65532:65532 data models
 ```
+
+> [!tip]
+> On rootless Podman, `sudo chown` targets the wrong namespace — use
+> `podman unshare chown -R 65532:65532 data models` instead. Apply the same
+> substitution to a custom `HOST_CACHE_PATH`, `HOST_STATE_PATH`, or
+> `HOST_MODELS_PATH`.
 
 The container also needs read access to your Vault. Grant it write access only
 if agents or the Web UI should change notes. On Linux, verify access for UID

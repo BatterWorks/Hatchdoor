@@ -10,7 +10,8 @@ to find and read a note, explicitly permit one small write, and inspect the
 result in the Web UI.
 
 Hatchdoor is not a hosted sync service and does not replace your Markdown app.
-It is the agent-first operating layer for notes you keep in ordinary files.
+It is the agent-first operating layer for notes you keep in ordinary files —
+see [[What Hatchdoor is]] for the full picture.
 
 ## What you need
 
@@ -24,6 +25,7 @@ It is the agent-first operating layer for notes you keep in ordinary files.
 
 You will complete this path:
 
+0. Understand the idea: [[Why keep a second brain]], then pick a way to organize one — [[The PARA method (external reference)|PARA]], [[The Zettelkasten method (external reference)|Zettelkasten]], or [[The LLM wiki pattern (external reference)|the LLM wiki pattern]]. None of it is required before installing, but it's worth five minutes before you start filing real notes.
 1. [[Install Hatchdoor with Docker Compose]]
 2. [[Connect your first Vault]]
 3. [[Connect your agent]]

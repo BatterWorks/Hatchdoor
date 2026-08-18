@@ -27,7 +27,7 @@ Create an empty deployment directory and, inside it, `compose.yaml`:
 ```yaml
 services:
   hatchdoor:
-    image: battermanz/hatchdoor:2.5.0
+    image: battermanz/hatchdoor:latest
     container_name: hatchdoor
     env_file:
       - .env

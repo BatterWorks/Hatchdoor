@@ -21,8 +21,19 @@ flowchart LR
 
 Follow [[Welcome to Hatchdoor]] to deploy Hatchdoor, connect your own agent, make one deliberate change, and review it in the browser. These docs target Hatchdoor v2.5.0.
 
-> [!tip]
-> Starting a new Vault and not sure how to organize it? Hatchdoor doesn't require any particular layout. Two established patterns worth knowing about: [[The PARA method (external reference)|PARA]] sorts folders by how actionable a note is (Projects, Areas, Resources, Archives); [[The LLM wiki pattern (external reference)|the LLM wiki pattern]] has an agent build and maintain an interlinked wiki for you. They aren't mutually exclusive — see [[How to run an LLM wiki in Hatchdoor]].
+## Before you start: what kind of notes app is this
+
+Hatchdoor is built for keeping a [[The Second Brain method (external reference)|second brain]] — a durable, external place for the things worth keeping — with one difference from most tools built for that: an MCP-connected agent can read and act on it too, not just you. See [[Why keep a second brain]] for what that changes about the ordinary capture-organize-distill-express rhythm.
+
+That still leaves how to lay out a Vault. Hatchdoor doesn't require any particular layout — pick whichever of these fits how you think, or mix them:
+
+| Method | What it optimizes | Reference |
+| --- | --- | --- |
+| **PARA** | Folders by how actionable a note is (Projects, Areas, Resources, Archives) | [[The PARA method (external reference)]] |
+| **Zettelkasten** | Dense links between atomic notes, little to no folder hierarchy | [[The Zettelkasten method (external reference)]] |
+| **LLM wiki** | An agent that builds and maintains an interlinked wiki for you | [[The LLM wiki pattern (external reference)]] |
+
+They aren't mutually exclusive — see [[How to run an LLM wiki in Hatchdoor]] for one way to combine an LLM wiki with folder-based organization underneath it.
 
 ## Documentation areas
 
@@ -39,8 +50,11 @@ Guides, Reference, and Concepts will grow from this starting point.
 
 - [[How to deploy Hatchdoor with an agent]]
 - [[How to set up a Git-backed Vault]]
+- [[How to manage multiple Vaults]]
 - [[How to organize a Vault with layers]]
 - [[How to run an LLM wiki in Hatchdoor]]
+- [[How to import and work with attachments]]
+- [[How to edit notes with the live editor]]
 - [[How to troubleshoot common problems]]
 
 **Reference**
@@ -51,10 +65,14 @@ Guides, Reference, and Concepts will grow from this starting point.
 - [[Settings and environment variables reference]]
 - [[The LLM wiki pattern (external reference)]]
 - [[The PARA method (external reference)]]
+- [[The Second Brain method (external reference)]]
+- [[The Zettelkasten method (external reference)]]
 
 **Concepts**
 
+- [[What Hatchdoor is]]
 - [[The layer system]]
 - [[How indexing and search work]]
 - [[The security model]]
 - [[Vault lifecycle states]]
+- [[Why keep a second brain]]
