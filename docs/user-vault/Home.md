@@ -48,6 +48,7 @@ Guides, Reference, and Concepts will grow from this starting point.
 - [[HTTP API reference]]
 - [[MCP tools reference]]
 - [[Supported Markdown reference]]
+- [[Settings and environment variables reference]]
 - [[The LLM wiki pattern (external reference)]]
 - [[The PARA method (external reference)]]
 
