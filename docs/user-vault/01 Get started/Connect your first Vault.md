@@ -28,6 +28,8 @@ reason to copy your real notes into the container.
 
 To connect another local Vault later, open **Settings** → **Add a Vault** →
 **A folder on this server** and enter the already-mounted container path.
+Want version history, or a Vault backed by a remote repository instead? See
+[[How to set up a Git-backed Vault]].
 
 With the first Vault ready, keep its contents read-only to agents while you
 make the first connection in [[Connect your agent]].
