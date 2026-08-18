@@ -70,8 +70,9 @@ dev-start profile="": _prepare-cargo _kill-stale
 
 # Rebuild the dev Vault fixtures under .dev/vaults and rewrite the registry.
 # Profiles: clean (one healthy Vault), messy (healthy + pathological content +
-# every degraded state), broken (degraded states only). Destroys and recreates
-# the fixture tree, so never point this at a Vault you care about.
+# every degraded state), broken (degraded states only), demo (the four public
+# demo-vaults/* side by side). Destroys and recreates the fixture tree, so
+# never point this at a Vault you care about.
 dev-vaults profile="clean":
     @scripts/dev-vaults.sh "{{profile}}"
 

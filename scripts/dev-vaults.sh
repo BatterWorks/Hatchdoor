@@ -8,7 +8,7 @@
 # NFC/NFD near-duplicates, symlinks), so keeping it out of the tree is what
 # lets the repo stay clonable on any platform.
 #
-# Usage: scripts/dev-vaults.sh <clean|messy|broken>
+# Usage: scripts/dev-vaults.sh <clean|messy|broken|demo>
 
 set -euo pipefail
 
@@ -41,10 +41,24 @@ note() {
 build_healthy() {
     local dest="$vaults_dir/healthy"
     mkdir -p "$dest"
-    if [ -d "$repo_root/demo-vault" ]; then
-        cp -a "$repo_root/demo-vault/." "$dest/"
+    if [ -d "$repo_root/demo-vaults/para" ]; then
+        cp -a "$repo_root/demo-vaults/para/." "$dest/"
     else
         cp -a "$repo_root/docs/starter-vault/." "$dest/"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# demo: the four public-demo vaults side by side, one per organisation style
+# (PARA, LLM wiki, Zettelkasten, flat/tag-only). Skips any vault whose folder
+# under demo-vaults/ hasn't been provisioned locally yet.
+# ---------------------------------------------------------------------------
+build_demo_vault() {
+    local style="$1"
+    local dest="$vaults_dir/demo-$style"
+    if [ -d "$repo_root/demo-vaults/$style" ]; then
+        mkdir -p "$dest"
+        cp -a "$repo_root/demo-vaults/$style/." "$dest/"
     fi
 }
 
@@ -632,8 +646,8 @@ EOF
         cp "$repo_root/docs/starter-vault/40-reference/pdf-preview-sample.pdf" \
             "$media/dossier — résumé (final) v2.pdf"
     fi
-    if [ -d "$repo_root/demo-vault/Media" ]; then
-        cp "$repo_root/demo-vault/Media/demo-dashboard.png" "$media/スクリーンショット 2026-08-16 🎉.png" 2>/dev/null || true
+    if [ -d "$repo_root/demo-vaults/para/Media" ]; then
+        cp "$repo_root/demo-vaults/para/Media/demo-dashboard.png" "$media/スクリーンショット 2026-08-16 🎉.png" 2>/dev/null || true
     fi
     printf 'not really a png\n' > "$media/lying-extension.png"
     head -c 12 /dev/urandom > "$media/no-extension"
@@ -718,6 +732,10 @@ ID_DISABLED="66666666-6666-4666-8666-666666666666"
 ID_GIT_BROKEN="77777777-7777-4777-8777-777777777777"
 ID_GIT_OK="88888888-8888-4888-8888-888888888888"
 ID_GIT_AUTH="99999999-9999-4999-8999-999999999999"
+ID_DEMO_PARA="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+ID_DEMO_LLM_WIKI="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+ID_DEMO_ZETTELKASTEN="cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+ID_DEMO_FLAT="dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 
 # Real repositories on the lab Forgejo. The three Git fixtures fail (or not) in
 # genuinely different code paths: a bad hostname never resolves, a private repo
@@ -762,8 +780,24 @@ case "$profile" in
             "$(git_vault_entry "$ID_GIT_OK" '"Git — clones cleanly"' "$FORGEJO_BASE/hatchdoor-dev-vault-ok.git" true)" \
             "$(git_vault_entry "$ID_GIT_AUTH" '"Git — auth refused"' "$FORGEJO_BASE/hatchdoor-dev-vault-private.git" true)"
         ;;
+    demo)
+        build_demo_vault "para"
+        build_demo_vault "llm-wiki"
+        build_demo_vault "zettelkasten"
+        build_demo_vault "flat"
+        entries=()
+        [ -d "$vaults_dir/demo-para" ] && entries+=("$(vault_entry "$ID_DEMO_PARA" '"Home & Life"' "$vaults_dir/demo-para" true)")
+        [ -d "$vaults_dir/demo-llm-wiki" ] && entries+=("$(vault_entry "$ID_DEMO_LLM_WIKI" '"Research Wiki"' "$vaults_dir/demo-llm-wiki" true)")
+        [ -d "$vaults_dir/demo-zettelkasten" ] && entries+=("$(vault_entry "$ID_DEMO_ZETTELKASTEN" '"Reading Notes"' "$vaults_dir/demo-zettelkasten" true)")
+        [ -d "$vaults_dir/demo-flat" ] && entries+=("$(vault_entry "$ID_DEMO_FLAT" '"Team Docs"' "$vaults_dir/demo-flat" true)")
+        if [ "${#entries[@]}" -eq 0 ]; then
+            echo "no demo-vaults/* folders found yet — nothing to register" >&2
+            exit 1
+        fi
+        write_registry "${entries[@]}"
+        ;;
     *)
-        echo "unknown profile '$profile' (expected: clean, messy, broken)" >&2
+        echo "unknown profile '$profile' (expected: clean, messy, broken, demo)" >&2
         exit 1
         ;;
 esac
