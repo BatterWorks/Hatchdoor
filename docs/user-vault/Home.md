@@ -50,8 +50,10 @@ Guides, Reference, and Concepts will grow from this starting point.
 
 - [[How to deploy Hatchdoor with an agent]]
 - [[How to set up a Git-backed Vault]]
+- [[How to manage multiple Vaults]]
 - [[How to organize a Vault with layers]]
 - [[How to run an LLM wiki in Hatchdoor]]
+- [[How to import and work with attachments]]
 - [[How to troubleshoot common problems]]
 
 **Reference**
