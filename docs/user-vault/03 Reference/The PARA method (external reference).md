@@ -43,4 +43,4 @@ One genuine point of contact: `archive_note` (both the MCP tool and the Web UI a
 
 ---
 
-Related: [[MCP tools reference]] · [[The layer system]] · [[The LLM wiki pattern (external reference)]]
+Related: [[MCP tools reference]] · [[The layer system]] · [[The LLM wiki pattern (external reference)]] · [[The Second Brain method (external reference)]] · [[The Zettelkasten method (external reference)]]
