@@ -1,11 +1,10 @@
 pub const PROTOCOL_VERSION: &str = "2025-11-25";
 
-/// Protocol revisions this server can speak, newest first. The first entry is
-/// the preferred version echoed when a client requests one we don't recognise.
-/// Accepting a small known-compatible set (rather than a single exact string)
-/// keeps version-skewed but otherwise-valid clients working.
-pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
-    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// Streamable HTTP protocol revisions this POST-only server can speak, newest
+/// first. The first entry is the preferred version echoed when a client
+/// requests one we don't recognise. `2024-11-05` used the prior HTTP+SSE
+/// transport and is deliberately excluded: this adapter does not implement it.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 
 pub fn is_supported_protocol_version(version: &str) -> bool {
     SUPPORTED_PROTOCOL_VERSIONS.contains(&version)

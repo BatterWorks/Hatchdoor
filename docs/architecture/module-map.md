@@ -1475,9 +1475,14 @@ files, checkouts, Git history, or credentials outside the registry record.
 - `src/mcp/tools/read.rs`
 - `src/mcp/tools/write.rs`
 
-**Public contract:** `/mcp` Streamable HTTP behavior, `McpConfig`, protocol
-version negotiation, server instructions, tool names/schemas/results, and
-`mcp_get_handler`/`mcp_post_handler`. `list_vaults` exposes the shared redacted
+**Public contract:** `/mcp` is POST-only Streamable HTTP behavior: initialize
+advertises no tool-list-change notification delivery, and negotiation/follow-up
+admission supports `2025-03-26`, `2025-06-18`, and `2025-11-25` only.
+`2024-11-05` is rejected because its HTTP+SSE transport is not implemented.
+Internal JSON-RPC failures expose the stable `Internal server error` message
+while the adapter logs diagnostics. `McpConfig`, server instructions, tool
+names/schemas/results, and `mcp_get_handler`/`mcp_post_handler` remain public.
+`list_vaults` exposes the shared redacted
 Vault discovery/status/capability and revision shape. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
 existing-Vault control names `vault_id`. Revisioned registry management uses

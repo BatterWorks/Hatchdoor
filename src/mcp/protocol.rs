@@ -160,17 +160,6 @@ impl Write for LimitedJsonWriter {
     }
 }
 
-/// The `notifications/tools/list_changed` JSON-RPC notification (no `id`), sent
-/// to tell a client its cached tool list is stale and it should re-`tools/list`.
-/// Built here so the shape is defined once; a streaming MCP transport writes it
-/// to the client when `AppState::mcp_tools_changed` fires.
-pub fn tools_list_changed_notification() -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/tools/list_changed",
-    })
-}
-
 pub fn tool_success(payload: Value) -> Value {
     let text = match bounded_json_bytes(&payload) {
         Ok(bytes) => String::from_utf8(bytes).expect("JSON serialization is valid UTF-8"),
@@ -217,16 +206,6 @@ pub fn tool_structured_error(payload: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tools_list_changed_notification_is_an_idless_jsonrpc_notification() {
-        let notification = tools_list_changed_notification();
-        assert_eq!(notification["jsonrpc"], "2.0");
-        assert_eq!(notification["method"], "notifications/tools/list_changed");
-        // A notification carries no id (it expects no response) and no params.
-        assert!(notification.get("id").is_none());
-        assert!(notification.get("params").is_none());
-    }
 
     #[test]
     fn oversized_success_response_is_replaced_with_a_bounded_error() {

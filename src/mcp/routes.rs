@@ -3,6 +3,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::{Value, json};
+use tracing::error;
 
 use crate::app_state::AppState;
 
@@ -141,8 +142,22 @@ async fn handle_authorized_mcp_post(state: AppState, body: Bytes, config: &McpCo
 
     match result {
         Ok(result) => jsonrpc_success_response(id, result),
-        Err(error) => jsonrpc_error_response(StatusCode::OK, id, error.code, error.message),
+        Err(error) => dispatcher_error_response(id, error),
     }
+}
+
+fn dispatcher_error_response(id: Value, error: JsonRpcFailure) -> Response {
+    if error.code == -32603 {
+        error!(detail = %error.message, "Internal MCP error");
+        return jsonrpc_error_response(
+            StatusCode::OK,
+            id,
+            error.code,
+            "Internal server error".to_string(),
+        );
+    }
+
+    jsonrpc_error_response(StatusCode::OK, id, error.code, error.message)
 }
 
 fn handle_initialize(params: Option<&Value>) -> Value {
@@ -154,11 +169,10 @@ fn handle_initialize(params: Option<&Value>) -> Value {
         "protocolVersion": protocol_version,
         "capabilities": {
             "tools": {
-                // The vault's `layers` enum changes when its marker set changes,
-                // so the tool list is not static. run_reindex fires
-                // state.mcp_tools_changed on such a change; a streaming transport
-                // turns that into a notifications/tools/list_changed.
-                "listChanged": true
+                // The POST-only transport has no channel to deliver a
+                // notifications/tools/list_changed event. Clients reissue
+                // tools/list to obtain the current live catalogue.
+                "listChanged": false
             }
         },
         "serverInfo": {
@@ -176,7 +190,7 @@ fn handle_setup_initialize(params: Option<&Value>) -> Value {
     let protocol_version = negotiate_protocol_version(requested);
     json!({
         "protocolVersion": protocol_version,
-        "capabilities": { "tools": { "listChanged": true } },
+        "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": { "name": "hatchdoor", "version": env!("CARGO_PKG_VERSION") },
         "instructions": "Hatchdoor needs first-run search-model setup before vault tools can be used. Call get_model_setup_status, then either accept_gemma_terms for the multilingual default or decline_gemma_terms to use the English-only Nomic fallback. Acceptance stays local and does not change ownership of vault data."
     })
@@ -956,6 +970,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn internal_dispatch_failures_hide_filesystem_diagnostics() {
+        let tmp = TempDir::new().expect("temp dir");
+        let response = dispatcher_error_response(
+            Value::from(90),
+            JsonRpcFailure::internal(format!(
+                "index failed at {}: not valid frontmatter",
+                tmp.path().display()
+            )),
+        );
+        let response = response_json(response).await;
+
+        assert_eq!(response["error"]["code"], -32603);
+        assert_eq!(response["error"]["message"], "Internal server error");
+        let message = response["error"]["message"].as_str().unwrap_or_default();
+        assert!(!message.contains(&tmp.path().display().to_string()));
+        assert!(!message.contains("not valid frontmatter"));
+    }
+
+    #[tokio::test]
+    async fn stable_protocol_errors_remain_actionable() {
+        let response = dispatcher_error_response(
+            Value::from(90),
+            JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"),
+        );
+        let response = response_json(response).await;
+
+        assert_eq!(response["error"]["code"], -32602);
+        assert_eq!(
+            response["error"]["message"],
+            "vault_id must be a canonical Vault ID"
+        );
+    }
+
+    #[tokio::test]
     async fn create_note_response_reports_resulting_layer() {
         let (state, _tmp) = layered_test_state();
         let body = call_tool(
@@ -1240,6 +1288,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_sse_protocol_version_is_not_claimed_or_accepted_on_post_transport() {
+        let (state, _tmp) = test_state();
+        let initialize = post_json(
+            state.clone(),
+            json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {}}
+            }),
+            enabled_config(),
+        )
+        .await;
+        let initialized = response_json(initialize).await;
+        assert_eq!(
+            initialized["result"]["protocolVersion"], "2025-11-25",
+            "the POST-only Streamable HTTP adapter must not claim the legacy HTTP+SSE revision"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "MCP-Protocol-Version",
+            HeaderValue::from_static("2024-11-05"),
+        );
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer test-token"),
+        );
+        let follow_up = handle_mcp_post(
+            state,
+            &headers,
+            Bytes::from(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string()),
+            &enabled_config(),
+        )
+        .await;
+
+        assert_eq!(follow_up.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(follow_up).await;
+        assert_eq!(body["error"]["code"], -32002);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("2024-11-05")
+        );
+    }
+
+    #[tokio::test]
     async fn initialize_echoes_supported_client_protocol_version() {
         let (state, _tmp) = test_state();
         let response = post_json(
@@ -1261,7 +1357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_returns_tools_capability_and_instructions() {
+    async fn initialize_does_not_advertise_undeliverable_tool_list_notifications() {
         let (state, _tmp) = test_state();
         let response = post_json(
             state,
@@ -1284,9 +1380,8 @@ mod tests {
         assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
         assert!(body["result"]["capabilities"]["tools"].is_object());
         assert_eq!(
-            body["result"]["capabilities"]["tools"]["listChanged"], true,
-            "the tool list is not static (its layers enum tracks the marker set), \
-             so listChanged must be advertised"
+            body["result"]["capabilities"]["tools"]["listChanged"], false,
+            "the POST-only transport has no channel to deliver tool-list change notifications"
         );
         let instructions = body["result"]["instructions"]
             .as_str()
