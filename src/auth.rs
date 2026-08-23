@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
@@ -8,15 +11,36 @@ use base64::Engine;
 
 use crate::api_types::ErrorResponse;
 
-/// Compare two byte strings without short-circuiting on the first differing
-/// byte. Length is allowed to leak (returns early), which is acceptable for the
-/// fixed-length tokens used here.
+#[cfg(test)]
+thread_local! {
+    static COMPARISON_WORK: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_comparison_work() {
+    COMPARISON_WORK.with(|work| work.set(0));
+}
+
+#[cfg(test)]
+fn comparison_work() -> usize {
+    COMPARISON_WORK.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_comparison_work() {
+    COMPARISON_WORK.with(|work| work.set(work.get() + 1));
+}
+
+/// Compare two bearer credentials without short-circuiting. Configuration
+/// permits arbitrary token strings, so first derive fixed-size BLAKE3
+/// representations before doing the fixed-width comparison.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let a = blake3::hash(a);
+    let b = blake3::hash(b);
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (x, y) in a.as_bytes().iter().zip(b.as_bytes()) {
+        #[cfg(test)]
+        record_comparison_work();
         diff |= x ^ y;
     }
     diff == 0
@@ -218,6 +242,55 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secre"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn bearer_comparison_uses_fixed_work_for_equal_and_unequal_lengths() {
+        let expected = b"an arbitrary configured bearer token";
+        let attempts: [(&[u8], bool); 3] = [
+            (expected, true),
+            (b"an arbitrary configured bearer tokem", false),
+            (b"wrong", false),
+        ];
+
+        let mut observed_work = Vec::new();
+        for (presented, accepted) in attempts {
+            reset_comparison_work();
+            assert_eq!(constant_time_eq(presented, expected), accepted);
+            observed_work.push(comparison_work());
+        }
+
+        assert_eq!(observed_work, vec![32, 32, 32]);
+    }
+
+    #[test]
+    fn web_bearer_authorization_keeps_header_and_query_credentials_strict() {
+        let expected = b"an arbitrary configured bearer token";
+        for (uri, header, accepted) in [
+            (
+                "/protected",
+                Some("Bearer an arbitrary configured bearer token"),
+                true,
+            ),
+            (
+                "/protected",
+                Some("Bearer an arbitrary configured bearer tokem"),
+                false,
+            ),
+            ("/protected", Some("Bearer wrong"), false),
+            (
+                "/protected?access_token=an%20arbitrary%20configured%20bearer%20token",
+                None,
+                true,
+            ),
+        ] {
+            let mut request = Request::builder().uri(uri);
+            if let Some(header) = header {
+                request = request.header(header::AUTHORIZATION, header);
+            }
+            let request = request.body(axum::body::Body::empty()).expect("request");
+            assert_eq!(request_is_authorized(&request, expected), accepted, "{uri}");
+        }
     }
 
     #[test]

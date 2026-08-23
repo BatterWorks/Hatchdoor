@@ -702,6 +702,13 @@ managed-Git Vault can be enabled and accepting operations before its checkout
 has materialized, and reports that as the same retryable
 `vault_read_unavailable` code an exact-note read's index build would rather
 than a caller discovering an unrelated raw filesystem error later.
+`asset_on_surface` applies the complete demo-readable policy to a contained
+asset's Vault-relative path: it must occur in the authoritative index's asset
+catalog (which has already applied configured and built-in noise exclusions)
+and survive `BrowseSurface` layer selection. A demo therefore cannot bypass
+its default-only Note surface by requesting a demoted, noise, or excluded asset
+directly; ordinary `Everything` reads retain the legacy contained-asset
+behavior.
 `exact_note_for_download` returns a Note together with its containing
 directory from one Vault control-block fetch — required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control

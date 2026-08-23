@@ -5065,6 +5065,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn demo_mode_serves_only_assets_on_its_readable_surface() {
+        let (demo, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("layered-assets");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n\n![[visible.png]]\n")
+            .expect("write visible note");
+        std::fs::write(vault_root.join("visible.png"), b"visible").expect("write visible asset");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(
+            vault_root.join("sources/Clipping.md"),
+            "# Clipping\n\n![[hidden.png]]\n",
+        )
+        .expect("write demoted note");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"hidden")
+            .expect("write hidden asset");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+
+        for (path, expected) in [
+            ("visible.png", StatusCode::OK),
+            ("sources/hidden.png", StatusCode::NOT_FOUND),
+        ] {
+            let response = demo
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/assets/{path}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_mode_asset_surface_excludes_noise_and_honours_nested_layer_markers() {
+        let (demo, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("complete-asset-surface");
+        for directory in ["sources/nested", ".trash", "private"] {
+            std::fs::create_dir_all(vault_root.join(directory)).expect("create asset directory");
+        }
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write visible note");
+        std::fs::write(vault_root.join("asset-only.png"), b"public asset")
+            .expect("write public asset without note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write demoting marker");
+        std::fs::write(
+            vault_root.join("sources/asset-only.png"),
+            b"hidden layer asset",
+        )
+        .expect("write hidden asset without note");
+        std::fs::write(
+            vault_root.join("sources/nested/.hatchdoor-layer"),
+            "default",
+        )
+        .expect("write nested default reinclude marker");
+        std::fs::write(
+            vault_root.join("sources/nested/reincluded.png"),
+            b"reinclude asset",
+        )
+        .expect("write reincluded asset without note");
+        std::fs::write(vault_root.join(".trash/noise.png"), b"noise asset")
+            .expect("write built-in noise asset");
+        std::fs::write(vault_root.join("private/excluded.png"), b"excluded asset")
+            .expect("write configured excluded asset");
+
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Complete surface".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_root.clone(),
+                    },
+                    exclude_patterns: vec!["private/".to_string()],
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add vault to registry");
+        let vault_id = snapshot
+            .definitions()
+            .find(|definition| definition.name() == "Complete surface")
+            .expect("added vault")
+            .vault_id()
+            .to_string();
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+
+        for (path, expected) in [
+            ("asset-only.png", StatusCode::OK),
+            ("sources/asset-only.png", StatusCode::NOT_FOUND),
+            ("sources/nested/reincluded.png", StatusCode::OK),
+            (".trash/noise.png", StatusCode::NOT_FOUND),
+            ("private/excluded.png", StatusCode::NOT_FOUND),
+        ] {
+            let response = demo
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/assets/{path}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_mode_retains_access_to_assets_under_demoted_layers() {
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, false);
+        let vault_root = tmp.path().join("ordinary-layered-assets");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::create_dir_all(vault_root.join(".trash")).expect("create noise directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write visible note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"operator asset")
+            .expect("write demoted asset");
+        std::fs::write(vault_root.join(".trash/noise.png"), b"operator noise asset")
+            .expect("write noise asset");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        for path in ["sources/hidden.png", ".trash/noise.png"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/assets/{path}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn an_ordinary_instance_still_reaches_demoted_notes() {
         // The other half of the #109 clamp: an authenticated operator's
         // instance keeps the established layer semantics, where demoting

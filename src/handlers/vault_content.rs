@@ -440,6 +440,21 @@ pub async fn vault_scoped_asset_handler(
             Ok(path) => path,
             Err(kind) => return Ok(AssetOutcome::PathError(kind)),
         };
+        let canonical_root = match std::fs::canonicalize(&vault_root) {
+            Ok(path) => path,
+            Err(error) => return Err(error.to_string()),
+        };
+        let relative_path = match asset_path.strip_prefix(canonical_root) {
+            Ok(path) => path.to_string_lossy().replace('\\', "/"),
+            // `resolve_asset_path` already established containment. This is
+            // defensive in case the two filesystem observations diverge.
+            Err(_) => return Ok(AssetOutcome::PathError(AssetPathError::Forbidden)),
+        };
+        match core.asset_on_surface(vault_id, &relative_path) {
+            Ok(true) => {}
+            Ok(false) => return Ok(AssetOutcome::PathError(AssetPathError::NotFound)),
+            Err(error) => return Ok(AssetOutcome::VaultError(error)),
+        }
         let content_type = content_type_for_path(&asset_path);
         // Bounded read: an asset is buffered whole to build the response, so a
         // single request must not turn into an unbounded allocation.

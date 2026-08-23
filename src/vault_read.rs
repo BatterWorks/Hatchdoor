@@ -558,6 +558,26 @@ impl<'a> VaultReadCore<'a> {
         Ok(path.to_path_buf())
     }
 
+    /// Whether a contained asset path belongs to this core's selected browse
+    /// surface. An ordinary instance retains the legacy contained-asset
+    /// behavior. A demo accepts only an asset present in the authoritative
+    /// index's asset catalog, which has already applied the complete
+    /// exclusion/noise policy, and then applies the layer map to that path.
+    /// Assets do not carry a layer of their own, so this is the same
+    /// path-to-surface decision the index uses for Notes.
+    pub fn asset_on_surface(
+        &self,
+        vault_id: VaultId,
+        relative_path: &str,
+    ) -> Result<bool, VaultReadError> {
+        if self.surface == BrowseSurface::Everything {
+            return Ok(true);
+        }
+        let index = self.authoritative_index(vault_id)?;
+        Ok(index.asset_paths.contains(relative_path)
+            && !self.surface.hides(index.layers.layer_for(relative_path)))
+    }
+
     /// The exact Note together with the local Markdown directory it was read
     /// from, both drawn from one Vault control-block fetch. A caller that
     /// needs both (e.g. to zip a note with its referenced assets) must not
