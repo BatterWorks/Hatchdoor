@@ -42,6 +42,11 @@ cargo run --release --bin eval -- run \
 
 Metrics print to stdout. A section is appended to `eval/results.md`.
 
+The cache records the exact embedding representation, not just its vector
+dimension. `run`, `rerank`, `hybrid`, and `compare` refuse a missing or
+mismatched stamp; rebuild the disposable cache with the same model, dimension,
+and document representation before querying it.
+
 ## Rerank an existing cache
 
 The `rerank` subcommand applies a cross-encoder reranker on top of an existing
@@ -62,7 +67,7 @@ Available rerankers:
 
 The first invocation per reranker downloads its ONNX weights (~150 MB and ~570 MB respectively) into the fastembed cache. Subsequent runs are fast.
 
-`--initial-k` controls how many embedding candidates are passed to the reranker; default is 20. Metrics are still scored at k=5 and k=10 against the post-rerank order. A section is appended to `eval/results.md` with rank-pre / rank-post / Δ columns and median / p90 / max latency stats.
+`--initial-k` controls how many embedding candidates are passed to the reranker; default is 20. Metrics are still scored at k=5 and k=10 against the post-rerank order. A section is appended to `eval/results.md` with rank-pre / rank-post / Δ columns, correct-heading and category/tier/language slices, and median / p90 / max latency stats.
 
 ## Adding private queries
 

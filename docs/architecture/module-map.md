@@ -871,6 +871,11 @@ methods, and frontend Search contracts.
   Vault snapshot, caps by `(Vault ID, slug)`, and never deduplicates equal
   content or note names across Vaults. Staleness is participant status, not a
   relevance penalty.
+- Semantic per-note-cap selection progressively enlarges its KNN candidate
+  window only as needed, stopping at candidate exhaustion or the explicit
+  200-candidate ceiling. If that bounded window is dominated by capped notes,
+  it returns the best available cap-compliant partial set without changing
+  semantic ranking.
 - Participant metadata, note projections, and KNN/FTS hits for one search
   response come from one pinned SQLite generation.
 - A structure-only frontend Search pilot must not modify these paths.
@@ -1522,7 +1527,13 @@ server router tests.
 - `src/bin/index_microbench.rs`
 
 **Public contract:** evaluation query JSONL, metrics/report formats, CLI
-arguments, and reproducible comparison behavior.
+arguments, and reproducible comparison behavior. Every cache-querying CLI mode
+(`run`, `rerank`, `hybrid`, and `compare`) validates the exact stamped
+`Embedder::identity()` before querying; an absent or unequal identity requires
+a disposable-cache rebuild. Rerank reports preserve heading paths and publish
+correct-heading plus category/tier/language slices alongside post-rerank
+quality metrics. `index_microbench` validates the active representation stamp
+and labels the representation it measures.
 
 **Consumed dependencies:** cache, embeddings, chunking, Search, and Reranking.
 

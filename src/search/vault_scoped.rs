@@ -20,6 +20,16 @@ use crate::vault_runtime::VaultCollectionRuntime;
 
 use super::{LayerSelection, NoteFilters, OutboundLink, SearchMode, tag_prefix_query};
 
+/// First KNN candidate window per requested result. The per-note cap is
+/// applied after ranking, so a small cap must not shrink the first window to
+/// the point where repeated chunks from one note crowd out eligible notes.
+const INITIAL_DIVERSITY_OVERFETCH: usize = 4;
+
+/// Search does not make unbounded KNN requests while backfilling after the
+/// per-note cap. If this candidate ceiling is all from capped notes, callers
+/// receive the best available cap-compliant partial result set.
+const MAX_SEMANTIC_CANDIDATES: usize = 200;
+
 #[cfg(test)]
 type SnapshotReadHook = Arc<dyn Fn() + Send + Sync>;
 
@@ -182,8 +192,8 @@ impl<'a> VaultSearchCore<'a> {
         let results = if let Some(tag) = tag_query {
             tag_results(&request, &snapshots, &tag)
         } else {
-            let raw = match request.mode {
-                SearchMode::Semantic => semantic_hits(
+            match request.mode {
+                SearchMode::Semantic => semantic_results(
                     &request,
                     self.cache,
                     &cache_snapshot,
@@ -191,10 +201,10 @@ impl<'a> VaultSearchCore<'a> {
                     &snapshots,
                 )?,
                 SearchMode::Keyword => {
-                    keyword_hits(&request, self.cache, &cache_snapshot, &snapshots)?
+                    let raw = keyword_hits(&request, self.cache, &cache_snapshot, &snapshots)?;
+                    apply_per_note_cap(raw, request.per_note_cap, request.limit)
                 }
-            };
-            apply_per_note_cap(raw, request.per_note_cap, request.limit)
+            }
         };
         let response = VaultReadProjection {
             scope: request.scope,
@@ -236,14 +246,63 @@ impl<'a> VaultSearchCore<'a> {
     }
 }
 
-fn semantic_hits(
+fn semantic_results(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
     conn: &rusqlite::Connection,
     embedder: &dyn Embedder,
     snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
 ) -> Result<Vec<VaultSearchResult>, VaultReadError> {
-    let raw_k = request.limit.saturating_mul(request.per_note_cap).min(200);
+    if request.limit == 0 || request.per_note_cap == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Filtered semantic search scans the participating snapshots directly, so
+    // it already has every eligible candidate and needs no KNN backfill loop.
+    if !request.filters.is_empty() {
+        let raw = semantic_hits(
+            request,
+            cache,
+            conn,
+            embedder,
+            snapshots,
+            MAX_SEMANTIC_CANDIDATES,
+        )?;
+        return Ok(apply_per_note_cap(raw, request.per_note_cap, request.limit));
+    }
+
+    progressively_cap_semantic_results(request.limit, request.per_note_cap, |raw_k| {
+        semantic_hits(request, cache, conn, embedder, snapshots, raw_k)
+    })
+}
+
+fn progressively_cap_semantic_results(
+    limit: usize,
+    per_note_cap: usize,
+    mut fetch: impl FnMut(usize) -> Result<Vec<VaultSearchResult>, VaultReadError>,
+) -> Result<Vec<VaultSearchResult>, VaultReadError> {
+    let mut raw_k = limit
+        .saturating_mul(per_note_cap.max(INITIAL_DIVERSITY_OVERFETCH))
+        .min(MAX_SEMANTIC_CANDIDATES);
+    loop {
+        let raw = fetch(raw_k)?;
+        let raw_len = raw.len();
+        let results = apply_per_note_cap(raw, per_note_cap, limit);
+        if results.len() == limit || raw_len < raw_k || raw_k == MAX_SEMANTIC_CANDIDATES {
+            return Ok(results);
+        }
+        raw_k = raw_k.saturating_mul(2).min(MAX_SEMANTIC_CANDIDATES);
+    }
+}
+
+fn semantic_hits(
+    request: &VaultSearchRequest,
+    cache: &SqliteCache,
+    conn: &rusqlite::Connection,
+    embedder: &dyn Embedder,
+    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+    raw_k: usize,
+) -> Result<Vec<VaultSearchResult>, VaultReadError> {
     if raw_k == 0 {
         return Ok(Vec::new());
     }
@@ -594,19 +653,49 @@ fn error(vault_id: Option<VaultId>, code: &str, message: &str, retryable: bool) 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::str::FromStr;
     use std::sync::{Arc, Barrier};
 
     use tempfile::TempDir;
 
     use crate::cache::SqliteCache;
-    use crate::embed::StubEmbedder;
+    use crate::embed::{Embedder, StubEmbedder};
     use crate::search::{LayerSelection, NoteFilters, SearchMode};
-    use crate::vault::VaultIndex;
+    use crate::vault::{NoteMetadata, VaultIndex};
     use crate::vault_read::{VaultParticipantState, VaultScope};
     use crate::vault_registry::{NewVaultDefinition, VaultId, VaultRegistryStore, VaultSource};
     use crate::vault_runtime::VaultCollectionRuntime;
 
-    use super::{VaultSearchCore, VaultSearchRequest};
+    use super::{VaultSearchCore, VaultSearchRequest, VaultSearchResult};
+
+    struct DominantNoteEmbedder;
+
+    impl Embedder for DominantNoteEmbedder {
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(texts
+                .iter()
+                .map(|text| {
+                    if text.contains("alpha") || text == "any query" {
+                        vec![0.0; 384]
+                    } else {
+                        vec![1.0; 384]
+                    }
+                })
+                .collect())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            384
+        }
+
+        fn identity(&self) -> String {
+            "dominant-note-384".to_string()
+        }
+
+        fn token_count(&self, text: &str, _add_special_tokens: bool) -> Result<usize, String> {
+            Ok(text.split_whitespace().count())
+        }
+    }
 
     struct Workspace {
         _directory: TempDir,
@@ -780,6 +869,104 @@ mod tests {
             .expect("one search");
         assert_eq!(one.data.results.len(), 1);
         assert_eq!(one.data.results[0].vault_id, workspace.vault_ids[1]);
+    }
+
+    #[test]
+    fn semantic_search_overfetches_to_fill_requested_distinct_notes() {
+        // Alpha's chunks rank ahead of Bravo's deterministic vector. More than
+        // the former fixed raw window (limit * 4 = 8) therefore contains only
+        // Alpha and the per-note cap leaves the caller short.
+        // The VaultSearchCore seam must backfill enough candidates to surface
+        // Bravo as the requested second distinct note.
+        let alpha = format!("# Alpha\n\n{}", "alpha ".repeat(9_000));
+        let workspace = workspace(&[(
+            "Only",
+            &[("alpha.md", &alpha), ("bravo.md", "# Bravo\n\nbravo")],
+        )]);
+        let embedder = DominantNoteEmbedder;
+        workspace
+            .cache
+            .replace_vault_snapshot(
+                workspace.vault_ids[0],
+                &VaultIndex::build(&workspace.vault_paths[0]).expect("index"),
+                &embedder,
+            )
+            .expect("publish deterministic vectors");
+        let alpha_chunks: i64 = workspace
+            .cache
+            .connection()
+            .expect("connection")
+            .query_row(
+                "SELECT COUNT(*) FROM vault_chunks WHERE note_slug = 'alpha'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count alpha chunks");
+        assert!(
+            alpha_chunks > 8,
+            "fixture must exceed the former fixed raw candidate window"
+        );
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+
+        let response = core
+            .search(VaultSearchRequest {
+                mode: SearchMode::Semantic,
+                limit: 2,
+                per_note_cap: 1,
+                ..request(VaultScope::One(workspace.vault_ids[0]), "any query")
+            })
+            .expect("semantic search");
+
+        assert_eq!(
+            response
+                .data
+                .results
+                .iter()
+                .map(|result| result.note_slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "bravo"]
+        );
+    }
+
+    #[test]
+    fn semantic_candidate_ceiling_returns_the_best_available_partial_set() {
+        // This isolates bounded candidate selection from the KNN implementation:
+        // 201 Alpha chunks precede Bravo, but 200 is the explicit ceiling.
+        let vault_id =
+            VaultId::from_str("018f47a0-7768-4d0c-8da3-5aa28d1c31c7").expect("known Vault ID");
+        let result = |note_slug: &str, chunk_id| VaultSearchResult {
+            vault_id,
+            chunk_id,
+            note_slug: note_slug.to_string(),
+            note_title: note_slug.to_string(),
+            note_path: format!("{note_slug}.md"),
+            heading_path: None,
+            content: String::new(),
+            score: 1.0,
+            layer: None,
+            outbound_links: Vec::new(),
+            metadata: NoteMetadata::default(),
+        };
+        let mut candidates = (0..201)
+            .map(|chunk_id| result("alpha", chunk_id))
+            .collect::<Vec<_>>();
+        candidates.push(result("bravo", 201));
+        let mut requested_depths = Vec::new();
+
+        let results = super::progressively_cap_semantic_results(2, 1, |raw_k| {
+            requested_depths.push(raw_k);
+            Ok(candidates[..raw_k.min(candidates.len())].to_vec())
+        })
+        .expect("bounded selection");
+
+        assert_eq!(requested_depths, vec![8, 16, 32, 64, 128, 200]);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.note_slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
     }
 
     #[test]

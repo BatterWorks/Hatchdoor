@@ -3,13 +3,15 @@ use std::env;
 use std::time::{Duration, Instant};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use hatchdoor::embed::contextual_document;
 use rusqlite::{Connection, OpenFlags};
 use tokenizers_fe::Tokenizer;
 
-const DOC_PREFIX: &str = "search_document: ";
 const DEFAULT_CACHE: &str = "data/cache/hatchdoor-cache.sqlite3";
 const SAMPLE_NOTES: usize = 16;
+const PRODUCTION_EMBEDDER_ID: &str =
+    "EmbeddingGemma300MQ4-768-max2048-fastembed-v5-ctx1-gemma-retrieval-v1";
+const PRODUCTION_REPRESENTATION: &str =
+    "EmbeddingGemma300MQ4 retrieval-format v1 (768-dim, max 2048)";
 
 #[derive(Clone)]
 struct CachedChunk {
@@ -22,15 +24,18 @@ struct CachedChunk {
 }
 
 impl CachedChunk {
-    /// The exact text the indexing pipeline embeds for this chunk: the model
-    /// document prefix wrapped around the shared contextual document (title +
-    /// heading path + body). Mirrors production so token counts and latency
-    /// stay representative.
+    /// The exact EmbeddingGemma retrieval document format used by production.
     fn embed_input(&self) -> String {
-        format!(
-            "{DOC_PREFIX}{}",
-            contextual_document(&self.title, self.heading_path.as_deref(), &self.content)
-        )
+        let title = if self.title.trim().is_empty() {
+            "none"
+        } else {
+            &self.title
+        };
+        let text = match self.heading_path.as_deref() {
+            Some(path) if !path.is_empty() => format!("Section: {path}\n\n{}", self.content),
+            _ => self.content.clone(),
+        };
+        format!("title: {title} | text: {text}")
     }
 }
 
@@ -43,6 +48,7 @@ fn main() -> Result<(), String> {
     let cache_path = env::args()
         .nth(1)
         .unwrap_or_else(|| DEFAULT_CACHE.to_string());
+    validate_cache_path_embedder_identity(&cache_path)?;
     let rows = read_chunks(&cache_path)?;
     if rows.is_empty() {
         return Err(format!("cache contains no chunks: {cache_path}"));
@@ -50,9 +56,10 @@ fn main() -> Result<(), String> {
 
     println!("Index microbenchmark (read-only; cache will not be modified)");
     println!("cache={cache_path} chunks={}", rows.len());
+    println!("representation={PRODUCTION_REPRESENTATION}");
 
-    let mut model_512 = load_model(512)?;
-    let raw_tokenizer = untruncated_tokenizer(&model_512.tokenizer)?;
+    let mut model_2048 = load_model(2048)?;
+    let raw_tokenizer = untruncated_tokenizer(&model_2048.tokenizer)?;
     let chunks = measure_raw_tokens(rows, &raw_tokenizer)?;
     print_truncation_report(&chunks);
 
@@ -66,71 +73,101 @@ fn main() -> Result<(), String> {
         sample_raw_tokens
     );
 
-    warm_up(&mut model_512)?;
-    let current = bench_per_note(&mut model_512, &sample)?;
-    let no_padding_512 = bench_individual(&mut model_512, &sample)?;
-    drop(model_512);
+    warm_up(&mut model_2048)?;
+    let current = bench_per_note(&mut model_2048, &sample)?;
+    let no_padding_2048 = bench_individual(&mut model_2048, &sample)?;
+    drop(model_2048);
 
     let mut model_1024 = load_model(1024)?;
     warm_up(&mut model_1024)?;
-    let expanded = bench_per_note(&mut model_1024, &sample)?;
+    let reduced = bench_per_note(&mut model_1024, &sample)?;
     let no_padding_1024 = bench_individual(&mut model_1024, &sample)?;
 
     println!();
     println!("Paired inference timings on the same sample:");
     print_timing(
-        "512 / current per-note batches",
+        "2048 / production per-note batches",
         &current,
         sample_chunk_count,
     );
     print_timing(
-        "512 / one chunk per call",
-        &no_padding_512,
+        "2048 / production one chunk per call",
+        &no_padding_2048,
         sample_chunk_count,
     );
     print_timing(
-        "1024 / current per-note batches",
-        &expanded,
+        "1024 / reduced per-note batches",
+        &reduced,
         sample_chunk_count,
     );
     print_timing(
-        "1024 / one chunk per call",
+        "1024 / reduced one chunk per call",
         &no_padding_1024,
         sample_chunk_count,
     );
 
     println!();
     print_ratio(
-        "1024/current vs 512/current",
-        expanded.elapsed,
+        "1024/reduced vs 2048/production",
+        reduced.elapsed,
         current.elapsed,
     );
     print_ratio(
-        "512/individual vs 512/current",
-        no_padding_512.elapsed,
+        "2048/individual vs 2048/production",
+        no_padding_2048.elapsed,
         current.elapsed,
     );
     print_ratio(
-        "1024/individual vs 512/current",
+        "1024/individual vs 2048/production",
         no_padding_1024.elapsed,
         current.elapsed,
     );
     println!(
-        "mean_cosine_same_chunk_512_vs_1024={:.6}",
-        mean_matching_cosine(&no_padding_512.vectors, &no_padding_1024.vectors)
+        "mean_cosine_same_chunk_2048_vs_1024={:.6}",
+        mean_matching_cosine(&no_padding_2048.vectors, &no_padding_1024.vectors)
     );
 
     Ok(())
 }
 
 fn load_model(max_length: usize) -> Result<TextEmbedding, String> {
-    println!("loading_model=NomicEmbedTextV15 max_length={max_length}");
+    println!("loading_model=EmbeddingGemma300MQ4 max_length={max_length}");
     TextEmbedding::try_new(
-        InitOptions::new(EmbeddingModel::NomicEmbedTextV15)
+        InitOptions::new(EmbeddingModel::EmbeddingGemma300MQ4)
             .with_max_length(max_length)
             .with_show_download_progress(false),
     )
-    .map_err(|error| format!("failed loading Nomic model at max_length={max_length}: {error}"))
+    .map_err(|error| {
+        format!("failed loading EmbeddingGemma model at max_length={max_length}: {error}")
+    })
+}
+
+fn validate_cache_path_embedder_identity(path: &str) -> Result<(), String> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("failed opening cache read-only: {error}"))?;
+    let stamped = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'embedder_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    validate_cache_embedder_identity(stamped.as_deref())
+}
+
+fn validate_cache_embedder_identity(stamped: Option<&str>) -> Result<(), String> {
+    match stamped {
+        Some(identity) if identity == PRODUCTION_EMBEDDER_ID => Ok(()),
+        Some(identity) => Err(format!(
+            "cache was built with embedder {identity}, but index_microbench requires {PRODUCTION_EMBEDDER_ID}; rebuild the cache with the active representation"
+        )),
+        None => Err(
+            "cache has no embedder_id stamp; rebuild it with the active representation".to_string(),
+        ),
+    }
 }
 
 type ChunkRow = (String, i64, String, Option<String>, String);
@@ -203,11 +240,6 @@ fn measure_raw_tokens(
 
 fn print_truncation_report(chunks: &[CachedChunk]) {
     let raw_total: usize = chunks.iter().map(|chunk| chunk.raw_tokens).sum();
-    let over_512 = chunks.iter().filter(|chunk| chunk.raw_tokens > 512).count();
-    let discarded_512: usize = chunks
-        .iter()
-        .map(|chunk| chunk.raw_tokens.saturating_sub(512))
-        .sum();
     let over_1024 = chunks
         .iter()
         .filter(|chunk| chunk.raw_tokens > 1024)
@@ -216,21 +248,29 @@ fn print_truncation_report(chunks: &[CachedChunk]) {
         .iter()
         .map(|chunk| chunk.raw_tokens.saturating_sub(1024))
         .sum();
+    let over_2048 = chunks
+        .iter()
+        .filter(|chunk| chunk.raw_tokens > 2048)
+        .count();
+    let discarded_2048: usize = chunks
+        .iter()
+        .map(|chunk| chunk.raw_tokens.saturating_sub(2048))
+        .sum();
     let max_raw = chunks
         .iter()
         .map(|chunk| chunk.raw_tokens)
         .max()
         .unwrap_or(0);
     println!(
-        "raw_tokens={} max_chunk_tokens={} over_512={} discarded_at_512={} ({:.2}%) over_1024={} discarded_at_1024={} ({:.2}%)",
+        "raw_tokens={} max_chunk_tokens={} over_1024={} discarded_at_1024={} ({:.2}%) over_2048={} discarded_at_2048={} ({:.2}%)",
         raw_total,
         max_raw,
-        over_512,
-        discarded_512,
-        percent(discarded_512, raw_total),
         over_1024,
         discarded_1024,
         percent(discarded_1024, raw_total),
+        over_2048,
+        discarded_2048,
+        percent(discarded_2048, raw_total),
     );
 }
 
@@ -261,7 +301,7 @@ fn select_note_sample(chunks: &[CachedChunk], target_notes: usize) -> Vec<Vec<Ca
 
 fn warm_up(model: &mut TextEmbedding) -> Result<(), String> {
     model
-        .embed(vec![format!("{DOC_PREFIX}warm up")], None)
+        .embed(vec!["title: warm up | text: warm up".to_string()], None)
         .map(|_| ())
         .map_err(|error| format!("warm-up embed failed: {error}"))
 }
@@ -345,5 +385,23 @@ fn percent(part: usize, total: usize) -> f64 {
         0.0
     } else {
         part as f64 * 100.0 / total as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_identity_must_match_the_active_gemma_representation() {
+        let mismatch = validate_cache_embedder_identity(Some(
+            "NomicEmbedTextV15-768-max1024-fastembed-v5-ctx1",
+        ))
+        .expect_err("superseded Nomic cache must be refused");
+        assert!(mismatch.contains("EmbeddingGemma300MQ4"));
+
+        let missing =
+            validate_cache_embedder_identity(None).expect_err("unstamped cache must be refused");
+        assert!(missing.contains("no embedder_id stamp"));
     }
 }
