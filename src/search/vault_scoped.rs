@@ -260,20 +260,66 @@ fn semantic_results(
     // Filtered semantic search scans the participating snapshots directly, so
     // it already has every eligible candidate and needs no KNN backfill loop.
     if !request.filters.is_empty() {
-        let raw = semantic_hits(
-            request,
-            cache,
-            conn,
-            embedder,
-            snapshots,
-            MAX_SEMANTIC_CANDIDATES,
-        )?;
+        let raw = semantic_hits(request, embedder, snapshots, MAX_SEMANTIC_CANDIDATES)?;
         return Ok(apply_per_note_cap(raw, request.per_note_cap, request.limit));
     }
 
+    if snapshots.is_empty() {
+        return Ok(Vec::new());
+    }
+    let query_vector = embedder
+        .embed(&[format!("{}{}", embedder.query_prefix(), request.query)])
+        .map_err(|message| error(None, "search_unavailable", &message, true))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            error(
+                None,
+                "search_unavailable",
+                "embedder returned no vectors",
+                true,
+            )
+        })?;
+
     progressively_cap_semantic_results(request.limit, request.per_note_cap, |raw_k| {
-        semantic_hits(request, cache, conn, embedder, snapshots, raw_k)
+        semantic_hits_with_vector(request, cache, conn, snapshots, &query_vector, raw_k)
     })
+}
+
+fn semantic_hits_with_vector(
+    request: &VaultSearchRequest,
+    cache: &SqliteCache,
+    conn: &rusqlite::Connection,
+    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
+    query_vector: &[f32],
+    raw_k: usize,
+) -> Result<Vec<VaultSearchResult>, VaultReadError> {
+    if raw_k == 0 {
+        return Ok(Vec::new());
+    }
+    let ids = snapshots.keys().copied().collect::<Vec<_>>();
+    let hits = cache
+        .vault_semantic_search_layered_with_vector(conn, &ids, query_vector, raw_k, &request.layers)
+        .map_err(|message| error(None, "search_unavailable", &message, true))?;
+    Ok(hits
+        .into_iter()
+        .filter_map(|hit| {
+            let snapshot = snapshots.get(&hit.vault_id)?;
+            let note = note_for(snapshot, &hit.note_slug)?;
+            Some(result_for(
+                hit.vault_id,
+                snapshot,
+                note,
+                ResultDetails {
+                    chunk_id: hit.chunk_id,
+                    heading_path: hit.heading_path,
+                    content: hit.content,
+                    score: (1.0 - hit.distance).clamp(0.0, 1.0),
+                },
+                &request.include_properties,
+            ))
+        })
+        .collect())
 }
 
 fn progressively_cap_semantic_results(
@@ -297,8 +343,6 @@ fn progressively_cap_semantic_results(
 
 fn semantic_hits(
     request: &VaultSearchRequest,
-    cache: &SqliteCache,
-    conn: &rusqlite::Connection,
     embedder: &dyn Embedder,
     snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
     raw_k: usize,
@@ -306,39 +350,7 @@ fn semantic_hits(
     if raw_k == 0 {
         return Ok(Vec::new());
     }
-    if request.filters.is_empty() {
-        let ids = snapshots.keys().copied().collect::<Vec<_>>();
-        let hits = cache
-            .vault_semantic_search_layered(
-                conn,
-                &ids,
-                embedder,
-                &request.query,
-                raw_k,
-                &request.layers,
-            )
-            .map_err(|message| error(None, "search_unavailable", &message, true))?;
-        let results = hits
-            .into_iter()
-            .filter_map(|hit| {
-                let snapshot = snapshots.get(&hit.vault_id)?;
-                let note = note_for(snapshot, &hit.note_slug)?;
-                Some(result_for(
-                    hit.vault_id,
-                    snapshot,
-                    note,
-                    ResultDetails {
-                        chunk_id: hit.chunk_id,
-                        heading_path: hit.heading_path,
-                        content: hit.content,
-                        score: (1.0 - hit.distance).clamp(0.0, 1.0),
-                    },
-                    &request.include_properties,
-                ))
-            })
-            .collect::<Vec<_>>();
-        return Ok(results);
-    }
+    debug_assert!(!request.filters.is_empty());
     let vector = embedder
         .embed(&[format!("{}{}", embedder.query_prefix(), request.query)])
         .map_err(|message| error(None, "search_unavailable", &message, true))?
@@ -654,6 +666,7 @@ fn error(vault_id: Option<VaultId>, code: &str, message: &str, retryable: bool) 
 mod tests {
     use std::path::Path;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
 
     use tempfile::TempDir;
@@ -668,10 +681,24 @@ mod tests {
 
     use super::{VaultSearchCore, VaultSearchRequest, VaultSearchResult};
 
-    struct DominantNoteEmbedder;
+    #[derive(Default)]
+    struct DominantNoteEmbedder {
+        calls: AtomicUsize,
+    }
+
+    impl DominantNoteEmbedder {
+        fn reset_calls(&self) {
+            self.calls.store(0, Ordering::SeqCst);
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
 
     impl Embedder for DominantNoteEmbedder {
         fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(texts
                 .iter()
                 .map(|text| {
@@ -883,7 +910,7 @@ mod tests {
             "Only",
             &[("alpha.md", &alpha), ("bravo.md", "# Bravo\n\nbravo")],
         )]);
-        let embedder = DominantNoteEmbedder;
+        let embedder = DominantNoteEmbedder::default();
         workspace
             .cache
             .replace_vault_snapshot(
@@ -892,6 +919,7 @@ mod tests {
                 &embedder,
             )
             .expect("publish deterministic vectors");
+        embedder.reset_calls();
         let alpha_chunks: i64 = workspace
             .cache
             .connection()
@@ -925,6 +953,11 @@ mod tests {
                 .map(|result| result.note_slug.as_str())
                 .collect::<Vec<_>>(),
             vec!["alpha", "bravo"]
+        );
+        assert_eq!(
+            embedder.calls(),
+            1,
+            "one semantic request must embed its query once across progressive KNN windows"
         );
     }
 

@@ -90,25 +90,21 @@ impl SqliteCache {
     /// part of the SQL eligibility predicate before sqlite-vec ranks chunks,
     /// so an all-Vault request has one global result window rather than a
     /// merged set of per-Vault windows.
-    pub(crate) fn vault_semantic_search_layered(
+    /// Execute the Vault-qualified layered KNN path with an already embedded
+    /// query. Progressive callers use this seam to reuse one query vector
+    /// across successively larger candidate windows.
+    pub(crate) fn vault_semantic_search_layered_with_vector(
         &self,
         conn: &Connection,
         vault_ids: &[VaultId],
-        embedder: &dyn Embedder,
-        query: &str,
+        query_vec: &[f32],
         k: usize,
         selection: &LayerSelection,
     ) -> Result<Vec<VaultSemanticHit>, String> {
         if vault_ids.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
-        let prefixed_query = format!("{}{}", embedder.query_prefix(), query);
-        let query_vec = embedder
-            .embed(&[prefixed_query])?
-            .into_iter()
-            .next()
-            .ok_or("embedder returned no vectors")?;
-        let query_bytes: &[u8] = bytemuck::cast_slice(&query_vec);
+        let query_bytes: &[u8] = bytemuck::cast_slice(query_vec);
         let ids = vault_ids
             .iter()
             .map(|vault_id| format!("'{}'", vault_id))
