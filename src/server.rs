@@ -1568,10 +1568,11 @@ mod tests {
         }
         // A token makes any host acceptable.
         assert!(check_web_auth_posture("0.0.0.0", true, false).is_ok());
-        // Loopback is fine without a token (only reachable from this machine).
-        assert!(check_web_auth_posture("127.0.0.1", false, false).is_ok());
-        assert!(check_web_auth_posture("localhost", false, false).is_ok());
-        assert!(check_web_auth_posture("::1", false, false).is_ok());
+        // Every loopback spelling accepted without a token has a corresponding
+        // structurally valid listener address (covered in config tests).
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            assert!(check_web_auth_posture(host, false, false).is_ok(), "{host}");
+        }
     }
 
     #[test]

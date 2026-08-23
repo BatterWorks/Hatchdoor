@@ -131,6 +131,11 @@ that production inventory are still checked for stale paths and duplicates.
   behavior belong only to registry Vault definitions. The removed,
   development-only `HATCHDOOR_VAULT_SOURCE`/`HATCHDOOR_VAULT_GIT_*` family is
   rejected explicitly rather than silently falling back to the local path.
+  `HOST` accepts numeric IP literals plus the DNS-free `localhost` alias;
+  accepted bracketed or bare IPv6 literals normalize structurally before bind,
+  and unsupported hostnames fail with guidance rather than depending on DNS.
+  The built-in `--healthcheck` selects a local target in the listener's address
+  family, preserving the IPv6 listener path in the shell-free runtime image.
 - `StartupTracker` exposes startup/model/indexing readiness.
 - `VaultRuntime` and its serialized snapshot expose only the process startup's
   local source/mode, lifecycle phase, and derived non-Git capabilities. Git
