@@ -1,21 +1,14 @@
+//! Shared MCP result/error vocabulary. JSON-RPC framing itself is rmcp-owned
+//! (ADR-17); what remains here are the tool-result shapes the dispatcher and
+//! the typed adapter share, plus the bounded HTTP error bodies our transport
+//! middleware returns before any rmcp framing exists (auth failures, request
+//! size limits).
+
 use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::Response;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::Write;
-
-/// MCP replies are JSON, not a bulk-transfer channel. Keep a hard ceiling so a
-/// broad tree/query result cannot allocate an unbounded serialized response.
-pub const MAX_JSONRPC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: Option<String>,
-    pub id: Option<Value>,
-    pub method: String,
-    pub params: Option<Value>,
-}
 
 #[derive(Debug)]
 pub struct JsonRpcFailure {
@@ -28,6 +21,10 @@ pub struct JsonRpcFailure {
 }
 
 impl JsonRpcFailure {
+    /// The code whose dispatcher-level rendering masks diagnostics behind the
+    /// stable `Internal server error` message.
+    pub const INTERNAL_ERROR_CODE: i64 = -32603;
+
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self {
             code: -32602,
@@ -63,17 +60,9 @@ impl JsonRpcFailure {
     }
 }
 
-pub fn jsonrpc_success_response(id: Value, result: Value) -> Response {
-    jsonrpc_response(
-        StatusCode::OK,
-        json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        }),
-    )
-}
-
+/// A plain-JSON HTTP error response with a JSON-RPC-shaped body. Used only by
+/// the authorization/limit middleware for pre-framing rejections; everything
+/// past that gate is framed by rmcp.
 pub fn jsonrpc_error_response(
     status: StatusCode,
     id: Value,
@@ -123,7 +112,7 @@ fn bounded_json_bytes(payload: &Value) -> Result<Vec<u8>, serde_json::Error> {
     Ok(writer.into_inner())
 }
 
-struct LimitedJsonWriter {
+pub(crate) struct LimitedJsonWriter {
     bytes: Vec<u8>,
     maximum: usize,
 }
@@ -159,6 +148,8 @@ impl Write for LimitedJsonWriter {
         Ok(())
     }
 }
+
+pub const MAX_JSONRPC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn tool_success(payload: Value) -> Value {
     let text = match bounded_json_bytes(&payload) {
@@ -201,20 +192,4 @@ pub fn tool_structured_error(payload: Value) -> Value {
         "structuredContent": payload,
         "isError": true
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn oversized_success_response_is_replaced_with_a_bounded_error() {
-        let response = jsonrpc_success_response(
-            Value::from(1),
-            json!({
-                "payload": "x".repeat(MAX_JSONRPC_RESPONSE_BYTES)
-            }),
-        );
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
 }

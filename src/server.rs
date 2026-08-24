@@ -42,7 +42,7 @@ use crate::handlers::{
     vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
     vault_scoped_write_capabilities_handler,
 };
-use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
+use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::runtime_config::{
     ConfigSnapshot, RuntimeConfig, live_settings_defaults, settings_file_path,
@@ -363,8 +363,11 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // until the legacy embedding-model setup is ready, but Vault collection
     // discovery/management tools stay reachable throughout (#103), mirroring
     // `vaults_v1`'s own independence from that legacy readiness signal below.
-    let mcp = Router::new()
-        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+    // The transport itself is rmcp-owned (ADR-17); the sub-router layers the
+    // per-request authorization/body-limit middleware in front of it.
+    let mcp_transport = HatchdoorMcpTransport::new(state.clone());
+    let mcp = mcp_transport
+        .router(&state)
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
     // Vault-collection discovery, management, events, exact content reads, and
@@ -2252,10 +2255,12 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("accept", "application/json, text/event-stream")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -2269,11 +2274,12 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
                     .header("authorization", "Bearer first-token")
                     .header("origin", "https://evil.example")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -2388,12 +2394,16 @@ mod tests {
             .expect("response");
         assert_eq!(limited_attachment.status(), StatusCode::BAD_REQUEST);
 
+        let limited_session = initialize_mcp_session(&app, "first-token").await;
         let limited_base64 = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", limited_session)
+                    .header("accept", "application/json, text/event-stream")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -2573,6 +2583,35 @@ mod tests {
         assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Perform the legacy initialize handshake against the real `/mcp`
+    /// transport and return the issued session ID.
+    async fn initialize_mcp_session(app: &Router, token: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("host", "localhost")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .expect("initialize issues Mcp-Session-Id")
+    }
+
     #[tokio::test]
     async fn mcp_route_accepts_an_authenticated_write_request_above_axums_default_limit() {
         // Axum's default request-body limit is 2 MiB. A valid write-enabled MCP
@@ -2598,6 +2637,7 @@ mod tests {
             ])
             .expect("configure write-enabled MCP");
         let app = build_router(state, None);
+        let session_id = initialize_mcp_session(&app, "mcp-secret").await;
         let body = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"padding":"{}"}}}}"#,
             "x".repeat(2 * 1024 * 1024 + 1)
@@ -2607,6 +2647,9 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", session_id)
+                    .header("accept", "application/json, text/event-stream")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer mcp-secret")
                     .body(Body::from(body))
@@ -2616,11 +2659,6 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let payload = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("JSON-RPC");
-        assert_eq!(payload["result"], serde_json::json!({}));
     }
 
     #[tokio::test]

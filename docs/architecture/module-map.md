@@ -1462,20 +1462,19 @@ files, checkouts, Git history, or credentials outside the registry record.
 
 ### MCP adapter
 
-**Status:** This section documents the boundary's accepted **target contract**
-per [ADR-17](../../adr/README.md): the hand-written wire implementation is
-replaced by an rmcp-backed adapter (pinned `rmcp = "=3.1.4"`) and the advertised
-revisions narrow to exactly `2026-07-28` and `2025-11-25`. Until the migration
-merges (#167–#172 on `feature/mcp-2026-07-28`), the served surface is the
-current hand-written POST-only adapter advertising `2025-03-26`, `2025-06-18`,
-and `2025-11-25`; this known map-versus-code gap is governed by ADR-17 and
-closed by #172.
+**Status:** Implemented per [ADR-17](../../adr/README.md) (#168): rmcp 3.x
+(pinned `rmcp = "=3.1.4"`) owns the `/mcp` transport and the advertised
+revisions are exactly `2026-07-28` and `2025-11-25`. The remaining Wayfinder
+children build on this seam: #169 (modern `server/discover` surface),
+#170 (`subscriptions/listen`), #171 (layered rate limits), and #172
+(release evidence).
 
 **Kind:** adapter/security surface.
 
 **Owned paths:**
 
 - `src/mcp/mod.rs`
+- `src/mcp/adapter.rs`
 - `src/mcp/auth.rs`
 - `src/mcp/config.rs`
 - `src/mcp/protocol.rs`
@@ -1507,7 +1506,10 @@ generates the `outputSchema` advertised in `tools/list` (#167), for the full
 35-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
-names/schemas/results, and `mcp_get_handler`/`mcp_post_handler` remain public.
+names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
+with its authorization/body-limit middleware) remain the boundary's public
+surface; `adapter.rs` implements rmcp's `ServerHandler` seam over the
+dispatcher, and `routes.rs` mounts it.
 `list_vaults` exposes the shared redacted
 Vault discovery/status/capability and revision shape. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and

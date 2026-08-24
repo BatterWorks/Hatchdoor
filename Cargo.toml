@@ -27,6 +27,7 @@ getrandom = "0.3"
 ignore = "0.4"
 libc = "0.2"
 notify = "8"
+rmcp = { version = "=3.1.4", features = ["server", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +44,7 @@ tokenizers-fe = { package = "tokenizers", version = "0.22", default-features = f
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 unicode-normalization = "0.1"
@@ -57,4 +59,4 @@ embedder-tests = []
 jsonschema = { version = "0.30", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
