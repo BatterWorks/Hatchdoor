@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use crate::app_state::AppState;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode, ErrorData,
-    Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
+    ErrorData, Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool,
+    ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler};
@@ -32,6 +33,12 @@ fn advertised_protocol_versions() -> Cow<'static, [rmcp::model::ProtocolVersion]
         rmcp::model::ProtocolVersion::V_2025_11_25,
     ])
 }
+
+/// SEP-2549 cache metadata on discovery and list results: a five-minute
+/// private TTL acts as the self-healing fallback for list handling — if a
+/// client misses a change notification (or we cannot yet push one), its cached
+/// list is refreshed at most five minutes later.
+const LIST_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
 
 pub struct HatchdoorMcpHandler {
     state: AppState,
@@ -118,6 +125,22 @@ impl ServerHandler for HatchdoorMcpHandler {
         >())
     }
 
+    /// The modern `2026-07-28` lifecycle opener: replaces `initialize`, needs
+    /// no session, and carries the same server information plus SEP-2549 cache
+    /// metadata. rmcp validates the per-request `_meta`/header contract before
+    /// dispatch reaches this method.
+    async fn discover(
+        &self,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::DiscoverResult, ErrorData> {
+        Ok(rmcp::model::DiscoverResult::from_server_info(
+            advertised_protocol_versions().into_owned(),
+            self.get_info(),
+        )
+        .with_ttl_ms(LIST_CACHE_TTL_MS)
+        .with_cache_scope(CacheScope::Private))
+    }
+
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -126,9 +149,11 @@ impl ServerHandler for HatchdoorMcpHandler {
         let config = self.config().map_err(internal_config_error)?;
         let mut tools = tools::setup_tools_list();
         tools.extend(tools::tools_list(&config));
-        Ok(ListToolsResult::with_all_items(
-            tools.into_iter().map(value_to_tool).collect(),
-        ))
+        Ok(
+            ListToolsResult::with_all_items(tools.into_iter().map(value_to_tool).collect())
+                .with_ttl_ms(LIST_CACHE_TTL_MS)
+                .with_cache_scope(CacheScope::Private),
+        )
     }
 
     async fn call_tool(

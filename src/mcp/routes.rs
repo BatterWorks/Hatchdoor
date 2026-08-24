@@ -52,6 +52,12 @@ impl HatchdoorMcpTransport {
         // Same static outer guard as before: the middleware re-applies the
         // live per-capability limit precisely.
         config.max_request_body_bytes = McpConfig::maximum_request_body_limit();
+        // Modern `2026-07-28` requests are always routed statelessly, so this
+        // gate applies to exactly them: each request must carry the
+        // `MCP-Protocol-Version` header plus per-request `_meta` whose declared
+        // version and required capability metadata match. Legacy session-routed
+        // traffic keeps today's rules unchanged.
+        config.stateless_protocol_metadata_required = true;
         Self {
             service: StreamableHttpService::new(
                 move || Ok(HatchdoorMcpHandler::new(state.clone())),
@@ -794,6 +800,355 @@ mod tests {
         .await;
         let message = response_message(raw).await;
         assert_eq!(message["error"]["code"], -32601);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Golden wire tests: the modern revision's request/response shapes
+    // (issue #169) — no initialization handshake, per-request metadata.
+    // ---------------------------------------------------------------------------
+
+    /// The `_meta` object a well-behaved `2026-07-28` client attaches to every
+    /// request (SEP-1319/2567): declared protocol version and client
+    /// capabilities.
+    fn modern_meta(protocol_version: &str, with_capabilities: bool) -> Value {
+        let mut meta = json!({
+            "io.modelcontextprotocol/protocolVersion": protocol_version,
+        });
+        if with_capabilities {
+            meta["io.modelcontextprotocol/clientCapabilities"] = json!({});
+        }
+        meta
+    }
+
+    async fn modern_post(
+        app: Router,
+        method_header: &str,
+        name_header: Option<&str>,
+        header_version: &str,
+        payload: Value,
+    ) -> Response {
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-protocol-version", header_version.to_string()));
+        headers.push(("Mcp-Method", method_header.to_string()));
+        if let Some(name) = name_header {
+            headers.push(("Mcp-Name", name.to_string()));
+        }
+        headers.push(("content-type", "application/json".into()));
+        headers.push(("accept", "application/json, text/event-stream".into()));
+        send(app, "POST", headers, Some(payload.to_string())).await
+    }
+
+    #[tokio::test]
+    async fn golden_discover_shape_for_the_modern_revision() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "server/discover",
+            Some("server/discover"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":1,"method":"server/discover",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        let result = &message["result"];
+        assert_eq!(result["resultType"], "complete");
+        assert_eq!(
+            result["supportedVersions"],
+            json!(["2026-07-28", "2025-11-25"])
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        assert!(
+            result["instructions"]
+                .as_str()
+                .expect("instructions")
+                .contains("Start with list_vaults")
+        );
+        assert_eq!(
+            result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+            "hatchdoor"
+        );
+        assert_eq!(result["ttlMs"], 300_000);
+        assert_eq!(result["cacheScope"], "private");
+        assert!(message.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn modern_tools_list_is_stateless_and_carries_cache_metadata() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "tools/list",
+            None,
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/list",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert!(message.get("error").is_none(), "{}", message);
+        assert!(
+            !message["result"]["tools"]
+                .as_array()
+                .expect("tools")
+                .is_empty()
+        );
+        assert_eq!(message["result"]["ttlMs"], 300_000);
+        assert_eq!(message["result"]["cacheScope"], "private");
+    }
+
+    #[tokio::test]
+    async fn modern_tool_call_completes_without_initialization() {
+        let (state, _tmp) = test_state();
+        let vault_id = state.vaults.snapshot().vaults.keys().next().copied();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "tools/call",
+            Some("get_note"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"get_note",
+                    "arguments":{"slug":"home","vault_id": vault_id}
+                }
+            }),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(message["result"]["isError"], false);
+        assert_eq!(
+            message["result"]["structuredContent"]["note"]["slug"],
+            "home"
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_request_without_protocol_version_header_is_rejected() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("Mcp-Method", "tools/list".into()));
+        headers.push(("content-type", "application/json".into()));
+        headers.push(("accept", "application/json, text/event-stream".into()));
+        let response = send(
+            app,
+            "POST",
+            headers,
+            Some(
+                json!({
+                    "jsonrpc":"2.0","id":4,"method":"tools/list",
+                    "params":{"_meta": modern_meta("2026-07-28", true)}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+    }
+
+    #[tokio::test]
+    async fn modern_request_without_meta_protocol_version_is_rejected() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut meta = modern_meta("2026-07-28", true);
+        meta.as_object_mut()
+            .unwrap()
+            .remove("io.modelcontextprotocol/protocolVersion");
+        let raw = modern_post(
+            app,
+            "tools/list",
+            None,
+            "2026-07-28",
+            json!({"jsonrpc":"2.0","id":5,"method":"tools/list","params":{"_meta": meta}}),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn modern_request_with_mismatched_header_and_meta_versions_is_rejected() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "tools/list",
+            None,
+            "2025-11-25",
+            json!({
+                "jsonrpc":"2.0","id":6,"method":"tools/list",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            }),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+    }
+
+    #[tokio::test]
+    async fn modern_request_missing_client_capabilities_is_rejected() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "tools/list",
+            None,
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":7,"method":"tools/list",
+                "params":{"_meta": modern_meta("2026-07-28", false)}
+            }),
+        )
+        .await;
+        let bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("clientCapabilities")
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_request_method_header_must_match_the_body_method() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "prompts/list",
+            None,
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":8,"method":"tools/list",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            }),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Mcp-Method")
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_request_missing_the_method_header_is_rejected() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-protocol-version", "2026-07-28".to_string()));
+        headers.push(("content-type", "application/json".into()));
+        headers.push(("accept", "application/json, text/event-stream".into()));
+        let response = send(
+            app,
+            "POST",
+            headers,
+            Some(
+                json!({
+                    "jsonrpc":"2.0","id":10,"method":"tools/list",
+                    "params":{"_meta": modern_meta("2026-07-28", true)}
+                })
+                .to_string(),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Mcp-Method")
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_tool_call_missing_the_name_header_is_rejected() {
+        let (state, _tmp) = test_state();
+        let vault_id = state.vaults.snapshot().vaults.keys().next().copied();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "tools/call",
+            None,
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":11,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"get_note",
+                    "arguments":{"slug":"home","vault_id": vault_id}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Mcp-Name")
+        );
+    }
+
+    #[tokio::test]
+    async fn modern_tool_call_name_header_must_match_the_requested_tool() {
+        let (state, _tmp) = test_state();
+        let vault_id = state.vaults.snapshot().vaults.keys().next().copied();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "tools/call",
+            Some("search_notes"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":9,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"get_note",
+                    "arguments":{"slug":"home","vault_id": vault_id}
+                }
+            }),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(raw.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], -32020);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("Mcp-Name")
+        );
     }
 
     // ---------------------------------------------------------------------------
