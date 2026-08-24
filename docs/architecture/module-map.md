@@ -1462,6 +1462,15 @@ files, checkouts, Git history, or credentials outside the registry record.
 
 ### MCP adapter
 
+**Status:** This section documents the boundary's accepted **target contract**
+per [ADR-17](../../adr/README.md): the hand-written wire implementation is
+replaced by an rmcp-backed adapter (pinned `rmcp = "=3.1.4"`) and the advertised
+revisions narrow to exactly `2026-07-28` and `2025-11-25`. Until the migration
+merges (#167–#172 on `feature/mcp-2026-07-28`), the served surface is the
+current hand-written POST-only adapter advertising `2025-03-26`, `2025-06-18`,
+and `2025-11-25`; this known map-versus-code gap is governed by ADR-17 and
+closed by #172.
+
 **Kind:** adapter/security surface.
 
 **Owned paths:**
@@ -1475,10 +1484,26 @@ files, checkouts, Git history, or credentials outside the registry record.
 - `src/mcp/tools/read.rs`
 - `src/mcp/tools/write.rs`
 
-**Public contract:** `/mcp` is POST-only Streamable HTTP behavior: initialize
-advertises no tool-list-change notification delivery, and negotiation/follow-up
-admission supports `2025-03-26`, `2025-06-18`, and `2025-11-25` only.
-`2024-11-05` is rejected because its HTTP+SSE transport is not implemented.
+**Public contract (target):** `/mcp` is Streamable HTTP served through rmcp's
+`StreamableHttpService` (GET/SSE + POST + DELETE). Legacy `2025-11-25` traffic
+keeps today's POST-only request/response shape and initialize/negotiation flow;
+modern clients additionally open GET/SSE streams for server-initiated delivery.
+Modern clients are stateless with no initialization handshake: `server/discover`
+replaces `initialize`, each request carries per-request `_meta` that must match
+the required protocol/capability HTTP headers, and `Mcp-Method`/`Mcp-Name`
+validation is enforced. Advertised protocol revisions are exactly `2026-07-28`
+and `2025-11-25`; older revisions are not negotiated.
+Once #170 lands, `tools.listChanged` is honestly `true`: modern clients receive
+tool-list change events via `subscriptions/listen` backed by the existing
+`mcp_tools_changed` broadcast, capped at four live subscriptions per bearer
+token, with acknowledgment, subscription metadata, keep-alives, and disconnect
+cancellation. Layered resource protection (#171) exempts protocol/discovery/
+list handling from the tool quota, limits tool calls to 120/minute/token and
+concurrency to eight ordinary / two expensive searches, rejects over-limit
+requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
+configuration. Every tool response is a typed Rust result structure whose type
+generates the `outputSchema` advertised in `tools/list` (#167), for the full
+35-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `mcp_get_handler`/`mcp_post_handler` remain public.
@@ -1518,14 +1543,22 @@ configuration snapshot bound at each request.
 documentation describing agent behavior.
 
 **Invariants:** MCP is disabled by default, uses its own token, validates
-Origins, and keeps read-only access credentialed (ADR-09). Token changes,
-write enablement, Origins, and attachment limits apply to the next request;
-attachment authorization never retains a rotated MCP token. Write tools use
-`vault/write`, the requested Vault's `acquire_mutation` lock, and retain
+Origins, and keeps read-only access credentialed (ADR-09); the wire transport
+itself is rmcp-owned rather than hand-implemented, and the advertised revision
+set stays narrowed to `2026-07-28` + `2025-11-25` (ADR-17). Per-request security
+ordering is preserved across the swap: enabled check → token-configured check →
+Origin allowlist → constant-time bearer compare → protocol-version header.
+The MCP bearer token is accepted by the multipart attachment endpoint only while
+MCP *and* MCP write mode are both live-enabled, checked per request; token
+changes, write enablement, Origins, and attachment limits apply to the next
+request, and attachment authorization never retains a rotated MCP token. Write
+tools use `vault/write`, the requested Vault's `acquire_mutation` lock, and retain
 optimistic concurrency and path protections (ADR-03).
 
-**Validation:** `cargo test mcp`, vault write tests for mutation changes, and
-server router tests.
+**Validation:** `cargo test mcp`, vault write tests for mutation changes,
+server router tests, and golden wire tests locking both supported revisions'
+request/response shapes. Before releases, the manual conformance-run procedure
+(#166) produces mandatory release evidence.
 
 ### Evaluation and development binaries
 
