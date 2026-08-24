@@ -1,0 +1,45 @@
+# Expected-failures baseline for the manual MCP conformance run.
+# See mcp-conformance-run.md. Rules:
+#   - every entry must have a reviewed reason (keep the inline comments);
+#   - a baselined scenario that PASSES trips exit 1 (stale entry) — remove it;
+#   - wire-schema-valid failures may never be baselined.
+# Measured against @modelcontextprotocol/conformance 0.1.16, development at
+# 128901c, 2026-08-24 (write-enabled posture; read-only is a subset).
+server:
+  # POST-only transport until ADR-17 lands: no session IDs / long-lived
+  # SSE streams yet, so multi-stream delivery cannot be exercised.
+  # Re-review at #168/#170 — remove once the RMCP boundary serves streams.
+  - server-sse-multiple-streams
+
+  # Capabilities Hatchdoor deliberately does not implement (tools-only
+  # surface): the server correctly answers these methods with -32601.
+  - logging-set-level          # no logging capability
+  - completion-complete        # no completion capability
+  - elicitation-sep1034-defaults  # no elicitation capability
+  - elicitation-sep1330-enums  # no elicitation capability
+  - resources-list             # no resources capability
+  - resources-read-text        # no resources capability
+  - resources-read-binary      # no resources capability
+  - resources-templates-read   # no resources capability
+  - resources-subscribe        # no resources capability
+  - resources-unsubscribe      # no resources capability
+  - prompts-list               # no prompts capability
+  - prompts-get-simple         # no prompts capability
+  - prompts-get-with-args      # no prompts capability
+  - prompts-get-embedded-resource  # no prompts capability
+  - prompts-get-with-image     # no prompts capability
+
+  # Fixture-catalogue scenarios: they call tool names defined by the suite's
+  # own reference server (e.g. `test_simple_text`), not a real server's tools.
+  # Structural for any third-party catalogue; re-review if the suite grows
+  # catalogue-independent tool scenarios.
+  - tools-call-simple-text
+  - tools-call-image
+  - tools-call-audio
+  - tools-call-embedded-resource
+  - tools-call-mixed-content
+  - tools-call-with-logging
+  - tools-call-error
+  - tools-call-with-progress
+  - tools-call-sampling
+  - tools-call-elicitation
