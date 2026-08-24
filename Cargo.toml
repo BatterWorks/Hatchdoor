@@ -28,6 +28,7 @@ ignore = "0.4"
 libc = "0.2"
 notify = "8"
 rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -53,6 +54,7 @@ default = []
 embedder-tests = []
 
 [dev-dependencies]
+jsonschema = { version = "0.30", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "time"] }
 tower = "0.5"

@@ -1,9 +1,11 @@
 //! Shared-core, Vault-qualified reads over authoritative Markdown and the
 //! disposable shared SQLite snapshot cache.
 
+use schemars::JsonSchema;
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
+use std::str::FromStr;
 
 use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
 use crate::vault::{Note, NoteLink, NoteLinks};
@@ -35,7 +37,42 @@ impl Serialize for VaultScope {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// Deserializes the same flat scalar `Serialize` emits (the canonical text of
+/// a Vault ID, or the literal `"all"`), so a typed result can round-trip.
+impl<'de> Deserialize<'de> for VaultScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value == "all" {
+            return Ok(VaultScope::All);
+        }
+        VaultId::from_str(&value)
+            .map(VaultScope::One)
+            .map_err(|_| serde::de::Error::custom("invalid scope"))
+    }
+}
+
+impl JsonSchema for VaultScope {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "VaultScope".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "description": "A canonical Vault ID or the literal all.",
+            "examples": ["all"]
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultReadError {
     pub code: String,
     pub message: String,
@@ -43,7 +80,7 @@ pub struct VaultReadError {
     pub retryable: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultParticipantState {
     Fresh,
@@ -60,7 +97,7 @@ pub enum VaultParticipantState {
     Unavailable,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultParticipant {
     pub vault_id: VaultId,
     pub vault_name: String,
@@ -70,7 +107,7 @@ pub struct VaultParticipant {
 }
 
 /// The common one-or-all read envelope future HTTP and MCP adapters share.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultReadProjection<T> {
     pub scope: VaultScope,
     pub collection_revision: u64,
@@ -79,7 +116,7 @@ pub struct VaultReadProjection<T> {
     pub data: T,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultQualifiedNote {
     pub vault_id: VaultId,
     pub note: Note,
@@ -90,19 +127,19 @@ pub struct VaultQualifiedNote {
 /// `api_types::VaultStatsResponse` directly rather than duplicating its wire
 /// shape; `vault_id` sits alongside it, matching `VaultQualifiedNote`'s
 /// nesting rather than a flat merge.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultQualifiedStats {
     pub vault_id: VaultId,
     pub stats: crate::api_types::VaultStatsResponse,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultQualifiedLink {
     pub vault_id: VaultId,
     pub link: NoteLink,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultQualifiedLinks {
     pub vault_id: VaultId,
     pub outgoing: Vec<VaultQualifiedLink>,
@@ -114,35 +151,35 @@ pub struct VaultQualifiedLinks {
 /// because they have no slug to name them by.
 pub type ResolvedVaultTargets = (Vec<Option<ResolvedVaultNote>>, Vec<Option<String>>);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct ResolvedVaultNote {
     pub vault_id: VaultId,
     pub slug: String,
     pub relative_path: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultTree {
     pub vault_id: VaultId,
     pub vault_name: String,
     pub tree: VaultExplorerFolder,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultExplorerFolder {
     pub name: String,
     pub folders: Vec<VaultExplorerFolder>,
     pub notes: Vec<VaultExplorerNote>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultExplorerNote {
     pub vault_id: VaultId,
     pub title: String,
     pub slug: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultStatistics {
     pub vault_id: VaultId,
     pub vault_name: String,
@@ -152,7 +189,7 @@ pub struct VaultStatistics {
     pub vault_size_bytes: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultGraph {
     pub vault_id: VaultId,
     pub vault_name: String,
@@ -160,7 +197,7 @@ pub struct VaultGraph {
     pub edges: Vec<VaultGraphEdge>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultGraphNode {
     pub vault_id: VaultId,
     pub slug: String,
@@ -169,14 +206,14 @@ pub struct VaultGraphNode {
     pub backlink_count: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultGraphEdge {
     pub vault_id: VaultId,
     pub source_slug: String,
     pub target_slug: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultRecentNote {
     pub vault_id: VaultId,
     pub title: String,

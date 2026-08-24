@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod protocol;
+pub mod results;
 pub mod routes;
 pub mod tools;
 

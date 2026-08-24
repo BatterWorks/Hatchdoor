@@ -1479,6 +1479,7 @@ closed by #172.
 - `src/mcp/auth.rs`
 - `src/mcp/config.rs`
 - `src/mcp/protocol.rs`
+- `src/mcp/results.rs`
 - `src/mcp/routes.rs`
 - `src/mcp/tools/mod.rs`
 - `src/mcp/tools/read.rs`
@@ -1518,6 +1519,13 @@ scope-less/default/sole-Vault tool remains reachable.
 `get_attachment_import_config` names one Vault and answers under every write
 posture, reporting the instance-wide write switch and that Vault's own
 mutation capability as separate fields rather than refusing the call.
+Typed results live in `src/mcp/results.rs`: each tool's success response is
+produced from one Rust structure — MCP-owned shapes there, shared V1 handler
+response structures re-exported for the proxied reads and registry controls —
+and that same structure generates the tool's advertised `outputSchema`. Read
+tools decode their proxied handler payload into the declared result type and
+re-serialize it, so a handler drift from its schema fails loudly instead of
+silently.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
 MCP write permission and without the mutation capability. `create_vault` and
 `edit_vault` advertise the `VaultSource` and credential contracts as

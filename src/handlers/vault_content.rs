@@ -20,7 +20,8 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 use crate::api_types::{
     ResolveAssetResult, ResolveBatchRequest, ResolveQuery, ResolveTargetResult,
@@ -43,7 +44,7 @@ use crate::vault_registry::VaultId;
 // Wire types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultResolveResponse {
     pub vault_id: VaultId,
     pub slug: Option<String>,

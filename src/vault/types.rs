@@ -1,7 +1,8 @@
+use schemars::JsonSchema;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteEntry {
@@ -13,7 +14,7 @@ pub struct NoteEntry {
     pub layer: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct Note {
     pub title: String,
     pub slug: String,
@@ -26,7 +27,7 @@ pub struct Note {
     pub metadata: NoteMetadata,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct NoteMetadata {
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
@@ -96,7 +97,7 @@ pub struct SearchHit {
     pub snippet: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct NoteLink {
     pub title: String,
     pub slug: String,
@@ -106,7 +107,7 @@ pub struct NoteLink {
     pub layer: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct NoteLinks {
     pub outgoing: Vec<NoteLink>,
     pub backlinks: Vec<NoteLink>,

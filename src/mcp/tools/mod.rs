@@ -29,7 +29,9 @@ pub async fn handle_tools_call(
         .unwrap_or_else(|| json!({}));
 
     if name == "get_model_setup_status" {
-        return Ok(tool_success(model_setup_status_payload(&state)));
+        return Ok(tool_success(crate::mcp::results::result_to_value(
+            &model_setup_status_result(&state),
+        )));
     }
 
     // Before the first index exists, only the explicit model-setup calls and
@@ -46,12 +48,18 @@ pub async fn handle_tools_call(
             "accept_gemma_terms" => select_model_tool(
                 state,
                 crate::model_setup::SelectedModel::Gemma,
-                json!({ "accepted": true, "model": crate::model_setup::GEMMA_MODEL_ID }),
+                crate::mcp::results::ModelChoiceResult {
+                    accepted: true,
+                    model: crate::model_setup::GEMMA_MODEL_ID,
+                },
             ),
             "decline_gemma_terms" => select_model_tool(
                 state,
                 crate::model_setup::SelectedModel::Nomic,
-                json!({ "accepted": false, "model": crate::model_setup::NOMIC_MODEL_ID }),
+                crate::mcp::results::ModelChoiceResult {
+                    accepted: false,
+                    model: crate::model_setup::NOMIC_MODEL_ID,
+                },
             ),
             _ => Ok(tool_error(
                 "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
@@ -165,10 +173,10 @@ pub async fn handle_tools_call(
 fn select_model_tool(
     state: AppState,
     selected: crate::model_setup::SelectedModel,
-    success: Value,
+    success: crate::mcp::results::ModelChoiceResult,
 ) -> Result<Value, JsonRpcFailure> {
     match crate::server::select_model_and_start(state, selected) {
-        Ok(()) => Ok(tool_success(success)),
+        Ok(()) => Ok(tool_success(crate::mcp::results::result_to_value(&success))),
         Err(crate::server::ModelChoiceError::AlreadyActive) => Ok(tool_error(
             "A search model setup is already active. Changing models after setup begins is not supported."
                 .to_string(),
@@ -179,23 +187,25 @@ fn select_model_tool(
     }
 }
 
-fn model_setup_status_payload(state: &AppState) -> Value {
-    json!({
-        "state": state.startup.status(),
-        "gemma": {
-            "model": crate::model_setup::GEMMA_MODEL_ID,
-            "terms_url": crate::model_setup::GEMMA_TERMS_URL,
-            "policy_url": crate::model_setup::GEMMA_POLICY_URL,
-            "terms_version": crate::model_setup::GEMMA_TERMS_VERSION,
-            "repository": crate::model_setup::GEMMA_REPOSITORY,
-            "revision": crate::model_setup::GEMMA_REVISION,
-            "data_notice": "Accepting the terms does not change ownership of your vault data. The acceptance record stays on this machine and is not sent anywhere."
+/// The typed `get_model_setup_status` answer. The data-notice text is part
+/// of the operator-facing privacy promise and stays byte-identical to what
+/// this tool has always reported.
+fn model_setup_status_result(state: &AppState) -> crate::mcp::results::ModelSetupStatusResult {
+    crate::mcp::results::ModelSetupStatusResult {
+        state: state.startup.status(),
+        gemma: crate::mcp::results::ModelSetupModelInfo {
+            model: crate::model_setup::GEMMA_MODEL_ID,
+            terms_url: Some(crate::model_setup::GEMMA_TERMS_URL),
+            policy_url: Some(crate::model_setup::GEMMA_POLICY_URL),
+            terms_version: crate::model_setup::GEMMA_TERMS_VERSION,
+            repository: crate::model_setup::GEMMA_REPOSITORY,
+            revision: crate::model_setup::GEMMA_REVISION,
         },
-        "fallback": {
-            "model": crate::model_setup::NOMIC_MODEL_ID,
-            "notice": "Nomic is the fallback if you decline Gemma. It supports English only and still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches. Nomic uses about 1.3 GB of RAM while indexing; Gemma uses about 0.5 GB."
-        }
-    })
+        fallback: crate::mcp::results::ModelSetupFallbackInfo {
+            model: crate::model_setup::NOMIC_MODEL_ID,
+            notice: "Nomic is the fallback if you decline Gemma. It supports English only and still provides solid search, but Gemma performed better in Hatchdoor's tests, including English searches. Nomic uses about 1.3 GB of RAM while indexing; Gemma uses about 0.5 GB.".to_string(),
+        },
+    }
 }
 
 pub fn tools_list(config: &McpConfig) -> Vec<Value> {
@@ -204,6 +214,22 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
         tools.extend(read::management_tools_list());
         tools.extend(write::write_tools_list());
     }
+    with_output_schemas(tools)
+}
+
+/// Attaches each advertised tool's `outputSchema`, generated from the same
+/// typed result structure its responses serialize from (`src/mcp/results.rs`).
+/// Every tool in the catalogue must have one; a missing entry fails the
+/// catalogue build rather than advertising a schemaless tool.
+fn with_output_schemas(mut tools: Vec<Value>) -> Vec<Value> {
+    for tool in &mut tools {
+        let name = tool["name"]
+            .as_str()
+            .expect("every advertised MCP tool has a name");
+        let schema = crate::mcp::results::output_schema_for(name)
+            .unwrap_or_else(|| panic!("{name} advertises no output schema"));
+        tool["outputSchema"] = serde_json::to_value(&schema).expect("schema serializes");
+    }
     tools
 }
 
@@ -211,7 +237,7 @@ pub fn tools_list(config: &McpConfig) -> Vec<Value> {
 /// cache their tool list on connection can complete first-run setup and then use
 /// the vault without reconnecting.
 pub fn setup_tools_list() -> Vec<Value> {
-    vec![
+    with_output_schemas(vec![
         json!({
             "name": "get_model_setup_status",
             "description": "Show Hatchdoor's first-run embedding model setup status, Gemma terms links, and the local-data privacy notice.",
@@ -230,7 +256,7 @@ pub fn setup_tools_list() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
             "annotations": write_tool_annotations(true, true),
         }),
-    ]
+    ])
 }
 
 /// Vault collection discovery/management tools mirror `handlers/vaults.rs`'s

@@ -1,12 +1,13 @@
 //! Vault-qualified search over the published disposable cache snapshots.
 
+use schemars::JsonSchema;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 #[cfg(test)]
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
 use crate::embed::Embedder;
@@ -45,7 +46,7 @@ pub struct VaultSearchRequest {
     pub layers: LayerSelection,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema, Deserialize)]
 pub struct VaultSearchResult {
     pub vault_id: VaultId,
     pub chunk_id: i64,
@@ -60,7 +61,7 @@ pub struct VaultSearchResult {
     pub metadata: crate::vault::NoteMetadata,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema, Deserialize)]
 pub struct VaultSearchResponse {
     pub mode: SearchMode,
     pub results: Vec<VaultSearchResult>,

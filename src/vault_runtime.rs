@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
@@ -6,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
 use crate::cache::SqliteCache;
@@ -105,19 +106,19 @@ impl VaultSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultSourceKind {
     Local,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultSourceMode {
     Local,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultPhase {
     TermsRequired,
@@ -129,7 +130,7 @@ pub enum VaultPhase {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultCapabilities {
     pub browse: bool,
     pub search: bool,
@@ -174,7 +175,7 @@ pub struct VaultRuntimeSnapshot {
     pub error: Option<VaultRuntimeError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultRuntimeError {
     pub code: String,
     pub message: String,
@@ -194,7 +195,7 @@ pub struct VaultRuntimeError {
 /// truncated-looking — list.
 const MAX_REPORTED_SYNC_ERROR_PATHS: usize = 50;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VaultRuntimeErrorDetail {
     /// Affected repository-relative paths for `managed_git_dirty_working_copy`
@@ -356,7 +357,7 @@ impl VaultRuntime {
 }
 
 /// Activation state for one definition in the live Vault collection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultActivationStatus {
     Active,
@@ -365,7 +366,7 @@ pub enum VaultActivationStatus {
 }
 
 /// Whether authoritative local Markdown can currently be used.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalContentStatus {
     ReadWrite,
@@ -374,7 +375,7 @@ pub enum LocalContentStatus {
 }
 
 /// Search availability is independent from local Markdown availability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultSearchStatus {
     Unavailable,
@@ -390,7 +391,7 @@ pub enum VaultSearchStatus {
 }
 
 /// Git status is kept separate so a Git failure cannot hide local Markdown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultGitStatus {
     Disabled,
@@ -399,7 +400,7 @@ pub enum VaultGitStatus {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultWatcherStatus {
     Running,
