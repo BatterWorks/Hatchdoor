@@ -25,6 +25,7 @@ use crate::app_state::AppState;
 use super::adapter::HatchdoorMcpHandler;
 use super::auth::validate_mcp_request;
 use super::config::McpConfig;
+use super::limits::{self, RateLimiter, RequestClass};
 use super::protocol::jsonrpc_error_response;
 use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
 
@@ -34,6 +35,10 @@ use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
 #[derive(Clone)]
 pub struct HatchdoorMcpTransport {
     service: StreamableHttpService<HatchdoorMcpHandler, LocalSessionManager>,
+    /// Layered resource protection (#171): one rolling quota window per token
+    /// plus the process-wide concurrency pools, shared by every handler this
+    /// service constructs.
+    limiter: Arc<RateLimiter>,
 }
 
 impl HatchdoorMcpTransport {
@@ -68,6 +73,7 @@ impl HatchdoorMcpTransport {
         // handler instance this service constructs.
         let subscriptions = Arc::new(SubscriptionRegistry::new());
         Self {
+            limiter: Arc::new(RateLimiter::new()),
             service: StreamableHttpService::new(
                 move || {
                     Ok(HatchdoorMcpHandler::new(
@@ -82,14 +88,23 @@ impl HatchdoorMcpTransport {
     }
 
     /// The `/mcp` sub-router: rmcp's Streamable HTTP service (GET/SSE + POST +
-    /// DELETE) behind the authorization/body-limit middleware. Merged into the
-    /// main application router by the composition root.
+    /// DELETE) behind the authorization/body-limit/rate-limit middleware.
+    /// Merged into the main application router by the composition root. The
+    /// rate limiter is captured here so one transport's middleware shares its
+    /// quota windows and concurrency pools across all requests.
     pub fn router(&self, state: &AppState) -> Router<AppState> {
+        let limiter = self.limiter.clone();
+        let state = state.clone();
         Router::new()
             .route("/mcp", any_service(self.clone()))
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                authorize_mcp_transport,
+            .layer(axum::middleware::from_fn(
+                move |request: Request, next: Next| {
+                    let state = state.clone();
+                    let limiter = limiter.clone();
+                    async move {
+                        authorize_mcp_transport(State(state.clone()), limiter, request, next).await
+                    }
+                },
             ))
     }
 }
@@ -128,9 +143,11 @@ async fn live_mcp_config(State(state): State<AppState>) -> Result<McpConfig, Res
 /// Per-request gate run before any body is collected or dispatched. This is
 /// the preserved security ordering from the hand-written adapter:
 /// enabled check → token configured → Origin allowlist → constant-time bearer
-/// compare → protocol-version header (`auth::validate_mcp_request`).
+/// compare → protocol-version header (`auth::validate_mcp_request`) → layered
+/// resource protection (#171).
 async fn authorize_mcp_transport(
     State(state): State<AppState>,
+    limiter: Arc<RateLimiter>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -169,6 +186,34 @@ async fn authorize_mcp_transport(
                 );
             }
         };
+
+        // Layered resource protection (#171): tool calls are quota-limited per
+        // bearer token and concurrency-capped process-wide; protocol,
+        // discovery, and list handling stay outside both layers. Rejections
+        // happen here — before dispatch — so they carry HTTP 429 with a
+        // Retry-After header instead of a JSON-RPC error.
+        if config.rate_limits_enabled
+            && let Some(class) = classify_post_body(&body)
+            && let Some(token) = parts.extensions.get::<McpBearerToken>()
+        {
+            // Concurrency first, so a busy-rejected call does not also spend
+            // quota budget on a request that never dispatched.
+            let guard = match limiter.try_acquire(class).await {
+                Ok(guard) => guard,
+                Err(retry_in) => return too_many_requests(limits::retry_after_seconds(retry_in)),
+            };
+            if let Err(retry_in) = limiter.check_quota(token, std::time::Instant::now()) {
+                return too_many_requests(limits::retry_after_seconds(retry_in));
+            }
+            // The guard is deliberately held across dispatch: its Drop is what
+            // frees the concurrency slots when the response (or an early
+            // error/cancel) completes.
+            let request = Request::from_parts(parts, Body::from(body));
+            let response = next.run(request).await;
+            drop(guard);
+            return response;
+        }
+
         let request = Request::from_parts(parts, Body::from(body));
         return next.run(request).await;
     }
@@ -176,10 +221,48 @@ async fn authorize_mcp_transport(
     next.run(Request::from_parts(parts, body)).await
 }
 
+/// Classify a buffered POST body for layered limiting (#171): `None` for
+/// exempt traffic (protocol lifecycle, discovery, list handling, notifications,
+/// and anything unparseable — which downstream JSON-RPC framing rejects
+/// without ever reaching a tool). Only `tools/call` bodies yield a class.
+/// The raw-byte scan is only used to *skip* work when it cannot hide a call:
+/// a body with no backslash decodes every character literally, so an absent
+/// marker there proves absence. Anything else falls back to parsing so an
+/// escaped method name (`"\\u0074ools/call"`) cannot slip past the quota.
+fn classify_post_body(body: &[u8]) -> Option<RequestClass> {
+    const MARKER: &[u8] = b"tools/call";
+    let marker_absent = !body.windows(MARKER.len()).any(|window| window == MARKER);
+    if marker_absent && !body.contains(&b'\\') {
+        return None;
+    }
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    let class = limits::classify(
+        parsed.get("method").and_then(Value::as_str),
+        parsed["params"]["name"].as_str(),
+    );
+    (class != RequestClass::Exempt).then_some(class)
+}
+
+/// The over-limit rejection (#171): HTTP 429 plus `Retry-After` in whole
+/// seconds. Deliberately not a JSON-RPC envelope — the request never reached
+/// dispatch, so no in-flight request id is owed an answer.
+fn too_many_requests(retry_after_seconds: u64) -> Response {
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        "MCP tool-call limit reached; retry later",
+    )
+        .into_response();
+    response
+        .headers_mut()
+        .insert(axum::http::header::RETRY_AFTER, retry_after_seconds.into());
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_state::{ReadyVault, build_cache, test_embedder};
+    use crate::mcp::limits::TOOL_CALLS_PER_MINUTE;
     use axum::body::to_bytes;
     use serde_json::json;
     use std::sync::Arc;
@@ -1271,6 +1354,119 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], -32600);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Layered resource protection (#171).
+    // ---------------------------------------------------------------------------
+
+    /// A cheap modern-stateless `tools/call` that still exercises the full
+    /// quota path (it is a real tool call, just one that touches no vault).
+    async fn modern_cheap_tool_call(app: Router, id: u64) -> Response {
+        modern_post(
+            app,
+            "tools/call",
+            Some("get_model_setup_status"),
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":id,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"get_model_setup_status",
+                    "arguments":{}
+                }
+            }),
+        )
+        .await
+    }
+
+    #[test]
+    fn classification_resists_json_string_escapes() {
+        // An escaped method name decodes to a real tool call, so it must be
+        // counted even though the raw bytes contain no marker.
+        let escaped =
+            br#"{"jsonrpc":"2.0","id":1,"method":"\u0074ools/call","params":{"name":"get_note"}}"#;
+        assert_eq!(
+            classify_post_body(escaped),
+            Some(RequestClass::ToolCall),
+            "an escaped method name must not bypass the quota"
+        );
+        assert_eq!(
+            classify_post_body(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#),
+            None,
+            "list handling stays exempt"
+        );
+        assert_eq!(classify_post_body(b"not json at all"), None);
+    }
+
+    #[tokio::test]
+    async fn tool_calls_past_the_per_minute_quota_get_429_with_retry_after() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        for id in 1..=(super::super::limits::TOOL_CALLS_PER_MINUTE as u64) {
+            let response = modern_cheap_tool_call(app.clone(), id).await;
+            assert_eq!(response.status(), StatusCode::OK, "call {id} admitted");
+        }
+        let over_limit = modern_cheap_tool_call(app, TOOL_CALLS_PER_MINUTE as u64 + 1).await;
+        assert_eq!(over_limit.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = over_limit
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .expect("429 carries Retry-After");
+        assert!(retry_after.parse::<u64>().is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_and_discovery_stay_outside_the_exhausted_tool_quota() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        for id in 1..=(TOOL_CALLS_PER_MINUTE as u64 + 2) {
+            if modern_cheap_tool_call(app.clone(), id).await.status()
+                == StatusCode::TOO_MANY_REQUESTS
+            {
+                break;
+            }
+        }
+        let raw = modern_post(
+            app.clone(),
+            "tools/list",
+            None,
+            "2026-07-28",
+            json!({"jsonrpc":"2.0","id":50,"method":"tools/list","params":{"_meta": modern_meta("2026-07-28", true)}}),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::OK, "list handling is exempt");
+        let raw = modern_post(
+            app.clone(),
+            "server/discover",
+            Some("server/discover"),
+            "2026-07-28",
+            json!({"jsonrpc":"2.0","id":51,"method":"server/discover","params":{"_meta": modern_meta("2026-07-28", true)}}),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::OK, "discovery is exempt");
+    }
+
+    #[tokio::test]
+    async fn disabling_rate_limits_admits_calls_past_the_quota() {
+        let (state, _tmp) = test_state();
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_RATE_LIMITS_ENABLED".to_string(),
+                "false".to_string(),
+            )])
+            .expect("disable rate limits");
+        let app = transport(&state);
+        for id in 1..=(TOOL_CALLS_PER_MINUTE as u64 + 5) {
+            let response = modern_cheap_tool_call(app.clone(), id).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "call {id} admitted while limits are disabled"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------------

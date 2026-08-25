@@ -1480,6 +1480,7 @@ build on this seam: #171 (layered rate limits) and #172 (release evidence).
 - `src/mcp/results.rs`
 - `src/mcp/routes.rs`
 - `src/mcp/subscriptions.rs`
+- `src/mcp/limits.rs`
 - `src/mcp/tools/mod.rs`
 - `src/mcp/tools/read.rs`
 - `src/mcp/tools/write.rs`
@@ -1504,7 +1505,8 @@ false`, so legacy clients continue reissuing `tools/list`. Layered resource prot
 list handling from the tool quota, limits tool calls to 120/minute/token and
 concurrency to eight ordinary / two expensive searches, rejects over-limit
 requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
-configuration. Every tool response is a typed Rust result structure whose type
+configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
+window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
 35-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message

@@ -35,7 +35,6 @@ pub const MAX_IN_MEMORY_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 /// Non-upload JSON-RPC calls should stay small even when the transport is
 /// capable of accepting a larger `import_attachment` request.
 pub const MAX_ORDINARY_MCP_REQUEST_BYTES: u64 = 128 * 1024;
-
 /// JSON-RPC framing beyond the encoded attachment field itself.
 const MCP_REQUEST_OVERHEAD_BYTES: u64 = 64 * 1024;
 
@@ -49,6 +48,9 @@ pub struct McpConfig {
     pub max_base64_bytes: u64,
     pub bearer_token: Option<String>,
     pub allowed_origins: Vec<String>,
+    /// Layered resource protection (#171): tool quota and concurrency caps.
+    /// Explicitly disableable for deployments behind their own gateway.
+    pub rate_limits_enabled: bool,
 }
 
 impl McpConfig {
@@ -64,6 +66,9 @@ impl McpConfig {
             .trim()
             .to_string();
         let bearer_token = (!bearer_token.is_empty()).then_some(bearer_token);
+        let rate_limits_enabled = crate::runtime_config::is_truthy(
+            snapshot.required("HATCHDOOR_MCP_RATE_LIMITS_ENABLED")?,
+        );
         let allowed_origins = snapshot
             .required("HATCHDOOR_MCP_ALLOWED_ORIGINS")?
             .split(',')
@@ -79,6 +84,7 @@ impl McpConfig {
             max_base64_bytes,
             bearer_token,
             allowed_origins,
+            rate_limits_enabled,
         })
     }
 
@@ -92,6 +98,7 @@ impl McpConfig {
             max_base64_bytes: DEFAULT_MAX_BASE64_BYTES,
             bearer_token: None,
             allowed_origins: Vec::new(),
+            rate_limits_enabled: true,
         }
     }
 

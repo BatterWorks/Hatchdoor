@@ -1,6 +1,7 @@
 pub mod adapter;
 pub mod auth;
 pub mod config;
+pub mod limits;
 pub mod protocol;
 pub mod results;
 pub mod routes;

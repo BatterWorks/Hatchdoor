@@ -274,6 +274,7 @@ mod schema_tests {
             max_base64_bytes: 5 * 1024 * 1024,
             bearer_token: Some("test-token".to_string()),
             allowed_origins: vec![],
+            rate_limits_enabled: true,
         };
         let mut names: Vec<String> = crate::mcp::tools::setup_tools_list()
             .into_iter()
