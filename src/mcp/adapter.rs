@@ -12,16 +12,17 @@ use std::sync::Arc;
 use crate::app_state::AppState;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ErrorCode,
-    ErrorData, Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool,
-    ToolAnnotations,
+    ErrorData, Implementation, InitializeResult, ListToolsResult, ProtocolVersion,
+    ServerCapabilities, ServerInfo, SubscriptionFilter, Tool, ToolAnnotations,
 };
-use rmcp::service::RequestContext;
+use rmcp::service::{RequestContext, SubscriptionContext};
 use rmcp::{RoleServer, ServerHandler};
 use serde_json::{Value, json};
 use tracing::error;
 
 use super::config::{McpConfig, SERVER_INSTRUCTIONS, SETUP_INSTRUCTIONS};
 use super::protocol::JsonRpcFailure;
+use super::subscriptions::{MAX_SUBSCRIPTIONS_PER_TOKEN, McpBearerToken, SubscriptionRegistry};
 use super::tools;
 
 /// Advertised protocol revisions, newest first (ADR-17). rmcp negotiates
@@ -42,11 +43,15 @@ const LIST_CACHE_TTL_MS: u64 = 5 * 60 * 1000;
 
 pub struct HatchdoorMcpHandler {
     state: AppState,
+    subscriptions: Arc<SubscriptionRegistry>,
 }
 
 impl HatchdoorMcpHandler {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(state: AppState, subscriptions: Arc<SubscriptionRegistry>) -> Self {
+        Self {
+            state,
+            subscriptions,
+        }
     }
 
     fn config(&self) -> Result<McpConfig, String> {
@@ -62,10 +67,12 @@ impl ServerHandler for HatchdoorMcpHandler {
         } else {
             SETUP_INSTRUCTIONS.to_string()
         };
-        // The legacy wire shape advertises `tools.listChanged: false`
-        // explicitly (the POST-only flow cannot deliver list-change events).
+        // The modern wire shape advertises `tools.listChanged: true` and
+        // delivers on it via `subscriptions/listen` (#170). The legacy
+        // handshake cannot open subscription streams, so `initialize`
+        // below flips this back to an honest `false` for legacy sessions.
         let mut tools_capability = rmcp::model::ToolsCapability::default();
-        tools_capability.list_changed = Some(false);
+        tools_capability.list_changed = Some(true);
         let mut capabilities = ServerCapabilities::builder().enable_tools().build();
         capabilities.tools = Some(tools_capability);
         ServerInfo::new(capabilities)
@@ -129,6 +136,34 @@ impl ServerHandler for HatchdoorMcpHandler {
     /// no session, and carries the same server information plus SEP-2549 cache
     /// metadata. rmcp validates the per-request `_meta`/header contract before
     /// dispatch reaches this method.
+    /// The legacy `initialize` handshake. Replicates rmcp's default
+    /// negotiation (a supported requested version wins; otherwise the server
+    /// default stands) and then advertises `tools.listChanged` honestly for
+    /// the negotiated revision: only the modern surface can deliver change
+    /// events through `subscriptions/listen`, so a legacy session still sees
+    /// `false` and keeps reissuing `tools/list`.
+    async fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        context.peer.set_peer_info(request.clone());
+        let mut info = self.get_info();
+        let supported = self.supported_protocol_versions();
+        let negotiated = if supported.contains(&request.protocol_version) {
+            request.protocol_version.clone()
+        } else {
+            info.protocol_version.clone()
+        };
+        if negotiated != ProtocolVersion::V_2026_07_28
+            && let Some(tools_capability) = info.capabilities.tools.as_mut()
+        {
+            tools_capability.list_changed = Some(false);
+        }
+        info.protocol_version = negotiated;
+        Ok(info)
+    }
+
     async fn discover(
         &self,
         _context: RequestContext<RoleServer>,
@@ -170,6 +205,60 @@ impl ServerHandler for HatchdoorMcpHandler {
             Ok(result) => Ok(tool_value_to_result(result)),
             Err(failure) => Err(dispatcher_failure_to_error_data(failure)),
         }
+    }
+
+    /// The subset of a client's `subscriptions/listen` filter Hatchdoor
+    /// accepts (#170): tool-list change events only. The SDK intersects this
+    /// with the request and with the advertised capabilities, so a client
+    /// opting into other categories is acknowledged with those removed.
+    fn accepted_subscription_filter(
+        &self,
+        _requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        Some(SubscriptionFilter::builder().tools_list_changed().build())
+    }
+
+    /// One established subscription stream. Runs until the request is
+    /// cancelled (client disconnect or explicit cancellation) and forwards
+    /// each `mcp_tools_changed` broadcast as
+    /// `notifications/tools/list_changed` carrying the subscription ID
+    /// metadata rmcp attaches. A missed batch of events while lagged still
+    /// produces one notification, telling the client its cached list is stale.
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), ErrorData> {
+        // Attribute the subscription to the credential the transport
+        // middleware validated; the marker is absent only for direct handler
+        // tests, which then share one anonymous budget.
+        let token = context
+            .request_context()
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<McpBearerToken>())
+            .map(|marker| marker.0.clone())
+            .unwrap_or_else(|| Arc::from(""));
+        let slot = self.subscriptions.try_acquire(&token).ok_or_else(|| {
+            ErrorData::new(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "maximum of {MAX_SUBSCRIPTIONS_PER_TOKEN} live subscriptions per bearer token",
+                ),
+                None,
+            )
+        })?;
+
+        let mut tools_changed = self.state.mcp_tools_changed.subscribe();
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => break,
+                event = tools_changed.recv() => match event {
+                    Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        context.sink().notify_tool_list_changed().await.ok();
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+            }
+        }
+        drop(slot);
+        Ok(())
     }
 }
 

@@ -1464,10 +1464,9 @@ files, checkouts, Git history, or credentials outside the registry record.
 
 **Status:** Implemented per [ADR-17](../../adr/README.md) (#168): rmcp 3.x
 (pinned `rmcp = "=3.1.4"`) owns the `/mcp` transport and the advertised
-revisions are exactly `2026-07-28` and `2025-11-25`. The remaining Wayfinder
-children build on this seam: #169 (modern `server/discover` surface),
-#170 (`subscriptions/listen`), #171 (layered rate limits), and #172
-(release evidence).
+revisions are exactly `2026-07-28` and `2025-11-25`; #170 adds honest
+`tools.listChanged` on the modern surface. The remaining Wayfinder children
+build on this seam: #171 (layered rate limits) and #172 (release evidence).
 
 **Kind:** adapter/security surface.
 
@@ -1480,6 +1479,7 @@ children build on this seam: #169 (modern `server/discover` surface),
 - `src/mcp/protocol.rs`
 - `src/mcp/results.rs`
 - `src/mcp/routes.rs`
+- `src/mcp/subscriptions.rs`
 - `src/mcp/tools/mod.rs`
 - `src/mcp/tools/read.rs`
 - `src/mcp/tools/write.rs`
@@ -1493,11 +1493,14 @@ replaces `initialize`, each request carries per-request `_meta` that must match
 the required protocol/capability HTTP headers, and `Mcp-Method`/`Mcp-Name`
 validation is enforced. Advertised protocol revisions are exactly `2026-07-28`
 and `2025-11-25`; older revisions are not negotiated.
-Once #170 lands, `tools.listChanged` is honestly `true`: modern clients receive
-tool-list change events via `subscriptions/listen` backed by the existing
-`mcp_tools_changed` broadcast, capped at four live subscriptions per bearer
-token, with acknowledgment, subscription metadata, keep-alives, and disconnect
-cancellation. Layered resource protection (#171) exempts protocol/discovery/
+Once #170 lands, the modern surface advertises `tools.listChanged: true`
+honestly: modern clients receive tool-list change events via
+`subscriptions/listen` backed by the existing `mcp_tools_changed` broadcast,
+capped at four live subscriptions per bearer token (`subscriptions.rs` owns
+the per-token registry and the validated-token request extension), with
+acknowledgment, subscription metadata, rmcp SSE keep-alives, and disconnect
+cancellation. The legacy handshake keeps advertising `tools.listChanged:
+false`, so legacy clients continue reissuing `tools/list`. Layered resource protection (#171) exempts protocol/discovery/
 list handling from the tool quota, limits tool calls to 120/minute/token and
 concurrency to eight ordinary / two expensive searches, rejects over-limit
 requests with HTTP 429 + `Retry-After`, and is explicitly disableable by

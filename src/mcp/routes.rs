@@ -26,6 +26,7 @@ use super::adapter::HatchdoorMcpHandler;
 use super::auth::validate_mcp_request;
 use super::config::McpConfig;
 use super::protocol::jsonrpc_error_response;
+use super::subscriptions::{McpBearerToken, SubscriptionRegistry};
 
 /// The process-wide MCP transport: one rmcp service instance whose session
 /// manager outlives individual requests (legacy clients hold a session across
@@ -58,9 +59,22 @@ impl HatchdoorMcpTransport {
         // version and required capability metadata match. Legacy session-routed
         // traffic keeps today's rules unchanged.
         config.stateless_protocol_metadata_required = true;
+        // Long-lived `subscriptions/listen` streams stay alive across idle
+        // periods with rmcp's SSE keep-alive comments (#170); 15s is also the
+        // library default but is pinned here so the behavior is explicit and
+        // survives an upstream default change.
+        config.sse_keep_alive = Some(std::time::Duration::from_secs(15));
+        // The per-token live-subscription budget (#170) shared by every
+        // handler instance this service constructs.
+        let subscriptions = Arc::new(SubscriptionRegistry::new());
         Self {
             service: StreamableHttpService::new(
-                move || Ok(HatchdoorMcpHandler::new(state.clone())),
+                move || {
+                    Ok(HatchdoorMcpHandler::new(
+                        state.clone(),
+                        subscriptions.clone(),
+                    ))
+                },
                 Arc::new(LocalSessionManager::default()),
                 config,
             ),
@@ -120,13 +134,22 @@ async fn authorize_mcp_transport(
     request: Request,
     next: Next,
 ) -> Response {
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let config = match live_mcp_config(State(state)).await {
         Ok(config) => config,
         Err(response) => return response,
     };
     if let Err(response) = validate_mcp_request(&parts.headers, &config) {
         return *response;
+    }
+
+    // Attach the validated credential so long-lived subscriptions can be
+    // attributed (and capped) per bearer token without re-reading headers in
+    // the adapter. rmcp exposes these request extensions to handlers.
+    if let Some(token) = &config.bearer_token {
+        parts
+            .extensions
+            .insert(McpBearerToken(Arc::from(token.as_str())));
     }
 
     if parts.method == Method::POST {
@@ -1853,5 +1876,228 @@ mod tests {
         let vault = &discovery["vaults"][0];
         assert_eq!(vault["credential_configured"], false);
         assert!(vault.get("https_credentials").is_none());
+    }
+
+    // ---------------------------------------------------------------------------
+    // Modern subscriptions/listen (#170).
+    // ---------------------------------------------------------------------------
+
+    use std::time::Duration;
+    use tokio_stream::StreamExt;
+
+    /// Pump one SSE response body into a channel of parsed `data:` payloads so
+    /// tests can await notifications as they arrive on the long-lived stream.
+    fn pump_sse(response: Response) -> tokio::sync::mpsc::Receiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let mut stream = response.into_body().into_data_stream();
+        tokio::spawn(async move {
+            let mut buffer = String::new();
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else { break };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(index) = buffer.find("\n") {
+                    let line: String = buffer.drain(..=index).collect();
+                    let Some(data) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    if let Ok(message) = serde_json::from_str::<Value>(data.trim())
+                        && tx.send(message).await.is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+        rx
+    }
+
+    async fn next_message(rx: &mut tokio::sync::mpsc::Receiver<Value>) -> Value {
+        tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("message within timeout")
+            .expect("stream open")
+    }
+
+    async fn open_listen(app: &Router, filter: Value) -> (tokio::sync::mpsc::Receiver<Value>, u64) {
+        let raw = modern_post(
+            app.clone(),
+            "subscriptions/listen",
+            None,
+            "2026-07-28",
+            json!({
+                "jsonrpc":"2.0","id":100,"method":"subscriptions/listen",
+                "params":{"_meta": modern_meta("2026-07-28", true),
+                          "notifications": filter}
+            }),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::OK, "listen accepted");
+        let id = 100;
+        (pump_sse(raw), id)
+    }
+
+    #[tokio::test]
+    async fn modern_discover_advertises_tools_list_changed_true() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let raw = modern_post(
+            app,
+            "server/discover",
+            Some("server/discover"),
+            "2026-07-28",
+            json!({"jsonrpc":"2.0","id":1,"method":"server/discover",
+                   "params":{"_meta": modern_meta("2026-07-28", true)}}),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(
+            message["result"]["capabilities"]["tools"]["listChanged"], true,
+            "the modern surface delivers change events, so it advertises them"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_delivers_acknowledgment_and_tool_list_changed_events() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut rx = open_listen(&app, json!({"toolsListChanged": true})).await.0;
+
+        // Acknowledgment first: the accepted subset of our requested filter.
+        let ack = next_message(&mut rx).await;
+        assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+        assert_eq!(
+            ack["params"]["notifications"],
+            json!({"toolsListChanged": true})
+        );
+        assert!(
+            ack["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"].is_number(),
+            "ack carries the subscription metadata"
+        );
+
+        // The catalogue changed seam fires; the client hears about it.
+        state.mcp_tools_changed.send(()).expect("broadcast");
+        let event = next_message(&mut rx).await;
+        assert_eq!(event["method"], "notifications/tools/list_changed");
+        assert!(event["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"].is_number());
+    }
+
+    #[tokio::test]
+    async fn unrequested_notification_categories_are_removed_from_the_acknowledgment() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let mut rx = open_listen(
+            &app,
+            json!({"toolsListChanged": true, "promptsListChanged": true,
+                   "resourcesListChanged": true}),
+        )
+        .await
+        .0;
+        let ack = next_message(&mut rx).await;
+        assert_eq!(
+            ack["params"]["notifications"],
+            json!({"toolsListChanged": true}),
+            "only the advertised tools.listChanged category survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn fifth_concurrent_subscription_per_token_is_rejected_then_reopens_after_disconnect() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let filter = json!({"toolsListChanged": true});
+        let mut streams = Vec::new();
+        for _ in 0..4 {
+            let (rx, _) = open_listen(&app, filter.clone()).await;
+            streams.push(rx);
+        }
+        for rx in &mut streams {
+            // Each established stream must have passed its cap slot.
+            let ack = next_message(rx).await;
+            assert_eq!(ack["method"], "notifications/subscriptions/acknowledged");
+        }
+
+        // The cap is applied when each stream's listener task starts, a moment
+        // after its acknowledgment; poll until the budget is fully consumed.
+        let rejected = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let attempt = modern_post(
+                    app.clone(),
+                    "subscriptions/listen",
+                    None,
+                    "2026-07-28",
+                    json!({"jsonrpc":"2.0","id":200,"method":"subscriptions/listen",
+                           "params":{"_meta": modern_meta("2026-07-28", true),
+                                     "notifications": filter}}),
+                )
+                .await;
+                if !attempt.status().is_success() {
+                    let bytes = to_bytes(attempt.into_body(), usize::MAX).await.unwrap();
+                    return serde_json::from_slice::<Value>(&bytes).unwrap_or(json!({}));
+                }
+                // A streamed refusal still answers 200 and its first
+                // payload is the acknowledgment; keep reading for the error.
+                let mut messages = pump_sse(attempt);
+                while let Ok(Some(message)) =
+                    tokio::time::timeout(Duration::from_secs(2), messages.recv()).await
+                {
+                    if message.get("error").is_some() {
+                        return message;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("fifth live subscription refused");
+        assert_eq!(rejected["error"]["code"], -32600);
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("subscriptions")
+        );
+
+        // Disconnecting one live stream frees its slot again.
+        streams.pop();
+        let reopened_at = tokio::time::timeout(Duration::from_secs(10), async move {
+            loop {
+                let attempt = modern_post(
+                    app.clone(),
+                    "subscriptions/listen",
+                    None,
+                    "2026-07-28",
+                    json!({"jsonrpc":"2.0","id":201,"method":"subscriptions/listen",
+                           "params":{"_meta": modern_meta("2026-07-28", true),
+                                     "notifications": {"toolsListChanged": true}}}),
+                )
+                .await;
+                if attempt.status() == StatusCode::OK {
+                    return StatusCode::OK;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        assert_eq!(
+            reopened_at,
+            Ok(StatusCode::OK),
+            "slot freed after disconnect"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_sessions_cannot_open_subscriptions() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+        let raw = rpc(
+            &app,
+            &session,
+            json!({"jsonrpc":"2.0","id":50,"method":"subscriptions/listen",
+                   "params":{"notifications":{"toolsListChanged":true}}}),
+        )
+        .await;
+        let message = response_message(raw).await;
+        assert_eq!(message["error"]["code"], -32601);
     }
 }

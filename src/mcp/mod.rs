@@ -4,6 +4,7 @@ pub mod config;
 pub mod protocol;
 pub mod results;
 pub mod routes;
+pub mod subscriptions;
 pub mod tools;
 
 pub use config::McpConfig;
