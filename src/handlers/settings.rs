@@ -144,6 +144,7 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_EMBED_LAYERS", "reindex", "switch"),
     ("HATCHDOOR_MCP_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_WRITE_ENABLED", "instant", "switch"),
+    ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "instant", "switch"),
     ("HATCHDOOR_MCP_BEARER_TOKEN", "instant", "secret"),
     ("HATCHDOOR_MCP_ALLOWED_ORIGINS", "instant", "text"),
     ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "instant", "number"),

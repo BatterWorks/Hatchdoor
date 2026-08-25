@@ -56,6 +56,7 @@ These live in `settings.json`, not `.env` — leave them unset in `.env` to mana
 | --- | --- | --- | --- |
 | `HATCHDOOR_MCP_ENABLED` | `false` | instant | Turns `/mcp` on or off. Off, the endpoint returns `404` rather than refusing — it isn't advertised as existing. |
 | `HATCHDOOR_MCP_WRITE_ENABLED` | `false` | instant | Separately gates every content- and Vault-mutating MCP tool. An agent can read with MCP enabled and this still off. |
+| `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | `true` | instant | Layered resource protection on `/mcp`: at most 120 tool calls per minute per token, eight tool calls running at once (two of them expensive searches), with over-limit requests answered `429 Retry-After`. Protocol, discovery, and list handling are always exempt. Off removes the caps entirely. |
 | `HATCHDOOR_MCP_BEARER_TOKEN` | unset | instant | The MCP password, required even for read-only access — see [[The security model]]. Enabling `HATCHDOOR_MCP_ENABLED` without this set is a startup validation error if pinned in `.env`. |
 | `HATCHDOOR_MCP_ALLOWED_ORIGINS` | `http://127.0.0.1,http://localhost` | instant | Origin allow-list checked on every MCP request, as a defense against DNS-rebinding attacks. Mainly relevant to a browser-based MCP client, not a CLI agent. |
 

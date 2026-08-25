@@ -22,6 +22,7 @@
 //! `demo_read_only_response` to refuse with the shared `403 demo_read_only`
 //! error before any registry mutation runs.
 
+use schemars::JsonSchema;
 use std::convert::Infallible;
 use std::str::FromStr;
 
@@ -53,7 +54,7 @@ use crate::vault_work::{ScheduleResult, VaultWorkKind};
 // Wire types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultSummary {
     pub vault_id: VaultId,
     pub name: String,
@@ -62,13 +63,13 @@ pub struct VaultSummary {
     /// path on the operator's disk, or the remote a Vault tracks, and a demo
     /// visitor is not an operator. Always present on an authenticated read,
     /// where it is the Settings page's own input.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<VaultSource>,
     pub exclude_patterns: Vec<String>,
     pub credential_configured: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_folder: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_identity: Option<VaultCommitIdentity>,
     pub activation: VaultActivationStatus,
     pub local_content: LocalContentStatus,
@@ -76,66 +77,66 @@ pub struct VaultSummary {
     pub git: VaultGitStatus,
     pub watcher: VaultWatcherStatus,
     pub capabilities: VaultCapabilities,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_error: Option<VaultRuntimeError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_error: Option<VaultRuntimeError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_error: Option<VaultRuntimeError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watcher_error: Option<VaultRuntimeError>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct RegistryRecoveryInfo {
-    pub code: &'static str,
-    pub kind: &'static str,
+    pub code: String,
+    pub kind: String,
     pub message: String,
 }
 
 impl From<&VaultRegistryRecovery> for RegistryRecoveryInfo {
     fn from(recovery: &VaultRegistryRecovery) -> Self {
         let kind = match recovery.kind() {
-            VaultRegistryRecoveryKind::Corrupt => "corrupt",
-            VaultRegistryRecoveryKind::UnsupportedSchema { .. } => "unsupported_schema",
-            VaultRegistryRecoveryKind::FutureSchema { .. } => "future_schema",
+            VaultRegistryRecoveryKind::Corrupt => "corrupt".to_string(),
+            VaultRegistryRecoveryKind::UnsupportedSchema { .. } => "unsupported_schema".to_string(),
+            VaultRegistryRecoveryKind::FutureSchema { .. } => "future_schema".to_string(),
         };
         Self {
-            code: "vault_registry_recovery_required",
+            code: "vault_registry_recovery_required".to_string(),
             kind,
             message: recovery.message().to_string(),
         }
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct LegacyMigrationRecoveryInfo {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
 }
 
 impl From<&crate::vault_migration::LegacyMigrationRecovery> for LegacyMigrationRecoveryInfo {
     fn from(recovery: &crate::vault_migration::LegacyMigrationRecovery) -> Self {
         Self {
-            code: recovery.code(),
+            code: recovery.code().to_string(),
             message: recovery.message().to_string(),
         }
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultDiscoveryResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_revision: Option<u64>,
     pub collection_revision: u64,
     pub vaults: Vec<VaultSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<RegistryRecoveryInfo>,
     /// Present only when the registry itself is fine (empty, revision 0) but
     /// safe automatic legacy import could not prove the deployment and needs
     /// operator recovery (#150). Distinct from `recovery` above: that one
     /// means the persisted registry file itself is unreadable.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_migration_recovery: Option<LegacyMigrationRecoveryInfo>,
     /// Instance-wide publication posture: `true` only under
     /// `HATCHDOOR_DEMO_MODE`. Always serialized (never omitted) so the
@@ -143,25 +144,25 @@ pub struct VaultDiscoveryResponse {
     pub demo_mode: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultMutationResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<VaultSummary>,
     pub registry_revision: u64,
     pub collection_revision: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultScheduleResponse {
     pub vault_id: VaultId,
-    pub schedule: &'static str,
+    pub schedule: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct VaultApiError {
     pub code: &'static str,
     pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault_id: Option<VaultId>,
     pub retryable: bool,
 }
@@ -997,7 +998,7 @@ async fn managed_git_control_handler(state: AppState, vault_id: VaultId, retry: 
             StatusCode::ACCEPTED,
             Json(VaultScheduleResponse {
                 vault_id,
-                schedule: "queued",
+                schedule: "queued".to_string(),
             }),
         )
             .into_response(),
@@ -1005,7 +1006,7 @@ async fn managed_git_control_handler(state: AppState, vault_id: VaultId, retry: 
             StatusCode::ACCEPTED,
             Json(VaultScheduleResponse {
                 vault_id,
-                schedule: "coalesced",
+                schedule: "coalesced".to_string(),
             }),
         )
             .into_response(),
@@ -1092,7 +1093,7 @@ pub async fn refresh_vault_handler(
             StatusCode::ACCEPTED,
             Json(VaultScheduleResponse {
                 vault_id,
-                schedule: "queued",
+                schedule: "queued".to_string(),
             }),
         )
             .into_response(),
@@ -1100,7 +1101,7 @@ pub async fn refresh_vault_handler(
             StatusCode::ACCEPTED,
             Json(VaultScheduleResponse {
                 vault_id,
-                schedule: "coalesced",
+                schedule: "coalesced".to_string(),
             }),
         )
             .into_response(),

@@ -1462,26 +1462,59 @@ files, checkouts, Git history, or credentials outside the registry record.
 
 ### MCP adapter
 
+**Status:** Implemented per [ADR-17](../../adr/README.md) (#168): rmcp 3.x
+(pinned `rmcp = "=3.1.4"`) owns the `/mcp` transport and the advertised
+revisions are exactly `2026-07-28` and `2025-11-25`; #170 adds honest
+`tools.listChanged` on the modern surface. The remaining Wayfinder children
+build on this seam: #171 (layered rate limits) and #172 (release evidence).
+
 **Kind:** adapter/security surface.
 
 **Owned paths:**
 
 - `src/mcp/mod.rs`
+- `src/mcp/adapter.rs`
 - `src/mcp/auth.rs`
 - `src/mcp/config.rs`
 - `src/mcp/protocol.rs`
+- `src/mcp/results.rs`
 - `src/mcp/routes.rs`
+- `src/mcp/subscriptions.rs`
+- `src/mcp/limits.rs`
 - `src/mcp/tools/mod.rs`
 - `src/mcp/tools/read.rs`
 - `src/mcp/tools/write.rs`
 
-**Public contract:** `/mcp` is POST-only Streamable HTTP behavior: initialize
-advertises no tool-list-change notification delivery, and negotiation/follow-up
-admission supports `2025-03-26`, `2025-06-18`, and `2025-11-25` only.
-`2024-11-05` is rejected because its HTTP+SSE transport is not implemented.
+**Public contract (target):** `/mcp` is Streamable HTTP served through rmcp's
+`StreamableHttpService` (GET/SSE + POST + DELETE). Legacy `2025-11-25` traffic
+keeps today's POST-only request/response shape and initialize/negotiation flow;
+modern clients additionally open GET/SSE streams for server-initiated delivery.
+Modern clients are stateless with no initialization handshake: `server/discover`
+replaces `initialize`, each request carries per-request `_meta` that must match
+the required protocol/capability HTTP headers, and `Mcp-Method`/`Mcp-Name`
+validation is enforced. Advertised protocol revisions are exactly `2026-07-28`
+and `2025-11-25`; older revisions are not negotiated.
+Once #170 lands, the modern surface advertises `tools.listChanged: true`
+honestly: modern clients receive tool-list change events via
+`subscriptions/listen` backed by the existing `mcp_tools_changed` broadcast,
+capped at four live subscriptions per bearer token (`subscriptions.rs` owns
+the per-token registry and the validated-token request extension), with
+acknowledgment, subscription metadata, rmcp SSE keep-alives, and disconnect
+cancellation. The legacy handshake keeps advertising `tools.listChanged:
+false`, so legacy clients continue reissuing `tools/list`. Layered resource protection (#171) exempts protocol/discovery/
+list handling from the tool quota, limits tool calls to 120/minute/token and
+concurrency to eight ordinary / two expensive searches, rejects over-limit
+requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
+configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
+window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
+generates the `outputSchema` advertised in `tools/list` (#167), for the full
+35-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
-names/schemas/results, and `mcp_get_handler`/`mcp_post_handler` remain public.
+names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
+with its authorization/body-limit middleware) remain the boundary's public
+surface; `adapter.rs` implements rmcp's `ServerHandler` seam over the
+dispatcher, and `routes.rs` mounts it.
 `list_vaults` exposes the shared redacted
 Vault discovery/status/capability and revision shape. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
@@ -1493,6 +1526,13 @@ scope-less/default/sole-Vault tool remains reachable.
 `get_attachment_import_config` names one Vault and answers under every write
 posture, reporting the instance-wide write switch and that Vault's own
 mutation capability as separate fields rather than refusing the call.
+Typed results live in `src/mcp/results.rs`: each tool's success response is
+produced from one Rust structure — MCP-owned shapes there, shared V1 handler
+response structures re-exported for the proxied reads and registry controls —
+and that same structure generates the tool's advertised `outputSchema`. Read
+tools decode their proxied handler payload into the declared result type and
+re-serialize it, so a handler drift from its schema fails loudly instead of
+silently.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
 MCP write permission and without the mutation capability. `create_vault` and
 `edit_vault` advertise the `VaultSource` and credential contracts as
@@ -1518,14 +1558,22 @@ configuration snapshot bound at each request.
 documentation describing agent behavior.
 
 **Invariants:** MCP is disabled by default, uses its own token, validates
-Origins, and keeps read-only access credentialed (ADR-09). Token changes,
-write enablement, Origins, and attachment limits apply to the next request;
-attachment authorization never retains a rotated MCP token. Write tools use
-`vault/write`, the requested Vault's `acquire_mutation` lock, and retain
+Origins, and keeps read-only access credentialed (ADR-09); the wire transport
+itself is rmcp-owned rather than hand-implemented, and the advertised revision
+set stays narrowed to `2026-07-28` + `2025-11-25` (ADR-17). Per-request security
+ordering is preserved across the swap: enabled check → token-configured check →
+Origin allowlist → constant-time bearer compare → protocol-version header.
+The MCP bearer token is accepted by the multipart attachment endpoint only while
+MCP *and* MCP write mode are both live-enabled, checked per request; token
+changes, write enablement, Origins, and attachment limits apply to the next
+request, and attachment authorization never retains a rotated MCP token. Write
+tools use `vault/write`, the requested Vault's `acquire_mutation` lock, and retain
 optimistic concurrency and path protections (ADR-03).
 
-**Validation:** `cargo test mcp`, vault write tests for mutation changes, and
-server router tests.
+**Validation:** `cargo test mcp`, vault write tests for mutation changes,
+server router tests, and golden wire tests locking both supported revisions'
+request/response shapes. Before releases, the manual conformance-run procedure
+(#166) produces mandatory release evidence.
 
 ### Evaluation and development binaries
 

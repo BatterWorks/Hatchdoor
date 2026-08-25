@@ -1,0 +1,16 @@
+[
+  {
+    "id": "tasks-status-notifications",
+    "name": "TasksStatusNotificationsScenario",
+    "description": "Status notifications conformance, pending subscriptions/listen rewrite.",
+    "status": "SKIPPED",
+    "timestamp": "2026-08-25T07:49:46.081Z",
+    "errorMessage": "Skipped: SEP-2663 delivers notifications/tasks via the SEP-2575 subscriptions/listen stream, not via the tools/call POST SSE response that the prior harness observed. The harness needs a rewrite against the new channel; tracked as a follow-up.",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  }
+]

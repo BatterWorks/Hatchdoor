@@ -42,7 +42,7 @@ use crate::handlers::{
     vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
     vault_scoped_write_capabilities_handler,
 };
-use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
+use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
 use crate::runtime_config::{
     ConfigSnapshot, RuntimeConfig, live_settings_defaults, settings_file_path,
@@ -363,8 +363,11 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // until the legacy embedding-model setup is ready, but Vault collection
     // discovery/management tools stay reachable throughout (#103), mirroring
     // `vaults_v1`'s own independence from that legacy readiness signal below.
-    let mcp = Router::new()
-        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+    // The transport itself is rmcp-owned (ADR-17); the sub-router layers the
+    // per-request authorization/body-limit middleware in front of it.
+    let mcp_transport = HatchdoorMcpTransport::new(state.clone());
+    let mcp = mcp_transport
+        .router(&state)
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
     // Vault-collection discovery, management, events, exact content reads, and
@@ -1970,14 +1973,19 @@ mod tests {
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
     ) -> (Router, TempDir) {
-        app_for_tests_with_web_and_mcp_auth_and_write_mode(web_bearer_token, mcp_bearer_token, true)
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            web_bearer_token,
+            mcp_bearer_token,
+            true,
+        );
+        (app, tmp)
     }
 
     fn app_for_tests_with_web_and_mcp_auth_and_write_mode(
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
         mcp_write_enabled: bool,
-    ) -> (Router, TempDir) {
+    ) -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -2033,7 +2041,7 @@ mod tests {
             startup: StartupTracker::ready(),
         };
 
-        (build_router(state, web_bearer_token), tmp)
+        (build_router(state.clone(), web_bearer_token), tmp, state)
     }
 
     fn attachment_upload_request(
@@ -2135,7 +2143,7 @@ mod tests {
         // keeps working here: audit finding X-F01 made an MCP disable (or a
         // write-mode disable) an immediate revocation of that credential's
         // upload capability. The gate lives in `auth.rs`.
-        let (app, tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
             Some(Arc::from("web-secret")),
             Some("mcp-secret".to_string()),
             false,
@@ -2252,10 +2260,12 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("accept", "application/json, text/event-stream")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -2269,11 +2279,12 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
                     .header("authorization", "Bearer first-token")
                     .header("origin", "https://evil.example")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -2388,12 +2399,16 @@ mod tests {
             .expect("response");
         assert_eq!(limited_attachment.status(), StatusCode::BAD_REQUEST);
 
+        let limited_session = initialize_mcp_session(&app, "first-token").await;
         let limited_base64 = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", limited_session)
+                    .header("accept", "application/json, text/event-stream")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -2476,6 +2491,86 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(new_token.status(), StatusCode::OK);
+    }
+
+    /// Dedicated regression for the v2.5.0 security invariant across the
+    /// ADR-17 boundary swap (#172): the multipart attachment endpoint accepts
+    /// an MCP bearer token **only** while MCP *and* MCP write mode are both
+    /// live-enabled in the current runtime snapshot — and it re-checks the
+    /// snapshot on every request, not once at startup.
+    #[tokio::test]
+    async fn attachment_route_accepts_the_mcp_token_only_while_mcp_and_writes_are_live() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Attachments",
+            &tmp.path().join("attachments"),
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        let upload = |name: &'static str| {
+            let app = app.clone();
+            let request = attachment_upload_request(
+                &vault_id,
+                &format!("Attachments/{name}"),
+                Some("mcp-secret"),
+            );
+            async move { app.oneshot(request).await.expect("response") }
+        };
+        let save = |updates: &[(&str, &str)]| {
+            state
+                .runtime_config
+                .save(updates.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        };
+
+        // MCP fully disabled: the MCP credential matches nothing and is 401.
+        save(&[
+            ("HATCHDOOR_MCP_ENABLED", "false"),
+            ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
+        ])
+        .expect("save disabled");
+        assert_eq!(
+            upload("mcp-disabled.png").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // MCP enabled but write mode off: recognized, but revoked → 403.
+        save(&[
+            ("HATCHDOOR_MCP_ENABLED", "true"),
+            ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
+        ])
+        .expect("save read-only");
+        assert_eq!(
+            upload("read-only.png").await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            !tmp.path()
+                .join("attachments/Attachments/read-only.png")
+                .exists()
+        );
+
+        // Both live: accepted on the very next request against the same router.
+        save(&[("HATCHDOOR_MCP_WRITE_ENABLED", "true")]).expect("save writes");
+        assert_eq!(upload("both-live.png").await.status(), StatusCode::OK);
+        assert!(
+            tmp.path()
+                .join("attachments/Attachments/both-live.png")
+                .exists()
+        );
+
+        // And revocation is immediate again — no restart, no re-mount.
+        save(&[("HATCHDOOR_MCP_ENABLED", "false")]).expect("save re-disable");
+        assert_eq!(
+            upload("re-disabled.png").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
@@ -2573,6 +2668,35 @@ mod tests {
         assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Perform the legacy initialize handshake against the real `/mcp`
+    /// transport and return the issued session ID.
+    async fn initialize_mcp_session(app: &Router, token: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("host", "localhost")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .expect("initialize issues Mcp-Session-Id")
+    }
+
     #[tokio::test]
     async fn mcp_route_accepts_an_authenticated_write_request_above_axums_default_limit() {
         // Axum's default request-body limit is 2 MiB. A valid write-enabled MCP
@@ -2598,6 +2722,7 @@ mod tests {
             ])
             .expect("configure write-enabled MCP");
         let app = build_router(state, None);
+        let session_id = initialize_mcp_session(&app, "mcp-secret").await;
         let body = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"padding":"{}"}}}}"#,
             "x".repeat(2 * 1024 * 1024 + 1)
@@ -2607,6 +2732,9 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", session_id)
+                    .header("accept", "application/json, text/event-stream")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer mcp-secret")
                     .body(Body::from(body))
@@ -2616,11 +2744,6 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let payload = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("JSON-RPC");
-        assert_eq!(payload["result"], serde_json::json!({}));
     }
 
     #[tokio::test]

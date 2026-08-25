@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::vault_runtime::{VaultPhase, VaultRuntime, VaultRuntimeSnapshot, VaultSource};
@@ -157,7 +158,7 @@ impl StartupTracker {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct StartupStatusResponse {
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]

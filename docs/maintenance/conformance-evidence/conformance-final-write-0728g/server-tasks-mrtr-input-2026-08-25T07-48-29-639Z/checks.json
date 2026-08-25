@@ -1,0 +1,69 @@
+[
+  {
+    "id": "sep-2663-tasks-get-status-input-required",
+    "name": "TasksMRTRInputRequestsOnTasksGet",
+    "description": "tasks/get on an input_required task MUST surface a non-empty inputRequests map",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:48:29.645Z",
+    "errorMessage": "Unknown MCP tool: confirm_delete",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ]
+  },
+  {
+    "id": "tasks-mrtr-tasks-update-resumes",
+    "name": "TasksMRTRTasksUpdateResumes",
+    "description": "tasks/update with matching inputResponses MUST be acked with {resultType:\"complete\"} and resume the task to a terminal state",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:48:29.650Z",
+    "errorMessage": "Unknown MCP tool: confirm_delete",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      },
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-mrtr-partial-fulfillment",
+    "name": "TasksMRTRPartialFulfillment",
+    "description": "tasks/update with a subset of keys MUST keep the task in input_required with only the unanswered key remaining",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:48:29.656Z",
+    "errorMessage": "Unknown MCP tool: multi_input",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      },
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:48:29.656Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 6,
+      "violations": []
+    }
+  }
+]

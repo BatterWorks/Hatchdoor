@@ -42,6 +42,14 @@ const settings = [
     kind: "switch",
   },
   {
+    key: "HATCHDOOR_MCP_RATE_LIMITS_ENABLED",
+    value: "true",
+    source: "default",
+    locked: null,
+    class: "instant",
+    kind: "switch",
+  },
+  {
     key: "HATCHDOOR_MCP_BEARER_TOKEN",
     value: null,
     configured: false,

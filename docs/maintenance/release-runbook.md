@@ -30,6 +30,9 @@ Before approving or merging the release PR, verify:
   workstream or item this release completed is marked done or removed from
   the roadmap rather than left as still-pending; horizon/version hints
   (`v2.x`, `v3`) that no longer match are corrected.
+- If this release touches `/mcp` or MCP-facing behavior: a clean manual MCP
+  conformance run per [`mcp-conformance-run.md`](./mcp-conformance-run.md) is
+  recorded as release evidence (manual pre-release step, not a CI gate).
 - Other affected docs under `docs/` — architecture records, ADRs, the module
   map — are consistent with what was actually built. If an ADR was
   contradicted by this release's changes, it was amended or superseded, not

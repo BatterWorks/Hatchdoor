@@ -1,0 +1,52 @@
+[
+  {
+    "id": "json-schema-2020-12-tool-found",
+    "name": "JsonSchema2020_12ToolFound",
+    "description": "Server advertises tool 'json_schema_2020_12_tool'",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:39.854Z",
+    "errorMessage": "Tool 'json_schema_2020_12_tool' not found. Available tools: get_model_setup_status, accept_gemma_terms, decline_gemma_terms, list_vaults, search_notes, get_note, get_note_links, resolve_wikilink, get_tree, get_stats, get_graph, list_note_attachments, get_attachment_import_config, recently_modified",
+    "specReferences": [
+      {
+        "id": "SEP-1613",
+        "url": "https://github.com/modelcontextprotocol/specification/pull/655"
+      }
+    ],
+    "details": {
+      "toolFound": false,
+      "availableTools": [
+        "get_model_setup_status",
+        "accept_gemma_terms",
+        "decline_gemma_terms",
+        "list_vaults",
+        "search_notes",
+        "get_note",
+        "get_note_links",
+        "resolve_wikilink",
+        "get_tree",
+        "get_stats",
+        "get_graph",
+        "list_note_attachments",
+        "get_attachment_import_config",
+        "recently_modified"
+      ]
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:49:39.857Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 5,
+      "violations": []
+    }
+  }
+]

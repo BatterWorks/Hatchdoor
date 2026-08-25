@@ -30,6 +30,7 @@ pub fn live_settings_defaults() -> BTreeMap<String, String> {
         ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
         ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "10485760"),
         ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "5242880"),
+        ("HATCHDOOR_MCP_RATE_LIMITS_ENABLED", "true"),
         ("HATCHDOOR_MCP_BEARER_TOKEN", ""),
         (
             "HATCHDOOR_MCP_ALLOWED_ORIGINS",

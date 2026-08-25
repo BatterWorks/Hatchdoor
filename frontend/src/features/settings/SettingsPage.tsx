@@ -165,6 +165,11 @@ const COPY: Record<
     label: "Let assistants change notes",
     help: "Assistants can create, edit, move and delete notes and attachments. Off means they can only read.",
   },
+  HATCHDOOR_MCP_RATE_LIMITS_ENABLED: {
+    section: "agents",
+    label: "Limit how fast assistants work",
+    help: "Caps assistant activity on the MCP door: at most 120 tool calls per minute per assistant, eight running at once, two of them expensive searches. Over the limit, requests are told to retry shortly. Off removes the caps entirely.",
+  },
   HATCHDOOR_MCP_BEARER_TOKEN: {
     section: "agents",
     label: "MCP password",

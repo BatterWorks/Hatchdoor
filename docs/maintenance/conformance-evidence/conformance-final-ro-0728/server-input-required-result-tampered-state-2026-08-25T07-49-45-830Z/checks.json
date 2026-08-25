@@ -1,0 +1,33 @@
+[
+  {
+    "id": "sep-2322-reject-tampered-state",
+    "name": "RejectTamperedState",
+    "description": "Server rejects tampered requestState with error",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:45.839Z",
+    "errorMessage": "Prerequisite failed: could not get initial InputRequiredResult with requestState",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:49:45.839Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

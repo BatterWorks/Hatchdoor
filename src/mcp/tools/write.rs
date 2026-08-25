@@ -489,9 +489,12 @@ pub(super) async fn list_note_attachments_tool(
     let entry = note_entry(&index, &args.slug)?;
     let attachments = list_note_attachments(&vault_path(vault), &index.layers, &entry)
         .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    Ok(tool_success(
-        json!({ "vault_id": vault.vault_id, "attachments": attachments }),
-    ))
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::NoteAttachmentsResult {
+            vault_id: vault.vault_id.to_string(),
+            attachments,
+        },
+    )))
 }
 
 /// Build the vault index off the async runtime. Write tools need the full
@@ -642,29 +645,33 @@ fn write_error_to_jsonrpc(vault_id: VaultId, error: WriteError) -> JsonRpcFailur
 }
 
 fn write_success(vault_id: VaultId, outcome: WriteOutcome, layer: Option<String>) -> Value {
-    tool_success(json!({
-        "vault_id": vault_id,
-        "ok": true,
-        "slug": outcome.slug,
-        "relative_path": outcome.relative_path,
-        "content_hash": outcome.content_hash,
-        "layer": layer,
-        "quality_warnings": outcome.quality_warnings,
-        "rewritten_notes": outcome.rewritten_notes,
-        "moved_assets": outcome.moved_assets,
-        "trashed_path": outcome.trashed_path,
-    }))
+    tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::NoteWriteResult {
+            vault_id: vault_id.to_string(),
+            ok: true,
+            slug: outcome.slug,
+            relative_path: outcome.relative_path,
+            content_hash: outcome.content_hash,
+            layer,
+            quality_warnings: outcome.quality_warnings,
+            rewritten_notes: outcome.rewritten_notes,
+            moved_assets: outcome.moved_assets,
+            trashed_path: outcome.trashed_path,
+        },
+    ))
 }
 
 fn attachment_success(vault_id: VaultId, outcome: AttachmentOutcome) -> Value {
-    tool_success(json!({
-        "vault_id": vault_id,
-        "ok": true,
-        "attachment": outcome.attachment,
-        "rewritten_notes": outcome.rewritten_notes,
-        "trashed_path": outcome.trashed_path,
-        "cleanup_warning": outcome.cleanup_warning,
-    }))
+    tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::AttachmentWriteResult {
+            vault_id: vault_id.to_string(),
+            ok: true,
+            attachment: outcome.attachment,
+            rewritten_notes: outcome.rewritten_notes,
+            trashed_path: outcome.trashed_path,
+            cleanup_warning: outcome.cleanup_warning,
+        },
+    ))
 }
 
 fn replace_filename(relative_path: &str, new_title: &str) -> String {

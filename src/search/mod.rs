@@ -1,5 +1,6 @@
 //! Phase 2 search orchestrator. Consumed by both MCP and HTTP.
 
+use schemars::JsonSchema;
 use std::collections::{BTreeMap, HashSet};
 
 use rusqlite::Connection;
@@ -17,7 +18,7 @@ pub mod vault_scoped;
 pub use layer_selection::{LayerInfo, LayerSelection};
 pub use retrieve::ChunkHit;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     #[default]
@@ -128,7 +129,7 @@ fn tag_prefix_query(query: &str) -> Option<String> {
     normalize_tag_path(tag)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema, Deserialize)]
 pub struct OutboundLink {
     pub slug: String,
     pub title: String,
