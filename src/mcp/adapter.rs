@@ -374,4 +374,31 @@ mod tests {
             Some(json!({"code": "vault_read_unavailable"}))
         );
     }
+
+    #[test]
+    fn internal_failures_are_masked_behind_the_stable_protocol_error() {
+        // -32603 internals must reach the log with their diagnostic detail but
+        // surface only the stable masked message (#172 error-semantics leg).
+        let masked = dispatcher_failure_to_error_data(JsonRpcFailure::internal(
+            "diagnostic: vault path /srv/leaked/vault read failed",
+        ));
+        assert_eq!(
+            masked.code,
+            rmcp::model::ErrorCode(JsonRpcFailure::INTERNAL_ERROR_CODE as i32)
+        );
+        assert_eq!(masked.message, "Internal server error");
+        assert!(
+            masked.data.is_none(),
+            "no diagnostics leak into the payload"
+        );
+
+        let config_failure =
+            internal_config_error("diagnostic: HATCHDOOR_MCP_ENABLED missing".to_string());
+        assert_eq!(
+            config_failure.code,
+            rmcp::model::ErrorCode(JsonRpcFailure::INTERNAL_ERROR_CODE as i32)
+        );
+        assert_eq!(config_failure.message, "Internal server error");
+        assert!(config_failure.data.is_none());
+    }
 }

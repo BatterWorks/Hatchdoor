@@ -1,0 +1,39 @@
+[
+  {
+    "id": "completion-complete",
+    "name": "CompletionComplete",
+    "description": "Server responds to completion requests",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:46:14.995Z",
+    "specReferences": [
+      {
+        "id": "MCP-Completion",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/completion"
+      }
+    ],
+    "details": {
+      "result": {
+        "completion": {
+          "values": []
+        }
+      }
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:46:15.002Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 5,
+      "violations": []
+    }
+  }
+]

@@ -3,18 +3,20 @@
 #   - every entry must have a reviewed reason (keep the inline comments);
 #   - a baselined scenario that PASSES trips exit 1 (stale entry) — remove it;
 #   - wire-schema-valid failures may never be baselined.
-# Measured against @modelcontextprotocol/conformance 0.1.16, development at
-# 128901c, 2026-08-24 (write-enabled posture; read-only is a subset).
+# Measured against @modelcontextprotocol/conformance 0.2.0-alpha.11 (the
+# first runner supporting --requirements 2026-07-28; earlier rows were
+# measured against 0.1.16), development feature/mcp-2026-07-28 at the #172
+# integration, 2026-08-25.
 server:
-  # POST-only transport until ADR-17 lands: no session IDs / long-lived
-  # SSE streams yet, so multi-stream delivery cannot be exercised.
-  # Re-review at #168/#170 — remove once the RMCP boundary serves streams.
-  - server-sse-multiple-streams
+  # (server-sse-multiple-streams pruned 2026-08-25: ADR-17's RMCP boundary now
+  # serves SSE streams, so multi-stream delivery is exercised and passes —
+  # exactly the re-review condition noted below.)
 
   # Capabilities Hatchdoor deliberately does not implement (tools-only
   # surface): the server correctly answers these methods with -32601.
+  # (completion-complete pruned 2026-08-25: the suite's check is satisfied by
+  # the -32601 answer itself since 0.1.16, so the entry went stale.)
   - logging-set-level          # no logging capability
-  - completion-complete        # no completion capability
   - elicitation-sep1034-defaults  # no elicitation capability
   - elicitation-sep1330-enums  # no elicitation capability
   - resources-list             # no resources capability
@@ -43,3 +45,56 @@ server:
   - tools-call-with-progress
   - tools-call-sampling
   - tools-call-elicitation
+
+  # Same fixture-catalogue category, 2026-07-28 revision (SEP-2322/2663 task
+  # scenarios): they drive the suite's own reference tools (e.g.
+  # test_input_required_result_capabilities, confirm_delete, multi_input) that
+  # a real tools-only server does not carry. wire-schema-valid passes on all
+  # of them. Reviewed at the first #172 conformance run, 2026-08-25.
+  - input-required-result-capability-check
+  - input-required-result-ignore-extra-params
+
+  # --- Capability-gated list caching (SEP-2549): the prompts/resources
+  # --- surfaces are absent, so their caching-hint checks cannot pass. Same
+  # --- root cause as the prompts/resources entries above.
+  - caching
+
+  # --- Resources-capability error-shape detail (SEP-2164).
+  - sep-2164-resource-not-found
+
+  # --- SEP-2575 stateless requirements needing either ADR-17's legacy
+  # --- initialize negotiation (unsupported versions must hard-reject per the
+  # --- modern spec, but retired revisions falling back cleanly is a
+  # --- documented design decision) or the suite's own diagnostic reference
+  # --- tools (test_missing_capability, test_streaming_elicitation,
+  # --- test_logging_tool). wire-schema-valid and every id-echo check pass;
+  # --- re-review if the initialize posture changes.
+  - server-stateless
+
+  # --- Suite-owned fixture/diagnostic tools this server does not carry:
+  # --- json-schema-2020-12 needs 'json_schema_2020_12_tool'; custom-header
+  # --- validation (SEP-2243) needs x-mcp-header annotated tools; the
+  # --- remaining input-required/task families (SEP-2322/2663) drive
+  # --- reference tools such as confirm_delete and multi_input. Tasks are not
+  # --- an advertised capability at all.
+  - json-schema-2020-12
+  - http-custom-header-server-validation
+  - input-required-result-basic-elicitation
+  - input-required-result-basic-sampling
+  - input-required-result-basic-list-roots
+  - input-required-result-request-state
+  - input-required-result-multiple-input-requests
+  - input-required-result-multi-round
+  - input-required-result-non-tool-request
+  - input-required-result-missing-input-response
+  - input-required-result-result-type
+  - input-required-result-tampered-state
+  - tasks-lifecycle
+  - tasks-capability-negotiation
+  - tasks-wire-fields
+  - tasks-request-state-removal
+  - tasks-mrtr-input
+  - tasks-request-headers
+  - tasks-dispatch-and-envelope
+  - tasks-required-task-error
+  - tasks-mrtr-composition

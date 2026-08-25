@@ -23,7 +23,7 @@ use serde_json::Value;
 use crate::app_state::AppState;
 
 use super::adapter::HatchdoorMcpHandler;
-use super::auth::validate_mcp_request;
+use super::auth::{reject_unsupported_protocol_version, validate_mcp_request};
 use super::config::McpConfig;
 use super::limits::{self, RateLimiter, RequestClass};
 use super::protocol::jsonrpc_error_response;
@@ -143,8 +143,8 @@ async fn live_mcp_config(State(state): State<AppState>) -> Result<McpConfig, Res
 /// Per-request gate run before any body is collected or dispatched. This is
 /// the preserved security ordering from the hand-written adapter:
 /// enabled check → token configured → Origin allowlist → constant-time bearer
-/// compare → protocol-version header (`auth::validate_mcp_request`) → layered
-/// resource protection (#171).
+/// compare (`auth::validate_mcp_request`) → buffered-body protocol-version
+/// check with id echo → layered resource protection (#171).
 async fn authorize_mcp_transport(
     State(state): State<AppState>,
     limiter: Arc<RateLimiter>,
@@ -186,6 +186,17 @@ async fn authorize_mcp_transport(
                 );
             }
         };
+
+        // The retired/unknown revision check needs the buffered POST body so
+        // its JSON-RPC error can echo the request `id` (SEP-2575). Everything
+        // above this line deliberately rejects before reading any bytes.
+        let request_id = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|parsed| parsed.get("id").cloned())
+            .unwrap_or(Value::Null);
+        if let Err(response) = reject_unsupported_protocol_version(&parts.headers, request_id) {
+            return *response;
+        }
 
         // Layered resource protection (#171): tool calls are quota-limited per
         // bearer token and concurrency-capped process-wide; protocol,
@@ -735,6 +746,8 @@ mod tests {
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             let message: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(message["error"]["code"], -32002, "{retired}");
+            // SEP-2575: the JSON-RPC error echoes the request id, never null.
+            assert_eq!(message["id"], 2, "{retired}");
             assert!(
                 message["error"]["message"]
                     .as_str()
@@ -1034,6 +1047,39 @@ mod tests {
         assert_eq!(
             message["result"]["structuredContent"]["note"]["slug"],
             "home"
+        );
+    }
+
+    /// The `isError: true` leg of the error-semantics matrix, golden-tested at
+    /// the modern revision too: a valid call with an actionable failure stays
+    /// a success-status tool result carrying the structured Vault error.
+    #[tokio::test]
+    async fn modern_actionable_tool_failure_returns_is_error_true_result() {
+        let (state, _tmp) = test_state();
+        let vault_id = state.vaults.snapshot().vaults.keys().next().copied();
+        let app = transport(&state);
+        let raw = raw_modern_post(
+            app,
+            "tools/call",
+            Some("get_note"),
+            json!({
+                "jsonrpc":"2.0","id":16,"method":"tools/call",
+                "params":{
+                    "_meta": modern_meta("2026-07-28", true),
+                    "name":"get_note",
+                    "arguments":{"slug":"no-such-note","vault_id": vault_id}
+                }
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(raw.status(), StatusCode::OK);
+        let message = response_message(raw).await;
+        assert!(message.get("error").is_none(), "{}", message);
+        assert_eq!(message["result"]["isError"], true);
+        assert_eq!(
+            message["result"]["structuredContent"]["code"],
+            "note_not_found"
         );
     }
 
@@ -2294,6 +2340,163 @@ mod tests {
         )
         .await;
         let message = response_message(raw).await;
+        assert_eq!(message["error"]["code"], -32601);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Error-semantics matrix (#172): malformed JSON-RPC, unknown methods and
+    // tools, and structurally invalid calls are protocol errors; valid calls
+    // with actionable failures stay `isError: true` tool results (covered by
+    // the golden tests above, e.g. missing_note_is_a_tool_error...).
+    // ---------------------------------------------------------------------------
+
+    async fn raw_modern_post(
+        app: Router,
+        method_header: &str,
+        name_header: Option<&str>,
+        body: String,
+    ) -> Response {
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-protocol-version", "2026-07-28".to_string()));
+        headers.push(("Mcp-Method", method_header.to_string()));
+        if let Some(name) = name_header {
+            headers.push(("Mcp-Name", name.to_string()));
+        }
+        headers.extend(json_post_headers());
+        send(app, "POST", headers, Some(body)).await
+    }
+
+    fn json_post_headers() -> Vec<(&'static str, String)> {
+        vec![
+            ("content-type", "application/json".to_string()),
+            ("accept", "application/json, text/event-stream".to_string()),
+        ]
+    }
+
+    /// Read a non-success response body without panicking, so error-path
+    /// golden tests can assert on the JSON-RPC protocol-error payload itself.
+    async fn error_body(response: Response) -> Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn malformed_json_body_is_a_protocol_error_for_both_revisions() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+
+        let mut headers = auth_headers(TEST_TOKEN);
+        headers.push(("mcp-session-id", session.id));
+        headers.extend(json_post_headers());
+        let response = send(
+            app.clone(),
+            "POST",
+            headers,
+            Some("{not json at all".to_string()),
+        )
+        .await;
+        // The body never parses as JSON-RPC, so there is no in-envelope code
+        // to pin: the JSON extractor rejects it pre-framing with a 4xx and an
+        // explanatory plain-text body. The guarantee under test is that an
+        // unparseable request can never dispatch as a success on either wire.
+        assert!(
+            response.status().is_client_error(),
+            "legacy: unparseable JSON-RPC must never dispatch as success"
+        );
+
+        let modern = raw_modern_post(app, "tools/list", None, "{not json at all".to_string()).await;
+        assert!(
+            modern.status().is_client_error(),
+            "modern: unparseable JSON-RPC must never dispatch as success"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_a_protocol_error_for_both_revisions() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+
+        // Legacy revision (initialize-negotiated): in-envelope JSON-RPC error.
+        let legacy = call_tool(&state, "no_such_tool", json!({})).await;
+        assert_eq!(legacy["error"]["code"], -32602);
+        assert_eq!(legacy["error"]["message"], "Unknown MCP tool: no_such_tool");
+
+        // Modern revision: HTTP 400 with the same protocol error semantics.
+        let modern = raw_modern_post(
+            app,
+            "tools/call",
+            Some("no_such_tool"),
+            json!({
+                "jsonrpc":"2.0","id":15,"method":"tools/call",
+                "params":{"_meta": modern_meta("2026-07-28", true),
+                          "name":"no_such_tool","arguments":{}}
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(modern.status(), StatusCode::BAD_REQUEST);
+        let message = error_body(modern).await;
+        assert_eq!(message["error"]["code"], -32602);
+        assert_eq!(
+            message["error"]["message"],
+            "Unknown MCP tool: no_such_tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_method_is_a_protocol_error_for_the_modern_revision() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let response = raw_modern_post(
+            app,
+            "prompts/list",
+            None,
+            json!({
+                "jsonrpc":"2.0","id":12,"method":"prompts/list",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let message = error_body(response).await;
+        assert_eq!(message["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn structurally_invalid_calls_are_protocol_errors_for_both_revisions() {
+        let (state, _tmp) = test_state();
+        let app = transport(&state);
+        let (session, _) = initialize(&app).await;
+
+        // Legacy revision: tools/call without params at all.
+        let legacy = rpc(
+            &app,
+            &session,
+            json!({"jsonrpc":"2.0","id":13,"method":"tools/call"}),
+        )
+        .await;
+        // rmcp reports protocol errors inside an HTTP 200 envelope.
+        let message = response_message(legacy).await;
+        assert_eq!(message["error"]["code"], -32601);
+
+        // Modern revision: shapeless body with otherwise valid headers.
+        let modern = raw_modern_post(
+            app,
+            "tools/call",
+            Some("get_note"),
+            json!({
+                "jsonrpc":"2.0","id":14,"method":"tools/call",
+                "params":{"_meta": modern_meta("2026-07-28", true)}
+            })
+            .to_string(),
+        )
+        .await;
+        assert_eq!(modern.status(), StatusCode::NOT_FOUND);
+        let message = error_body(modern).await;
         assert_eq!(message["error"]["code"], -32601);
     }
 }

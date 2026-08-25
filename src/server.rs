@@ -1973,14 +1973,19 @@ mod tests {
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
     ) -> (Router, TempDir) {
-        app_for_tests_with_web_and_mcp_auth_and_write_mode(web_bearer_token, mcp_bearer_token, true)
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            web_bearer_token,
+            mcp_bearer_token,
+            true,
+        );
+        (app, tmp)
     }
 
     fn app_for_tests_with_web_and_mcp_auth_and_write_mode(
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
         mcp_write_enabled: bool,
-    ) -> (Router, TempDir) {
+    ) -> (Router, TempDir, AppState) {
         let tmp = TempDir::new().expect("temp dir");
         let vault_root = tmp.path().join("vault");
         std::fs::create_dir_all(&vault_root).expect("create vault");
@@ -2036,7 +2041,7 @@ mod tests {
             startup: StartupTracker::ready(),
         };
 
-        (build_router(state, web_bearer_token), tmp)
+        (build_router(state.clone(), web_bearer_token), tmp, state)
     }
 
     fn attachment_upload_request(
@@ -2138,7 +2143,7 @@ mod tests {
         // keeps working here: audit finding X-F01 made an MCP disable (or a
         // write-mode disable) an immediate revocation of that credential's
         // upload capability. The gate lives in `auth.rs`.
-        let (app, tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
             Some(Arc::from("web-secret")),
             Some("mcp-secret".to_string()),
             false,
@@ -2486,6 +2491,86 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(new_token.status(), StatusCode::OK);
+    }
+
+    /// Dedicated regression for the v2.5.0 security invariant across the
+    /// ADR-17 boundary swap (#172): the multipart attachment endpoint accepts
+    /// an MCP bearer token **only** while MCP *and* MCP write mode are both
+    /// live-enabled in the current runtime snapshot — and it re-checks the
+    /// snapshot on every request, not once at startup.
+    #[tokio::test]
+    async fn attachment_route_accepts_the_mcp_token_only_while_mcp_and_writes_are_live() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Attachments",
+            &tmp.path().join("attachments"),
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        let upload = |name: &'static str| {
+            let app = app.clone();
+            let request = attachment_upload_request(
+                &vault_id,
+                &format!("Attachments/{name}"),
+                Some("mcp-secret"),
+            );
+            async move { app.oneshot(request).await.expect("response") }
+        };
+        let save = |updates: &[(&str, &str)]| {
+            state
+                .runtime_config
+                .save(updates.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        };
+
+        // MCP fully disabled: the MCP credential matches nothing and is 401.
+        save(&[
+            ("HATCHDOOR_MCP_ENABLED", "false"),
+            ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
+        ])
+        .expect("save disabled");
+        assert_eq!(
+            upload("mcp-disabled.png").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // MCP enabled but write mode off: recognized, but revoked → 403.
+        save(&[
+            ("HATCHDOOR_MCP_ENABLED", "true"),
+            ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
+        ])
+        .expect("save read-only");
+        assert_eq!(
+            upload("read-only.png").await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            !tmp.path()
+                .join("attachments/Attachments/read-only.png")
+                .exists()
+        );
+
+        // Both live: accepted on the very next request against the same router.
+        save(&[("HATCHDOOR_MCP_WRITE_ENABLED", "true")]).expect("save writes");
+        assert_eq!(upload("both-live.png").await.status(), StatusCode::OK);
+        assert!(
+            tmp.path()
+                .join("attachments/Attachments/both-live.png")
+                .exists()
+        );
+
+        // And revocation is immediate again — no restart, no re-mount.
+        save(&[("HATCHDOOR_MCP_ENABLED", "false")]).expect("save re-disable");
+        assert_eq!(
+            upload("re-disabled.png").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]
