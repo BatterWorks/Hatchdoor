@@ -625,7 +625,8 @@ watching, and application startup.
 - `src/vault/write/tests.rs`
 
 **Public contract:** write functions and result/error types re-exported from
-`src/vault.rs`, including note CRUD-by-move, section/edit primitives, attachment
+`src/vault.rs`, including note CRUD-by-move, section/edit primitives,
+shallow frontmatter merge (`update_note_frontmatter`), attachment
 operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
 
 **Consumed dependencies:** vault index/types and the local filesystem.
@@ -780,7 +781,9 @@ full backend checks.
 and the methods implemented on `SqliteCache`. The crate-private
 `vault_snapshots` seam owns Vault-ID-qualified candidate publication,
 stale/participation state, attempt ordering, and Vault-local disposal in the shared cache. `parse` is currently public and
-also supplies parsing/hash behavior to vault indexing. The crate-private
+also supplies parsing/hash behavior to vault indexing, and its
+`frontmatter_span`/`parse_frontmatter_metadata` parsing to the shared write
+layer's frontmatter merge. The crate-private
 `is_recognized_legacy_cache` inspection seam owns the supported legacy schema
 fingerprint and opens existing files read-only for the one-time migration.
 `ReadSnapshot` is the crate-private pinned-read seam used where participant
@@ -1508,7 +1511,7 @@ requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
 window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
-35-tool catalogue.
+37-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
@@ -1534,7 +1537,13 @@ tools decode their proxied handler payload into the declared result type and
 re-serialize it, so a handler drift from its schema fails loudly instead of
 silently.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
-MCP write permission and without the mutation capability. `create_vault` and
+MCP write permission and without the mutation capability, as is
+`get_frontmatter` — a body-free tags/aliases/properties projection of one note
+served from the same authoritative Markdown read. `update_frontmatter` is a
+write tool over `vault/write`'s shallow top-level YAML merge primitive
+(`update_note_frontmatter`): explicit null deletes a key, unmentioned keys
+survive, nested mappings replace wholesale, and the body outside the leading
+frontmatter block stays byte-for-byte unchanged. `create_vault` and
 `edit_vault` advertise the `VaultSource` and credential contracts as
 per-variant schemas rather than opaque objects; `edit_vault` replaces a
 definition wholesale, and only its credential patch preserves a stored value

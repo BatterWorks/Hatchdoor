@@ -166,6 +166,21 @@ pub struct NoteWriteResult {
     pub trashed_path: Option<String>,
 }
 
+/// `get_frontmatter`'s answer: the note's frontmatter projection — tags,
+/// aliases, and every remaining property — without the Markdown body. A
+/// note with no frontmatter block answers `has_frontmatter: false` with an
+/// empty projection rather than an error.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetFrontmatterResult {
+    pub vault_id: String,
+    pub slug: String,
+    pub relative_path: String,
+    pub has_frontmatter: bool,
+    pub tags: Vec<String>,
+    pub aliases: Vec<String>,
+    pub properties: serde_json::Map<String, Value>,
+}
+
 /// The receipt every attachment-mutation tool returns (`import_attachment`
 /// through `delete_attachment`). A move/rename/delete carries no new
 /// `attachment` metadata beyond identity, so only `import_attachment` fills
@@ -216,6 +231,7 @@ output_schemas! {
     "recently_modified" => RecentlyModifiedResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
+    "get_frontmatter" => GetFrontmatterResult,
     // Management tools
     "create_vault" => CreateVaultResult,
     "edit_vault" => EditVaultResult,
@@ -230,6 +246,7 @@ output_schemas! {
     "append_to_note" => NoteWriteResult,
     "edit_note" => NoteWriteResult,
     "replace_section" => NoteWriteResult,
+    "update_frontmatter" => NoteWriteResult,
     "rename_note" => NoteWriteResult,
     "move_note" => NoteWriteResult,
     "move_rename_note" => NoteWriteResult,
@@ -288,12 +305,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 35,
-            "3 setup + 11 read + 7 management + 14 write tools"
+            total, 37,
+            "3 setup + 12 read + 7 management + 15 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 35, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 37, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

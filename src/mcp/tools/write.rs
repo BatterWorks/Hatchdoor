@@ -18,7 +18,7 @@ use crate::vault::{
     AttachmentOutcome, LayerMap, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
     create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
     list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
-    replace_section, update_note,
+    replace_section, update_note, update_note_frontmatter,
 };
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
@@ -99,6 +99,25 @@ fn vault_error(error: VaultReadError) -> JsonRpcFailure {
     JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message))
 }
 
+/// Shapes one structured read-side error for the frontmatter tools, using the
+/// same `{code, message, vault_id, retryable}` envelope as the other
+/// Vault-qualified failures (`note_not_found`, `capability_unavailable`).
+fn frontmatter_read_error(
+    vault_id: VaultId,
+    code: &str,
+    message: impl std::fmt::Display,
+) -> JsonRpcFailure {
+    JsonRpcFailure::not_found(
+        json!({
+            "code": code,
+            "message": message.to_string(),
+            "vault_id": vault_id,
+            "retryable": false,
+        })
+        .to_string(),
+    )
+}
+
 pub(super) async fn create_note_tool(
     _state: AppState,
     vault: &McpVault,
@@ -141,6 +160,59 @@ pub(super) async fn update_note_tool(
     let index = current_index(vault).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
+}
+
+pub(super) async fn get_frontmatter_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: GetFrontmatterArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid get_frontmatter arguments: {error}"))
+    })?;
+    let index = current_index(vault).await?;
+    let entry = note_entry(&index, &args.slug)?;
+    // Reading the note's bytes is the same read `get_note` performs; the
+    // projection just never returns them. The canonical cache-layer parser
+    // decides what counts as frontmatter.
+    let content = std::fs::read_to_string(&entry.path).map_err(|error| {
+        frontmatter_read_error(
+            vault.vault_id,
+            "note_unreadable",
+            format!("failed to read note '{}': {error}", entry.relative_path),
+        )
+    })?;
+    let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
+    let metadata =
+        crate::cache::parse::parse_frontmatter_metadata(&content).map_err(|message| {
+            frontmatter_read_error(vault.vault_id, "invalid_frontmatter", message)
+        })?;
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::GetFrontmatterResult {
+            vault_id: vault.vault_id.to_string(),
+            slug: entry.slug.clone(),
+            relative_path: entry.relative_path.clone(),
+            has_frontmatter,
+            tags: metadata.tags,
+            aliases: metadata.aliases,
+            properties: metadata.properties,
+        },
+    )))
+}
+
+pub(super) async fn update_frontmatter_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: UpdateFrontmatterArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid update_frontmatter arguments: {error}"))
+    })?;
+    let index = current_index(vault).await?;
+    let entry = note_entry(&index, &args.slug)?;
+    let outcome = update_note_frontmatter(&entry, args.frontmatter, &args.expected_content_hash)
         .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
@@ -769,6 +841,22 @@ pub(super) fn write_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(false, false)
         }),
         json!({
+            "name": "update_frontmatter",
+            "description": "Shallow top-level YAML merge into an existing note's frontmatter, leaving the body untouched. An explicit null value deletes a key; keys not mentioned survive; nested mappings replace wholesale (shallow semantics). A note with no frontmatter block gets one created. Requires expected_content_hash from get_note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1},
+                    "frontmatter": {"type": "object", "additionalProperties": true, "description": "Top-level frontmatter keys to set or replace. A null value deletes the key."},
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["slug", "frontmatter", "expected_content_hash"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
             "name": "rename_note",
             "description": "Rename a note within its current folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
@@ -991,6 +1079,24 @@ struct ReplaceSectionArgs {
     expected_content_hash: String,
     #[serde(default)]
     commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateFrontmatterArgs {
+    vault_id: VaultId,
+    slug: String,
+    frontmatter: serde_json::Map<String, serde_json::Value>,
+    expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetFrontmatterArgs {
+    vault_id: VaultId,
+    slug: String,
 }
 
 #[derive(Debug, Deserialize)]

@@ -98,6 +98,13 @@ pub async fn handle_tools_call(
             let vault = write::readable_vault(&state, &arguments)?;
             write::list_note_attachments_tool(state, &vault, arguments).await
         }
+        // Reading a Note's frontmatter projection is a read, like reading the
+        // Note itself; it is answered under read permission even though its
+        // implementation lives next to the mutation helpers.
+        "get_frontmatter" => {
+            let vault = write::readable_vault(&state, &arguments)?;
+            write::get_frontmatter_tool(state, &vault, arguments).await
+        }
         "create_vault" if config.write_enabled => read::create_vault_tool(state, arguments).await,
         "edit_vault" if config.write_enabled => read::edit_vault_tool(state, arguments).await,
         "enable_vault" if config.write_enabled => read::enable_vault_tool(state, arguments).await,
@@ -108,8 +115,9 @@ pub async fn handle_tools_call(
         "sync_vault" if config.write_enabled => read::sync_vault_tool(state, arguments).await,
         "retry_vault" if config.write_enabled => read::retry_vault_tool(state, arguments).await,
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
-        | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment"
+        | "update_frontmatter" | "rename_note" | "move_note" | "move_rename_note"
+        | "archive_note" | "delete_note" | "import_attachment" | "move_attachment"
+        | "rename_attachment" | "delete_attachment"
             if config.write_enabled =>
         {
             let vault = write::scoped_vault(&state, &arguments)?;
@@ -123,6 +131,9 @@ pub async fn handle_tools_call(
                 "append_to_note" => write::append_to_note_tool(state, &vault, arguments).await,
                 "edit_note" => write::edit_note_tool(state, &vault, arguments).await,
                 "replace_section" => write::replace_section_tool(state, &vault, arguments).await,
+                "update_frontmatter" => {
+                    write::update_frontmatter_tool(state, &vault, arguments).await
+                }
                 "rename_note" => write::rename_note_tool(state, &vault, arguments).await,
                 "move_note" => write::move_note_tool(state, &vault, arguments).await,
                 "move_rename_note" => write::move_rename_note_tool(state, &vault, arguments).await,
@@ -142,12 +153,11 @@ pub async fn handle_tools_call(
             }
         }
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "rename_note" | "move_note" | "move_rename_note" | "archive_note" | "delete_note"
-        | "import_attachment" | "move_attachment" | "rename_attachment" | "delete_attachment" => {
-            Err(JsonRpcFailure::invalid_params(
-                "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
-            ))
-        }
+        | "update_frontmatter" | "rename_note" | "move_note" | "move_rename_note"
+        | "archive_note" | "delete_note" | "import_attachment" | "move_attachment"
+        | "rename_attachment" | "delete_attachment" => Err(JsonRpcFailure::invalid_params(
+            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
+        )),
         "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
         | "sync_vault" | "retry_vault" => Err(JsonRpcFailure::invalid_params(
             "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",

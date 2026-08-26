@@ -824,6 +824,7 @@ mod tests {
                 "get_tree",
                 "get_stats",
                 "get_graph",
+                "get_frontmatter",
                 "list_note_attachments",
                 "get_attachment_import_config",
                 "recently_modified",
@@ -2001,6 +2002,118 @@ mod tests {
                 .expect("ready vault")
                 .join("Projects/New.md")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn get_frontmatter_projects_metadata_without_the_body() {
+        // test_state's notes have no frontmatter: an empty projection, not an
+        // error (acceptance criterion).
+        let (state, _tmp) = test_state();
+        let body = call_tool(&state, "get_frontmatter", json!({"slug": "home"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["has_frontmatter"], false);
+        assert_eq!(content["tags"], json!([]));
+        assert_eq!(content["properties"], json!({}));
+        let serialized = serde_json::to_string(content).expect("serialize");
+        assert!(
+            !serialized.contains("alpha token"),
+            "body text never appears: {serialized}"
+        );
+
+        // A note with frontmatter projects tags/aliases/properties.
+        let vault_path = state.vault_path().await.expect("ready vault");
+        std::fs::write(
+            vault_path.join("Tagged.md"),
+            "---\ntags:\n  - space/hobby\naliases:\n  - Tagged Home\nstatus: active\n---\n\n# Tagged\nsecret body\n",
+        )
+        .expect("write tagged note");
+        let index = crate::vault::VaultIndex::build(&vault_path).expect("index");
+        let vault_id = match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot
+                .definitions()
+                .next()
+                .expect("test definition")
+                .vault_id(),
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("test recovery"),
+        };
+        state
+            .startup_sqlite
+            .replace_vault_snapshot(vault_id, &index, state.embedder.as_ref())
+            .expect("republish snapshot");
+        let body = call_tool(&state, "get_frontmatter", json!({"slug": "tagged"})).await;
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["has_frontmatter"], true);
+        assert_eq!(content["tags"], json!(["space/hobby"]));
+        assert_eq!(content["aliases"], json!(["Tagged Home"]));
+        assert_eq!(content["properties"]["status"], "active");
+        let serialized = serde_json::to_string(content).expect("serialize");
+        assert!(!serialized.contains("secret body"));
+    }
+
+    #[tokio::test]
+    async fn update_frontmatter_merges_and_preserves_the_body() {
+        let (state, _tmp) = write_state();
+        // Matches the test_state fixture byte-for-byte (no trailing newline).
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let updated = call_tool(
+            &state,
+            "update_frontmatter",
+            json!({"slug": "home", "frontmatter": {"tags": ["one", "two"], "status": "active"}, "expected_content_hash": hash}),
+        )
+        .await;
+        assert_eq!(updated["result"]["structuredContent"]["ok"], true);
+        let content = std::fs::read_to_string(
+            state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Home.md"),
+        )
+        .expect("read");
+        assert!(content.starts_with("---\n"), "block created: {content:?}");
+        assert_eq!(
+            content,
+            "---\nstatus: active\ntags:\n- one\n- two\n---\n# Home\nalpha token\n[[Plan]]"
+        );
+        let new_hash = updated["result"]["structuredContent"]["content_hash"]
+            .as_str()
+            .expect("new hash")
+            .to_string();
+
+        // Shallow semantics: null deletes one key, unmentioned keys survive.
+        let second = call_tool(
+            &state,
+            "update_frontmatter",
+            json!({"slug": "home", "frontmatter": {"status": null}, "expected_content_hash": new_hash}),
+        )
+        .await;
+        assert_eq!(second["result"]["structuredContent"]["ok"], true);
+        let content = std::fs::read_to_string(
+            state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Home.md"),
+        )
+        .expect("read");
+        assert!(content.contains("tags:"), "unmentioned key survives");
+        assert!(
+            !content.contains("status"),
+            "null deletes the key: {content:?}"
+        );
+
+        // Stale hash fails with the same structured error as other writes.
+        let stale = call_tool(
+            &state,
+            "update_frontmatter",
+            json!({"slug": "home", "frontmatter": {"x": 1}, "expected_content_hash": hash}),
+        )
+        .await;
+        assert_eq!(stale["result"]["isError"], true);
+        assert_eq!(
+            stale["result"]["structuredContent"]["code"],
+            "write_conflict"
         );
     }
 
