@@ -42,9 +42,10 @@ use crate::handlers::vault_content::vault_read_error_response;
 use crate::handlers::vaults::{VaultApiError, parse_vault_id};
 use crate::vault::{
     AttachmentInfo, AttachmentOutcome, ExcludeMatcher, LayerMap, VaultIndex, WriteError,
-    WriteOutcome, archive_note, create_note, delete_note, import_attachment_bytes,
-    move_or_rename_note, update_note,
+    WriteOutcome, create_note, delete_note, import_attachment_bytes, move_or_rename_note,
 };
+use crate::vault_error::VaultOperationError;
+use crate::vault_mutation::{NoteWriteOutcome, VaultMutationCore};
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultControlBlock;
@@ -140,6 +141,59 @@ pub struct VaultAttachmentOutcomeResponse {
 /// `Result`s; built into a real `Response` only at the point it is returned
 /// from a handler.
 type ApiError = (StatusCode, VaultApiError);
+
+/// The HTTP half of ADR-19's mapping for a Vault mutation: one structured
+/// core error becomes a status code plus the same `{code, message, vault_id,
+/// retryable}` body the surface has always returned. Codes the mutation core
+/// does not raise — the Vault-resolution and index-build failures it inherits
+/// from the read core — fall through to the shared read bucket, so a mutation
+/// reports a missing, disabled, or unavailable Vault exactly as a read does.
+fn mutation_error_response(error: VaultOperationError) -> Response {
+    let status = match error.code.as_str() {
+        // `write_failed` carries the underlying I/O detail, which this surface
+        // has always sanitized away; MCP reports it verbatim under that code.
+        "write_failed" | "internal_error" => {
+            return crate::handlers::vaults::internal_error_response(error.message, error.vault_id);
+        }
+        // A partially-applied multi-phase mutation needs operator action, so
+        // its message survives rather than collapsing into the generic
+        // sanitized internal error.
+        "write_recovery_required" => StatusCode::INTERNAL_SERVER_ERROR,
+        "write_conflict" | "capability_unavailable" => StatusCode::CONFLICT,
+        "invalid_write_input" | "noise_excluded_write" => StatusCode::BAD_REQUEST,
+        "note_not_found" => StatusCode::NOT_FOUND,
+        _ => {
+            return vault_read_error_response(VaultReadError {
+                code: error.code,
+                message: error.message,
+                vault_id: error.vault_id,
+                retryable: error.retryable,
+            });
+        }
+    };
+    error.respond(status)
+}
+
+/// The success half of that mapping: the core's typed outcome, already
+/// carrying its resolved layer, shaped into this route's response body.
+fn note_write_response(vault_id: VaultId, outcome: NoteWriteOutcome) -> Response {
+    (
+        StatusCode::OK,
+        Json(VaultWriteOutcomeResponse {
+            vault_id,
+            ok: true,
+            slug: outcome.slug,
+            relative_path: outcome.relative_path,
+            content_hash: outcome.content_hash,
+            quality_warnings: outcome.quality_warnings,
+            rewritten_notes: outcome.rewritten_notes,
+            moved_assets: outcome.moved_assets,
+            trashed_path: outcome.trashed_path,
+            layer: outcome.layer,
+        }),
+    )
+        .into_response()
+}
 
 fn respond((status, error): ApiError) -> Response {
     error.respond(status)
@@ -522,35 +576,18 @@ pub async fn vault_scoped_update_note_handler(
         Err(error) => return respond(error),
     };
 
-    let control = match mutation_control_block(&state, vault_id) {
-        Ok(control) => control,
-        Err(error) => return vault_read_error_response(error),
-    };
-    if let Err(error) = ensure_mutable(vault_id, &control) {
-        return respond(error);
-    }
-    let _guard = match acquire_mutation(vault_id, &control).await {
-        Ok(guard) => guard,
-        Err(error) => return vault_read_error_response(error),
-    };
-    let index = match authoritative_index(vault_id, &control).await {
-        Ok(index) => index,
-        Err(error) => return vault_read_error_response(error),
-    };
-    let entry = match note_entry(vault_id, &index, &slug) {
-        Ok(entry) => entry,
-        Err(error) => return respond(error),
-    };
-    let outcome = match run_write_op(move || {
-        update_note(&entry, &payload.content, &payload.expected_content_hash)
-    })
-    .await
+    match VaultMutationCore::from_state(&state)
+        .update_note(
+            vault_id,
+            &slug,
+            &payload.content,
+            &payload.expected_content_hash,
+        )
+        .await
     {
-        Ok(outcome) => outcome,
-        Err(error) => return write_error_response(vault_id, error),
-    };
-
-    finalize_note_write_response(vault_id, &index.layers, outcome)
+        Ok(outcome) => note_write_response(vault_id, outcome),
+        Err(error) => mutation_error_response(error),
+    }
 }
 
 /// `PATCH /api/v1/vaults/{vault_id}/notes/{slug}/rename`
@@ -776,63 +813,13 @@ pub async fn vault_scoped_archive_note_handler(
         Err(error) => return respond(error),
     };
 
-    let control = match mutation_control_block(&state, vault_id) {
-        Ok(control) => control,
-        Err(error) => return vault_read_error_response(error),
-    };
-    if let Err(error) = ensure_mutable(vault_id, &control) {
-        return respond(error);
-    }
-    let _guard = match acquire_mutation(vault_id, &control).await {
-        Ok(guard) => guard,
-        Err(error) => return vault_read_error_response(error),
-    };
-    let index = match authoritative_index(vault_id, &control).await {
-        Ok(index) => index,
-        Err(error) => return vault_read_error_response(error),
-    };
-    let entry = match note_entry(vault_id, &index, &slug) {
-        Ok(entry) => entry,
-        Err(error) => return respond(error),
-    };
-    // The Vault's own configured archive folder overrides the instance-wide
-    // setting when present (#130).
-    let snapshot = state.runtime_snapshot();
-    let archive_prefix = match AppState::vault_archive_prefix(Some(control.definition()), &snapshot)
+    match VaultMutationCore::from_state(&state)
+        .archive_note(vault_id, &slug, &payload.expected_content_hash)
+        .await
     {
-        Ok(prefix) => prefix,
-        Err(error) => {
-            return crate::handlers::vaults::internal_error_response(error, Some(vault_id));
-        }
-    };
-    let archive_folder = archive_prefix.trim().trim_matches('/');
-    let file_name = entry
-        .relative_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&entry.relative_path);
-    let target_relative_path = format!("{archive_folder}/{file_name}");
-    if let Some(response) = reject_noise_write(vault_id, &control, &target_relative_path) {
-        return response;
+        Ok(outcome) => note_write_response(vault_id, outcome),
+        Err(error) => mutation_error_response(error),
     }
-    let layers = index.layers.clone();
-    let vault_path = control.vault_path().to_path_buf();
-    let outcome = match run_write_op(move || {
-        archive_note(
-            &vault_path,
-            &index,
-            &entry,
-            &archive_prefix,
-            &payload.expected_content_hash,
-        )
-    })
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => return write_error_response(vault_id, error),
-    };
-
-    finalize_note_write_response(vault_id, &layers, outcome)
 }
 
 /// `DELETE /api/v1/vaults/{vault_id}/notes/{slug}`
@@ -1176,6 +1163,111 @@ mod tests {
 
         let io = write_error_response(vault_id, WriteError::Io("disk full".to_string()));
         assert_eq!(io.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn mutation_error_response_maps_every_core_code_this_surface_can_receive() {
+        // ADR-19: the core reports one structured error and this adapter owns
+        // the status code. `write_failed` carries the underlying I/O detail,
+        // which this surface has always sanitized away; MCP reports it.
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let map = |code: &str| {
+            mutation_error_response(VaultOperationError::new(
+                code,
+                "detail",
+                Some(vault_id),
+                false,
+            ))
+        };
+
+        assert_eq!(map("write_conflict").status(), StatusCode::CONFLICT);
+        assert_eq!(map("capability_unavailable").status(), StatusCode::CONFLICT);
+        assert_eq!(map("invalid_write_input").status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            map("noise_excluded_write").status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(map("note_not_found").status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            map("write_recovery_required").status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            map("internal_error").status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            map("write_failed").status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        // Codes the mutation core inherits from the read core fall through to
+        // the shared read bucket, so a mutation reports an unreachable Vault
+        // exactly as a read of that Vault does.
+        assert_eq!(map("vault_not_found").status(), StatusCode::NOT_FOUND);
+        assert_eq!(map("vault_disabled").status(), StatusCode::CONFLICT);
+        assert_eq!(
+            map("vault_read_unavailable").status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_error_response_sanitizes_only_the_two_internal_codes() {
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        async fn body(vault_id: VaultId, code: &str) -> serde_json::Value {
+            let response = mutation_error_response(VaultOperationError::new(
+                code,
+                "disk full at /srv/vaults/secret",
+                Some(vault_id),
+                false,
+            ));
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("json")
+        }
+
+        let sanitized = body(vault_id, "write_failed").await;
+        assert_eq!(sanitized["code"], "internal_error");
+        assert_eq!(sanitized["message"], "Internal server error");
+
+        // A partially-applied multi-phase mutation needs operator action, so
+        // its message must survive rather than collapse into the generic one.
+        let recovery = body(vault_id, "write_recovery_required").await;
+        assert_eq!(recovery["code"], "write_recovery_required");
+        assert_eq!(recovery["message"], "disk full at /srv/vaults/secret");
+    }
+
+    #[tokio::test]
+    async fn note_write_response_carries_the_cores_outcome_verbatim() {
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let response = note_write_response(
+            vault_id,
+            NoteWriteOutcome {
+                slug: Some("clip".to_string()),
+                relative_path: Some("sources/Clip".to_string()),
+                content_hash: Some("h".to_string()),
+                quality_warnings: vec!["warn".to_string()],
+                rewritten_notes: 2,
+                moved_assets: 1,
+                trashed_path: None,
+                layer: Some("sources".to_string()),
+            },
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["vault_id"], vault_id.to_string());
+        assert_eq!(body["slug"], "clip");
+        assert_eq!(body["relative_path"], "sources/Clip");
+        assert_eq!(body["content_hash"], "h");
+        assert_eq!(body["layer"], "sources");
+        assert_eq!(body["quality_warnings"][0], "warn");
+        assert_eq!(body["rewritten_notes"], 2);
+        assert_eq!(body["moved_assets"], 1);
     }
 
     #[test]

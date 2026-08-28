@@ -100,6 +100,17 @@
   protocol-version header rather than silently downgraded. If an MCP client
   stops connecting after this upgrade, check which revision it pins and update
   it — nothing in Hatchdoor's own configuration restores the dropped ones.
+- The `update_note` and `archive_note` MCP tools now run their write off the
+  request thread, the way the equivalent HTTP routes always have, so a large
+  note no longer holds up other MCP traffic while it is written. Both tools
+  and both routes share one implementation now, which makes three of their
+  error payloads agree where they used to differ. From these two MCP tools: a
+  "note not found" now names the Vault it looked in; refusing to archive into a
+  folder the Vault's own exclusion patterns hide now uses the same wording the
+  HTTP route uses; and a crash while scanning the Vault is now reported as the
+  retryable `vault_read_unavailable` the HTTP route already returned, instead
+  of a generic internal error. Success responses and every other field are
+  unchanged.
 
 ## v2.5.0 - 2026-08-17
 

@@ -18,15 +18,19 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::app_state::AppState;
+use crate::runtime_config::ConfigSnapshot;
 use crate::vault::VaultIndex;
 use crate::vault::{
-    AttachmentOutcome, LayerMap, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
-    create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
-    list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
-    replace_section, update_note, update_note_frontmatter,
+    AttachmentOutcome, LayerMap, SectionMode, WriteError, WriteOutcome, append_note, create_note,
+    delete_attachment, delete_note, edit_note, import_attachment_bytes, list_note_attachments,
+    move_attachment, move_or_rename_note, rename_attachment, replace_section,
+    update_note_frontmatter,
 };
+use crate::vault_error::VaultOperationError;
+use crate::vault_mutation::{NoteWriteOutcome, VaultMutation};
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultControlBlock;
@@ -40,9 +44,26 @@ use super::{non_empty_argument, write_tool_annotations};
 pub(super) struct McpVault {
     pub(super) vault_id: VaultId,
     control: VaultControlBlock,
+    /// The live settings snapshot bound when this target was resolved, so the
+    /// mutation core reads the same instance-wide defaults (the archive
+    /// folder) the rest of this call does.
+    settings: Arc<ConfigSnapshot>,
 }
 
 impl McpVault {
+    /// The mutation core's view of this Vault. `scoped_vault` has already
+    /// gated it and applied the core's own `ensure_mutable`, and the
+    /// dispatcher holds its mutation lock (`mod.rs` for the length of one
+    /// tool call, `batch.rs` for the length of a whole batch), which is why
+    /// the operations below never re-take it.
+    fn mutation(&self) -> VaultMutation {
+        VaultMutation::gated(
+            self.vault_id,
+            self.control.clone(),
+            Arc::clone(&self.settings),
+        )
+    }
+
     fn exclude(&self) -> Result<crate::vault::ExcludeMatcher, JsonRpcFailure> {
         crate::vault::ExcludeMatcher::new(self.control.definition().exclude_patterns())
             .map_err(JsonRpcFailure::internal)
@@ -69,7 +90,11 @@ pub(super) fn readable_vault(
         .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))?;
     let core = VaultReadCore::new(&state.startup_sqlite, &state.vaults);
     let control = core.control_block(vault_id).map_err(vault_error)?;
-    Ok(McpVault { vault_id, control })
+    Ok(McpVault {
+        vault_id,
+        control,
+        settings: state.runtime_snapshot(),
+    })
 }
 
 pub(super) fn scoped_vault(
@@ -77,18 +102,8 @@ pub(super) fn scoped_vault(
     arguments: &Value,
 ) -> Result<McpVault, JsonRpcFailure> {
     let vault = readable_vault(state, arguments)?;
-    let vault_id = vault.vault_id;
-    if !vault.control.snapshot().capabilities.mutate {
-        return Err(JsonRpcFailure::not_found(
-            serde_json::json!({
-                "code": "capability_unavailable",
-                "message": "This Vault's current source and lifecycle do not allow mutation",
-                "vault_id": vault_id,
-                "retryable": false,
-            })
-            .to_string(),
-        ));
-    }
+    crate::vault_mutation::ensure_mutable(vault.vault_id, &vault.control)
+        .map_err(mutation_error)?;
     Ok(vault)
 }
 
@@ -96,14 +111,49 @@ pub(super) async fn acquire_mutation(
     vault: &McpVault,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>, JsonRpcFailure> {
     vault
-        .control
+        .mutation()
         .acquire_mutation()
         .await
-        .map_err(|error| vault_error(crate::vault_read::runtime_error(vault.vault_id, error)))
+        .map_err(mutation_error)
 }
 
 fn vault_error(error: VaultReadError) -> JsonRpcFailure {
     JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message))
+}
+
+/// The MCP half of ADR-19's mapping for a Vault mutation: one structured core
+/// error becomes a tool error carrying that same `{code, message, vault_id,
+/// retryable}` payload, except the two shapes this surface has always
+/// reported at the protocol level instead — an unwritable target path is an
+/// invalid parameter, and an instance-side failure is an internal error whose
+/// detail this surface (unlike HTTP) reports.
+fn mutation_error(error: VaultOperationError) -> JsonRpcFailure {
+    match error.code.as_str() {
+        "noise_excluded_write" => JsonRpcFailure::invalid_params(error.message),
+        "internal_error" => JsonRpcFailure::internal(error.message),
+        _ => JsonRpcFailure::not_found(
+            serde_json::to_string(&error).unwrap_or_else(|_| error.message.clone()),
+        ),
+    }
+}
+
+/// The success half of that mapping: the core's typed outcome, already
+/// carrying its resolved layer, shaped into this tool's result value.
+fn note_write_result(vault_id: VaultId, outcome: NoteWriteOutcome) -> Value {
+    tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::NoteWriteResult {
+            vault_id: vault_id.to_string(),
+            ok: true,
+            slug: outcome.slug,
+            relative_path: outcome.relative_path,
+            content_hash: outcome.content_hash,
+            layer: outcome.layer,
+            quality_warnings: outcome.quality_warnings,
+            rewritten_notes: outcome.rewritten_notes,
+            moved_assets: outcome.moved_assets,
+            trashed_path: outcome.trashed_path,
+        },
+    ))
 }
 
 /// Shapes one structured read-side error using the same
@@ -244,11 +294,13 @@ pub(super) async fn update_note_tool(
     let args: UpdateNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid update_note arguments: {error}"))
     })?;
-    let index = current_index(vault).await?;
-    let entry = note_entry(&index, &args.slug)?;
-    let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
-        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
+    let slug = non_empty_argument("slug", args.slug)?;
+    let outcome = vault
+        .mutation()
+        .update_note(&slug, &args.content, &args.expected_content_hash)
+        .await
+        .map_err(mutation_error)?;
+    Ok(note_write_result(vault.vault_id, outcome))
 }
 
 pub(super) async fn get_frontmatter_tool(
@@ -458,35 +510,20 @@ pub(super) async fn move_rename_note_tool(
 }
 
 pub(super) async fn archive_note_tool(
-    state: AppState,
+    _state: AppState,
     vault: &McpVault,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: ArchiveNoteArgs = serde_json::from_value(arguments).map_err(|error| {
         JsonRpcFailure::invalid_params(format!("Invalid archive_note arguments: {error}"))
     })?;
-    let index = current_index(vault).await?;
-    let entry = note_entry(&index, &args.slug)?;
-    let snapshot = state.runtime_snapshot();
-    let archive_prefix = AppState::vault_archive_prefix(Some(vault.definition()), &snapshot)
-        .map_err(JsonRpcFailure::internal)?;
-    let archive_folder = archive_prefix.trim().trim_matches('/');
-    let file_name = entry
-        .relative_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(&entry.relative_path);
-    let target = format!("{archive_folder}/{file_name}");
-    refuse_noise_write(&vault.exclude()?, &target)?;
-    let outcome = archive_note(
-        &vault_path(vault),
-        &index,
-        &entry,
-        &archive_prefix,
-        &args.expected_content_hash,
-    )
-    .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
-    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
+    let slug = non_empty_argument("slug", args.slug)?;
+    let outcome = vault
+        .mutation()
+        .archive_note(&slug, &args.expected_content_hash)
+        .await
+        .map_err(mutation_error)?;
+    Ok(note_write_result(vault.vault_id, outcome))
 }
 
 pub(super) async fn delete_note_tool(
@@ -1450,6 +1487,85 @@ mod finalize_tests {
             advertised, declared,
             "WRITE_OPS and write_tools_list() must name exactly the same tools"
         );
+    }
+
+    #[test]
+    fn mutation_error_maps_every_core_code_this_surface_can_receive() {
+        // ADR-19: the core reports one structured error and this adapter owns
+        // the JSON-RPC shape. Two meanings live only here — an unwritable
+        // target path is an invalid parameter, and an instance-side failure is
+        // an internal error whose detail this surface (unlike HTTP) reports.
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let map = |code: &str| {
+            mutation_error(VaultOperationError::new(
+                code,
+                "detail",
+                Some(vault_id),
+                false,
+            ))
+        };
+
+        let noise = map("noise_excluded_write");
+        assert_eq!(noise.code, -32602);
+        assert!(!noise.tool_level);
+        assert_eq!(noise.message, "detail");
+
+        let internal = map("internal_error");
+        assert_eq!(internal.code, JsonRpcFailure::INTERNAL_ERROR_CODE);
+        assert!(!internal.tool_level);
+        assert_eq!(internal.message, "detail");
+
+        // Everything else keeps carrying the structured payload verbatim, so
+        // a client reads the same `{code, message, vault_id, retryable}` the
+        // HTTP surface returns.
+        for code in [
+            "write_conflict",
+            "capability_unavailable",
+            "invalid_write_input",
+            "note_not_found",
+            "write_recovery_required",
+            "write_failed",
+            "vault_not_found",
+            "vault_disabled",
+            "vault_read_unavailable",
+        ] {
+            let failure = map(code);
+            assert!(failure.tool_level, "{code} must stay a tool error");
+            let payload: Value =
+                serde_json::from_str(&failure.message).expect("structured payload");
+            assert_eq!(payload["code"], code);
+            assert_eq!(payload["message"], "detail");
+            assert_eq!(payload["vault_id"], vault_id.to_string());
+            assert_eq!(payload["retryable"], false);
+        }
+    }
+
+    #[test]
+    fn note_write_result_carries_the_cores_outcome_verbatim() {
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let value = note_write_result(
+            vault_id,
+            NoteWriteOutcome {
+                slug: Some("clip".to_string()),
+                relative_path: Some("sources/Clip".to_string()),
+                content_hash: Some("h".to_string()),
+                quality_warnings: vec!["warn".to_string()],
+                rewritten_notes: 2,
+                moved_assets: 1,
+                trashed_path: None,
+                layer: Some("sources".to_string()),
+            },
+        );
+        let content = &value["structuredContent"];
+        assert_eq!(content["ok"], true);
+        assert_eq!(content["vault_id"], vault_id.to_string());
+        assert_eq!(content["slug"], "clip");
+        assert_eq!(content["relative_path"], "sources/Clip");
+        assert_eq!(content["content_hash"], "h");
+        assert_eq!(content["layer"], "sources");
+        assert_eq!(content["quality_warnings"][0], "warn");
+        assert_eq!(content["rewritten_notes"], 2);
+        assert_eq!(content["moved_assets"], 1);
     }
 
     #[test]

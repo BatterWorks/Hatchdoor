@@ -4468,6 +4468,10 @@ mod tests {
 
     #[tokio::test]
     async fn vault_scoped_archive_note_rejects_a_vault_owned_noise_path() {
+        // The refusal itself is asserted at the mutation core's interface
+        // (`vault_mutation.rs`). This stays as the route's mapping proof:
+        // that `noise_excluded_write` reaches the client as a `400` with its
+        // code intact, and that nothing was written.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_root = tmp.path().join("noise-archive");
         std::fs::create_dir_all(&vault_root).expect("create vault directory");

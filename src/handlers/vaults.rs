@@ -38,6 +38,7 @@ use tokio_stream::wrappers::WatchStream;
 use tracing::error;
 
 use crate::app_state::AppState;
+use crate::vault_error::VaultOperationError;
 use crate::vault_registry::{
     HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
     VaultDefinitionEdit, VaultDefinitionError, VaultId, VaultRegistryError, VaultRegistryRecovery,
@@ -158,30 +159,18 @@ pub struct VaultScheduleResponse {
     pub schedule: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct VaultApiError {
-    pub code: &'static str,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub vault_id: Option<VaultId>,
-    pub retryable: bool,
-}
+/// The HTTP surface's historical name for the structured error every
+/// Vault-qualified core now returns. The type itself moved to
+/// `crate::vault_error` (ADR-19): it is transport-neutral, and MCP already
+/// re-serialised this exact shape into its own tool errors. The alias stays
+/// until the Vault collection management ticket (#187) moves the collection
+/// handlers below off it.
+pub type VaultApiError = VaultOperationError;
 
-impl VaultApiError {
-    pub(crate) fn new(
-        code: &'static str,
-        message: impl Into<String>,
-        vault_id: Option<VaultId>,
-        retryable: bool,
-    ) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            vault_id,
-            retryable,
-        }
-    }
-
+impl VaultOperationError {
+    /// The HTTP adapter's half of the mapping ADR-19 describes: a core's
+    /// structured error becomes a status code plus this same JSON body. It
+    /// lives here rather than beside the type because it is axum-shaped.
     pub(crate) fn respond(self, status: StatusCode) -> Response {
         (status, Json(self)).into_response()
     }
