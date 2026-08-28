@@ -657,7 +657,9 @@ fn looks_like_frontmatter_header(lines: &[&str]) -> bool {
     has_property
 }
 
-fn percent_encode_filename(input: &str) -> String {
+// Also reused by the MCP `get_attachment` read tool to encode each segment
+// of an attachment's relative path for the existing `/assets/{*path}` route.
+pub(crate) fn percent_encode_filename(input: &str) -> String {
     let mut encoded = String::with_capacity(input.len());
     for byte in input.bytes() {
         let is_safe = matches!(

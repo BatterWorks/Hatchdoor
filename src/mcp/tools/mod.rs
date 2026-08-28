@@ -98,6 +98,12 @@ pub async fn handle_tools_call(
             let vault = write::readable_vault(&state, &arguments)?;
             write::list_note_attachments_tool(state, &vault, arguments).await
         }
+        // Fetching an attachment's bytes is a read, like list_note_attachments;
+        // it needs `config` for the base64 encoding's size cap.
+        "get_attachment" => {
+            let vault = write::readable_vault(&state, &arguments)?;
+            write::get_attachment_tool(state, &vault, arguments, config).await
+        }
         // Reading a Note's frontmatter projection is a read, like reading the
         // Note itself; it is answered under read permission even though its
         // implementation lives next to the mutation helpers.

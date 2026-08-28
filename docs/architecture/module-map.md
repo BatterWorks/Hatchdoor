@@ -1450,7 +1450,16 @@ consumer of `VaultControlBlock::acquire_mutation` and of
 `VaultReadCore::control_block`/`vault_read::runtime_error` outside
 `vault_read.rs` itself.
 
-**Consumers:** route construction in `src/server.rs`.
+**Consumers:** route construction in `src/server.rs`. `assets.rs`'s
+`resolve_asset_path`/`content_type_for_path`/`read_asset_bytes`/
+`asset_error_parts`, and `downloads.rs`'s `percent_encode_filename`, are
+additionally re-exported `pub(crate)` from `handlers/mod.rs` for the MCP
+boundary's `get_attachment` read tool, which resolves an attachment the same
+way this route does without going through `VaultReadCore`'s browse-surface
+gating (irrelevant to MCP's always-full-access trust model, matching every
+other MCP attachment tool) and percent-encodes its advertised download URL's
+path segments with the same byte-level encoder `downloads.rs` already used
+for export filenames.
 
 **Coordination paths:** `src/server.rs`, `src/api_types.rs`, frontend clients,
 and whichever domain a handler adapts.
@@ -1511,7 +1520,7 @@ requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
 window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
-37-tool catalogue.
+38-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport
@@ -1539,7 +1548,22 @@ silently.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
 MCP write permission and without the mutation capability, as is
 `get_frontmatter` — a body-free tags/aliases/properties projection of one note
-served from the same authoritative Markdown read. `update_frontmatter` is a
+served from the same authoritative Markdown read. `get_attachment` is the
+outbound counterpart to `import_attachment`'s inbound flow, addressed by the
+same `relative_path` `list_note_attachments` reports: `encoding: "url"` (the
+default) returns an HTTP `download_url` under the existing Vault-scoped
+`/assets/{*path}` route, and `encoding: "base64"` inlines the bytes instead,
+bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment`
+enforces on the way in. Resolution reuses `handlers/assets.rs`'s
+`resolve_asset_path`/`content_type_for_path`/`read_asset_bytes`/
+`asset_error_parts` (now re-exported `pub(crate)` from `handlers/mod.rs` for
+this cross-boundary reuse) rather than `VaultReadCore`'s browse-surface path:
+like every other MCP attachment tool, it is a raw filesystem read against the
+Vault's authoritative directory with no demo-mode surface gating, which
+applies only to the public HTTP read model. The advertised `download_url`
+carries no credential of its own; the same Vault-scoped route it points at
+still requires that deployment's web bearer token, not this MCP session's,
+whenever one is configured. `update_frontmatter` is a
 write tool over `vault/write`'s shallow top-level YAML merge primitive
 (`update_note_frontmatter`): explicit null deletes a key, unmentioned keys
 survive, nested mappings replace wholesale, and the body outside the leading

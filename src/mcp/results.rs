@@ -148,6 +148,37 @@ pub struct NoteAttachmentsResult {
     pub attachments: Vec<AttachmentInfo>,
 }
 
+/// One way `get_attachment` may deliver an attachment's bytes: an HTTP
+/// download URL by default, or inline base64 content as the fallback when an
+/// out-of-band HTTP request isn't possible, or the URL's own credential is
+/// unavailable to this client. The two variants carry different fields (a
+/// URL has its own path/auth story; base64 just carries content), so this is
+/// internally tagged on `encoding` — the same field name `get_attachment`'s
+/// own argument uses to choose between them.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(tag = "encoding")]
+pub enum AttachmentContent {
+    #[serde(rename = "url")]
+    Url {
+        download_url: String,
+        path_note: &'static str,
+        auth: &'static str,
+    },
+    #[serde(rename = "base64")]
+    Base64 { content: String },
+}
+
+/// `get_attachment`'s answer: one attachment's bytes, addressed by the same
+/// `relative_path` `list_note_attachments` reports.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetAttachmentResult {
+    pub vault_id: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub content_type: String,
+    pub content: AttachmentContent,
+}
+
 /// The receipt every note-mutation tool returns (`create_note` through
 /// `delete_note`). `layer` reports the resulting surface of the written note
 /// (`null` = default surface); it is always `null` after a delete, which
@@ -231,6 +262,7 @@ output_schemas! {
     "recently_modified" => RecentlyModifiedResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
+    "get_attachment" => GetAttachmentResult,
     "get_frontmatter" => GetFrontmatterResult,
     // Management tools
     "create_vault" => CreateVaultResult,
@@ -305,12 +337,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 37,
-            "3 setup + 12 read + 7 management + 15 write tools"
+            total, 38,
+            "3 setup + 13 read + 7 management + 15 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 37, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 38, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
@@ -432,6 +464,42 @@ mod schema_tests {
             .iter()
             .map(|extension| extension.to_string())
             .collect()
+    }
+
+    #[test]
+    fn get_attachment_result_validates_both_encodings() {
+        let validator = validator::<GetAttachmentResult>();
+
+        let url_variant = serde_json::to_value(GetAttachmentResult {
+            vault_id: "018f47a0-7768-4d0c-8da3-5aa28d1c31c7".to_string(),
+            relative_path: "Sources/diagram.png".to_string(),
+            size_bytes: 1234,
+            content_type: "image/png".to_string(),
+            content: AttachmentContent::Url {
+                download_url: "/api/v1/vaults/x/assets/Sources/diagram.png".to_string(),
+                path_note: "resolve against this MCP endpoint",
+                auth: "requires the web bearer token",
+            },
+        })
+        .expect("serialize");
+        assert!(validator.is_valid(&url_variant), "url encoding validates");
+        assert_eq!(url_variant["content"]["encoding"], "url");
+
+        let base64_variant = serde_json::to_value(GetAttachmentResult {
+            vault_id: "018f47a0-7768-4d0c-8da3-5aa28d1c31c7".to_string(),
+            relative_path: "Sources/diagram.png".to_string(),
+            size_bytes: 3,
+            content_type: "image/png".to_string(),
+            content: AttachmentContent::Base64 {
+                content: "cG5n".to_string(),
+            },
+        })
+        .expect("serialize");
+        assert!(
+            validator.is_valid(&base64_variant),
+            "base64 encoding validates"
+        );
+        assert_eq!(base64_variant["content"]["encoding"], "base64");
     }
 
     #[test]

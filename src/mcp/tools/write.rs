@@ -99,10 +99,11 @@ fn vault_error(error: VaultReadError) -> JsonRpcFailure {
     JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message))
 }
 
-/// Shapes one structured read-side error for the frontmatter tools, using the
-/// same `{code, message, vault_id, retryable}` envelope as the other
+/// Shapes one structured read-side error using the same
+/// `{code, message, vault_id, retryable}` envelope as the other
 /// Vault-qualified failures (`note_not_found`, `capability_unavailable`).
-fn frontmatter_read_error(
+/// Shared by the frontmatter and attachment read tools.
+fn structured_read_error(
     vault_id: VaultId,
     code: &str,
     message: impl std::fmt::Display,
@@ -116,6 +117,18 @@ fn frontmatter_read_error(
         })
         .to_string(),
     )
+}
+
+/// Maps the existing `/assets/{*path}` route's own containment/extension
+/// check to the same structured error shape, so `get_attachment` reports the
+/// identical `code` a caller would see resolving the same path over HTTP.
+fn asset_error_to_jsonrpc(
+    vault_id: VaultId,
+    relative_path: &str,
+    error: crate::handlers::AssetPathError,
+) -> JsonRpcFailure {
+    let (code, _status, message) = crate::handlers::asset_error_parts(error, relative_path);
+    structured_read_error(vault_id, code, message)
 }
 
 pub(super) async fn create_note_tool(
@@ -178,17 +191,15 @@ pub(super) async fn get_frontmatter_tool(
     // projection just never returns them. The canonical cache-layer parser
     // decides what counts as frontmatter.
     let content = std::fs::read_to_string(&entry.path).map_err(|error| {
-        frontmatter_read_error(
+        structured_read_error(
             vault.vault_id,
             "note_unreadable",
             format!("failed to read note '{}': {error}", entry.relative_path),
         )
     })?;
     let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
-    let metadata =
-        crate::cache::parse::parse_frontmatter_metadata(&content).map_err(|message| {
-            frontmatter_read_error(vault.vault_id, "invalid_frontmatter", message)
-        })?;
+    let metadata = crate::cache::parse::parse_frontmatter_metadata(&content)
+        .map_err(|message| structured_read_error(vault.vault_id, "invalid_frontmatter", message))?;
     Ok(tool_success(crate::mcp::results::result_to_value(
         &crate::mcp::results::GetFrontmatterResult {
             vault_id: vault.vault_id.to_string(),
@@ -547,6 +558,95 @@ pub(super) async fn delete_attachment_tool(
     let outcome = delete_attachment(&vault_path(vault), &index, &source_relative_path)
         .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(attachment_success(vault.vault_id, outcome))
+}
+
+/// Fetch one attachment's bytes: an HTTP download URL by default, or
+/// base64-inline content as the fallback when an out-of-band HTTP request
+/// isn't possible or the URL's own credential isn't available to this
+/// client. Addressed by `relative_path`, no note or index build required —
+/// resolved through the same containment/extension check the existing
+/// `/assets/{*path}` route uses, which every `list_note_attachments` entry
+/// already satisfies (both share the same servable-extension allow-list).
+pub(super) async fn get_attachment_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    let args: GetAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid get_attachment arguments: {error}"))
+    })?;
+    let relative_path = non_empty_argument("relative_path", args.relative_path)?;
+    let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
+
+    let resolved = crate::handlers::resolve_asset_path(&vault_path(vault), &relative_path)
+        .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
+    let content_type = crate::handlers::content_type_for_path(&resolved);
+    let size_bytes = std::fs::metadata(&resolved)
+        .map_err(|error| {
+            JsonRpcFailure::internal(format!(
+                "failed reading attachment metadata for '{relative_path}': {error}"
+            ))
+        })?
+        .len();
+
+    let content = match encoding {
+        AttachmentEncoding::Url => crate::mcp::results::AttachmentContent::Url {
+            download_url: format!(
+                "/api/v1/vaults/{}/assets/{}",
+                vault.vault_id,
+                encode_asset_url_path(&relative_path),
+            ),
+            path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
+            auth: "Requires this deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) when one is configured — as an Authorization: Bearer header or an access_token query parameter, not this MCP session's own token. When no web bearer token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot obtain that token, call get_attachment again with encoding \"base64\".",
+        },
+        AttachmentEncoding::Base64 => {
+            if size_bytes > config.max_base64_bytes {
+                return Err(JsonRpcFailure::invalid_params(format!(
+                    "attachment exceeds max size for base64 encoding: {size_bytes} > {}; call get_attachment again with encoding \"url\" instead",
+                    config.max_base64_bytes
+                )));
+            }
+            let bytes = crate::handlers::read_asset_bytes(&resolved).map_err(|error| {
+                let message = match error {
+                    crate::handlers::AssetReadError::TooLarge => {
+                        "attachment is too large to read".to_string()
+                    }
+                    crate::handlers::AssetReadError::Io(message) => message,
+                };
+                JsonRpcFailure::internal(format!(
+                    "failed reading attachment '{relative_path}': {message}"
+                ))
+            })?;
+            use base64::Engine as _;
+            crate::mcp::results::AttachmentContent::Base64 {
+                content: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }
+        }
+    };
+
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::GetAttachmentResult {
+            vault_id: vault.vault_id.to_string(),
+            relative_path,
+            size_bytes,
+            content_type: content_type.to_string(),
+            content,
+        },
+    )))
+}
+
+/// Percent-encode a Vault-relative attachment path for the existing
+/// `/assets/{*path}` route, one segment at a time — mirrors the frontend's
+/// own encoding of the same route
+/// (`frontend/src/components/note-page/wikilinks.ts`), reusing the same
+/// byte-level encoder `downloads.rs` already uses for export filenames.
+fn encode_asset_url_path(relative_path: &str) -> String {
+    relative_path
+        .split('/')
+        .map(crate::handlers::percent_encode_filename)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub(super) async fn list_note_attachments_tool(
@@ -1162,6 +1262,22 @@ struct ImportAttachmentArgs {
     overwrite: Option<bool>,
     #[serde(default)]
     commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetAttachmentArgs {
+    vault_id: VaultId,
+    relative_path: String,
+    #[serde(default)]
+    encoding: Option<AttachmentEncoding>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AttachmentEncoding {
+    Url,
+    Base64,
 }
 
 #[derive(Debug, Deserialize)]

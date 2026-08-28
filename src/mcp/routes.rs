@@ -826,6 +826,7 @@ mod tests {
                 "get_graph",
                 "get_frontmatter",
                 "list_note_attachments",
+                "get_attachment",
                 "get_attachment_import_config",
                 "recently_modified",
             ]
@@ -1856,6 +1857,129 @@ mod tests {
         let body = call_tool(&state, "list_note_attachments", json!({"slug": "home"})).await;
         assert_eq!(body["result"]["isError"], false);
         assert!(body["result"]["structuredContent"]["attachments"].is_array());
+    }
+
+    #[tokio::test]
+    async fn get_attachment_returns_a_working_download_url_by_default() {
+        // get_attachment needs no write permission and no note context: the
+        // attachment only has to exist on disk at relative_path.
+        let (state, _tmp) = test_state();
+        let vault_id = state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .copied()
+            .expect("registered test Vault");
+        let vault_path = state.vault_path().await.expect("ready vault");
+        std::fs::create_dir_all(vault_path.join("Sources")).expect("sources dir");
+        std::fs::write(vault_path.join("Sources/diagram.png"), b"png-bytes").expect("attachment");
+
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "Sources/diagram.png"}),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false);
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["vault_id"], json!(vault_id));
+        assert_eq!(content["relative_path"], "Sources/diagram.png");
+        assert_eq!(content["size_bytes"], 9);
+        assert_eq!(content["content_type"], "image/png");
+        assert_eq!(content["content"]["encoding"], "url");
+        assert_eq!(
+            content["content"]["download_url"],
+            format!("/api/v1/vaults/{vault_id}/assets/Sources/diagram.png")
+        );
+        assert!(
+            content["content"]["auth"]
+                .as_str()
+                .unwrap()
+                .contains("web bearer token")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_attachment_base64_decodes_byte_identically() {
+        use base64::Engine as _;
+
+        let (state, _tmp) = test_state();
+        let vault_path = state.vault_path().await.expect("ready vault");
+        let bytes = b"not really a png but bytes are bytes";
+        std::fs::write(vault_path.join("clip.png"), bytes).expect("attachment");
+
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "clip.png", "encoding": "base64"}),
+        )
+        .await;
+        assert_eq!(body["result"]["isError"], false);
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["content"]["encoding"], "base64");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(content["content"]["content"].as_str().expect("content"))
+            .expect("valid base64");
+        assert_eq!(decoded, bytes);
+    }
+
+    #[tokio::test]
+    async fn get_attachment_base64_refuses_past_the_configured_cap() {
+        let (state, _tmp) = test_state();
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "4".to_string(),
+            )])
+            .expect("lower the base64 cap");
+        let vault_path = state.vault_path().await.expect("ready vault");
+        std::fs::write(vault_path.join("clip.png"), b"more than four bytes").expect("attachment");
+
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "clip.png", "encoding": "base64"}),
+        )
+        .await;
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("exceeds max size for base64 encoding")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_attachment_reports_the_same_containment_error_the_assets_route_would() {
+        let (state, _tmp) = test_state();
+
+        let missing = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "nope.png"}),
+        )
+        .await;
+        assert_eq!(missing["result"]["isError"], true);
+        assert_eq!(
+            missing["result"]["structuredContent"]["code"],
+            "asset_not_found"
+        );
+
+        let traversal = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "../outside.png"}),
+        )
+        .await;
+        assert_eq!(traversal["result"]["isError"], true);
+        assert_eq!(
+            traversal["result"]["structuredContent"]["code"],
+            "invalid_asset_path"
+        );
     }
 
     #[tokio::test]
