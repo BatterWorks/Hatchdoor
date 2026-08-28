@@ -76,7 +76,7 @@ summary() {
 }
 
 # Ticket context for the failure path; empty during preflight.
-target=""; title=""; ticket_started=0; ticket_log=""
+target=""; title=""; ticket_started=0; ticket_log=""; ticket_pid=""
 
 halt() {
   local gate="${2:-preflight}"
@@ -97,6 +97,9 @@ halt() {
 # loses the run entirely: no row, no gate, no cost. Record what is known, name
 # the resumable child session, and leave the tree alone.
 on_signal() {
+  # Take the in-flight ticket down with us, so no orphaned agent keeps editing
+  # the worktree after the driver has reported itself dead.
+  [[ -n "$ticket_pid" ]] && kill -TERM "$ticket_pid" 2>/dev/null
   if [[ -n "$target" ]]; then
     record "$target" "KILLED" "external-signal" \
       "$(( $(date +%s) - ticket_started ))" \
@@ -203,17 +206,28 @@ for (( i = 1; i <= MAX_TICKETS; i++ )); do
   # `claude -p` has no internal wall-clock cap, so an inner run that wedges
   # (stuck network call, a dev server that never comes healthy) would block the
   # pipeline forever and no gate below would ever run. timeout returns 124.
-  timeout --kill-after=60 "$TICKET_TIMEOUT" \
-    claude -p "/implement" \
-      --model "$MODEL" \
-      --effort "$EFFORT" \
-      --dangerously-skip-permissions \
-      --verbose \
-      --output-format stream-json \
-      "${budget_args[@]}" \
-      2>&1 | tee "$ticket_log"
-
-  status="${PIPESTATUS[0]}"
+  # Run as a background job and wait on it, rather than in the foreground: bash
+  # defers a trap until the running foreground command returns, so a TERM
+  # arriving mid-ticket would otherwise sit unhandled until the 3h timeout and
+  # the KILLED ledger row would never be written. `wait` is interruptible.
+  # The subshell re-exports claude's status, which PIPESTATUS would otherwise
+  # lose behind tee.
+  (
+    timeout --kill-after=60 "$TICKET_TIMEOUT" \
+      claude -p "/implement" \
+        --model "$MODEL" \
+        --effort "$EFFORT" \
+        --dangerously-skip-permissions \
+        --verbose \
+        --output-format stream-json \
+        "${budget_args[@]}" \
+        2>&1 | tee "$ticket_log"
+    exit "${PIPESTATUS[0]}"
+  ) &
+  ticket_pid=$!
+  wait "$ticket_pid"
+  status=$?
+  ticket_pid=""
 
   # --- Gates --- second argument names the gate for the ledger.
   (( status != 124 && status != 137 )) \
