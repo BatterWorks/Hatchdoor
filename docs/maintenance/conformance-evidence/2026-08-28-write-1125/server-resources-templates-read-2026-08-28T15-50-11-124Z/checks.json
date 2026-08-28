@@ -1,0 +1,33 @@
+[
+  {
+    "id": "resources-templates-read",
+    "name": "ResourcesTemplateRead",
+    "description": "Read resource from template with parameter substitution",
+    "status": "FAILURE",
+    "timestamp": "2026-08-28T15:50:11.144Z",
+    "errorMessage": "Failed: resources/read",
+    "specReferences": [
+      {
+        "id": "MCP-Resources-Templates",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/resources#resource-templates"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:11.144Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 5,
+      "violations": []
+    }
+  }
+]

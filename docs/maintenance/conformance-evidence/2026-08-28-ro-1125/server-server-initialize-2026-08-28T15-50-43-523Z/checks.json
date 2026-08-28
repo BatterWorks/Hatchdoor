@@ -1,0 +1,52 @@
+[
+  {
+    "id": "server-initialize",
+    "name": "ServerInitialize",
+    "description": "Server responds to initialize request with valid structure",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:43.627Z",
+    "specReferences": [
+      {
+        "id": "MCP-Initialize",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle#initialization"
+      }
+    ],
+    "details": {
+      "serverUrl": "http://127.0.0.1:42999/mcp",
+      "connected": true
+    }
+  },
+  {
+    "id": "server-session-id-visible-ascii",
+    "name": "ServerSessionIdVisibleAscii",
+    "description": "Server-provided session ID uses only visible ASCII characters",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:43.648Z",
+    "specReferences": [
+      {
+        "id": "MCP-Session-Management",
+        "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management"
+      }
+    ],
+    "details": {
+      "sessionId": "f68f5940-e627-4407-8e68-b568a1ef7af7"
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:43.652Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 3,
+      "violations": []
+    }
+  }
+]

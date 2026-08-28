@@ -1,0 +1,40 @@
+[
+  {
+    "id": "sep-2663-server-returns-missing-capability-when-required",
+    "name": "Sep2663ServerReturnsMissingCapabilityWhenRequired",
+    "description": "tools/call for a TaskSupport=required tool MUST reject with code -32021 (Missing Required Client Capability) when the client did not declare io.modelcontextprotocol/tasks",
+    "status": "FAILURE",
+    "timestamp": "2026-08-28T15:50:22.170Z",
+    "errorMessage": "tools/call for failing_job returned error code -32602; spec requires -32021.",
+    "specReferences": [
+      {
+        "id": "SEP-2575",
+        "url": "https://modelcontextprotocol.io/seps/2575-stateless-mcp"
+      },
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ],
+    "details": {
+      "observedCode": -32602
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:22.170Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

@@ -1,0 +1,37 @@
+[
+  {
+    "id": "sep-2663-mrtr-synchronous-before-task-creation",
+    "name": "Sep2663MrtrSynchronousBeforeTaskCreation",
+    "description": "MRTR loop gathers input then escalates to a task on the final round (SEP-2322 + SEP-2663 451f5e1).",
+    "status": "FAILURE",
+    "timestamp": "2026-08-28T15:50:22.175Z",
+    "errorMessage": "Unknown MCP tool: test_tool_with_task",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      },
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:22.175Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

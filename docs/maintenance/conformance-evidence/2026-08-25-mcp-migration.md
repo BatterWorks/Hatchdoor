@@ -1,5 +1,11 @@
 # MCP conformance run — 2026-08-25 (issue #172, MCP 2026-07-28 migration)
 
+> [!note]
+> **Superseded** by [`./2026-08-28-mcp-capability-expansion.md`](./2026-08-28-mcp-capability-expansion.md).
+> This run verified the boundary at 35 tools; issue #174 then added four more,
+> and the later run covers the 39-tool catalogue the next release will ship.
+> Kept as the record of the ADR-17 migration itself.
+
 Clean release evidence for the ADR-17 boundary swap (`feature/mcp-2026-07-28`
 integrated into `development`). Procedure: [`../mcp-conformance-run.md`](../mcp-conformance-run.md).
 
