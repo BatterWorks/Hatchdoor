@@ -1916,7 +1916,6 @@ mod tests {
     use super::*;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
-    use crate::search::LayerSelection;
     use crate::vault::VaultIndex;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1950,10 +1949,35 @@ mod tests {
         (dir, cache, embedder)
     }
 
-    fn sources_selection() -> LayerSelection {
-        let (selection, _) =
-            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
-        selection
+    /// Counts rows in the demoted vec0 table: the direct evidence of whether
+    /// demoted layers were embedded, independent of any search entry point.
+    fn demoted_vector_count(cache: &SqliteCache) -> i64 {
+        cache
+            .read()
+            .expect("read")
+            .query_row("SELECT COUNT(*) FROM chunk_vectors_demoted", [], |row| {
+                row.get(0)
+            })
+            .expect("count demoted vectors")
+    }
+
+    /// Slugs whose chunk rows match `term` in the chunk FTS index, in slug
+    /// order: the direct evidence of what was written to `chunks`/`chunk_fts`,
+    /// independent of any search entry point.
+    fn chunk_fts_slugs(cache: &SqliteCache, term: &str) -> Vec<String> {
+        let conn = cache.read().expect("read");
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT chunks.note_slug FROM chunk_fts \
+                 JOIN chunks ON chunks.id = chunk_fts.rowid \
+                 WHERE chunk_fts MATCH ?1 ORDER BY chunks.note_slug",
+            )
+            .expect("prepare chunk FTS probe");
+        let rows = stmt
+            .query_map(params![term], |row| row.get::<_, String>(0))
+            .expect("query chunk FTS probe");
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read chunk FTS probe")
     }
 
     #[test]
@@ -2016,35 +2040,20 @@ mod tests {
 
     #[test]
     fn embed_layers_false_skips_demoted_vectors_but_keeps_keyword_search() {
-        let (_dir, cache, embedder) = demoted_vault_with_flag(false);
+        let (_dir, cache, _embedder) = demoted_vault_with_flag(false);
 
-        // No demoted vectors were built: a layer semantic search finds nothing.
-        let semantic = cache
-            .semantic_search_layered(&embedder, "melatonin circadian", 10, &sources_selection())
-            .expect("semantic");
-        assert!(
-            semantic.is_empty(),
-            "HATCHDOOR_EMBED_LAYERS=false must leave demoted layers without vectors: {:?}",
-            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        // No demoted vectors were built: the demoted vector table is empty.
+        assert_eq!(
+            demoted_vector_count(&cache),
+            0,
+            "HATCHDOOR_EMBED_LAYERS=false must leave demoted layers without vectors"
         );
-        // The demoted vector table is genuinely empty.
-        let demoted_count: i64 = cache
-            .read()
-            .expect("read")
-            .query_row("SELECT COUNT(*) FROM chunk_vectors_demoted", [], |r| {
-                r.get(0)
-            })
-            .expect("count");
-        assert_eq!(demoted_count, 0);
 
         // Keyword search still finds the demoted note (chunk rows were written).
-        let keyword = cache
-            .fts_search_chunks_layered("melatonin", 10, &sources_selection())
-            .expect("keyword");
+        let matched = chunk_fts_slugs(&cache, "melatonin");
         assert!(
-            keyword.iter().any(|h| h.note_slug == "clip"),
-            "keyword search over the demoted layer must still find the note: {:?}",
-            keyword.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+            matched.iter().any(|slug| slug == "clip"),
+            "keyword search over the demoted layer must still find the note: {matched:?}"
         );
     }
 
@@ -2054,11 +2063,9 @@ mod tests {
         // actually build the demoted vectors, not leave them permanently empty
         // because no note's content changed.
         let (dir, cache, embedder) = demoted_vault_with_flag(false);
-        assert!(
-            cache
-                .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
-                .expect("semantic")
-                .is_empty(),
+        assert_eq!(
+            demoted_vector_count(&cache),
+            0,
             "precondition: no demoted vectors while the flag is false"
         );
 
@@ -2068,13 +2075,9 @@ mod tests {
             .replace_with_options(&index, &embedder, None, true, &BuildOptions::default())
             .expect("re-embed");
 
-        let semantic = cache
-            .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
-            .expect("semantic after flip");
         assert!(
-            semantic.iter().any(|h| h.note_slug == "clip"),
-            "flipping the flag back to true must re-embed the demoted layer: {:?}",
-            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+            demoted_vector_count(&cache) > 0,
+            "flipping the flag back to true must re-embed the demoted layer"
         );
     }
 
@@ -2403,9 +2406,7 @@ mod tests {
             .expect("note exists");
         assert_eq!(note.content, "# Home\nbravo token");
 
-        let hits = cache.search("bravo", true, 10).expect("content search");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].slug, "home");
+        assert_eq!(chunk_fts_slugs(&cache, "bravo"), vec!["home".to_string()]);
     }
 }
 

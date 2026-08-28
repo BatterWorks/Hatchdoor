@@ -134,13 +134,6 @@ pub struct ResolveAssetResult {
     pub path: Option<String>,
 }
 
-/// Still consumed by `src/mcp/tools/read.rs`'s own refresh tool over the
-/// legacy shared-core call (#103, unaffected by #101's HTTP route removal).
-#[derive(Debug, Serialize)]
-pub struct RefreshResponse {
-    pub refreshed: bool,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct RecentlyModifiedQuery {
     pub limit: Option<usize>,

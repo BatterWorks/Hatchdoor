@@ -584,13 +584,12 @@ query-parameter fallback for browser contexts that cannot set headers (ADR-08).
 **Owned paths:** `src/api_types.rs`.
 
 **Public contract:** the shared serialized request and response structures
-defined here, including resolve, refresh, recent, stats, and graph shapes.
+defined here, including resolve, recent, stats, and graph shapes.
 Endpoint-local wire types remain owned by their handlers, notably write types
 in `handlers/vault_write.rs` and diagnostics types in
-`handlers/diagnostics.rs`. `RefreshResponse` remains only for legacy internal
-compatibility; #103 retires the scope-less MCP refresh tool alongside the HTTP
-`/api/refresh` route. Index now has a production dispatch consumer, but this
-packet adds no Vault-scoped refresh control; that remains separately owned.
+`handlers/diagnostics.rs`. The legacy `RefreshResponse` is retired along with
+the scope-less refresh surface; Vault-scoped refresh control remains
+separately owned.
 
 **Consumers:** `src/handlers/**` and the manually corresponding frontend types
 in `frontend/src/types.ts` or feature-local client types.
@@ -732,8 +731,8 @@ directly (never wrapped in `VaultReadProjection`, like `exact_note`), scoped
 to exactly one Vault via `collection`'s `VaultScope::One` gating, computing
 every legacy `VaultStatsResponse` field from the same published snapshot
 `statistics`/`trees`/`graphs` read rather than the single-Vault-shaped SQL
-cache tables `cache::queries::metadata::vault_stats` used (unreachable from
-any production route since #101). `VaultScope` serializes as the flat scalar
+cache tables the retired scope-less statistics query read. `VaultScope`
+serializes as the flat scalar
 `docs/migrations/vault-scoped-clients.md`'s envelope documents — the Vault
 ID's canonical text for `One`, or the literal `"all"` — mirroring exactly what
 a caller passes as the `scope` path segment, rather than serde's derived
@@ -826,7 +825,12 @@ full backend checks.
 - `src/cache/vault_snapshots.rs`
 
 **Public contract:** `SqliteCache`, `ReadConn`, `BuildOptions`, `SemanticHit`,
-and the methods implemented on `SqliteCache`. The crate-private
+and the methods implemented on `SqliteCache`. The read queries are the
+Vault-qualified snapshot lookups, the evaluation binaries' `semantic_search`
+and `fts_search_notes`, `read_note_by_slug`, and the link/wikilink queries;
+the scope-less stats, explorer-tree, recently-modified, read-by-path,
+demoted-layer, note-summary, health-check, graph, and layered/filtered
+search variants are retired. The crate-private
 `vault_snapshots` seam owns Vault-ID-qualified candidate publication,
 stale/participation state, attempt ordering, and Vault-local disposal in the shared cache. `parse` is currently public and
 also supplies parsing/hash behavior to vault indexing, and its
@@ -841,9 +845,9 @@ metadata and cache queries must observe one published generation.
 FTS5, and sqlite-vec.
 
 **Consumers:** application state/reindexing, runtime composition's per-Vault
-Index dispatch, Vault-qualified read projections, Search, handlers, MCP reads,
-evaluation tooling, diagnostics, and the one-time legacy single-Vault
-migration's read-only evidence check.
+Index dispatch, Vault-qualified read projections, the Vault-qualified search
+core, handlers, MCP reads, evaluation tooling, diagnostics, and the one-time
+legacy single-Vault migration's read-only evidence check.
 
 **Coordination paths:** `src/app_state.rs`, `src/vault_runtime.rs`,
 `src/vault_read.rs`, `src/search/**`, `src/vault/index.rs`, `src/chunk/**`,
@@ -900,29 +904,28 @@ commands when retrieval behavior may change.
 **Owned paths:**
 
 - `src/search/mod.rs`
-- `src/search/assemble.rs`
 - `src/search/layer_selection.rs`
-- `src/search/retrieve.rs`
 - `src/search/vault_scoped.rs`
 
-**Public contract:** `SearchMode`, `SearchRequest`, `NoteFilters`,
-`LayerSelection`, `LayerInfo`, `SearchResult`, `SearchResponse`, and `run`.
-The Vault-qualified shared-core contract is `VaultSearchCore`,
-`VaultSearchRequest`, `VaultSearchResponse`, and `VaultSearchResult`; it uses
-the explicit `VaultScope` and common projection/participant envelope from the
-Vault-read core without owning any HTTP, MCP, or frontend adapter.
+**Public contract:** the shared search vocabulary `SearchMode`, `NoteFilters`,
+`LayerSelection`, `LayerInfo`, and `OutboundLink`. The Vault-qualified
+shared-core contract is `VaultSearchCore`, `VaultSearchRequest`,
+`VaultSearchResponse`, and `VaultSearchResult`; it uses the explicit
+`VaultScope` and common projection/participant envelope from the Vault-read
+core without owning any HTTP, MCP, or frontend adapter. `VaultSearchCore` is
+the only search entry point: the scope-less single-Vault `run`, its retrieve
+and assemble helpers, and its request/result/response types are retired.
 
 **Consumed dependencies:** `SqliteCache`, its published Vault snapshot/cache
 query seam, `Embedder`, the Vault collection runtime, the explicit Vault-read
 scope/envelope, and vault metadata/types.
 
-**Consumers:** the legacy HTTP search handler, `handlers/vault_collection_reads.rs`
-(the first HTTP consumer of `VaultSearchCore::search`), MCP search/query
-tools, offline evaluation runners, and future Vault-scoped MCP adapters.
+**Consumers:** `handlers/vault_collection_reads.rs` (the HTTP consumer of
+`VaultSearchCore::search`), MCP search tools, offline evaluation runners, and
+future Vault-scoped MCP adapters.
 
-**Coordination paths:** `src/api_types.rs`, `src/handlers/api.rs`,
-`src/handlers/vault_collection_reads.rs`, `src/mcp/tools/read.rs`, cache query
-methods, and frontend Search contracts.
+**Coordination paths:** `src/handlers/vault_collection_reads.rs`,
+`src/mcp/tools/read.rs`, cache query methods, and frontend Search contracts.
 
 **Invariants:**
 

@@ -543,10 +543,8 @@ impl<'a> VaultReadCore<'a> {
     /// `VaultScope::One` gating for the identical not-found/disabled/
     /// unavailable behavior the lean `statistics` (`{scope}/stats`) endpoint
     /// already has, computed from the same published snapshot `statistics`
-    /// reads rather than the legacy single-Vault-shaped SQL cache tables
-    /// `cache::queries::metadata::vault_stats` used (unreachable from any
-    /// production route since #101; superseded by this method for the
-    /// multi-Vault architecture).
+    /// reads rather than the legacy single-Vault-shaped SQL cache tables the
+    /// retired scope-less statistics query read.
     pub fn statistics_detail(
         &self,
         vault_id: VaultId,
@@ -952,11 +950,10 @@ impl FolderBuilder {
 }
 
 /// Computes every `VaultStatsResponse` field from one Vault's published
-/// snapshot. A Rust port of `cache::queries::metadata::vault_stats`'s SQL
-/// (unreachable from any production route since #101), rewritten against
-/// `VaultSnapshotRead` because the multi-Vault architecture publishes
-/// Vault-attributed data there rather than through that legacy single-Vault-
-/// shaped cache schema. Unlike the legacy function, this applies no
+/// snapshot. A Rust port of the retired scope-less statistics query's SQL,
+/// rewritten against `VaultSnapshotRead` because the multi-Vault architecture
+/// publishes Vault-attributed data there rather than through that legacy
+/// single-Vault-shaped cache schema. Unlike the legacy function, this applies no
 /// `LayerSelection` filter, matching `VaultReadCore::statistics`'s existing
 /// lean projection: every note in the published snapshot counts, consistent
 /// with what that already-shipped collection endpoint reports for the same
