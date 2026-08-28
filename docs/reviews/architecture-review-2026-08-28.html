@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Architecture review: hatchdoor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({
+        startOnLoad: true,
+        theme: "neutral",
+        securityLevel: "loose",
+        flowchart: { htmlLabels: true, curve: "basis", padding: 8 },
+        sequence: { mirrorActors: false, actorMargin: 40, messageMargin: 28 },
+      });
+    </script>
+    <style>
+      .seam { stroke-dasharray: 4 4; }
+      .leak { stroke: #dc2626; }
+      .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+      .lbl { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
+      .band { border: 1px solid #cbd5e1; background: #fff; border-radius: 4px; padding: 4px 8px; font-size: 11px; line-height: 1.25; overflow-wrap: anywhere; min-width: 0; }
+      .lanes { display: grid; grid-template-columns: minmax(0, 1fr) 9.5rem minmax(0, 1fr); gap: 0.5rem; align-items: start; }
+      .step { position: relative; }
+      .step .num { position: absolute; left: -10px; top: -8px; width: 18px; height: 18px; border-radius: 9999px; background: #0f172a; color: #fff; font-size: 10px; display: flex; align-items: center; justify-content: center; font-weight: 600; }
+      .band-red { border-color: #fca5a5; background: #fef2f2; color: #991b1b; }
+      .band-ghost { border-style: dashed; color: #94a3b8; background: #f8fafc; }
+      .mermaid svg { max-width: 100%; height: auto; }
+      .mermaid { display: flex; justify-content: center; }
+      .stamp { transform: rotate(-8deg); }
+      .diagram { min-height: 320px; }
+      h2, h1, .font-serif { font-family: Georgia, "Times New Roman", serif; }
+    </style>
+  </head>
+  <body class="bg-stone-50 text-slate-900 font-sans">
+    <main class="max-w-6xl mx-auto px-6 py-12 space-y-14">
+      <!-- ============ HEADER ============ -->
+      <header class="space-y-4">
+        <div class="flex flex-wrap items-baseline justify-between gap-4">
+          <h1 class="font-serif text-4xl tracking-tight">Architecture review <span class="text-slate-400">·</span> <span class="font-mono text-3xl">hatchdoor</span></h1>
+          <div class="text-sm text-slate-500">2026-08-28 · branch <span class="font-mono">development</span> @ <span class="font-mono">3f210bc</span></div>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-slate-600">
+          <span class="flex items-center gap-2"><span class="inline-block w-5 h-3 border border-slate-400 bg-white"></span>module</span>
+          <span class="flex items-center gap-2"><svg width="24" height="8"><line x1="0" y1="4" x2="24" y2="4" stroke="#475569" stroke-width="1.5" class="seam"/></svg>seam</span>
+          <span class="flex items-center gap-2"><svg width="24" height="8"><line x1="0" y1="4" x2="20" y2="4" stroke="#dc2626" stroke-width="2"/><path d="M18 1 L23 4 L18 7" fill="none" stroke="#dc2626" stroke-width="2"/></svg>leakage</span>
+          <span class="flex items-center gap-2"><span class="inline-block w-5 h-3 deep rounded-sm"></span>deep module</span>
+          <span class="ml-auto flex flex-wrap gap-2">
+            <span class="rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span>
+            <span class="rounded-full bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span>
+            <span class="rounded-full bg-slate-200 text-slate-700 px-2 py-0.5">Speculative</span>
+          </span>
+        </div>
+        <div class="grid sm:grid-cols-4 gap-3 text-xs">
+          <div class="rounded-lg border border-slate-200 bg-white p-3"><div class="text-2xl font-serif">8,009</div><div class="text-slate-500">lines in <span class="font-mono">server.rs</span>; 82% are tests</div></div>
+          <div class="rounded-lg border border-slate-200 bg-white p-3"><div class="text-2xl font-serif">10 / 25</div><div class="text-slate-500"><span class="font-mono">AppState</span> fields that belong to the legacy lane</div></div>
+          <div class="rounded-lg border border-slate-200 bg-white p-3"><div class="text-2xl font-serif">16 / 39</div><div class="text-slate-500">MCP tools that reach the domain by calling an HTTP handler</div></div>
+          <div class="rounded-lg border border-slate-200 bg-white p-3"><div class="text-2xl font-serif">2,686</div><div class="text-slate-500">lines of module map, edited 88 times in four months</div></div>
+        </div>
+        <p class="text-sm text-slate-600 max-w-4xl">The module map is where interface knowledge currently lives: every candidate below moves a piece of that prose into a type or a module so a reader (human or agent) learns it from the seam instead of the changelog.</p>
+      </header>
+
+      <!-- ============ CANDIDATES ============ -->
+      <section id="candidates" class="space-y-12">
+
+        <!-- ================= CARD 1 ================= -->
+        <article id="c1" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <header class="space-y-3">
+            <h2 class="font-serif text-2xl">1. Retire the legacy single-Vault lane</h2>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-emerald-100 text-emerald-800 px-2.5 py-0.5 font-medium">Strong</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">local-substitutable</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">deletion</span>
+            </div>
+          </header>
+          <div class="font-mono text-sm text-slate-700 leading-6">
+            src/app_state.rs · src/git/task.rs · src/git/sync.rs (remote half) · src/handlers/settings.rs · src/startup.rs · src/search/{mod,retrieve,assemble}.rs · src/cache/queries/{metadata,graph}.rs (non-<span class="text-slate-400">_on</span> variants) · src/handlers/diagnostics.rs
+          </div>
+
+          <div class="grid lg:grid-cols-2 gap-6">
+            <!-- BEFORE -->
+            <div>
+              <div class="lbl text-slate-500 mb-2">Before · two implementations of indexing and Git sync</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 lanes">
+                <div class="space-y-1.5">
+                  <div class="lbl text-red-700">legacy lane · VAULT_PATH</div>
+                  <div class="band band-red">config.rs <span class="font-mono">VAULT_PATH</span></div>
+                  <div class="band band-red"><span class="font-mono">AppState::ready_vault</span> (None at boot)</div>
+                  <div class="band band-red"><span class="font-mono">run_reindex</span> app_state.rs:546<br/>builds legacy <span class="font-mono">notes/chunks</span> tables</div>
+                  <div class="band band-red"><span class="font-mono">spawn_sync_task</span> git/task.rs (754)<br/><span class="font-mono">GitSyncHandle</span> · <span class="font-mono">vault_write_lock</span></div>
+                  <div class="band band-red">git/sync.rs remote half (~900)<br/>fetch · integrate · push · merge marker</div>
+                  <div class="band band-red">search::run · retrieve · assemble (~800, 0 callers)</div>
+                </div>
+                <div class="space-y-1.5 pt-5">
+                  <div class="band flex items-center gap-1"><svg width="22" height="10" viewBox="0 0 22 10"><path d="M22 5 H3 M7 1 L3 5 L7 9" fill="none" stroke="#dc2626" stroke-width="2"/></svg><span>settings.rs:481 reindex-class save</span></div>
+                  <div class="band flex items-center gap-1"><svg width="22" height="10" viewBox="0 0 22 10"><path d="M22 5 H3 M7 1 L3 5 L7 9" fill="none" stroke="#dc2626" stroke-width="2"/></svg><span>settings.rs:319 <span class="font-mono">HATCHDOOR_GIT_*</span> save → 503</span></div>
+                  <div class="band flex items-center gap-1"><svg width="22" height="10" viewBox="0 0 22 10"><path d="M22 5 H3 M7 1 L3 5 L7 9" fill="none" stroke="#dc2626" stroke-width="2"/></svg><span><span class="font-mono">/api/git-status</span> · <span class="font-mono">/api/index-status</span></span></div>
+                  <div class="band flex items-center gap-1"><svg width="22" height="10" viewBox="0 0 22 10"><path d="M22 5 H3 M7 1 L3 5 L7 9" fill="none" stroke="#dc2626" stroke-width="2"/></svg><span>mcp/adapter.rs:248 <span class="font-mono">listChanged</span> ← only sender is <span class="font-mono">run_reindex</span></span></div>
+                  <div class="band band-ghost">SettingsPage.tsx polls both</div>
+                </div>
+                <div class="space-y-1.5">
+                  <div class="lbl text-slate-600">Vault collection lane · live</div>
+                  <div class="band"><span class="font-mono">VaultRegistryStore</span></div>
+                  <div class="band"><span class="font-mono">VaultCollectionRuntime</span> control blocks</div>
+                  <div class="band"><span class="font-mono">VaultWorkCoordinator</span></div>
+                  <div class="band">Index turn → <span class="font-mono">vault_*</span> snapshot</div>
+                  <div class="band">Git turn → <span class="font-mono">managed_sync</span></div>
+                  <div class="band"><span class="font-mono">VaultSearchCore</span></div>
+                </div>
+              </div>
+            </div>
+            <!-- AFTER -->
+            <div>
+              <div class="lbl text-slate-500 mb-2">After · one implementation, the collection lane</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 lanes relative">
+                <div class="space-y-1.5 opacity-40">
+                  <div class="lbl text-slate-500 line-through">legacy lane</div>
+                  <div class="band band-ghost line-through">VAULT_PATH as a Vault source</div>
+                  <div class="band band-ghost line-through">ready_vault · run_reindex</div>
+                  <div class="band band-ghost line-through">spawn_sync_task · GitSyncHandle</div>
+                  <div class="band band-ghost line-through">sync.rs remote half</div>
+                  <div class="band band-ghost line-through">search::run · retrieve · assemble</div>
+                  <div class="band band-ghost line-through">diagnostics.rs · dead cache queries</div>
+                </div>
+                <div class="space-y-1.5 pt-5">
+                  <div class="band flex items-center gap-1"><span>settings save → Index turn for every active Vault</span><svg width="22" height="10" viewBox="0 0 22 10"><path d="M0 5 H19 M15 1 L19 5 L15 9" fill="none" stroke="#059669" stroke-width="2"/></svg></div>
+                  <div class="band flex items-center gap-1"><span>Git behaviour lives per Vault (already in vaults.rs)</span><svg width="22" height="10" viewBox="0 0 22 10"><path d="M0 5 H19 M15 1 L19 5 L15 9" fill="none" stroke="#059669" stroke-width="2"/></svg></div>
+                  <div class="band flex items-center gap-1"><span>Index turn signals marker-set change</span><svg width="22" height="10" viewBox="0 0 22 10"><path d="M0 5 H19 M15 1 L19 5 L15 9" fill="none" stroke="#059669" stroke-width="2"/></svg></div>
+                  <div class="band band-ghost">SettingsPage polls Vault discovery</div>
+                </div>
+                <div class="space-y-1.5">
+                  <div class="lbl text-slate-600">Vault collection lane</div>
+                  <div class="band"><span class="font-mono">VaultRegistryStore</span></div>
+                  <div class="band"><span class="font-mono">VaultCollectionRuntime</span></div>
+                  <div class="band"><span class="font-mono">VaultWorkCoordinator</span></div>
+                  <div class="band">Index turn → <span class="font-mono">vault_*</span> snapshot</div>
+                  <div class="band">Git turn → <span class="font-mono">managed_sync</span></div>
+                  <div class="band"><span class="font-mono">VaultSearchCore</span></div>
+                </div>
+                <div class="stamp absolute left-3 bottom-3 rounded border-2 border-red-500 text-red-600 font-mono text-[10px] leading-tight px-2 py-1 bg-white/90 w-40">−4,000 prod lines<br/>−10 AppState fields · −3 routes</div>
+              </div>
+            </div>
+          </div>
+
+          <dl class="grid sm:grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="lbl text-slate-500 pt-1">Problem</dt>
+            <dd>The legacy implementation is not dead, it is a zombie: a Settings save of <span class="font-mono">HATCHDOOR_EXCLUDE</span> or <span class="font-mono">HATCHDOOR_EMBED_LAYERS</span> rebuilds the startup <span class="font-mono">VAULT_PATH</span> into tables no read uses, a <span class="font-mono">HATCHDOOR_GIT_*</span> save answers 503 until that rebuild has run, and modern MCP <span class="font-mono">tools.listChanged</span> honesty rests on a signal only the legacy rebuild sends.</dd>
+            <dt class="lbl text-slate-500 pt-1">Solution</dt>
+            <dd>Delete the lane; point the three surviving callers (settings reindex, Git settings, marker-set change) at the collection lane's coordinator and per-Vault definitions, and drop <span class="font-mono">VAULT_PATH</span> as a Vault source.</dd>
+            <dt class="lbl text-slate-500 pt-1">Deletion test</dt>
+            <dd>Nothing reappears. The collection lane already answers every product question the legacy lane did. The strongest possible yes.</dd>
+          </dl>
+
+          <div>
+            <div class="lbl text-slate-500 mb-2">Wins</div>
+            <ul class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm list-disc list-inside">
+              <li>Locality: one indexing path, one Git path</li>
+              <li><span class="font-mono">AppState</span> 25 → 15 fields</li>
+              <li>Every test fixture stops calling <span class="font-mono">build_cache</span></li>
+              <li>Settings saves act on the Vault collection</li>
+              <li><span class="font-mono">listChanged</span> fed by the real Index turn</li>
+              <li>Module map sheds its stale entries</li>
+            </ul>
+          </div>
+
+          <div class="rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-2">
+            <span class="font-medium">ADR-10</span> describes the mechanism this lane implements (debounced background commit-and-push). The managed per-Vault Git turn superseded it in practice without a record. Worth reopening: ship a superseding ADR alongside the deletion so the "writes do not block on sync" invariant is restated for the collection lane.
+          </div>
+
+          <div class="rounded-md border border-dashed border-slate-300 p-4 text-sm space-y-2">
+            <div class="lbl text-slate-500">Unlocked after this card</div>
+            <div class="flex flex-wrap gap-x-8 gap-y-2">
+              <div><span class="rounded-full bg-slate-200 text-slate-700 px-2 py-0.5 text-xs mr-2">Speculative</span><span class="font-medium">One cache table family.</span> Every Index turn builds through the legacy <span class="font-mono">notes/chunks</span> schema in a candidate cache and transcribes into <span class="font-mono">vault_*</span> (<span class="font-mono">vault_snapshots.rs:141–188</span>). Once the legacy tables have no other writer the candidate schema can be the <span class="font-mono">vault_*</span> schema. ADR-15: needs eval numbers even if retrieval is nominally unchanged.</div>
+              <div><span class="rounded-full bg-slate-200 text-slate-700 px-2 py-0.5 text-xs mr-2">Speculative</span><span class="font-medium">Fold <span class="font-mono">git/sync.rs</span> into <span class="font-mono">managed_sync.rs</span>.</span> <span class="font-mono">managed_sync.rs</span> re-implements <span class="font-mono">stage_vault_drift</span> and <span class="font-mono">merge_remote</span> with a different error type and imports nothing from <span class="font-mono">sync.rs</span>. After the lane goes, ~250 live lines remain in <span class="font-mono">sync.rs</span>. Needs the ADR-10 successor first.</div>
+            </div>
+          </div>
+        </article>
+
+        <!-- ================= CARD 2 ================= -->
+        <article id="c2" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <header class="space-y-3">
+            <h2 class="font-serif text-2xl">2. Give Vault mutation a core to match <span class="font-mono text-xl">VaultReadCore</span></h2>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-emerald-100 text-emerald-800 px-2.5 py-0.5 font-medium">Strong</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">local-substitutable</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">safety-critical</span>
+            </div>
+          </header>
+          <div class="font-mono text-sm text-slate-700 leading-6">
+            src/handlers/vault_write.rs (1,224 · 5 tests) · src/mcp/tools/write.rs (1,499 · 5 tests) · src/mcp/tools/batch.rs · src/mcp/tools/mod.rs:110–137 · src/vault/write/** (15 primitives) · src/vault_read.rs (<span class="text-slate-400">control_block, runtime_error widened for this</span>)
+          </div>
+
+          <div class="grid lg:grid-cols-2 gap-6">
+            <!-- BEFORE -->
+            <div>
+              <div class="lbl text-slate-500 mb-2">Before · two "thin" adapters, each taller than the module they wrap</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 flex flex-col gap-2">
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <div class="lbl text-slate-600 mb-1">HTTP adapter · 1,224 lines · 8 ops</div>
+                    <div class="space-y-0.5">
+                      <div class="band">parse Vault ID · <span class="font-mono">parse_vault_id</span></div>
+                      <div class="band">control-block gate via <span class="font-mono">VaultReadCore::new(..).control_block</span></div>
+                      <div class="band"><span class="font-mono">capabilities.mutate</span> → 409</div>
+                      <div class="band"><span class="font-mono">acquire_mutation</span></div>
+                      <div class="band">authoritative index · <span class="font-mono">spawn_blocking</span></div>
+                      <div class="band">slug → entry · <span class="font-mono">note_entry</span></div>
+                      <div class="band">noise / marker refusal · <span class="font-mono">reject_noise_write</span></div>
+                      <div class="band">archive prefix · <span class="font-mono">replace_filename</span></div>
+                      <div class="band"><span class="font-mono">WriteError</span> → code/message/retryable</div>
+                    </div>
+                  </div>
+                  <div>
+                    <div class="lbl text-slate-600 mb-1">MCP adapter · 1,499 lines · 15 ops</div>
+                    <div class="space-y-0.5">
+                      <div class="band">parse Vault ID · <span class="font-mono">readable_vault</span></div>
+                      <div class="band">control-block gate via <span class="font-mono">VaultReadCore::new(..).control_block</span></div>
+                      <div class="band"><span class="font-mono">capabilities.mutate</span> → <span class="font-mono">JsonRpcFailure</span> carrying <span class="font-mono">VaultApiError</span> as a string</div>
+                      <div class="band"><span class="font-mono">acquire_mutation</span></div>
+                      <div class="band band-red">the write runs inline on the async runtime (:249, :481, :502)</div>
+                      <div class="band">slug → entry · <span class="font-mono">note_entry</span> (copy)</div>
+                      <div class="band">noise / marker refusal · <span class="font-mono">refuse_noise_write</span></div>
+                      <div class="band">archive prefix · <span class="font-mono">replace_filename</span> (byte-for-byte copy)</div>
+                      <div class="band"><span class="font-mono">write_error_to_jsonrpc</span> · same 4-code table</div>
+                    </div>
+                  </div>
+                </div>
+                <div class="grid grid-cols-[minmax(0,1fr)_10rem] gap-2 items-center">
+                  <div class="band text-center"><span class="font-mono">vault/write</span> · 15 primitives · the actual implementation</div>
+                  <div class="band band-red text-center">7 primitives reachable only via MCP<br/>+ <span class="font-mono">batch.rs</span> hash chain, MCP only</div>
+                </div>
+              </div>
+            </div>
+            <!-- AFTER -->
+            <div>
+              <div class="lbl text-slate-500 mb-2">After · one deep module, two adapters that only shape the wire</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 flex flex-col gap-2">
+                <div class="grid grid-cols-3 gap-2">
+                  <div class="band text-center">HTTP adapter<br/><span class="text-slate-500">status codes</span></div>
+                  <div class="band text-center">MCP adapter<br/><span class="text-slate-500">isError · structuredContent</span></div>
+                  <div class="band text-center"><span class="font-mono">batch</span><br/><span class="text-slate-500">loop + hash chain</span></div>
+                </div>
+                <svg class="mx-auto" width="200" height="14" viewBox="0 0 200 14"><line x1="0" y1="7" x2="200" y2="7" stroke="#475569" stroke-width="1.5" class="seam"/></svg>
+                <div class="deep rounded-lg p-4 flex-1">
+                  <div class="lbl text-emerald-300 mb-2">Vault mutation core · all 15 primitives</div>
+                  <div class="grid grid-cols-3 gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                    <span>Vault ID + control-block gate</span><span>capability check</span><span>per-Vault lock</span>
+                    <span>index build off-thread</span><span>slug → entry</span><span>noise / marker refusal</span>
+                    <span>archive prefix</span><span>write off-thread</span><span>typed outcome + error</span>
+                  </div>
+                  <div class="mt-3 text-xs text-slate-300">Sits beside <span class="font-mono">VaultReadCore</span>; same shape, same gating, same error type.</div>
+                </div>
+                <div class="band text-center"><span class="font-mono">vault/write</span> · 15 primitives · unchanged</div>
+              </div>
+            </div>
+          </div>
+
+          <dl class="grid sm:grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="lbl text-slate-500 pt-1">Problem</dt>
+            <dd>ADR-03 puts one write module behind both adapters, but the nine-step prologue and epilogue around it exist twice, 8 of 15 operations are implemented twice, and the two copies have already drifted (MCP runs writes on the async runtime; HTTP offloads them).</dd>
+            <dt class="lbl text-slate-500 pt-1">Solution</dt>
+            <dd>Move the prologue and epilogue into a Vault mutation core mirroring <span class="font-mono">VaultReadCore</span>; both adapters shrink to wire shaping and HTTP gains the seven MCP-only primitives for free.</dd>
+            <dt class="lbl text-slate-500 pt-1">Deletion test</dt>
+            <dd>Delete either adapter and every step reappears in the other. Two shallow adapters wrapping an absent deep module.</dd>
+          </dl>
+
+          <div>
+            <div class="lbl text-slate-500 mb-2">Wins</div>
+            <ul class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm list-disc list-inside">
+              <li>Locality: one place to audit data-loss safety</li>
+              <li>Leverage: 15 primitives, 3 adapters, one interface</li>
+              <li>~22 <span class="font-mono">server.rs</span> write tests move to the core</li>
+              <li>Async-runtime drift fixed once, everywhere</li>
+              <li>Error type stops round-tripping as a string</li>
+              <li><span class="font-mono">batch</span> becomes a loop over the core</li>
+            </ul>
+          </div>
+
+          <div class="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm px-4 py-2">
+            <span class="font-medium">ADR-03 / ADR-13.</span> Delivers ADR-03's intent at the seam where it is currently only nominal. No trait needed: a struct like <span class="font-mono">VaultReadCore</span> satisfies ADR-13.
+          </div>
+        </article>
+
+        <!-- ================= CARD 3 ================= -->
+        <article id="c3" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <header class="space-y-3">
+            <h2 class="font-serif text-2xl">3. Lift Vault collection management out of <span class="font-mono text-xl">handlers/vaults.rs</span></h2>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-amber-100 text-amber-800 px-2.5 py-0.5 font-medium">Worth exploring</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">local-substitutable</span>
+            </div>
+          </header>
+          <div class="font-mono text-sm text-slate-700 leading-6">
+            src/handlers/vaults.rs (1,768 · 7 tests) · src/mcp/tools/read.rs:353–453 · src/vault_registry.rs · src/vault_runtime.rs · src/git/managed_task.rs
+          </div>
+
+          <div class="grid lg:grid-cols-2 gap-6">
+            <div>
+              <div class="lbl text-slate-500 mb-2">Before · the orchestration lives in a handler; MCP imports the handler as a library</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-white p-3">
+                <pre class="mermaid">
+flowchart TB
+  R["HTTP router<br/>/api/v1/vaults/*"] --> H
+  M["mcp/tools/read.rs<br/>7 management tools"] -. "calls handler fns with<br/>hand-built extractors" .-> H
+  W["vault_write.rs · vault_content.rs<br/>mcp/tools/write.rs"] -. "construct VaultApiError" .-> H
+  H["handlers/vaults.rs<br/>11 handlers · VaultApiError<br/>reconcile_after_commit · mutation_response<br/>public_vault_summary · credential-retry rule"]
+  H --> REG["VaultRegistryStore"]
+  H --> RT["VaultCollectionRuntime"]
+  H --> SCH["ManagedGitScheduler"]
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#991b1b;
+  class M,W leak
+                </pre>
+              </div>
+            </div>
+            <div>
+              <div class="lbl text-slate-500 mb-2">After · one deep module; both adapters shape the wire</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-white p-3">
+                <pre class="mermaid">
+flowchart TB
+  R["HTTP adapter<br/>vaults.rs · status codes only"] --> C
+  M["MCP adapter<br/>7 management tools"] --> C
+  C["Vault collection management<br/>commit · reconcile · revision response<br/>projections (redacted / public) · structured error"]:::deep
+  C --> REG["VaultRegistryStore"]
+  C --> RT["VaultCollectionRuntime"]
+  C --> SCH["ManagedGitScheduler"]
+  classDef deep fill:#0f172a,color:#f8fafc,stroke:#0f172a,stroke-width:3px;
+                </pre>
+              </div>
+            </div>
+          </div>
+
+          <dl class="grid sm:grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="lbl text-slate-500 pt-1">Problem</dt>
+            <dd>The registry-commit → runtime-reconcile → collection-revision protocol, the demo projection fork, and the credential-replacement retry rule have no home outside HTTP; <span class="font-mono">VaultApiError</span> is the crate's de-facto structured error and is defined in a handler file.</dd>
+            <dt class="lbl text-slate-500 pt-1">Solution</dt>
+            <dd>A Vault collection management module owns that orchestration and the error type; <span class="font-mono">vaults.rs</span> and the seven MCP tools become adapters over it.</dd>
+            <dt class="lbl text-slate-500 pt-1">Deletion test</dt>
+            <dd>Delete <span class="font-mono">vaults.rs</span> and the seven MCP tools lose their implementation. It earns its keep, at the wrong seam.</dd>
+          </dl>
+
+          <div>
+            <div class="lbl text-slate-500 mb-2">Wins</div>
+            <ul class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm list-disc list-inside">
+              <li>Locality: one commit-reconcile-respond sequence</li>
+              <li>MCP management tools lose the handler dependency</li>
+              <li>Structured error named for what it is</li>
+              <li>7 handler tests become module tests</li>
+            </ul>
+          </div>
+          <div class="rounded-md bg-slate-50 border border-slate-200 text-slate-700 text-sm px-4 py-2">Pairs with card 4: the seven management tools are half of the sixteen that proxy handlers. No ADR conflict.</div>
+        </article>
+
+        <!-- ================= CARD 4 ================= -->
+        <article id="c4" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <header class="space-y-3">
+            <h2 class="font-serif text-2xl">4. MCP reads cross the domain seam, not the HTTP one</h2>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-amber-100 text-amber-800 px-2.5 py-0.5 font-medium">Worth exploring</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">in-process</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">Strong with cards 2 + 3</span>
+            </div>
+          </header>
+          <div class="font-mono text-sm text-slate-700 leading-6">
+            src/mcp/tools/read.rs:32–54 (<span class="text-slate-400">handler_payload</span>), 137–265 · src/mcp/results.rs (700) · src/mcp/protocol.rs:154–171 · src/vault_read.rs · src/search/vault_scoped.rs
+          </div>
+
+          <div class="grid lg:grid-cols-2 gap-6">
+            <div>
+              <div class="lbl text-slate-500 mb-2">Before · six hops, three serialisations, one 2 MiB cap</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-white p-3">
+                <pre class="mermaid">
+sequenceDiagram
+  participant T as MCP read tool
+  participant H as axum handler
+  participant C as VaultReadCore
+  T->>H: State(state), Path((vault_id, slug))
+  H->>C: exact_note
+  C-->>H: projection
+  H-->>T: Response (JSON bytes)
+  T->>T: to_bytes, 2 MiB cap
+  T->>T: Value, then results::T
+  T->>T: result_to_value again
+  Note over T: content[0].text + structuredContent
+                </pre>
+              </div>
+            </div>
+            <div>
+              <div class="lbl text-slate-500 mb-2">After · one hop, one serialisation, one type</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-white p-3">
+                <pre class="mermaid">
+sequenceDiagram
+  participant T as MCP read tool
+  participant C as VaultReadCore / VaultSearchCore
+  T->>C: exact_note (BrowseSurface applied)
+  C-->>T: projection, which is results::T
+  Note over T: serialise once for rmcp
+  Note over C: the 4 attachment tools use the<br/>same gate instead of bypassing it
+                </pre>
+              </div>
+            </div>
+          </div>
+
+          <dl class="grid sm:grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="lbl text-slate-500 pt-1">Problem</dt>
+            <dd>All 9 read tools and 7 management tools build axum extractors, call a handler, read the <span class="font-mono">Response</span> body back through a byte cap and two serde passes; zero tools call <span class="font-mono">VaultReadCore</span> or <span class="font-mono">VaultSearchCore</span>. Testing one tool means the full transport on both sides (all 84 tests in <span class="font-mono">mcp/routes.rs</span>).</dd>
+            <dt class="lbl text-slate-500 pt-1">Solution</dt>
+            <dd>Tools call the read and search cores directly, and <span class="font-mono">results.rs</span> types are the projection types, so "handler drift fails loudly" becomes "there is one type".</dd>
+            <dt class="lbl text-slate-500 pt-1">Deletion test</dt>
+            <dd>Deleting the proxy concentrates nothing: the cores already own the logic. The proxy is pass-through plus a schema check that belongs on the type.</dd>
+          </dl>
+
+          <div>
+            <div class="lbl text-slate-500 mb-2">Wins</div>
+            <ul class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm list-disc list-inside">
+              <li>Tool tests need no HTTP framing</li>
+              <li>Interface is the test surface: the core</li>
+              <li>One serialisation instead of three</li>
+              <li>Demo surface gating reaches attachment tools</li>
+            </ul>
+          </div>
+          <div class="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm px-4 py-2">
+            <span class="font-medium">ADR-17 / ADR-02.</span> ADR-17 wants the tool catalogue framework-independent; this removes its dependence on axum. ADR-02's "one shared core" is today satisfied by routing MCP through the HTTP adapter rather than the core.
+          </div>
+        </article>
+
+        <!-- ================= CARD 5 ================= -->
+        <article id="c5" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <header class="space-y-3">
+            <h2 class="font-serif text-2xl">5. Put the Index turn and Git turn behind one Vault work executor</h2>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-amber-100 text-amber-800 px-2.5 py-0.5 font-medium">Worth exploring</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">local-substitutable</span>
+            </div>
+          </header>
+          <div class="font-mono text-sm text-slate-700 leading-6">
+            src/server.rs:72–126, 1259–1343, 1411–1440 · src/vault_runtime.rs:1759–2322 · src/vault_work.rs · src/cache/vault_snapshots.rs · src/git/managed_task.rs · src/startup.rs
+          </div>
+
+          <div class="grid lg:grid-cols-2 gap-6">
+            <div>
+              <div class="lbl text-slate-500 mb-2">Before · an Index turn spans 7 files, a Git turn 9; readiness policy sits inside the loop</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 pl-5 space-y-1.5">
+                <div class="step band"><span class="num">1</span><span class="font-mono">server.rs</span> · <span class="font-mono">forward_vault_change_intent</span> :1411 · watcher intent becomes an Index request</div>
+                <div class="step band"><span class="num">2</span><span class="font-mono">vault_work.rs</span> · <span class="font-mono">VaultWorkCoordinator</span> FIFO → <span class="font-mono">VaultWorkWorker::run_next</span></div>
+                <div class="step band band-red"><span class="num">3</span><span class="font-mono">server.rs</span> · <span class="font-mono">run_server</span> dispatch loop :1259–1334 · builds <span class="font-mono">VaultWorkDispatchContext</span> :72–126 per turn · <span class="font-medium">readiness rule inline</span> (<span class="font-mono">collection_indexes_ready</span> :1431)</div>
+                <div class="step band"><span class="num">4</span><span class="font-mono">vault_runtime.rs</span> · <span class="font-mono">dispatch_vault_index_turn_with_progress</span> (155 lines) <span class="text-slate-400">or</span> <span class="font-mono">dispatch_managed_git_turn_with</span> (307 lines, 3 source/mode arms)</div>
+                <div class="grid grid-cols-2 gap-1.5">
+                  <div class="step band"><span class="num">5</span><span class="font-mono">cache/vault_snapshots.rs</span> · 4 methods · candidate build → publish</div>
+                  <div class="step band"><span class="num">5</span><span class="font-mono">git/managed_task</span> · <span class="font-mono">managed_sync</span> · <span class="font-mono">managed_checkout</span> · <span class="font-mono">sync.rs</span></div>
+                </div>
+                <div class="step band"><span class="num">6</span><span class="font-mono">vault_runtime.rs</span> · <span class="font-mono">publish_managed_git_turn_outcome</span> :2284 · status, scheduler outcome, optional Index request</div>
+                <div class="step band"><span class="num">7</span><span class="font-mono">startup.rs</span> · <span class="font-mono">set_ready</span> / <span class="font-mono">set_failed</span>, called from step 3's loop body</div>
+                <div class="text-[10px] text-slate-500 pt-1">7 files for an Index turn, 9 for a Git turn; step 3 is the only one with no interface of its own.</div>
+              </div>
+            </div>
+            <div>
+              <div class="lbl text-slate-500 mb-2">After · <span class="font-mono">run_server</span> calls one thing; <span class="font-mono">vault_runtime.rs</span> is lifecycle only</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 flex flex-col gap-2">
+                <div class="band text-center"><span class="font-mono">run_server</span> · build, start, shut down</div>
+                <svg class="mx-auto" width="200" height="14" viewBox="0 0 200 14"><line x1="0" y1="7" x2="200" y2="7" stroke="#475569" stroke-width="1.5" class="seam"/></svg>
+                <div class="deep rounded-lg p-4 flex-1">
+                  <div class="lbl text-emerald-300 mb-2">Vault work executor</div>
+                  <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-400">
+                    <span>drain the coordinator</span><span>bind a config snapshot per turn</span>
+                    <span>Index turn body (155 lines)</span><span>Git turn body (307 lines)</span>
+                    <span>outcome publication</span><span>watcher intent forwarding</span>
+                    <span class="col-span-2">readiness rule: Ready when every active Vault's Index turn settles; Failed on any non-<span class="font-mono">embedder_not_ready</span> error</span>
+                  </div>
+                </div>
+                <div class="grid grid-cols-3 gap-2">
+                  <div class="band text-center"><span class="font-mono">vault_runtime</span><br/><span class="text-slate-500">control blocks · reconcile</span></div>
+                  <div class="band text-center"><span class="font-mono">cache/vault_snapshots</span><br/><span class="text-slate-500">4 methods, unchanged</span></div>
+                  <div class="band text-center"><span class="font-mono">git/managed_*</span><br/><span class="text-slate-500">unchanged</span></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <dl class="grid sm:grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="lbl text-slate-500 pt-1">Problem</dt>
+            <dd>"What happens when a Vault is indexed" bounces across seven files, and the rule that decides startup readiness lives in the body of a loop inside <span class="font-mono">run_server</span>, testable only by running the server.</dd>
+            <dt class="lbl text-slate-500 pt-1">Solution</dt>
+            <dd>One module owns the dispatch context, both turn bodies, outcome publication, and the readiness rule; <span class="font-mono">vault_runtime.rs</span> keeps lifecycle (control blocks, reconcile), which is what its name says.</dd>
+            <dt class="lbl text-slate-500 pt-1">Deletion test</dt>
+            <dd>Delete the loop and the dispatch policy reappears wherever the worker is driven. Real complexity, just not behind a seam.</dd>
+          </dl>
+
+          <div>
+            <div class="lbl text-slate-500 mb-2">Wins</div>
+            <ul class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm list-disc list-inside">
+              <li>Locality: one file per turn kind</li>
+              <li>Readiness rule testable without <span class="font-mono">run_server</span></li>
+              <li><span class="font-mono">vault_runtime.rs</span> 2,329 → lifecycle only</li>
+              <li><span class="font-mono">run_server</span> loses ~90 lines of policy</li>
+            </ul>
+          </div>
+          <div class="rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 text-sm px-4 py-2">
+            <span class="font-medium">ADR-02 / ADR-13.</span> ADR-02 accepts a large composition root; this keeps composition there and moves execution policy out. Plain struct, no trait.
+          </div>
+        </article>
+
+        <!-- ================= CARD 6 ================= -->
+        <article id="c6" class="rounded-xl border border-slate-200 bg-white p-8 space-y-6 shadow-sm">
+          <header class="space-y-3">
+            <h2 class="font-serif text-2xl">6. Frontend: one Vault collection client instead of seven files and eight callers</h2>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full bg-amber-100 text-amber-800 px-2.5 py-0.5 font-medium">Worth exploring</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">in-process</span>
+              <span class="rounded-full bg-white ring-1 ring-slate-300 text-slate-600 px-2.5 py-0.5">second tier</span>
+            </div>
+          </header>
+          <div class="font-mono text-sm text-slate-700 leading-6">
+            frontend/src/hooks/useVaultScope.ts · hooks/useVaultTree.ts:112–142 · app/vaultSlotLogic.ts · app/vaultSlot.tsx · app/vaultAccordion.ts · lib/vaultParticipants.ts · lib/stateCompare.ts (945 lines) · App.tsx <span class="text-slate-400">VaultWorkspace</span> 74–1052
+          </div>
+
+          <div class="grid lg:grid-cols-2 gap-6">
+            <div>
+              <div class="lbl text-slate-500 mb-2">Before · a pure function with eight callers that each decide what "count" means</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-white p-3">
+                <pre class="mermaid">
+flowchart LR
+  A["vaultSlot.tsx<br/>count = /all/stats"] --> D
+  B["ExplorerPane.tsx<br/>count = /all/stats"] --> D
+  C["GraphPage.tsx<br/>count = island.nodeCount"] --> D
+  E["NotePage.tsx<br/>count = undefined"] --> D
+  F["VaultSettingsIndex.tsx<br/>demoMode omitted"] --> D
+  G["AppTopbar.tsx · App.tsx<br/>vaultAccordion.ts (3 more)"] --> D
+  D["deriveVaultSlot(vault, count, demoMode)<br/>vaultSlotLogic.ts"]
+  T["useVaultTree.ts<br/>the one SSE revision"] -.-> N["useVaultNoteCounts<br/>useVaultScope.ts"]
+  S["loadVaults<br/>re-called by hand after mutations"] -.-> D
+  classDef leak stroke:#dc2626,stroke-width:2px,color:#991b1b;
+  class C,E,F,S leak
+                </pre>
+              </div>
+            </div>
+            <div>
+              <div class="lbl text-slate-500 mb-2">After · surfaces ask one module; inputs are decided once</div>
+              <div class="diagram rounded-lg border border-slate-200 bg-stone-50 p-3 flex flex-col gap-2">
+                <div class="flex flex-wrap gap-1.5 justify-center">
+                  <span class="band">Scope zone</span><span class="band">accordion</span><span class="band">topbar sheet</span><span class="band">graph islands</span><span class="band">NotePage escalation</span><span class="band">Settings index</span><span class="band">Search facets</span>
+                </div>
+                <svg class="mx-auto" width="200" height="14" viewBox="0 0 200 14"><line x1="0" y1="7" x2="200" y2="7" stroke="#475569" stroke-width="1.5" class="seam"/></svg>
+                <div class="deep rounded-lg p-4 flex-1">
+                  <div class="lbl text-emerald-300 mb-2">Vault collection client</div>
+                  <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-400">
+                    <span>discovery, revision-driven</span><span>the one SSE subscription</span>
+                    <span>per-Vault note counts</span><span>slot derivation per surface</span>
+                    <span>participants and "did not answer"</span><span>demo clamp applied once</span>
+                  </div>
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <div class="band text-center"><span class="font-mono">GET /api/v1/vaults</span></div>
+                  <div class="band text-center"><span class="font-mono">/api/v1/vaults/events</span> SSE</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <dl class="grid sm:grid-cols-[7rem_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt class="lbl text-slate-500 pt-1">Problem</dt>
+            <dd>The pure pieces are unit-tested, but the bugs hide in how they are called: four different meanings of <span class="font-mono">count</span>, one caller omitting <span class="font-mono">demoMode</span>, discovery refreshed by hand while the revision stream lives in the tree hook. Only composition tests cover the wiring, and <span class="font-mono">App.tsx</span> threads ~65 props to make it work.</dd>
+            <dt class="lbl text-slate-500 pt-1">Solution</dt>
+            <dd>One client module owns discovery, revision, counts, and slot derivation so a surface asks for its Vault's condition instead of assembling the inputs.</dd>
+            <dt class="lbl text-slate-500 pt-1">Deletion test</dt>
+            <dd>Delete <span class="font-mono">vaultSlotLogic.ts</span> and the derivation reappears in eight files. Earning its keep; the missing piece is locality for its inputs.</dd>
+          </dl>
+
+          <div>
+            <div class="lbl text-slate-500 mb-2">Wins</div>
+            <ul class="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm list-disc list-inside">
+              <li>Locality: count and demo clamp decided once</li>
+              <li>Discovery follows the revision stream</li>
+              <li>Fewer props through <span class="font-mono">App.tsx</span></li>
+              <li>Surface tests assert conditions, not inputs</li>
+            </ul>
+          </div>
+          <div class="rounded-md bg-slate-50 border border-slate-200 text-slate-700 text-sm px-4 py-2">ADR-13: a hook or plain module, no state library.</div>
+        </article>
+      </section>
+
+      <!-- ============ TOP RECOMMENDATION ============ -->
+      <section id="top-recommendation" class="rounded-xl deep p-10 space-y-4 shadow-lg">
+        <div class="lbl text-emerald-300">Top recommendation</div>
+        <h2 class="font-serif text-3xl"><a href="#c1" class="underline decoration-emerald-400 underline-offset-4">1. Retire the legacy single-Vault lane</a></h2>
+        <p class="text-slate-200 max-w-3xl">It is the only candidate that fixes wrong behaviour today (a Settings reindex that rebuilds the wrong index, Git settings that answer 503, a <span class="font-mono">listChanged</span> signal with a dead sender), and it clears the ground for everything else: every later candidate's tests inherit the fixtures and the 25-field <span class="font-mono">AppState</span> this deletion halves.</p>
+        <p class="text-slate-400 text-sm">Next: <a href="#c2" class="underline underline-offset-2">card 2</a>, the Vault mutation core, the highest-churn and most safety-critical seam in the codebase.</p>
+      </section>
+
+      <footer class="text-xs text-slate-400 pt-4">Generated by /improve-codebase-architecture · vocabulary from /codebase-design · domain terms from CONTEXT.md · read-only, nothing in the repo was modified.</footer>
+    </main>
+  </body>
+</html>
