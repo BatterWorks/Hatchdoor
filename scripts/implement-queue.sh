@@ -17,9 +17,15 @@
 #   LOG_DIR         per-ticket transcripts            (default: tmp/implement-queue)
 #   TICKET_TIMEOUT  wall-clock cap per ticket         (default: 3h)
 #   MAX_BUDGET_USD  optional spend cap per ticket     (default: unset)
+#   MODEL           model alias for every ticket      (default: opus)
+#   EFFORT          effort level                      (default: medium)
 #
 # Runs with --dangerously-skip-permissions: the agent can run any command
 # without prompting. Halts the whole loop on the first failed gate.
+#
+# Every ticket, finished or failed, is recorded in a TSV ledger under LOG_DIR
+# with the gate it died on, its wall time, cost and turn count, so a morning
+# review shows what worked and what did not.
 
 set -uo pipefail
 
@@ -30,6 +36,8 @@ MAX_TICKETS="${1:-20}"
 BRANCH="${BRANCH:-development}"
 LOG_DIR="${LOG_DIR:-tmp/implement-queue}"
 TICKET_TIMEOUT="${TICKET_TIMEOUT:-3h}"
+MODEL="${MODEL:-opus}"
+EFFORT="${EFFORT:-medium}"
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 
 # The inner agent's Bash tool defaults to a 120s per-command timeout, capped at
@@ -41,12 +49,47 @@ export BASH_MAX_TIMEOUT_MS="${BASH_MAX_TIMEOUT_MS:-1800000}"
 
 mkdir -p "$LOG_DIR"
 
+LEDGER="$LOG_DIR/$RUN_ID-ledger.tsv"
+printf 'issue\toutcome\tgate\tseconds\tcost_usd\tturns\tcommit\ttitle\n' > "$LEDGER"
+
 # stderr, so a log line inside eligible_issues can never be captured as a queue entry.
 log() { printf '\n[queue %s] %s\n' "$(date +%H:%M:%S)" "$*" >&2; }
 
+# Pull cost/turns off the final stream-json result event. The log interleaves
+# stderr, so select the result line rather than parsing the file as a whole.
+result_field() {
+  local file="$1" field="$2" line
+  line="$(grep '"type":"result"' "$file" 2>/dev/null | tail -1)"
+  [[ -n "$line" ]] || { echo "-"; return; }
+  printf '%s' "$line" | jq -r "(.$field // \"-\") | tostring" 2>/dev/null || echo "-"
+}
+
+record() {
+  # issue, outcome, gate, seconds, cost, turns, commit, title
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$@" >> "$LEDGER"
+}
+
+summary() {
+  [[ -s "$LEDGER" ]] || return 0
+  log "Ledger: $LEDGER"
+  column -t -s $'\t' "$LEDGER" >&2 2>/dev/null || cat "$LEDGER" >&2
+}
+
+# Ticket context for the failure path; empty during preflight.
+target=""; title=""; ticket_started=0; ticket_log=""
+
 halt() {
-  log "HALTED: $*"
+  local gate="${2:-preflight}"
+  if [[ -n "$target" ]]; then
+    record "$target" "FAILED" "$gate" \
+      "$(( $(date +%s) - ticket_started ))" \
+      "$(result_field "$ticket_log" total_cost_usd)" \
+      "$(result_field "$ticket_log" num_turns)" \
+      "-" "$title"
+  fi
+  log "HALTED: $1"
   log "Worktree and issue left as-is for inspection. Logs: $LOG_DIR/$RUN_ID-*.log"
+  summary
   exit 1
 }
 
@@ -116,12 +159,14 @@ for (( i = 1; i <= MAX_TICKETS; i++ )); do
 
   if (( ${#queue[@]} == 0 )); then
     log "No eligible ready-for-agent tickets left. Done after $completed ticket(s)."
+    summary
     exit 0
   fi
 
   target="${queue[0]}"
-  title="$(gh issue view "$target" --json title --jq .title)"
+  title="$(gh issue view "$target" --json title --jq .title | tr '\t' ' ')"
   head_before="$(git rev-parse HEAD)"
+  ticket_started="$(date +%s)"
   log "Ticket $i/$MAX_TICKETS -> #$target: $title"
   log "Remaining eligible: ${queue[*]}"
 
@@ -135,6 +180,8 @@ for (( i = 1; i <= MAX_TICKETS; i++ )); do
   # pipeline forever and no gate below would ever run. timeout returns 124.
   timeout --kill-after=60 "$TICKET_TIMEOUT" \
     claude -p "/implement" \
+      --model "$MODEL" \
+      --effort "$EFFORT" \
       --dangerously-skip-permissions \
       --verbose \
       --output-format stream-json \
@@ -143,28 +190,36 @@ for (( i = 1; i <= MAX_TICKETS; i++ )); do
 
   status="${PIPESTATUS[0]}"
 
-  # --- Gates ---
+  # --- Gates --- second argument names the gate for the ledger.
   (( status != 124 && status != 137 )) \
-    || halt "#$target: exceeded TICKET_TIMEOUT=$TICKET_TIMEOUT and was killed (see $ticket_log)"
-  (( status == 0 )) || halt "#$target: claude exited $status (see $ticket_log)"
+    || halt "#$target: exceeded TICKET_TIMEOUT=$TICKET_TIMEOUT and was killed (see $ticket_log)" timeout
+  (( status == 0 )) || halt "#$target: claude exited $status (see $ticket_log)" exit-status
 
   [[ -z "$(git status --porcelain)" ]] \
-    || halt "#$target: worktree left dirty; the run did not finish cleanly"
+    || halt "#$target: worktree left dirty; the run did not finish cleanly" dirty-worktree
 
   state="$(gh issue view "$target" --json state --jq .state)"
   [[ "$state" == "CLOSED" ]] \
-    || halt "#$target: still $state; /implement reported a blocking gate"
+    || halt "#$target: still $state; /implement reported a blocking gate" issue-open
 
   head_after="$(git rev-parse HEAD)"
   [[ "$head_after" != "$head_before" ]] \
-    || halt "#$target: closed but HEAD did not move; no commit was made"
+    || halt "#$target: closed but HEAD did not move; no commit was made" no-commit
 
-  git fetch --quiet origin "$BRANCH" || halt "#$target: could not fetch origin/$BRANCH"
+  git fetch --quiet origin "$BRANCH" || halt "#$target: could not fetch origin/$BRANCH" fetch-failed
   git merge-base --is-ancestor "$head_after" "origin/$BRANCH" \
-    || halt "#$target: commit $head_after is not on origin/$BRANCH; push did not land"
+    || halt "#$target: commit $head_after is not on origin/$BRANCH; push did not land" not-pushed
+
+  record "$target" "OK" "-" \
+    "$(( $(date +%s) - ticket_started ))" \
+    "$(result_field "$ticket_log" total_cost_usd)" \
+    "$(result_field "$ticket_log" num_turns)" \
+    "$(git rev-parse --short "$head_after")" "$title"
 
   completed=$(( completed + 1 ))
   log "#$target done and pushed ($head_after)."
+  target=""   # clear, so a later loop-level halt does not re-record this finished ticket
 done
 
 log "Reached the $MAX_TICKETS ticket cap. Completed $completed."
+summary
