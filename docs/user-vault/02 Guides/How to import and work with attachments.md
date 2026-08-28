@@ -14,7 +14,7 @@ Every upload path, browser or agent, is limited to the same file types and enfor
 | --- | --- | --- |
 | Extensions | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | — |
 | HTTP upload (Web UI and agents) | — | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, 10 MiB |
-| MCP base64 fallback (`import_attachment`) | — | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded |
+| MCP base64 fallback (`import_attachment` in, `get_attachment` out) | — | `HATCHDOOR_MCP_MAX_BASE64_BYTES`, 5 MiB decoded |
 
 Both limits are adjustable at runtime in **Settings → Uploads** — see [[Settings and environment variables reference]].
 
@@ -49,16 +49,27 @@ Both return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashe
 > [!tip]
 > There's no requirement to use the Vault-root `Attachments/` folder the Web UI uses — `target_relative_path` is any Vault-relative path you choose. Keeping the Web UI's convention makes files easy to find by browsing, but an agent following its own filing scheme (per-note folders, a `Sources/` layer) works just as well.
 
+## Getting one back out
+
+`get_attachment` is the mirror of the upload flow, with the same two methods and the same tradeoff between them. It takes `vault_id` and the `relative_path` exactly as `list_note_attachments` reports it, and an optional `encoding`:
+
+| `encoding` | Returns | When to use it |
+| --- | --- | --- |
+| `url` (default) | `content.download_url` — a path to resolve against the same scheme, host, and port as the MCP endpoint | The default. Note it's served by the ordinary web route, so it wants the **web** bearer token (`HATCHDOOR_WEB_BEARER_TOKEN`), as an `Authorization: Bearer` header or an `access_token` query parameter — not the MCP session's own token. With no web bearer token configured, or in demo mode, it needs no credential. |
+| `base64` | `content.content`, the bytes inline | The fallback, for a client that can't make an out-of-band HTTP request or can't get hold of that web token. Bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap as `import_attachment`; an oversized file is rejected with its measured size rather than truncated. |
+
+Reading an attachment is a read: `get_attachment` works whenever MCP is enabled, with no write mode required.
+
 ## Managing attachments already in the Vault
 
-| Tool | Does |
-| --- | --- |
-| `list_note_attachments` | Every attachment one note references, without pulling the note's full content — useful before deciding whether a move or rename is safe. |
-| `move_attachment` | Moves the file and rewrites every note that referenced it. |
-| `rename_attachment` | Renames the file in place and rewrites every reference. |
-| `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference — the same trash mechanism `delete_note` uses (see [[MCP tools reference#Write content tools]]), so it's recoverable from disk, not gone. |
+| Tool | Does | Write mode |
+| --- | --- | --- |
+| `list_note_attachments` | Every attachment one note references, without pulling the note's full content — useful before deciding whether a move or rename is safe. | Not required |
+| `move_attachment` | Moves the file and rewrites every note that referenced it. | Required |
+| `rename_attachment` | Renames the file in place and rewrites every reference. | Required |
+| `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference — the same trash mechanism `delete_note` uses (see [[MCP tools reference#Write content tools]]), so it's recoverable from disk, not gone. | Required |
 
-All four require `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write — see [[MCP tools reference#Write content tools]] for full parameters.
+The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write — see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); it is best-effort, so read each item's own `ok` rather than assuming the whole set landed.
 
 ---
 

@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+- The MCP endpoint now speaks the current **2026-07-28** protocol revision
+  alongside `2025-11-25`. On the modern revision there is no handshake: a client
+  opens with a stateless `server/discover` call and carries its protocol version
+  and per-request `_meta` on every request afterward. A client on `2025-11-25`
+  keeps its `initialize` session, unchanged. Live updates arrive through a single opt-in
+  `subscriptions/listen` stream instead of SSE subscribe/unsubscribe, and the
+  server now advertises `tools.listChanged` honestly on that surface — a client
+  on the older revision keeps negotiating it as `false` and reissuing
+  `tools/list`, as before. Discovery and `tools/list` responses carry a
+  five-minute private cache TTL so a stale catalogue heals itself.
+- The `/mcp` protocol boundary is now the `rmcp` library rather than a
+  hand-written JSON-RPC layer. Tool names, arguments, and response shapes are
+  unchanged; per-request security ordering (enabled check, token configured,
+  Origin allow-list, constant-time bearer compare, protocol-version header) is
+  unchanged.
+- Every MCP tool advertises an `outputSchema`, generated from the same typed
+  structure its responses serialize from, so a client can validate a result
+  against the contract it was given instead of inferring the shape.
+- **Four new MCP tools**, all purely additive — no existing tool's name,
+  arguments, or behavior changed:
+  - `get_frontmatter` reads one note's tags, aliases, and other properties
+    without its Markdown body. It answers under read permission, and a note with
+    no frontmatter block returns an empty projection rather than an error.
+  - `update_frontmatter` does a shallow top-level merge into a note's
+    frontmatter and leaves the body byte-for-byte untouched. Keys you don't
+    mention survive, an explicit `null` deletes one, a nested mapping is
+    replaced wholesale, a note without a block gets one created, and deleting
+    the last key strips the empty block. Same `expected_content_hash`
+    concurrency as every other write.
+  - `get_attachment` returns an attachment's bytes, mirroring the upload flow in
+    reverse: an HTTP `download_url` by default, base64 inline as the fallback for
+    a client that can't fetch out-of-band, bounded by the same
+    `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap as `import_attachment`. The download URL
+    is served by the ordinary web route, so it wants the **web** bearer token,
+    not the MCP one — the response says so rather than assuming a credential the
+    client may not hold.
+  - `batch` runs an ordered list of note and attachment operations in one call:
+    best-effort with a per-item result, no rollback, no mid-batch visibility.
+    Vault-management tools can't go inside one, and a batch is capped at 50
+    read-shaped and 20 write-shaped items. Within a single batch,
+    `expected_content_hash` is chained between items touching the same note, so
+    an agent can create or edit a note and reference it again later in the same
+    call without an intermediate read; a note the batch hasn't written validates
+    its hash normally. That relaxation never escapes the call — each touched
+    Vault's mutation lock is held for the rest of it.
+- MCP now has layered resource protection: a rolling 120-calls-per-minute quota
+  per bearer token, plus process-wide concurrency caps (8 ordinary calls, 2
+  concurrent `search_notes`). An over-limit request is rejected before dispatch
+  with `429` and a `Retry-After` header; protocol, discovery, and list handling
+  are exempt. The whole layer can be switched off at runtime with the new
+  instant setting `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` (default on).
+
+### ⚠️ Breaking changes — action required on upgrade
+- **MCP protocol revisions `2025-03-26` and `2025-06-18` are no longer served.**
+  The endpoint now advertises and accepts exactly `2026-07-28` and `2025-11-25`;
+  a client pinned to one of the two dropped revisions is refused on the
+  protocol-version header rather than silently downgraded. If an MCP client
+  stops connecting after this upgrade, check which revision it pins and update
+  it — nothing in Hatchdoor's own configuration restores the dropped ones.
+
 ## v2.5.0 - 2026-08-17
 
 - Attachment embeds written the way Obsidian writes them now render. A bare

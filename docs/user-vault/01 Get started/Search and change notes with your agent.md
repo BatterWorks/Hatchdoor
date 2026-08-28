@@ -37,6 +37,7 @@ The expected agent workflow is compact:
 | Find a note | `list_vaults` → `search_notes` |
 | Inspect it | `get_note` |
 | Add one item under a heading | `edit_note` or `replace_section`, with the returned content hash |
+| Change its tags or other metadata | `get_frontmatter` → `update_frontmatter`, with the returned content hash |
 | Check Vault state | `list_vaults` |
 
 Do not grant write access just because an agent is connected. Turn it back off
