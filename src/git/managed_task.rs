@@ -38,8 +38,8 @@ use super::managed_sync::{
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Backoff bounds for re-attempting a turn that failed for a retryable
-/// (transient) reason, loosely mirroring the legacy single-Vault task's
-/// bounds (`git/task.rs::RETRY_BASE`/`RETRY_MAX`) but capped by
+/// (transient) reason, loosely mirroring the retired single-Vault task's
+/// bounds (30s base, 60s ceiling; deleted in #185) but capped by
 /// `vault_registry::MIN_MANAGED_GIT_POLL_INTERVAL_SECS`: a "normal" schedule
 /// shorter than this bound would make it meaningless (see that constant's
 /// doc), so the two move together. `BACKOFF_MAX` must equal that floor.

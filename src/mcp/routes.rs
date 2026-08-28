@@ -281,13 +281,12 @@ fn too_many_requests(retry_after_seconds: u64) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_state::{ReadyVault, build_cache, test_embedder};
+    use crate::app_state::test_embedder;
     use crate::mcp::limits::TOOL_CALLS_PER_MINUTE;
     use axum::body::to_bytes;
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use tokio::sync::RwLock;
     use tower::ServiceExt;
 
     const TEST_TOKEN: &str = "test-token";
@@ -314,26 +313,16 @@ mod tests {
         config
     }
 
-    fn base_state(tmp: &TempDir, vault_root: Option<std::path::PathBuf>) -> AppState {
+    /// A Vault-less `AppState`: an empty registry over a fresh in-memory
+    /// snapshot database. `scoped_test_state` registers and indexes a Vault
+    /// into it.
+    fn base_state(tmp: &TempDir) -> AppState {
         let embedder = test_embedder();
-        let cache = match &vault_root {
-            Some(root) => build_cache(&root.clone(), embedder.as_ref()).expect("build cache"),
-            None => crate::app_state::VaultCache {
-                sqlite: Arc::new(
-                    crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
-                ),
-            },
-        };
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let sqlite = Arc::new(crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
         let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
-        let ready_vault = vault_root.map(|root| ReadyVault {
-            vault_path: root,
-            cache: cache.clone(),
-        });
         AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 tmp.path().join("state/vaults.json"),
             ),
@@ -341,10 +330,7 @@ mod tests {
             vault_work,
             managed_git,
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(ready_vault)),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
+            startup_sqlite: sqlite,
             mcp_tools_changed,
             runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
             embedder,
@@ -352,14 +338,8 @@ mod tests {
                 tmp.path().join("models"),
             )),
             model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(tokio::sync::RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: mcp_runtime_config(false),
             startup: crate::startup::StartupTracker::ready(),
         }
@@ -374,7 +354,7 @@ mod tests {
         std::fs::write(vault_root.join("Home.md"), "# Home\nalpha token\n[[Plan]]")
             .expect("write home");
         std::fs::write(vault_root.join("Plan.md"), "# Plan\nlinked note").expect("write plan");
-        let mut state = base_state(&tmp, Some(vault_root.clone()));
+        let mut state = base_state(&tmp);
         state.runtime_config = mcp_runtime_config(false);
         let state = scoped_test_state(state, vault_root);
         (state, tmp)
@@ -390,7 +370,7 @@ mod tests {
     /// A zero-Vault registry, for discovery/repair reachability tests (#103).
     fn empty_test_state() -> (AppState, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
-        let state = base_state(&tmp, None);
+        let state = base_state(&tmp);
         (state, tmp)
     }
 
@@ -415,7 +395,7 @@ mod tests {
             "---\ntags: [topic/x]\n---\n# Clip\nmelatonin clipping",
         )
         .expect("clip");
-        let state = base_state(&tmp, Some(vault_root.clone()));
+        let state = base_state(&tmp);
         let state = scoped_test_state(state, vault_root);
         (state, tmp)
     }
@@ -425,6 +405,26 @@ mod tests {
         let mut state = state;
         state.runtime_config = mcp_runtime_config(true);
         (state, tmp)
+    }
+
+    /// The registered test Vault's directory on disk, for the tests that
+    /// write fixture files straight into it. Replaces the retired legacy
+    /// `AppState::vault_path` accessor.
+    fn registered_vault_path(state: &AppState) -> std::path::PathBuf {
+        use crate::vault_registry::{VaultRegistryState, VaultSource};
+        let snapshot = match state.vault_registry.load().expect("load registry") {
+            VaultRegistryState::Ready(snapshot) => snapshot,
+            VaultRegistryState::Recovery(_) => panic!("test registry recovery"),
+        };
+        match snapshot
+            .definitions()
+            .next()
+            .expect("one registered test Vault")
+            .source()
+        {
+            VaultSource::Local { path } => path.clone(),
+            other => panic!("test Vault is not Local: {other:?}"),
+        }
     }
 
     fn scoped_test_state(state: AppState, vault_root: std::path::PathBuf) -> AppState {
@@ -1886,7 +1886,7 @@ mod tests {
             .next()
             .copied()
             .expect("registered test Vault");
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         std::fs::create_dir_all(vault_path.join("Sources")).expect("sources dir");
         std::fs::write(vault_path.join("Sources/diagram.png"), b"png-bytes").expect("attachment");
 
@@ -1920,7 +1920,7 @@ mod tests {
         use base64::Engine as _;
 
         let (state, _tmp) = test_state();
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         let bytes = b"not really a png but bytes are bytes";
         std::fs::write(vault_path.join("clip.png"), bytes).expect("attachment");
 
@@ -1949,7 +1949,7 @@ mod tests {
                 "4".to_string(),
             )])
             .expect("lower the base64 cap");
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         std::fs::write(vault_path.join("clip.png"), b"more than four bytes").expect("attachment");
 
         let body = call_tool(
@@ -2075,7 +2075,7 @@ mod tests {
         // The stable-message rule lives at the adapter boundary now; verify it
         // end to end by breaking a write's underlying Vault directory.
         let (state, _tmp) = write_state();
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         std::fs::remove_dir_all(&vault_path).expect("remove vault dir");
 
         let body = call_tool(
@@ -2099,7 +2099,7 @@ mod tests {
         let attachment = &body["result"]["structuredContent"]["attachment"];
         assert_eq!(attachment["relative_path"], "Assets/diagram.png");
         assert_eq!(attachment["size_bytes"], 9);
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         assert_eq!(
             std::fs::read(vault_path.join("Assets/diagram.png")).expect("read attachment"),
             b"png-bytes"
@@ -2134,10 +2134,7 @@ mod tests {
         .await;
         assert_eq!(created["result"]["structuredContent"]["ok"], true);
         assert!(
-            state
-                .vault_path()
-                .await
-                .expect("ready vault")
+            registered_vault_path(&state)
                 .join("Projects/New.md")
                 .exists()
         );
@@ -2160,7 +2157,7 @@ mod tests {
         );
 
         // A note with frontmatter projects tags/aliases/properties.
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         std::fs::write(
             vault_path.join("Tagged.md"),
             "---\ntags:\n  - space/hobby\naliases:\n  - Tagged Home\nstatus: active\n---\n\n# Tagged\nsecret body\n",
@@ -2201,14 +2198,8 @@ mod tests {
         )
         .await;
         assert_eq!(updated["result"]["structuredContent"]["ok"], true);
-        let content = std::fs::read_to_string(
-            state
-                .vault_path()
-                .await
-                .expect("ready vault")
-                .join("Home.md"),
-        )
-        .expect("read");
+        let content =
+            std::fs::read_to_string(registered_vault_path(&state).join("Home.md")).expect("read");
         assert!(content.starts_with("---\n"), "block created: {content:?}");
         assert_eq!(
             content,
@@ -2227,14 +2218,8 @@ mod tests {
         )
         .await;
         assert_eq!(second["result"]["structuredContent"]["ok"], true);
-        let content = std::fs::read_to_string(
-            state
-                .vault_path()
-                .await
-                .expect("ready vault")
-                .join("Home.md"),
-        )
-        .expect("read");
+        let content =
+            std::fs::read_to_string(registered_vault_path(&state).join("Home.md")).expect("read");
         assert!(content.contains("tags:"), "unmentioned key survives");
         assert!(
             !content.contains("status"),
@@ -2272,14 +2257,7 @@ mod tests {
         .await;
         assert_eq!(edited["result"]["structuredContent"]["ok"], true);
         assert_eq!(
-            std::fs::read_to_string(
-                state
-                    .vault_path()
-                    .await
-                    .expect("ready vault")
-                    .join("Home.md"),
-            )
-            .expect("read"),
+            std::fs::read_to_string(registered_vault_path(&state).join("Home.md"),).expect("read"),
             "# Home\nALPHA token\n[[Plan]]\n"
         );
     }
@@ -2297,7 +2275,7 @@ mod tests {
         let content = &renamed["result"]["structuredContent"];
         assert_eq!(content["ok"], true);
         assert_eq!(content["slug"], "renamed-home");
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         assert!(vault_path.join("Renamed Home.md").exists());
         assert!(!vault_path.join("Home.md").exists());
     }
@@ -2320,14 +2298,7 @@ mod tests {
         .await;
         assert_eq!(section["result"]["structuredContent"]["ok"], true);
         assert_eq!(
-            std::fs::read_to_string(
-                state
-                    .vault_path()
-                    .await
-                    .expect("ready vault")
-                    .join("Home.md"),
-            )
-            .expect("read"),
+            std::fs::read_to_string(registered_vault_path(&state).join("Home.md"),).expect("read"),
             "# Home\nrewritten\n"
         );
 
@@ -2788,10 +2759,7 @@ mod tests {
                 .contains("not a valid batch operation")
         );
         assert!(
-            !state
-                .vault_path()
-                .await
-                .expect("ready vault")
+            !registered_vault_path(&state)
                 .join("Should/NotExist.md")
                 .exists(),
             "nothing in the batch may execute once any op is rejected up front"
@@ -2843,10 +2811,7 @@ mod tests {
                 .contains("write-shaped items")
         );
         assert!(
-            !state
-                .vault_path()
-                .await
-                .expect("ready vault")
+            !registered_vault_path(&state)
                 .join("Batch/Note0.md")
                 .exists(),
             "an over-cap batch must be refused before any item executes"
@@ -2911,7 +2876,7 @@ mod tests {
         assert_eq!(content["items"][3]["op"], "delete_attachment");
         assert_eq!(content["items"][3]["result"]["ok"], true);
 
-        let vault_path = state.vault_path().await.expect("ready vault");
+        let vault_path = registered_vault_path(&state);
         assert!(!vault_path.join("Batch/ToDelete.md").exists());
         assert!(!vault_path.join("Batch/asset.png").exists());
         assert!(
@@ -2984,14 +2949,9 @@ mod tests {
         assert_eq!(content["items"][2]["ok"], true);
         assert_eq!(content["items"][2]["op"], "append_to_note");
 
-        let written = std::fs::read_to_string(
-            state
-                .vault_path()
-                .await
-                .expect("ready vault")
-                .join("Batch/Chained.md"),
-        )
-        .expect("read written note");
+        let written =
+            std::fs::read_to_string(registered_vault_path(&state).join("Batch/Chained.md"))
+                .expect("read written note");
         assert_eq!(written, "one\ntwo\n");
     }
 

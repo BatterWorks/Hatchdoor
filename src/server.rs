@@ -13,7 +13,6 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, warn};
@@ -26,7 +25,7 @@ use crate::auth::{
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
-use crate::git::{self, GitConfig};
+use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
     disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
@@ -181,10 +180,20 @@ pub fn check_web_auth_posture(
     Ok(())
 }
 
+/// Refuse a demo start whose operator still has legacy instance-wide Git
+/// versioning or MCP configured.
+///
+/// `legacy_git_configured` is `HATCHDOOR_GIT_SYNC_ENABLED` resolving to a
+/// mode. Since #185 that setting drives nothing at runtime, so this is no
+/// longer the refusal that keeps a demo read-only — the registry check in
+/// [`check_demo_mode_registry_posture`] is. It is kept because the operator's
+/// `.env` and Hatchdoor's behaviour disagreeing is worth stopping over, and
+/// because the setting is still live input to the first-boot legacy import,
+/// which would register the Vault it names.
 pub fn check_demo_mode_posture(
     demo_mode: bool,
     mcp_enabled: bool,
-    git_writes_enabled: bool,
+    legacy_git_configured: bool,
 ) -> Result<(), String> {
     if !demo_mode {
         return Ok(());
@@ -195,7 +204,7 @@ pub fn check_demo_mode_posture(
                 .to_string(),
         );
     }
-    if git_writes_enabled {
+    if legacy_git_configured {
         return Err(
             "HATCHDOOR_DEMO_MODE=true is incompatible with Git writeback; disable HATCHDOOR_GIT_SYNC_ENABLED and managed bidirectional mode for public demos."
                 .to_string(),
@@ -383,10 +392,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
     // Vault-collection discovery, management, events, exact content reads, and
-    // #101's Vault-scoped mutations are deliberately not gated by any
-    // `require_vault_ready`-style middleware: connecting the first Vault and
-    // recovering a corrupt registry must stay reachable at zero enabled
-    // Vaults. Every operation gates per-request on its own targeted Vault
+    // #101's Vault-scoped mutations are deliberately behind no instance-wide
+    // readiness middleware: connecting the first Vault and recovering a
+    // corrupt registry must stay reachable at zero enabled Vaults. Every
+    // operation gates per-request on its own targeted Vault
     // instead (`vault_not_found`/`vault_disabled`/`vault_unavailable`/
     // `capability_unavailable` from `VaultReadCore`/`VaultControlBlock`),
     // which is the per-Vault equivalent this surface needs.
@@ -998,7 +1007,11 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    let git_sync_config = match &config.vault_source {
+    // The instance-wide Git lane is gone (issue #185), so this parses
+    // `HATCHDOOR_GIT_*` for exactly two remaining purposes: validating that a
+    // configured mode is fully configured, and the demo posture refusal
+    // below. No runtime behaviour reads the result.
+    let legacy_git_config = match &config.vault_source {
         VaultSource::Local { vault_path } => {
             GitConfig::from_snapshot(vault_path.clone(), &startup_snapshot)
         }
@@ -1011,7 +1024,7 @@ pub async fn run_server() {
     if let Err(message) = check_demo_mode_posture(
         config.demo_mode,
         mcp_config.enabled,
-        git_sync_config.is_some(),
+        legacy_git_config.is_some(),
     ) {
         error!("{message}");
         std::process::exit(1);
@@ -1147,19 +1160,6 @@ pub async fn run_server() {
         "Demoted-layer vector embedding (HATCHDOOR_EMBED_LAYERS)"
     );
 
-    let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
-    if let Some(git_config) = &git_sync_config {
-        let validation = match git_config.mode {
-            crate::git::GitMode::Local => git::validate_local_repo(git_config),
-            crate::git::GitMode::Remote => git::validate_repo(git_config),
-        };
-        if let Err(error) = validation {
-            error!("Git versioning configuration invalid: {error}");
-            std::process::exit(1);
-        }
-    }
-
-    let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let vaults = VaultCollectionRuntime::with_watching_and_cache(
         config.cache_db_path.clone(),
@@ -1202,39 +1202,25 @@ pub async fn run_server() {
     }
     let shutdown_vaults = vaults.clone();
     let state = AppState {
-        cache_db_path: config.cache_db_path.clone(),
         vault_registry,
         vaults,
         vault_work: vault_work.clone(),
         managed_git: managed_git.clone(),
         legacy_migration_recovery: Arc::new(std::sync::RwLock::new(legacy_migration_recovery)),
         startup_sqlite: sqlite.clone(),
-        ready_vault: Arc::new(RwLock::new(None)),
-        vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        vault_events,
         mcp_tools_changed,
         embedder,
         runtime_embedder,
         model_setup,
         model_setup_started: Arc::new(AtomicBool::new(false)),
-        startup_git_config: Arc::new(git_sync_config.clone()),
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
-        vault_write_lock,
-        git_sync: Arc::new(RwLock::new(None)),
-        scan_config_cache: Arc::new(std::sync::RwLock::new(Some((
-            startup_snapshot.clone(),
-            scan_config.clone(),
-        )))),
-        refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-        index_status: crate::app_state::IndexStatusTracker::up_to_date(),
         runtime_config,
         startup,
     };
 
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
     let app = build_router(state.clone(), web_bearer_token);
-    let shutdown_state = state.clone();
     let (shutdown_started, mut shutdown_received) = tokio::sync::watch::channel(false);
     let shutdown_task = tokio::spawn({
         let vault_work = vault_work.clone();
@@ -1393,11 +1379,6 @@ pub async fn run_server() {
     if let Err(error) = dispatch_task.await {
         error!(%error, "Vault background work dispatch loop exited unexpectedly");
     }
-    if let Some(git_sync) = shutdown_state.git_sync.read().await.clone()
-        && let Err(error) = git_sync.stop(std::time::Duration::from_secs(30)).await
-    {
-        error!(%error, "Git sync did not reach its shutdown boundary");
-    }
     if let Err(error) = shutdown_task.await {
         error!(%error, "Server shutdown task exited unexpectedly");
     }
@@ -1439,7 +1420,6 @@ fn collection_indexes_ready(vaults: &VaultCollectionRuntime) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_state::ReadyVault;
 
     #[test]
     fn compose_vault_path_alone_never_refuses_a_start() {
@@ -1840,11 +1820,9 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use std::time::Duration;
     use tempfile::TempDir;
-    use tokio::sync::RwLock;
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
-    use crate::app_state::build_cache;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
@@ -1866,54 +1844,75 @@ mod tests {
         web_bearer_token: Option<Arc<str>>,
         demo_mode: bool,
     ) -> (Router, TempDir, AppState) {
-        // These settings tests exercise the explicit fresh-repository consent
-        // flow. Keep the fixture outside Cargo's TMPDIR: the project build
-        // directory may sit inside Hatchdoor's own Git checkout, which would
-        // intentionally count as an enclosing existing repository for Local
-        // history.
+        let (router, tmp, state, _worker) = app_for_tests_with_worker(web_bearer_token, demo_mode);
+        (router, tmp, state)
+    }
+
+    /// The same fixture, keeping the coordinator's worker. Nothing else in a
+    /// test process consumes the queue, so a test that wants to observe which
+    /// turns a route *newly* requested has to drain the ones Vault creation
+    /// already queued first.
+    fn app_for_tests_with_worker(
+        web_bearer_token: Option<Arc<str>>,
+        demo_mode: bool,
+    ) -> (
+        Router,
+        TempDir,
+        AppState,
+        crate::vault_work::VaultWorkWorker,
+    ) {
+        // Keep the fixture outside Cargo's TMPDIR: the project build directory
+        // may sit inside Hatchdoor's own Git checkout, which a Git-backed
+        // Vault created by one of these tests would count as an enclosing
+        // existing repository.
+        //
+        // The state itself registers no Vault. Each test that needs one
+        // creates it over the real `/api/v1/vaults` route with
+        // `create_vault_with_files`, which registers it, activates it, and
+        // publishes its indexed snapshot the way a deployment does.
         let tmp = TempDir::new_in("/tmp").expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        std::fs::create_dir_all(&vault_root).expect("create vault");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let sqlite = Arc::new(SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let (vault_work, vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
         let managed_git =
             std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
-                vault_path: vault_root,
-                cache,
-            }))),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
+            startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
             runtime_embedder: Arc::new(RuntimeEmbedder::new()),
             model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
             model_setup_started: Arc::new(AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
 
-        (build_router(state.clone(), web_bearer_token), tmp, state)
+        (
+            build_router(state.clone(), web_bearer_token),
+            tmp,
+            state,
+            vault_worker,
+        )
+    }
+
+    /// Run every turn already sitting in the coordinator's queue to completion,
+    /// so a later assertion sees only what the route under test requested.
+    async fn drain_queued_turns(worker: &mut crate::vault_work::VaultWorkWorker) {
+        while tokio::time::timeout(
+            Duration::from_millis(50),
+            worker.run_next(|_| async move { Ok::<(), crate::vault_work::VaultWorkError>(()) }),
+        )
+        .await
+        .is_ok()
+        {}
     }
 
     fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
@@ -2055,13 +2054,10 @@ mod tests {
         mcp_bearer_token: Option<String>,
         mcp_write_enabled: bool,
     ) -> (Router, TempDir, AppState) {
+        // Registers no Vault of its own; see `app_for_tests_with_worker`.
         let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        std::fs::create_dir_all(&vault_root).expect("create vault");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let sqlite = Arc::new(SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let runtime_config = crate::runtime_config::RuntimeConfig::for_tests();
         if let Some(mcp_bearer_token) = mcp_bearer_token {
@@ -2080,32 +2076,19 @@ mod tests {
         let managed_git =
             std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
-                vault_path: vault_root,
-                cache,
-            }))),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
+            startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
             runtime_embedder: Arc::new(RuntimeEmbedder::new()),
             model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
             model_setup_started: Arc::new(AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode: false,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config,
             startup: StartupTracker::ready(),
         };
@@ -3179,7 +3162,6 @@ mod tests {
     #[tokio::test]
     async fn unavailable_vault_keeps_liveness_status_and_spa_available() {
         let (_app, _tmp, mut state) = app_for_tests_with_state();
-        *state.ready_vault.write().await = None;
         state.startup = StartupTracker::new(VaultRuntime::new(VaultSource::Local {
             vault_path: "/data/vault".into(),
         }));
@@ -3772,13 +3754,31 @@ mod tests {
     /// values are still durable before any rebuilding starts. What changed
     /// (#181) is what a confirmed save then does: it requests one Index turn
     /// per active Vault through the shared work coordinator instead of the
-    /// legacy instance-wide rebuild, so `index_status` — which only ever
-    /// described that legacy rebuild — stays untouched by a settings save.
-    /// The per-Vault queueing itself is proven in
-    /// `handlers::settings::tests`, which can observe the coordinator's queue.
+    /// legacy instance-wide rebuild, which #185 deleted outright. Asserted
+    /// here over the real route with a registered Vault; the queueing rules
+    /// themselves (one turn per *active* Vault, none for a disabled one) are
+    /// proven in `handlers::settings::tests`.
     #[tokio::test]
-    async fn reindex_settings_require_confirmation_and_persist_without_the_legacy_rebuild() {
-        let (app, _tmp, state) = app_for_tests_with_state();
+    async fn reindex_settings_require_confirmation_and_persist_over_the_collection_lane() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Reindexed",
+            &tmp.path().join("reindexed"),
+            &[("Home.md", "# Home\n")],
+            0,
+        )
+        .await;
+        let vault_id: crate::vault_registry::VaultId = vault_id.parse().expect("Vault id");
+        // Activation queues this Vault's first Index turn; run it out, so the
+        // assertion below can only be satisfied by the settings save itself.
+        drain_queued_turns(&mut worker).await;
+        assert!(
+            !state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "precondition: no Index turn is pending before the save"
+        );
 
         let missing_confirmation = app
             .clone()
@@ -3829,12 +3829,12 @@ mod tests {
                 .value,
             "generated/**"
         );
-        assert_eq!(
-            state.index_status.status().state,
-            "up_to_date",
-            "a settings save must no longer start the legacy instance-wide rebuild"
+        assert!(
+            state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a confirmed indexing save must request an Index turn for the active Vault"
         );
-        assert!(!state.index_status.status().stale);
 
         let second_response = app
             .oneshot(
@@ -3858,18 +3858,19 @@ mod tests {
                 .value,
             "false"
         );
-        assert_eq!(state.index_status.status().state, "up_to_date");
-        assert!(!state.index_status.status().stale);
     }
 
+    /// #185 deleted the instance-wide Git lane, so the legacy
+    /// `HATCHDOOR_GIT_SYNC_ENABLED` key is a first-boot import input with no
+    /// runtime reader. Saving it still persists (the legacy importer reads
+    /// it) but must no longer ask for a consequence confirmation and must no
+    /// longer create a repository as a side effect of a settings save.
     #[tokio::test]
-    async fn enabling_local_versioning_no_longer_asks_for_confirmation() {
-        // #183 retired the `git_init` consequence along with the Versioning
-        // console that explained it. Enabling local versioning on a vault that
-        // is not yet a git repository now applies in one call and still
-        // creates the repository.
+    async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
         let (app, tmp, state) = app_for_tests_with_state();
-        assert!(!tmp.path().join("vault/.git").exists());
+        let vault_root = tmp.path().join("legacy-git-mode");
+        std::fs::create_dir_all(&vault_root).expect("create vault directory");
+        assert!(!vault_root.join(".git").exists());
 
         let response = app
             .oneshot(
@@ -3885,53 +3886,10 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(tmp.path().join("vault/.git").exists());
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
-                .expect("setting")
-                .value,
-            "local"
+        assert!(
+            !vault_root.join(".git").exists(),
+            "a settings save must not initialize versioning on any directory"
         );
-    }
-
-    #[tokio::test]
-    async fn downgrade_onto_a_non_repo_vault_no_longer_asks_for_confirmation() {
-        // The case that used to need both `git_downgrade` and `git_init`:
-        // switching remote -> local when the vault is not a git repository at
-        // all. Both consequences were retired in #183, so the save applies in
-        // one call rather than across two 409 round-trips.
-        let (app, tmp, state) = app_for_tests_with_state();
-        state
-            .runtime_config
-            .save([
-                (
-                    "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                    "remote".to_string(),
-                ),
-                ("HATCHDOOR_GIT_HTTPS_TOKEN".to_string(), "token".to_string()),
-            ])
-            .expect("save initial remote config");
-        // No .git directory exists in this vault at all: remote mode was only
-        // ever configured, never actually initialized on disk.
-        assert!(!tmp.path().join("vault/.git").exists());
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(tmp.path().join("vault/.git").exists());
         assert_eq!(
             state
                 .runtime_snapshot()

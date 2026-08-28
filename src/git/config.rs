@@ -1,5 +1,9 @@
-/// Runtime-selected versioning mode. `off` is represented by the absence of a
-/// [`GitConfig`]; a running task is always either local or remote.
+/// Versioning mode as the legacy `HATCHDOOR_GIT_SYNC_ENABLED` setting spells
+/// it. `off` is represented by the absence of a [`GitConfig`]. Since #185
+/// deleted the instance-wide lane, this drives no runtime behaviour: it is
+/// read by the first-boot legacy import (`vault_migration.rs`) and by the
+/// demo-mode startup posture check, and a per-Vault Git turn selects its
+/// operation from `vault_registry::VaultGitMode` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitMode {
     Local,
@@ -15,7 +19,13 @@ impl GitMode {
     }
 }
 
-/// Static configuration for one running versioning task.
+/// Static configuration for one Git operation on one Vault directory.
+///
+/// Every field except `vault_path`, `author_name`, and `author_email` is a
+/// remnant of the instance-wide lane #185 deleted: they are still parsed from
+/// the legacy settings by [`GitConfig::from_snapshot`] for the legacy import
+/// and the demo posture check, and `run_local_history_git_turn` fills them
+/// with placeholders its callees never read.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GitConfig {
     /// Absolute path to the Vault. Remote mode requires it to be the Git
@@ -23,15 +33,20 @@ pub struct GitConfig {
     pub vault_path: std::path::PathBuf,
     /// Local commits only, or local commits plus safe remote synchronization.
     pub mode: GitMode,
-    /// Remote name to fetch/push (e.g. "origin").
+    /// Remote name (e.g. "origin"). Legacy import input; only
+    /// `validate_repo` still reads it.
     pub remote: String,
-    /// Branch to commit and push.
+    /// Branch the legacy remote lane committed and pushed. Legacy import
+    /// input; only `validate_repo` still reads it.
     pub branch: String,
-    /// HTTPS auth username. Many providers accept any non-empty value with a token.
+    /// HTTPS auth username. Legacy import input; no Git operation in this
+    /// module reads it.
     pub username: String,
-    /// HTTPS auth token. Never logged or surfaced.
+    /// HTTPS auth token. Never logged or surfaced. Legacy import input; no
+    /// Git operation in this module reads it.
     pub token: String,
-    /// Quiet window before a batch is committed and pushed.
+    /// Quiet window the legacy debounced task waited before committing.
+    /// Legacy import input; nothing reads it.
     pub debounce_seconds: u64,
     /// Commit author/committer name.
     pub author_name: String,

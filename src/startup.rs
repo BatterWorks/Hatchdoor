@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::vault_runtime::{VaultPhase, VaultRuntime, VaultRuntimeSnapshot, VaultSource};
+use crate::vault_runtime::{VaultPhase, VaultRuntime, VaultSource};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct IndexingProgressSnapshot {
@@ -100,10 +100,6 @@ impl StartupTracker {
 
     pub fn is_ready(&self) -> bool {
         self.0.is_ready()
-    }
-
-    pub fn snapshot(&self) -> VaultRuntimeSnapshot {
-        self.0.snapshot()
     }
 
     pub fn runtime(&self) -> &VaultRuntime {

@@ -4,8 +4,8 @@
 //! This is a Vault-scoped adapter over the unchanged shared mutation layer in
 //! [`crate::vault::write`] (ADR-03): every handler here resolves exactly one
 //! Vault's [`crate::vault_runtime::VaultControlBlock`], serializes concurrent
-//! mutations to that Vault through its own `acquire_mutation` lock (never the
-//! legacy single-Vault `AppState::vault_write_lock`), and calls straight into
+//! mutations to that Vault through its own `acquire_mutation` lock — since
+//! #185 the only vault write lock there is — and calls straight into
 //! already-implemented, already-unit-tested write functions. It reuses
 //! `handlers/vaults.rs`'s `VaultApiError`/`parse_vault_id`/rejection helpers
 //! and `handlers/vault_content.rs`'s `vault_read_error_response`, mounted

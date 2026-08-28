@@ -1422,32 +1422,6 @@ mod record_tests {
     use super::*;
 
     #[test]
-    fn record_note_write_prefers_relative_path_target() {
-        let outcome = WriteOutcome {
-            slug: Some("new".to_string()),
-            relative_path: Some("Projects/New".to_string()),
-            content_hash: Some("h".to_string()),
-            quality_warnings: Vec::new(),
-            rewritten_notes: 0,
-            moved_assets: 0,
-            trashed_path: None,
-            affected_paths: vec![std::path::PathBuf::from("/v/Projects/New.md")],
-        };
-        let record = crate::git::WriteRecord {
-            op: "create".to_string(),
-            target: outcome
-                .relative_path
-                .clone()
-                .or_else(|| outcome.slug.clone())
-                .unwrap_or_default(),
-            affected_paths: outcome.affected_paths.clone(),
-            summary: Some("added".to_string()),
-        };
-        assert_eq!(record.target, "Projects/New");
-        assert_eq!(record.affected_paths.len(), 1);
-    }
-
-    #[test]
     fn recovery_required_write_errors_expose_bounded_guidance() {
         let vault_id = crate::vault_registry::VaultId::generate().expect("generate Vault id");
         let failure = write_error_to_jsonrpc(

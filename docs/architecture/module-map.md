@@ -99,8 +99,13 @@ that production inventory are still checked for stale paths and duplicates.
   public startup without web authentication remains a refusal; its error
   includes a freshly generated, non-persisted recovery token for the operator
   to place in `.env`.
-- `AppState` and `VaultCache` carry shared runtime state; `build_cache*`,
-  `sqlite_cache`, `refresh_coalescing`, and `refresh_now` coordinate reindexing.
+- `AppState` carries shared runtime state. Every field has a production
+  reader, and each is one of: collection runtime (`vault_registry`, `vaults`,
+  `vault_work`, `managed_git`, `startup_sqlite`, `embedder`,
+  `runtime_embedder`, `mcp_tools_changed`), startup or posture
+  (`legacy_migration_recovery`, `model_setup`, `model_setup_started`,
+  `web_auth_enabled`, `demo_mode`, `startup`), or live configuration
+  (`runtime_config`).
 - `VaultCollectionRuntime` reconstructs disposable background turns at startup
   and, on process shutdown, stops new work and waits only for active
   background-turn and foreground-mutation safe boundaries.
@@ -120,8 +125,6 @@ that production inventory are still checked for stale paths and duplicates.
   again once its vectors exist (`Ready`), so browsing does not wait on
   embedding. The structure pass is skipped for a Vault that already has a
   searchable generation, which keeps search answering across a rebuild.
-  `AppState::index_status` separately tracks setting-triggered rebuild drift,
-  progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
   reindex binds before it starts, including `HATCHDOOR_EMBED_LAYERS` for the
   per-Vault disposable candidate cache. `request_collection_reindex` is the
@@ -181,9 +184,9 @@ that production inventory are still checked for stale paths and duplicates.
   active collection Vault's Index turn settles Ready.
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
   an independently cancellable handle. `run_server()` coalesces those intents
-  through the shared `VaultWorkCoordinator` as Index requests. The existing
-  `spawn_vault_watcher` remains the transitional single-Vault adapter until
-  later application-surface packets.
+  through the shared `VaultWorkCoordinator` as Index requests. It is the only
+  watcher: the transitional single-Vault adapter is gone with the rest of the
+  legacy lane (#185).
 - `dispatch_managed_git_turn` is the `VaultWorkKind::Git` execution closure
   `src/server.rs`'s worker loop calls: for a `ManagedGit` Vault it resolves
   the current definition and credentials, obtains that Vault's checkout lease
@@ -697,9 +700,10 @@ frontend write API/types, and configuration for archive or upload limits.
 - **Known gap resolved by #103:** `vault_write.rs`
   serializes concurrent writes to one Vault through
   `VaultControlBlock::acquire_mutation` (a genuine per-Vault lock). MCP write
-  tools now resolve one registered Vault and acquire that same control-block
-  lock before calling `vault/write`; the older `AppState::vault_write_lock`
-  remains only for the isolated legacy single-Vault Git-sync task.
+  tools resolve one registered Vault and acquire that same control-block lock
+  before calling `vault/write`. It is now the only vault write lock: the
+  instance-wide `AppState::vault_write_lock` went with the legacy Git-sync
+  task (#185).
 
 **Validation:** `cargo test vault::write`, adapter write tests, and the full
 backend checks.
@@ -1087,15 +1091,20 @@ superseding ADR-05.
 - `src/git/managed_sync.rs`
 - `src/git/managed_task.rs`
 - `src/git/message.rs`
-- `src/git/status.rs`
 - `src/git/sync.rs`
-- `src/git/task.rs`
 
-**Public contract:** `GitMode` (`off`/`local`/`remote` through the existing
-runtime setting), `GitConfig`, write-record/message types, sync outcomes and
-errors (including `GitError::ManualRecovery` for repository operations that
-cannot be proven Hatchdoor-owned), lifecycle status, repository operations,
-`GitSyncHandle`, `SyncOps`, and `spawn_sync_task`. The crate-private
+**Public contract:** `GitMode` (`off`/`local`, carried only by the legacy
+first-boot import — the instance-wide runtime lane is gone, #185), `GitConfig`,
+write-record/message types, commit outcomes and errors (including
+`GitError::ManualRecovery` for repository operations that cannot be proven
+Hatchdoor-owned), and the local repository operations `validate_repo`,
+`validate_local_repo`, `init_local_repo`, `commit_local`,
+`has_uncommitted_changes`, and `run_local_history_git_turn`. Only the last
+three are on a live path; `validate_repo`, `init_local_repo`, and
+`has_uncommitted_changes` lost their production callers with the settings
+lifecycle and the boot-time legacy validation in #185 and are retained
+deliberately by that ticket's explicit keep list, against #82's removal of the
+legacy import. The crate-private
 `parse_mode` and `non_empty_setting` helpers keep startup and one-time
 migration interpretation identical. `resolve_commit_identity` (issue #130)
 resolves one Vault's own configured `VaultCommitIdentity`
@@ -1104,36 +1113,20 @@ resolves one Vault's own configured `VaultCommitIdentity`
 composition's `dispatch_managed_git_turn` calls it once per turn, before
 dispatching to any of the branches below, so every commit this boundary makes
 for a Vault — managed-Git, existing-Git remote-sync, or existing-Git
-Local-history — honors that Vault's own identity. Local mode commits without
-network access and discovers an enclosing existing checkout while staging only
-the configured Vault subtree; remote mode retains the safe
-fetch/integrate/push phases.
-Automatic recovery requires a persisted Hatchdoor merge marker whose fresh
-nonce remains bound to the current merge's Git-managed operation metadata and
-whose index, Git-relevant tracked-worktree identity (content, type, and
-executable status), and cleanup-sensitive merge metadata were predicted from
-the immutable parent commits before the live merge began. The isolated
-checkout supplies the worktree prediction; exact `MERGE_HEAD`, `MERGE_MODE`,
-and full `MERGE_MSG` bytes are bound into the Active marker after adding the
-nonce. A live merge must match those predictions before its marker becomes
-Active, and every later reset or commit rechecks them; no post-merge
-observation can become ownership evidence. Unknown, malformed, stale,
-replayed, mismatched, chmodded, or manually changed operation state is
-preserved for manual recovery. Local-history turns skip this recovery path
-entirely rather than acting on state they did not create, and
-`classify_local_history_error` reports an encountered `ManualRecovery` as the
-non-retryable `existing_git_local_history_manual_recovery_required`.
-The settings HTTP boundary owns the preflight → bounded drain → replacement
-protocol. It has no wire surface: `GET /api/git-status` was retired in #183
-along with the Settings console it fed.
-`GitSyncHandle::stop` preempts debounce and returns `Ok` only after one
-successful final drain. A timeout withdraws its stop request, and a failed
-final drain keeps the old task/status active: either way the task continues
-accepting records, and only a `stop` that truly returns `Ok` lets a caller
-install a replacement task. Spawning a task flushes any
-drift accumulated while versioning was off (uncommitted working-tree changes
-in either mode, or unpushed commits in remote mode) under its own
-distinguishable commit message. `init_local_repo` takes the vault's configured
+Local-history — honors that Vault's own identity. `commit_local` commits without network
+access and discovers an enclosing existing checkout while staging only the
+configured Vault subtree. Remote fetch/integrate/push, unpushed accounting,
+and interrupted-merge marker recovery are gone with the instance-wide task
+(#185); every remote graph operation this boundary still performs lives in
+`managed_sync.rs`, which owns its own conflict and containment rules.
+`classify_local_history_error` still reports an encountered `ManualRecovery`
+as the non-retryable
+`existing_git_local_history_manual_recovery_required`, defensively rather
+than because a local-history turn can produce one. This boundary has no wire
+surface and no instance-wide lifecycle: `GET /api/git-status` was retired in
+#183 along with the Settings console it fed, and the settings handler's
+preflight → drain → replacement protocol went with the task itself in #185.
+`init_local_repo` takes the vault's configured
 cache-database and settings-file paths and derives `.gitignore` entries from
 them (only when those paths live inside the vault), appending to an existing
 `.gitignore` rather than skipping it.
@@ -1371,28 +1364,29 @@ a machine-readable `confirmation_required` consequence — the server is the
 authority, and sends no prose; the page owns the words and resends with a
 `confirm` list. `reindex` is the only consequence: #183 retired `git_init` and
 `git_downgrade` with the instance-wide Versioning console that explained them,
-so enabling local history or leaving remote versioning now applies on the first
-request while still initializing the repository. Saves persist before
-rebuilding. A confirmed indexing-setting save requests one Index turn per
+and #185 removed the repository work they described, so a `HATCHDOOR_GIT_*`
+save now only persists a value. Saves persist before rebuilding. A confirmed indexing-setting save requests one Index turn per
 active Vault through the shared work coordinator
 (`app_state::request_collection_reindex`), never the legacy instance-wide
 rebuild: each Vault reports its own `indexing` condition and keeps serving
 reads from its previous snapshot until its new one is published, and a
 disabled Vault has no active runtime so it is not queued.
-`app_state::IndexStatusTracker` still records the legacy dedicated rebuild's
-staleness, progress, ETA, and last failure, which the settings save path no
-longer starts; #183 retired its `/api/index-status` wire surface, so nothing
-reads it and the lane itself is removed in #185. A save that flips
+A save that flips
 `HATCHDOOR_MCP_WRITE_ENABLED` — the only setting that adds or removes tools
 from the advertised catalogue — broadcasts
 `AppState::mcp_tools_changed` so subscribed MCP sessions re-list; a
 layer-marker change does not, because no tool schema is derived from it.
-A `HATCHDOOR_GIT_*` save takes the legacy versioning-task lifecycle branch
-(stop the task, preflight the repository, respawn) only while the legacy
-`ready_vault` is published; a registry deployment, where nothing publishes it,
-takes the ordinary save path instead of refusing `503`, so the
-`HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` commit-identity fallback the collection
-lane's Git turns read stays changeable without a restart.
+Every save takes one path: the legacy versioning-task lifecycle branch (stop
+the task, preflight the repository, respawn) went with the task itself in
+#185. `HATCHDOOR_GIT_SYNC_ENABLED`, `_REMOTE`, `_BRANCH`, `_HTTPS_USERNAME`,
+`_HTTPS_TOKEN`, `_DEBOUNCE_SECONDS`, and `HATCHDOOR_EXCLUDE` remain in the
+schema as first-boot import inputs (`vault_migration.rs` consumes them until
+#82 closes). No per-operation code reads them; two `server.rs` startup checks
+still parse them — `check_demo_mode_posture` and `HATCHDOOR_EXCLUDE`'s pattern
+validation — and both only refuse a start.
+`HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` remain
+the commit-identity fallback the collection lane's Git turns read per turn, so
+a change to them still reaches the next turn without a restart.
 
 `vaults.rs` owns `/api/v1/vaults` discovery, collection management (create/
 edit/enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh,
@@ -1402,8 +1396,7 @@ of the Vault collection registry's write operations and of
 `VaultCollectionRuntime::reconcile_and_reconstruct`, which every mutation calls
 in the same request through its foreground-mutation safe boundary; background
 Index/Git draining may continue asynchronously, while a newly enabled Vault's
-work is still requested without a separate reconciliation pass. Deliberately not gated by
-`require_vault_ready` (a legacy single-configured-Vault signal): discovery and
+work is still requested without a separate reconciliation pass. Discovery and
 creating the first Vault stay reachable at zero enabled Vaults, and discovery
 reports an explicit `recovery` object rather than erroring when the persisted
 registry itself needs operator recovery. Every response uses the shared
@@ -1558,8 +1551,7 @@ yet; they follow in #186. Those routes still
 call unchanged `vault/write/**` functions exactly as the legacy write API
 did, gate every mutation on the requested Vault's own control block —
 `VaultControlBlock::acquire_mutation` (a genuine per-Vault lock, shared by the
-MCP and HTTP write adapters; the legacy single instance-wide
-`AppState::vault_write_lock` remains only for the legacy Git-sync task — see
+MCP and HTTP write adapters, and since #185 the only vault write lock — see
 the "Vault mutation" boundary's known-gap invariant) and
 `capabilities.mutate` (a `capability_unavailable`/
 `409` for a Pull-only or otherwise non-mutable Vault, new in #101 since the
@@ -1574,8 +1566,8 @@ and attachment size limit stay instance-wide settings (issue #62), read via
 the same `AppState::runtime_snapshot`/`runtime_archive_prefix`/
 `runtime_mcp_config` calls the legacy write API used. A mutation response
 omits `git_sync_warning`: the managed-Git scheduler has no debounced-on-write
-hook, unlike the legacy single `git_sync` task, so there is nothing per-write
-to report that Vault discovery does not already expose. `vaults.rs` owns the
+hook, unlike the retired instance-wide sync task, so there is nothing
+per-write to report that Vault discovery does not already expose. `vaults.rs` owns the
 additive authenticated `POST /api/v1/vaults/{vault_id}/refresh` control: it
 requires one enabled Vault with usable local Markdown, asks
 `VaultWorkCoordinator` for `VaultWorkKind::Index`, and returns its immediate

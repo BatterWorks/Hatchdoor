@@ -360,23 +360,20 @@ mod tests {
     use std::sync::Arc;
 
     use tempfile::TempDir;
-    use tokio::sync::RwLock;
 
     use super::*;
     use crate::embed::{Embedder, StubEmbedder};
     use crate::startup::StartupTracker;
 
     /// The lifecycle test only exercises model-setup claiming, so no Vault is
-    /// registered: `ready_vault` stays `None` and nothing under test reads it.
+    /// registered, and nothing under test reads a Vault snapshot.
     fn setup_state_with_claimed_lifecycle() -> (AppState, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
         let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 tmp.path().join("state/vaults.json"),
             ),
@@ -387,9 +384,6 @@ mod tests {
             startup_sqlite: Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
-            ready_vault: Arc::new(RwLock::new(None)),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
             mcp_tools_changed,
             embedder,
             runtime_embedder: Arc::new(crate::embed::RuntimeEmbedder::new()),
@@ -397,14 +391,8 @@ mod tests {
                 tmp.path().join("models"),
             )),
             model_setup_started: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::terms_required(),
         };

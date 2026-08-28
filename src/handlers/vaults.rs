@@ -2,10 +2,10 @@
 //! status, and the collection-wide invalidation event stream.
 //!
 //! This is the first HTTP surface over the Vault collection registry and
-//! runtime: it is deliberately independent of `require_vault_ready` (a
-//! legacy single-configured-Vault gate) so collection management, including
-//! connecting the very first Vault, stays reachable at zero enabled Vaults
-//! and while the persisted registry itself is in an explicit recovery state.
+//! runtime: it carries no instance-wide readiness gate, so collection
+//! management, including connecting the very first Vault, stays reachable at
+//! zero enabled Vaults and while the persisted registry itself is in an
+//! explicit recovery state.
 //! Exact Vault-scoped content reads and their contained resources are a
 //! sibling adapter, `handlers/vault_content.rs`, mounted in the same router
 //! group and reusing `VaultApiError` and the rejection-mapping helpers below.
@@ -1182,12 +1182,11 @@ mod tests {
     use crate::vault_work::VaultWorkError;
 
     /// A minimal `AppState` for exercising `handlers/vaults.rs` request
-    /// handlers directly, without the legacy single-Vault cache/embedder
-    /// machinery those handlers never touch (mirrors `mcp/routes.rs`'s own
-    /// `test_state` shape). `startup_sqlite` still needs a real (in-memory,
-    /// so cheap) `SqliteCache` because the field is not optional;
-    /// `ready_vault` genuinely can be `None` since nothing under test reads
-    /// it. Returns the coordinator's worker too — discarded by most callers,
+    /// handlers directly (mirrors `mcp/routes.rs`'s own `test_state` shape).
+    /// `startup_sqlite` still needs a real (in-memory, so cheap)
+    /// `SqliteCache` because the field is not optional; the tests register
+    /// whatever Vaults they need through the registry.
+    /// Returns the coordinator's worker too — discarded by most callers,
     /// but a test that needs to drain a queued turn (e.g. the one Vault
     /// activation itself requests) needs direct access to it, since nothing
     /// else in this process consumes the coordinator's queue. Also returns
@@ -1198,13 +1197,11 @@ mod tests {
         tempfile::TempDir,
     ) {
         let directory = tempfile::tempdir().expect("temp dir");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, worker) = crate::vault_work::VaultWorkCoordinator::new();
         let managed_git =
             std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
-            cache_db_path: directory.path().join("cache.sqlite3"),
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 directory.path().join("state/vaults.json"),
             ),
@@ -1215,9 +1212,6 @@ mod tests {
             startup_sqlite: std::sync::Arc::new(
                 SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
-            ready_vault: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            vault_revision: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
             mcp_tools_changed,
             embedder: crate::app_state::test_embedder(),
             runtime_embedder: std::sync::Arc::new(crate::embed::RuntimeEmbedder::new()),
@@ -1225,14 +1219,8 @@ mod tests {
                 directory.path().join("models"),
             )),
             model_setup_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_git_config: std::sync::Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
-            vault_write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            scan_config_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };

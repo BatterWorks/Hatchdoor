@@ -100,6 +100,21 @@
   protocol-version header rather than silently downgraded. If an MCP client
   stops connecting after this upgrade, check which revision it pins and update
   it — nothing in Hatchdoor's own configuration restores the dropped ones.
+- Hatchdoor no longer carries a second, unused copy of indexing and Git sync.
+  The instance-wide debounced Git task and the single-Vault rebuild it went
+  with were unreachable after the multi-Vault cutover; every Vault has done its
+  own indexing and its own Git turns since v2.5.0. Behaviour is unchanged.
+  `HATCHDOOR_GIT_SYNC_ENABLED`, `HATCHDOOR_GIT_REMOTE`, `HATCHDOOR_GIT_BRANCH`,
+  `HATCHDOOR_GIT_HTTPS_USERNAME`, `HATCHDOOR_GIT_HTTPS_TOKEN`,
+  `HATCHDOOR_GIT_DEBOUNCE_SECONDS`, and `HATCHDOOR_EXCLUDE` stay in Settings
+  and keep their values, but nothing acts on them while the server runs: they
+  are inputs to importing a pre-2.5.0 deployment on first boot, and are
+  otherwise only checked for validity at startup. Each Vault's own exclusion
+  patterns and Git mode are what actually apply. Saving one no longer creates
+  or reconfigures a Git repository as a side effect. `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` are
+  unaffected: they remain the commit identity a Vault without its own falls
+  back to, and a change to either still reaches the next Git turn without a
+  restart.
 - The `update_note` and `archive_note` MCP tools now run their write off the
   request thread, the way the equivalent HTTP routes always have, so a large
   note no longer holds up other MCP traffic while it is written. Both tools

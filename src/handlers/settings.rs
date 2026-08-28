@@ -130,16 +130,6 @@ struct PatchPlan {
     /// The save flips `HATCHDOOR_MCP_WRITE_ENABLED`, which is the only setting
     /// that adds or removes tools from the advertised MCP catalogue.
     mcp_write_toggled: bool,
-    git_config: Option<crate::git::GitConfig>,
-    initialize_local_repo: Option<crate::git::GitConfig>,
-}
-
-/// The paths a git-touching save needs to preflight a mode change and (for a
-/// fresh local repo) derive `.gitignore` entries from.
-struct GitPaths {
-    vault_path: std::path::PathBuf,
-    cache_db_path: std::path::PathBuf,
-    settings_file_path: std::path::PathBuf,
 }
 
 const SETTINGS: &[(&str, &str, &str)] = &[
@@ -153,6 +143,14 @@ const SETTINGS: &[(&str, &str, &str)] = &[
     ("HATCHDOOR_MCP_ALLOWED_ORIGINS", "instant", "text"),
     ("HATCHDOOR_MAX_ATTACHMENT_BYTES", "instant", "number"),
     ("HATCHDOOR_MCP_MAX_BASE64_BYTES", "instant", "number"),
+    // The `HATCHDOOR_GIT_*` keys below, and `HATCHDOOR_EXCLUDE` above, stay in
+    // the schema as first-boot import inputs: #185 deleted the instance-wide
+    // lane whose behaviour they drove, and `vault_migration.rs` consumes them
+    // until #82 closes. Two startup checks still parse them — the demo-mode
+    // posture refusal and `HATCHDOOR_EXCLUDE`'s pattern validation, both in
+    // `server.rs` — but nothing reads them per operation. The two author keys
+    // are the exception: the collection lane's Git turns read them per turn as
+    // the commit-identity fallback for a Vault without its own (#181).
     ("HATCHDOOR_GIT_SYNC_ENABLED", "instant", "mode"),
     ("HATCHDOOR_GIT_HTTPS_USERNAME", "instant", "text"),
     ("HATCHDOOR_GIT_HTTPS_TOKEN", "instant", "secret"),
@@ -250,134 +248,31 @@ pub async fn patch_settings_handler(
         ))]);
     }
 
-    let git_changed = request
-        .updates
-        .keys()
-        .any(|key| key.starts_with("HATCHDOOR_GIT_"));
-
-    // The lifecycle branch exists to stop, preflight, and respawn the *legacy*
-    // single-Vault versioning task, so it is reachable only while that legacy
-    // Vault is actually ready. After the multi-Vault cutover nothing publishes
-    // `ready_vault`, so every deployment now takes the ordinary path: there is
-    // no legacy task to restart and no legacy repository to preflight. Sending
-    // `503 Vault is not ready` instead would refuse a save that has real work
-    // to do — `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` are the commit identity the
-    // collection lane's Git turns fall back to, and #181 requires a change to
-    // them to reach the next Git turn without a restart.
-    if git_changed && state.vault_path().await.is_some() {
-        patch_settings_with_git_lifecycle(&state, request).await
-    } else {
-        let result = state
-            .runtime_config
-            .validate_and_save(request.updates.clone(), |snapshot| {
-                decide_patch(snapshot, &request, None)
-            });
-        match result {
-            Ok((plan, saved)) => finish_patch(&state, plan, &saved),
-            Err(refusal) => refusal.into_response(),
-        }
-    }
-}
-
-/// The git-touching path: the versioning task lifecycle (stop the old task,
-/// persist, spawn the new one) is its own function so `patch_settings_handler`
-/// reads as one short dispatch rather than one long function mixing
-/// validation, confirmations, task lifecycle, and persistence together.
-async fn patch_settings_with_git_lifecycle(
-    state: &AppState,
-    request: PatchSettingsRequest,
-) -> Response {
-    // The caller only routes here while the legacy Vault is ready; a
-    // disappearance between that check and this read is still handled rather
-    // than unwrapped.
-    let Some(vault_path) = state.vault_path().await else {
-        return crate::app_state::vault_unavailable().into_response();
-    };
-    let old_git_config =
-        match crate::git::GitConfig::from_snapshot(vault_path.clone(), &state.runtime_snapshot()) {
-            Ok(config) => config,
-            Err(error) => {
-                return validation_response(vec![FieldError::on(
-                    "HATCHDOOR_GIT_SYNC_ENABLED",
-                    error,
-                )]);
-            }
-        };
-
-    let mut active = state.git_sync.write().await;
-    if let Some(handle) = active.as_ref()
-        && let Err(message) = handle.stop(std::time::Duration::from_secs(15)).await
-    {
-        let status = handle.status();
-        let mut status = status.write().await;
-        status.last_ok = false;
-        status.last_error = Some(message.clone());
-        return busy_response(message);
-    }
-    active.take();
-
-    let git_paths = GitPaths {
-        vault_path,
-        cache_db_path: state.cache_db_path.clone(),
-        settings_file_path: state.runtime_config.settings_path().to_path_buf(),
-    };
-    let init_cache_db_path = git_paths.cache_db_path.clone();
-    let init_settings_file_path = git_paths.settings_file_path.clone();
-    let result = state.runtime_config.validate_and_save_then(
-        request.updates.clone(),
-        |snapshot| decide_patch(snapshot, &request, Some(git_paths)),
-        |plan, _saved| {
-            let Some(config) = &plan.initialize_local_repo else {
-                return Ok(());
-            };
-            crate::git::init_local_repo(config, &init_cache_db_path, &init_settings_file_path)
-                .map_err(|error| {
-                    PatchRefusal::Internal(format!(
-                        "Local versioning setup failed after the setting was saved; Hatchdoor restored the previous setting: {error}"
-                    ))
-                })
-        },
-    );
-
+    // Every save takes one path. The instance-wide versioning-task lifecycle
+    // this handler used to run for a `HATCHDOOR_GIT_*` change is gone with the
+    // legacy single-Vault lane (issue #185); those keys are first-boot import
+    // inputs now, except `HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL`, which the
+    // collection lane's Git turns read per turn and therefore need no restart
+    // and no lifecycle work here.
+    let result = state
+        .runtime_config
+        .validate_and_save(request.updates.clone(), |snapshot| {
+            decide_patch(snapshot, &request)
+        });
     match result {
-        Ok((plan, saved)) => {
-            if let Some(config) = plan.git_config.clone() {
-                *active = Some(crate::git::spawn_sync_task(
-                    config,
-                    state.vault_write_lock.clone(),
-                    production_sync_ops(),
-                ));
-            }
-            drop(active);
-            finish_patch(state, plan, &saved)
-        }
-        Err(refusal) => {
-            // Nothing was persisted: restore the task we stopped so the
-            // refusal leaves versioning exactly as it was.
-            if let Some(config) = old_git_config {
-                *active = Some(crate::git::spawn_sync_task(
-                    config,
-                    state.vault_write_lock.clone(),
-                    production_sync_ops(),
-                ));
-            }
-            drop(active);
-            refusal.into_response()
-        }
+        Ok((plan, saved)) => finish_patch(&state, plan, &saved),
+        Err(refusal) => refusal.into_response(),
     }
 }
 
-/// The single authoritative decision for a save: field validation, the
-/// reindex confirmation, and (when `vault_path` is `Some`, i.e. this save
-/// touches `HATCHDOOR_GIT_*`) the git preflight that decides whether local
-/// history has to be created. Runs inside `RuntimeConfig::validate_and_save`'s critical
-/// section, against the snapshot current at the moment of persistence, so two
-/// concurrent PATCHes cannot both validate against a snapshot the other has
-/// already invalidated (issue #54).
+/// The single authoritative decision for a save: field validation and the
+/// reindex confirmation. Runs inside `RuntimeConfig::validate_and_save`'s
+/// critical section, against the snapshot current at the moment of
+/// persistence, so two concurrent PATCHes cannot both validate against a
+/// snapshot the other has already invalidated (issue #54).
 fn decide_patch(
     snapshot: &ConfigSnapshot,
     request: &PatchSettingsRequest,
-    git_paths: Option<GitPaths>,
 ) -> Result<PatchPlan, PatchRefusal> {
     let errors = validate_updates(snapshot, &request.updates);
     if !errors.is_empty() {
@@ -390,56 +285,14 @@ fn decide_patch(
     }
     let mcp_write_toggled = mcp_write_setting_toggled(snapshot, &request.updates);
 
-    let Some(git_paths) = git_paths else {
-        return Ok(PatchPlan {
-            reindex_changed,
-            mcp_write_toggled,
-            git_config: None,
-            initialize_local_repo: None,
-        });
-    };
-    let vault_path = git_paths.vault_path;
-
-    let prospective = snapshot.with_updates(&request.updates);
-    let git_config =
-        crate::git::GitConfig::from_snapshot(vault_path, &prospective).map_err(|message| {
-            PatchRefusal::Validation(vec![FieldError::on("HATCHDOOR_GIT_SYNC_ENABLED", message)])
-        })?;
-
-    // The `git_downgrade` and `git_init` confirmations are retired (issue
-    // #183): they described the instance-wide Git lifecycle, which no longer
-    // has a Settings console to explain them and no longer runs on any
-    // deployment. Leaving remote versioning and creating fresh local history
-    // still happen here; they simply no longer stop to ask first.
-    let mut initialize_local_repo = None;
-    if let Some(config) = &git_config {
-        let preflight = match config.mode {
-            crate::git::GitMode::Local => crate::git::validate_local_repo(config),
-            crate::git::GitMode::Remote => crate::git::validate_repo(config),
-        };
-        if let Err(error) = preflight {
-            if config.mode == crate::git::GitMode::Local {
-                initialize_local_repo = Some(config.clone());
-            } else {
-                return Err(PatchRefusal::Validation(vec![FieldError::on(
-                    "HATCHDOOR_GIT_SYNC_ENABLED",
-                    error.to_string(),
-                )]));
-            }
-        }
-    }
-
     Ok(PatchPlan {
         reindex_changed,
         mcp_write_toggled,
-        git_config,
-        initialize_local_repo,
     })
 }
 
 /// The tail every successful save shares: request the work the save implies
-/// and build the response. Previously duplicated at the end of both the git and
-/// non-git branches.
+/// and build the response.
 fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Response {
     if plan.reindex_changed {
         // One Index turn per active Vault through the shared work coordinator,
@@ -454,15 +307,6 @@ fn finish_patch(state: &AppState, plan: PatchPlan, saved: &ConfigSnapshot) -> Re
         let _ = state.mcp_tools_changed.send(());
     }
     Json(settings_response(saved, state.demo_mode)).into_response()
-}
-
-fn production_sync_ops() -> crate::git::SyncOps {
-    crate::git::SyncOps {
-        commit: Box::new(crate::git::commit_local),
-        fetch: Box::new(crate::git::fetch_remote),
-        integrate: Box::new(crate::git::integrate_fetched),
-        push: Box::new(crate::git::push_branch),
-    }
 }
 
 fn validation_response(errors: Vec<FieldError>) -> Response {
@@ -483,14 +327,6 @@ fn confirmation_required(kind: &'static str) -> Response {
     (
         StatusCode::CONFLICT,
         Json(serde_json::json!({ "confirmation_required": kind })),
-    )
-        .into_response()
-}
-
-fn busy_response(message: String) -> Response {
-    (
-        StatusCode::CONFLICT,
-        Json(serde_json::json!({ "error": message, "state": "stopping" })),
     )
         .into_response()
 }
@@ -665,21 +501,18 @@ mod tests {
     use tempfile::tempdir;
 
     /// A minimal `AppState` for the settings save path's collection-lane
-    /// effects. Mirrors `handlers/vaults.rs`'s own `test_state`: the legacy
-    /// single-Vault cache/embedder machinery is not what these tests exercise,
-    /// but `startup_sqlite` is not optional so it gets a cheap in-memory
-    /// cache. The worker is returned because nothing else in this process
-    /// consumes the coordinator's queue, and the `TempDir` so it outlives the
-    /// state.
+    /// effects. Mirrors `handlers/vaults.rs`'s own `test_state`: no Vault is
+    /// registered, and `startup_sqlite` gets a cheap in-memory cache because
+    /// the field is not optional. The worker is returned because nothing else
+    /// in this process consumes the coordinator's queue, and the `TempDir` so
+    /// it outlives the state.
     fn test_state() -> (AppState, VaultWorkWorker, tempfile::TempDir) {
         let directory = tempdir().expect("temp dir");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, worker) = crate::vault_work::VaultWorkCoordinator::new();
         let managed_git =
             std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
         let state = AppState {
-            cache_db_path: directory.path().join("cache.sqlite3"),
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 directory.path().join("state/vaults.json"),
             ),
@@ -690,9 +523,6 @@ mod tests {
             startup_sqlite: std::sync::Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),
             ),
-            ready_vault: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            vault_revision: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
             mcp_tools_changed,
             embedder: crate::app_state::test_embedder(),
             runtime_embedder: std::sync::Arc::new(crate::embed::RuntimeEmbedder::new()),
@@ -700,14 +530,8 @@ mod tests {
                 directory.path().join("models"),
             )),
             model_setup_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_git_config: std::sync::Arc::new(None),
             web_auth_enabled: false,
             demo_mode: false,
-            vault_write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-            scan_config_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: RuntimeConfig::for_tests(),
             startup: crate::startup::StartupTracker::ready(),
         };
@@ -722,7 +546,13 @@ mod tests {
         name: &str,
         enabled: bool,
     ) -> crate::vault_registry::VaultId {
-        let path = state.cache_db_path.parent().expect("state root").join(name);
+        let path = state
+            .vault_registry
+            .path()
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("state root")
+            .join(name);
         std::fs::create_dir_all(&path).expect("vault dir");
         let before: std::collections::BTreeSet<_> = match state.vault_registry.load() {
             Ok(VaultRegistryState::Ready(snapshot)) => snapshot.vault_ids().collect(),
@@ -812,10 +642,6 @@ mod tests {
             !indexed.contains(&disabled),
             "a disabled Vault has no active runtime and must not be queued"
         );
-        assert!(
-            state.index_status.status().state != "rebuilding",
-            "the legacy instance-wide rebuild must no longer be started by a settings save"
-        );
     }
 
     #[tokio::test]
@@ -838,19 +664,14 @@ mod tests {
     }
 
     /// The Git author defaults are the commit identity every Vault without its
-    /// own falls back to, so a save of them has to succeed in an ordinary
-    /// registry deployment. It used to be refused `503 Vault is not ready`,
-    /// because any `HATCHDOOR_GIT_*` key routed into the legacy single-Vault
-    /// versioning-task lifecycle, which needs a legacy `ready_vault` that the
-    /// multi-Vault cutover left permanently unpublished — making #181's
-    /// "applies on the next Git turn, without a restart" unreachable.
+    /// own falls back to, so a save of them has to succeed like any other
+    /// instant setting: no lifecycle work, no confirmation, and no queued
+    /// background turn. Every `HATCHDOOR_GIT_*` key used to route into the
+    /// legacy single-Vault versioning-task lifecycle instead, which #185
+    /// deleted.
     #[tokio::test]
-    async fn git_author_defaults_save_without_a_legacy_ready_vault() {
+    async fn git_author_defaults_save_like_any_other_instant_setting() {
         let (state, _worker, _directory) = test_state();
-        assert!(
-            state.vault_path().await.is_none(),
-            "a registry deployment has no legacy ready Vault"
-        );
 
         let request = PatchSettingsRequest {
             updates: BTreeMap::from([
@@ -866,7 +687,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::OK,
-            "the commit identity must be savable without a legacy Vault"
+            "the commit identity must be savable on any deployment"
         );
 
         let snapshot = state.runtime_snapshot();
@@ -1008,43 +829,6 @@ mod tests {
         assert_eq!(
             errors[0].key, None,
             "the refusal spans two fields (enabled + token), so it belongs to neither alone"
-        );
-    }
-
-    #[test]
-    fn failed_settings_persistence_does_not_initialize_local_versioning() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let vault = temp.path().join("vault");
-        std::fs::create_dir(&vault).expect("vault");
-        let settings_parent = temp.path().join("settings-parent-is-a-file");
-        std::fs::write(&settings_parent, "not a directory").expect("block settings parent");
-        let runtime = RuntimeConfig::load(
-            settings_parent.join("settings.json"),
-            Environment::empty(),
-            live_settings_defaults(),
-        )
-        .expect("runtime configuration loads before its first save");
-        let request = PatchSettingsRequest {
-            updates: BTreeMap::from([("HATCHDOOR_GIT_SYNC_ENABLED".into(), "local".into())]),
-            confirm: vec![],
-        };
-        let git_paths = GitPaths {
-            vault_path: vault.clone(),
-            cache_db_path: vault.join(".hatchdoor-cache.sqlite3"),
-            settings_file_path: settings_parent.join("settings.json"),
-        };
-
-        let result = runtime.validate_and_save(request.updates.clone(), |snapshot| {
-            decide_patch(snapshot, &request, Some(git_paths))
-        });
-
-        assert!(
-            result.is_err(),
-            "the intentionally blocked settings write fails"
-        );
-        assert!(
-            !vault.join(".git").exists(),
-            "a failed settings persistence must not initialize a surprise repository"
         );
     }
 }

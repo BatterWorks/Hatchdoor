@@ -1967,9 +1967,8 @@ pub async fn dispatch_managed_git_turn(
     .await
 }
 
-/// [`dispatch_managed_git_turn`] with the actual `git2` turn injectable,
-/// mirroring `git/task.rs`'s `SyncOps` dependency-injection pattern: `execute`
-/// is production's `run_managed_git_turn` in the real dispatch loop, and a
+/// [`dispatch_managed_git_turn`] with the actual `git2` turn injectable:
+/// `execute` is production's `run_managed_git_turn` in the real dispatch loop, and a
 /// deterministic fake in tests that need to drive a real failure through the
 /// full async path (credential resolution, `spawn_blocking`, status
 /// publishing, scheduler recording) without a reachable remote.
@@ -2215,10 +2214,10 @@ where
     // same order for the same Vault, and nothing else in this codebase ever
     // acquires the checkout lease, so there is no risk of the mutation lock
     // and the checkout lease being acquired in opposite orders elsewhere.
-    // Coarser than the legacy single-Vault path's fine-grained per-phase
-    // locking (`git/task.rs::run_sync_phases` releases its lock across the
-    // network-only fetch/push phases) — held for this whole turn instead,
-    // including `synchronize_managed_checkout`'s network round-trip.
+    // Coarser than the retired single-Vault path's fine-grained per-phase
+    // locking, which released its lock across the network-only fetch/push
+    // phases (deleted with that lane in #185) — held for this whole turn
+    // instead, including `synchronize_managed_checkout`'s network round-trip.
     // Reproducing the fine-grained scheme here would require splitting
     // `synchronize_managed_checkout`'s monolithic fetch+integrate+push call
     // into phases callable independently from this async dispatch layer, a
