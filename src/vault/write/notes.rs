@@ -15,6 +15,7 @@ use super::paths::{
 };
 use super::rewrites::{backlink_rewrite_plan, merge_rewrites, parse_fence_marker};
 use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
+use crate::cache::parse::frontmatter_span;
 
 /// Where `replace_section` places the supplied content relative to the matched section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +214,114 @@ pub fn update_note(
         relative_path: Some(entry.relative_path.clone()),
         content_hash: Some(content_hash(&prepared.content)),
         quality_warnings: prepared.warnings,
+        rewritten_notes: 0,
+        moved_assets: 0,
+        trashed_path: None,
+        affected_paths: vec![entry.path.clone()],
+    })
+}
+
+/// Shallow top-level YAML merge into one note's frontmatter: every key in
+/// `updates` replaces (or creates) its top-level frontmatter value wholesale —
+/// nested mappings are not merged recursively — while keys `updates` does not
+/// mention survive untouched. A `null` value deletes the key. The Markdown
+/// body outside the leading frontmatter block is preserved byte-for-byte; a
+/// note with no block gets one created. Deleting a note's last frontmatter
+/// key removes the now-empty block entirely.
+///
+/// Only the body is promised byte-stable: the block itself is re-serialized
+/// through `serde_json::Map`, so surviving keys come back deterministically
+/// sorted and untouched values are re-formatted to serde_yaml's canonical
+/// style even when they themselves were not mentioned. Reuses the canonical
+/// cache-layer frontmatter parsing (`cache/parse.rs`) so reads and writes
+/// agree on what the block is.
+pub fn update_note_frontmatter(
+    entry: &NoteEntry,
+    updates: serde_json::Map<String, serde_json::Value>,
+    expected_content_hash: &str,
+) -> Result<WriteOutcome, WriteError> {
+    if updates.is_empty() {
+        return Err(WriteError::InvalidInput(
+            "update_frontmatter needs at least one top-level key".to_string(),
+        ));
+    }
+    ensure_content_hash(entry, expected_content_hash)?;
+    let content = read_note(entry)?;
+    let span = frontmatter_span(&content);
+    let had_frontmatter = span.is_some();
+    // Surface the same frontmatter quality contract as the sibling note
+    // primitives: a merge parses the block through serde_yaml, which silently
+    // collapses duplicate keys (last one wins), so that loss is reported as a
+    // warning rather than dropped silently.
+    let warnings = frontmatter_warnings(&content);
+    let mut merged = match &content[span.map(|(start, end)| start..end).unwrap_or(0..0)] {
+        "" => serde_json::Map::new(),
+        frontmatter => match serde_yaml::from_str::<serde_json::Value>(frontmatter) {
+            Ok(serde_json::Value::Object(properties)) => properties,
+            Ok(_) | Err(_) => {
+                return Err(WriteError::InvalidInput(format!(
+                    "note '{}' has invalid YAML frontmatter; fix it directly in the vault before updating it through the API",
+                    entry.relative_path
+                )));
+            }
+        },
+    };
+    for (key, value) in updates {
+        if value.is_null() {
+            merged.remove(&key);
+        } else {
+            merged.insert(key, value);
+        }
+    }
+
+    let updated = if merged.is_empty() {
+        if !had_frontmatter {
+            return Err(WriteError::InvalidInput(
+                "update_frontmatter cannot create an empty frontmatter block; only null values were supplied".to_string(),
+            ));
+        }
+        // Every key was deleted: strip the whole block instead of leaving an
+        // empty `---\n---` pair behind. `end + 4` skips the closing "\n---",
+        // so the body keeps its exact bytes including any leading newline.
+        content[span.map(|(_, end)| end + 4).unwrap_or_default()..].to_string()
+    } else {
+        let yaml = serde_yaml::to_string(&merged).map_err(|error| {
+            WriteError::InvalidInput(format!(
+                "updated frontmatter cannot be serialized as YAML: {error}"
+            ))
+        })?;
+        // The canonical parser closes the block at the first `\n---`, so a
+        // serialized value whose own lines contain a bare `---` would corrupt
+        // every later read of the note. Refuse instead of writing.
+        if yaml.split('\n').any(|line| line.trim_end() == "---") {
+            return Err(WriteError::InvalidInput(
+                "updated frontmatter values may not serialize a line containing only '---'"
+                    .to_string(),
+            ));
+        }
+        match span {
+            // Rewrite exactly the inner region so the opening/closing markers
+            // and everything after them keep their original bytes. The yaml
+            // text ends with its own newline, which `content[end..]`'s leading
+            // `\n---` replaces.
+            Some((start, end)) => {
+                format!(
+                    "{}{}{}",
+                    &content[..start],
+                    yaml.trim_end_matches('\n'),
+                    &content[end..]
+                )
+            }
+            None => format!("---\n{yaml}---\n{content}"),
+        }
+    };
+
+    atomic_write_if_unchanged(&entry.path, &updated, expected_content_hash)?;
+    Ok(WriteOutcome {
+        slug: Some(entry.slug.clone()),
+        relative_path: Some(entry.relative_path.clone()),
+        content_hash: Some(content_hash(&updated)),
+        quality_warnings: warnings,
         rewritten_notes: 0,
         moved_assets: 0,
         trashed_path: None,

@@ -159,23 +159,26 @@ fn string_values(value: serde_json::Value) -> Vec<String> {
 }
 
 fn split_frontmatter(content: &str) -> (&str, &str) {
+    match frontmatter_span(content) {
+        Some((start, end)) => (&content[start..end], content.get(end + 4..).unwrap_or("")),
+        None => ("", content),
+    }
+}
+
+/// Byte range `[start, end)` of one leading frontmatter block's *inner* text
+/// (between `---\n` and the next `\n---`), or `None` when the content has no
+/// frontmatter block. The shared write layer uses the same span so its
+/// frontmatter merge rewrites exactly this region and leaves every other
+/// byte of the note untouched.
+pub(crate) fn frontmatter_span(content: &str) -> Option<(usize, usize)> {
     let lines: Vec<&str> = content.splitn(3, '\n').collect();
     if lines.len() < 2 || lines[0].trim() != "---" {
-        return ("", content);
+        return None;
     }
-    let rest = &content[lines[0].len() + 1..];
-    if let Some(end) = rest.find("\n---") {
-        let fm_end = lines[0].len() + 1 + end;
-        let body_start = fm_end + 4; // skip "\n---"
-        let body = if body_start < content.len() {
-            &content[body_start..]
-        } else {
-            ""
-        };
-        (&content[lines[0].len() + 1..fm_end], body)
-    } else {
-        ("", content)
-    }
+    let start = lines[0].len() + 1; // skip "---\n"
+    let rest = &content[start..];
+    let end = start + rest.find("\n---")?;
+    Some((start, end))
 }
 
 fn extract_frontmatter_tags(frontmatter: &str, tags: &mut HashSet<String>) {

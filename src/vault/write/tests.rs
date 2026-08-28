@@ -279,6 +279,185 @@ fn update_note_requires_matching_hash() {
     assert_eq!(fs::read_to_string(path).expect("read"), "new\n");
 }
 
+fn frontmatter_entry(
+    root: &Path,
+    content: &str,
+    name: &str,
+) -> (VaultIndex, crate::vault::NoteEntry) {
+    fs::write(root.join(format!("{name}.md")), content).expect("write note");
+    let index = build(root);
+    let entry = index
+        .find_by_slug(&crate::vault::slugify(name))
+        .unwrap_or_else(|| panic!("{} entry", crate::vault::slugify(name)))
+        .clone();
+    (index, entry)
+}
+
+#[test]
+fn update_note_frontmatter_merges_top_level_keys_and_keeps_the_body_byte_for_byte() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\ntitle: Home\ntags:\n  - alpha\nnested:\n  keep: me\n---\n\n# Body\nsecret body text\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("status".to_string(), serde_json::json!("active"));
+    updates.insert(
+        "nested".to_string(),
+        serde_json::json!({"replaced": "wholesale"}),
+    );
+
+    let outcome = update_note_frontmatter(&entry, updates, &content_hash(original))
+        .expect("frontmatter update");
+
+    let updated = fs::read_to_string(entry.path).expect("read");
+    // serde_json maps serialize deterministically (keys sorted); nested values are replaced wholesale.
+    assert_eq!(
+        updated,
+        "---\nnested:\n  replaced: wholesale\nstatus: active\ntags:\n- alpha\ntitle: Home\n---\n\n# Body\nsecret body text\n"
+    );
+    assert!(updated.ends_with("secret body text\n"), "body is unchanged");
+    assert_eq!(
+        outcome.content_hash.as_deref(),
+        Some(content_hash(&updated).as_str())
+    );
+    assert_eq!(outcome.slug.as_deref(), Some("home"));
+    assert_eq!(outcome.relative_path.as_deref(), Some("Home"));
+}
+
+#[test]
+fn update_note_frontmatter_null_deletes_and_unmentioned_keys_survive() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\nkeep: yes\ndrop: me\n---\nbody stays\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("drop".to_string(), serde_json::Value::Null);
+    updates.insert("added".to_string(), serde_json::json!(2));
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    assert!(updated.contains("added: 2"));
+    assert!(updated.contains("keep: yes"));
+    assert!(
+        !updated.contains("drop"),
+        "explicit null deletes the key: {updated}"
+    );
+    assert!(updated.ends_with("body stays\n"));
+}
+
+#[test]
+fn update_note_frontmatter_creates_a_block_on_a_note_without_one() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "# Body only\nplain body\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("tags".to_string(), serde_json::json!(["one", "two"]));
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    assert!(
+        updated.starts_with("---\ntags:\n"),
+        "frontmatter block created: {updated}"
+    );
+    assert!(
+        updated.ends_with("# Body only\nplain body\n"),
+        "original content preserved as the body: {updated}"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_strips_the_block_when_the_last_keys_are_deleted() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\nonly: key\n---\n\nremaining body\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("only".to_string(), serde_json::Value::Null);
+
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    assert!(
+        !updated.contains("---"),
+        "empty frontmatter block is removed entirely: {updated:?}"
+    );
+    assert!(updated.ends_with("remaining body\n"));
+}
+
+#[test]
+fn update_note_frontmatter_rejects_empty_updates_and_all_null_creation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let plain = "just a body\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), plain, "Home");
+    assert!(matches!(
+        update_note_frontmatter(&entry, serde_json::Map::new(), &content_hash(plain)),
+        Err(WriteError::InvalidInput(_))
+    ));
+
+    let mut nulls = serde_json::Map::new();
+    nulls.insert("ghost".to_string(), serde_json::Value::Null);
+    assert!(
+        matches!(
+            update_note_frontmatter(&entry, nulls, &content_hash(plain)),
+            Err(WriteError::InvalidInput(_))
+        ),
+        "creating a frontmatter block from deletes-only is refused"
+    );
+}
+
+#[test]
+fn update_note_frontmatter_warns_when_duplicate_keys_are_collapsed() {
+    let tmp = TempDir::new().expect("tempdir");
+    // serde_yaml parses this last-wins, so `keep: second` silently replaces
+    // `keep: first` — surfaced as a quality warning like sibling primitives.
+    let original = "---\nkeep: first\nkeep: second\n---\nbody\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("added".to_string(), serde_json::json!(1));
+
+    let outcome =
+        update_note_frontmatter(&entry, updates, &content_hash(original)).expect("update");
+
+    assert!(
+        outcome
+            .quality_warnings
+            .iter()
+            .any(|warning| warning.contains("duplicate key")),
+        "duplicate-key collapse is warned about: {:?}",
+        outcome.quality_warnings
+    );
+}
+
+#[test]
+fn update_note_frontmatter_requires_matching_hash() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\na: b\n---\nbody\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("a".to_string(), serde_json::json!("c"));
+    assert!(matches!(
+        update_note_frontmatter(&entry, updates.clone(), "fnv1a64:deadbeef"),
+        Err(WriteError::Conflict(_))
+    ));
+    update_note_frontmatter(&entry, updates, &content_hash(original))
+        .expect("stale hash rejected, fresh accepted");
+}
+
+#[test]
+fn update_note_frontmatter_refuses_invalid_existing_yaml_without_touching_it() {
+    let tmp = TempDir::new().expect("tempdir");
+    let original = "---\ntags: [broken\n---\nbody\n";
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let mut updates = serde_json::Map::new();
+    updates.insert("a".to_string(), serde_json::json!(1));
+    let error = update_note_frontmatter(&entry, updates, &content_hash(original))
+        .expect_err("malformed existing frontmatter must fail loudly");
+    assert!(
+        matches!(error, WriteError::InvalidInput(_)),
+        "got {error:?}"
+    );
+    assert_eq!(fs::read_to_string(&entry.path).expect("read"), original);
+}
+
 #[cfg(unix)]
 #[test]
 fn attachment_overwrite_rejects_a_symlink_destination_without_touching_its_target() {

@@ -148,6 +148,37 @@ pub struct NoteAttachmentsResult {
     pub attachments: Vec<AttachmentInfo>,
 }
 
+/// One way `get_attachment` may deliver an attachment's bytes: an HTTP
+/// download URL by default, or inline base64 content as the fallback when an
+/// out-of-band HTTP request isn't possible, or the URL's own credential is
+/// unavailable to this client. The two variants carry different fields (a
+/// URL has its own path/auth story; base64 just carries content), so this is
+/// internally tagged on `encoding` — the same field name `get_attachment`'s
+/// own argument uses to choose between them.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(tag = "encoding")]
+pub enum AttachmentContent {
+    #[serde(rename = "url")]
+    Url {
+        download_url: String,
+        path_note: &'static str,
+        auth: &'static str,
+    },
+    #[serde(rename = "base64")]
+    Base64 { content: String },
+}
+
+/// `get_attachment`'s answer: one attachment's bytes, addressed by the same
+/// `relative_path` `list_note_attachments` reports.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetAttachmentResult {
+    pub vault_id: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub content_type: String,
+    pub content: AttachmentContent,
+}
+
 /// The receipt every note-mutation tool returns (`create_note` through
 /// `delete_note`). `layer` reports the resulting surface of the written note
 /// (`null` = default surface); it is always `null` after a delete, which
@@ -166,6 +197,21 @@ pub struct NoteWriteResult {
     pub trashed_path: Option<String>,
 }
 
+/// `get_frontmatter`'s answer: the note's frontmatter projection — tags,
+/// aliases, and every remaining property — without the Markdown body. A
+/// note with no frontmatter block answers `has_frontmatter: false` with an
+/// empty projection rather than an error.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct GetFrontmatterResult {
+    pub vault_id: String,
+    pub slug: String,
+    pub relative_path: String,
+    pub has_frontmatter: bool,
+    pub tags: Vec<String>,
+    pub aliases: Vec<String>,
+    pub properties: serde_json::Map<String, Value>,
+}
+
 /// The receipt every attachment-mutation tool returns (`import_attachment`
 /// through `delete_attachment`). A move/rename/delete carries no new
 /// `attachment` metadata beyond identity, so only `import_attachment` fills
@@ -178,6 +224,38 @@ pub struct AttachmentWriteResult {
     pub rewritten_notes: usize,
     pub trashed_path: Option<String>,
     pub cleanup_warning: Option<String>,
+}
+
+/// One `batch` item's outcome. `result` carries the named tool's own
+/// `structuredContent` on success; `error` carries a structured failure in
+/// the same shape a standalone call to that tool would return (either the
+/// domain error object, or `{code, message}` for a protocol-level failure
+/// such as an unresolvable Vault).
+///
+/// `ok` is authoritative and exactly one of `result`/`error` is present with
+/// it. This deliberately stays three flat fields rather than the tagged enum
+/// [`AttachmentContent`] uses for its own either/or: `ok` plus `result`/`error`
+/// is the shape MCP clients expect from a batch, and it is already the
+/// advertised `outputSchema`. The invariant is therefore held by the two
+/// construction sites in `mcp::tools::batch` — both set `ok` and its matching
+/// field together — not by the type. Keep them in step when editing either.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BatchItemResult {
+    pub index: usize,
+    pub op: String,
+    pub ok: bool,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+}
+
+/// `batch`'s answer: one ordered outcome per requested operation. Execution
+/// is best-effort — an earlier item's failure never stops a later item from
+/// running, and there is no rollback.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BatchResult {
+    pub items: Vec<BatchItemResult>,
+    pub succeeded: usize,
+    pub failed: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +294,9 @@ output_schemas! {
     "recently_modified" => RecentlyModifiedResult,
     "get_attachment_import_config" => AttachmentImportConfigResult,
     "list_note_attachments" => NoteAttachmentsResult,
+    "get_attachment" => GetAttachmentResult,
+    "get_frontmatter" => GetFrontmatterResult,
+    "batch" => BatchResult,
     // Management tools
     "create_vault" => CreateVaultResult,
     "edit_vault" => EditVaultResult,
@@ -230,6 +311,7 @@ output_schemas! {
     "append_to_note" => NoteWriteResult,
     "edit_note" => NoteWriteResult,
     "replace_section" => NoteWriteResult,
+    "update_frontmatter" => NoteWriteResult,
     "rename_note" => NoteWriteResult,
     "move_note" => NoteWriteResult,
     "move_rename_note" => NoteWriteResult,
@@ -288,12 +370,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 35,
-            "3 setup + 11 read + 7 management + 14 write tools"
+            total, 39,
+            "3 setup + 13 read + 1 batch + 7 management + 15 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 35, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 39, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
@@ -415,6 +497,42 @@ mod schema_tests {
             .iter()
             .map(|extension| extension.to_string())
             .collect()
+    }
+
+    #[test]
+    fn get_attachment_result_validates_both_encodings() {
+        let validator = validator::<GetAttachmentResult>();
+
+        let url_variant = serde_json::to_value(GetAttachmentResult {
+            vault_id: "018f47a0-7768-4d0c-8da3-5aa28d1c31c7".to_string(),
+            relative_path: "Sources/diagram.png".to_string(),
+            size_bytes: 1234,
+            content_type: "image/png".to_string(),
+            content: AttachmentContent::Url {
+                download_url: "/api/v1/vaults/x/assets/Sources/diagram.png".to_string(),
+                path_note: "resolve against this MCP endpoint",
+                auth: "requires the web bearer token",
+            },
+        })
+        .expect("serialize");
+        assert!(validator.is_valid(&url_variant), "url encoding validates");
+        assert_eq!(url_variant["content"]["encoding"], "url");
+
+        let base64_variant = serde_json::to_value(GetAttachmentResult {
+            vault_id: "018f47a0-7768-4d0c-8da3-5aa28d1c31c7".to_string(),
+            relative_path: "Sources/diagram.png".to_string(),
+            size_bytes: 3,
+            content_type: "image/png".to_string(),
+            content: AttachmentContent::Base64 {
+                content: "cG5n".to_string(),
+            },
+        })
+        .expect("serialize");
+        assert!(
+            validator.is_valid(&base64_variant),
+            "base64 encoding validates"
+        );
+        assert_eq!(base64_variant["content"]["encoding"], "base64");
     }
 
     #[test]

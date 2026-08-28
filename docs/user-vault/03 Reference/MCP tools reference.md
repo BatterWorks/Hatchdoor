@@ -140,14 +140,21 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. |
 | `get_stats` | `scope` | Grouped statistics for one Vault or all enabled Vaults. |
 | `get_graph` | `scope` | Grouped link graph for one Vault or all enabled Vaults. |
+| `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter metadata — `tags`, `aliases`, and every remaining top-level key under `properties` — without returning the Markdown body. A note with no frontmatter block answers `has_frontmatter: false` with empty collections rather than an error. It returns no `content_hash`: to write the metadata back, take the hash from `get_note`. |
 | `recently_modified` | `scope` | Recently modified notes. Optional `limit` (1–25, default 5). |
 | `list_note_attachments` | `vault_id`, `slug` | List the attachments one note references, without the note's full content. |
+| `get_attachment` | `vault_id`, `relative_path` | Fetch one attachment's bytes, addressed by the same `relative_path` `list_note_attachments` reports. Optional `encoding`: `url` (the default) returns a `download_url`, `base64` returns the bytes inline. |
 | `get_attachment_import_config` | `vault_id` | Report whether uploads are currently possible for this Vault, the available methods, their byte limits, and the allowed file extensions. Call this before uploading. |
 
 Collection-scoped results (`search_notes`, `get_tree`, `get_stats`, `get_graph`, `recently_modified` with `scope: "all"`) carry `scope`, `collection_revision`, `partial`, and `participants` — an agent should branch on the structured error `code`, never on message text, and should treat `partial: true` as "some enabled Vaults did not answer in time," not as an error.
 
 > [!note]
 > `get_attachment_import_config`'s `enabled` field is the AND of two independent gates: `HATCHDOOR_MCP_WRITE_ENABLED` (instance-wide) and the target Vault's own `capabilities.mutate` (source mode and lifecycle phase). The response explains which one is currently false when `enabled` is `false`.
+
+`get_attachment` mirrors the inbound upload flow in the opposite direction, and its two encodings carry the same tradeoff. `encoding: "url"` returns `content.download_url` — a **relative** path to resolve against the same scheme, host, and port as the MCP endpoint itself — plus `path_note` and `auth` fields restating that. Send your MCP bearer token as an `Authorization: Bearer` header and it works: the asset route accepts that credential for as long as MCP is enabled, exactly as the upload endpoint accepts it on the way in. The web bearer token works too, as a header or an `access_token` query parameter, and with neither token configured (or in demo mode) the URL needs no credential at all. A client that cannot make an out-of-band HTTP request calls `get_attachment` again with `encoding: "base64"` and gets `content.content` inline instead — bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment` uses on the way in, and rejected with the measured size when the file is over it. Either way the result carries `vault_id`, `relative_path`, `size_bytes`, and `content_type`.
+
+> [!note]
+> Fetching that URL with the MCP token is held to the same limits as fetching the bytes over `/mcp`: the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` ceiling (a larger attachment returns `413`, so use the web token or raise the setting) and the same per-token rate quota, drawn from the same counter, answering `429` with `Retry-After`. The URL is a cheaper transport, not a larger allowance. Turning MCP off revokes it on the very next request, with no restart. See [[The security model]].
 
 ## Write content tools
 
@@ -160,6 +167,7 @@ Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id
 | `append_to_note` | `slug`, `content`, `expected_content_hash` | Append content to a note. |
 | `edit_note` | `slug`, `old_string`, `new_string`, `expected_content_hash` | Surgical string replacement. `old_string` must match exactly and be unique unless `replace_all: true`; otherwise the edit is rejected without writing. Prefer this over `update_note` for small changes. |
 | `replace_section` | `slug`, `heading`, `mode`, `content`, `expected_content_hash` | Replace or insert around a Markdown section identified by its heading. `mode` is `replace` (overwrite the section — `content` should include the heading), `before`, or `after`. The section spans the heading through the next same-or-higher heading; headings inside fenced code blocks are ignored, and the heading must match exactly and be unique. |
+| `update_frontmatter` | `slug`, `frontmatter`, `expected_content_hash` | Shallow top-level merge into the note's YAML frontmatter, leaving the body untouched. Keys you don't mention survive; an explicit `null` deletes a key; a nested mapping is replaced wholesale rather than merged into. A note with no frontmatter block gets one created, and deleting its last key removes the block rather than leaving an empty one. Rejects an empty `frontmatter` object, and a creation whose values are all `null`. |
 | `rename_note` | `slug`, `new_title`, `expected_content_hash` | Rename within the current folder; rewrites wikilink backlinks and moves/rewrites referenced assets. |
 | `move_note` | `slug`, `target_folder`, `expected_content_hash` | Move to a target folder; same backlink/asset handling as rename. |
 | `move_rename_note` | `slug`, `target_relative_path`, `expected_content_hash` | Move and rename in one operation. |
@@ -180,6 +188,36 @@ Every write tool accepts an optional `commit_summary` (a one-line string) used i
 A successful note write returns `vault_id`, `slug`, `relative_path`, `content_hash` (use this for the next write), `layer`, `quality_warnings`, `rewritten_notes` (backlinks updated), `moved_assets`, and `trashed_path` (set only by `delete_note`). A successful attachment write returns `vault_id`, `attachment`, `rewritten_notes`, `trashed_path`, and `cleanup_warning`.
 
 A write conflict (stale `expected_content_hash`, or a registry revision that moved under a Vault-management call) is reported as a retryable tool error — re-read the current state and retry rather than assuming the operation is unsafe to repeat.
+
+## Batch
+
+`batch` runs an ordered list of the tools above in a single call. There is one such tool, not a batching variant per tool: each item names an `op` and carries that tool's own `arguments` exactly as a standalone call would, `vault_id` included, so one batch can span several Vaults.
+
+```json
+{
+  "operations": [
+    {"op": "create_note", "arguments": {"vault_id": "<id>", "relative_path": "Inbox/Draft.md", "content": "# Draft\n"}},
+    {"op": "update_frontmatter", "arguments": {"vault_id": "<id>", "slug": "inbox/draft", "frontmatter": {"tags": ["status/draft"]}, "expected_content_hash": "ignored-here"}},
+    {"op": "get_note", "arguments": {"vault_id": "<id>", "slug": "inbox/draft"}}
+  ]
+}
+```
+
+**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
+
+**Best-effort, in order, no rollback.** Items run one after another; an item that fails never stops the ones after it, and nothing already written is undone. There is no mid-batch visibility either — an item sees the Vault, not the batch's own bookkeeping, apart from the hash chaining below.
+
+**Permission is still per item.** `batch` itself is not gated on write mode, because a batch may be entirely read-only. Each write-shaped item is gated exactly as the same call would be standalone: with `HATCHDOOR_MCP_WRITE_ENABLED=false` the read items succeed and the write items fail individually, and a Vault whose `capabilities.mutate` is false refuses its writes the same way.
+
+**`expected_content_hash` inside a batch.** Once a batch has written a note, later items in that same call targeting the same `vault_id` + `slug` have their `expected_content_hash` replaced with the hash that write produced — you cannot know the intermediate hash without the round trip a batch exists to avoid, so supply any placeholder for it and it is discarded. This applies to `create_note` too: create a note and edit it later in the same call. A note the batch has *not* already written validates its `expected_content_hash` normally, exactly like a standalone call. The relaxation never leaks outside the call — Hatchdoor holds each touched Vault's mutation lock from that Vault's first write through the end of the batch, so no outside writer can slip in behind a substituted hash.
+
+**Result shape.** `items` (one entry per requested operation, carrying `index`, `op`, `ok`, and then either `result` — that tool's own normal result — or `error`), plus `succeeded` and `failed` counts. A batch that ran at all returns success at the tool level; read `failed` and the per-item `ok` flags, never the call's own status, to find out what happened.
+
+**Cost to everyone else.** From its first write to a Vault until the call ends, a batch holds that Vault's write lock. Other writers to the same Vault — the Web UI, another agent, the HTTP API — wait for it. That is what makes the hash chaining safe and what keeps the batch's writes in one Git commit, but it means a 20-write batch against a busy Vault is a pause other writers feel. Reads are unaffected.
+
+Vault changes made by a batch are committed together on the Vault's next Git sync turn, the same as any other burst of writes. (On the legacy single-Vault sync path, a batch's writes may land in more than one commit; nothing is lost or reordered, only the commit boundary differs.)
+
+A batch is a single `tools/call`, so it costs one call against the per-token rate limit (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED` in [[Settings and environment variables reference]]) no matter how many items it carries — which is most of the reason to reach for it. The item caps above are the tool's own, enforced separately.
 
 ---
 

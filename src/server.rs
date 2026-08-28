@@ -19,7 +19,10 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::{debug, error, info, warn};
 
 use crate::app_state::AppState;
-use crate::auth::{WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_token, require_web_token};
+use crate::auth::{
+    AssetReadTokens, WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_read_token,
+    require_web_or_live_mcp_token, require_web_token,
+};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
@@ -477,10 +480,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/v1/vaults/{vault_id}/resolve-batch",
                 post(vault_scoped_resolve_batch_handler),
             )
-            .route(
-                "/api/v1/vaults/{vault_id}/assets/{*path}",
-                get(vault_scoped_asset_handler),
-            )
             // Grouped with mutation-related routes (not #109's exposed safe-read
             // list) since it is write-capability discovery, not content
             // browsing; gated the same as the mutations it describes.
@@ -539,6 +538,39 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         }
     };
 
+    // Vault-scoped asset reads sit outside `vaults_v1`'s web-token-only auth for
+    // the same reason the upload route below does, in the opposite direction:
+    // `get_attachment`'s default response is a `download_url` pointing here
+    // (#176), and an MCP client holding only the MCP bearer token could not
+    // fetch it while this route accepted the web token alone. Read-only MCP
+    // already exposes the same bytes through `encoding: "base64"`, so accepting
+    // the MCP credential here widens no capability. The web token still works,
+    // including as an `access_token` query parameter, which is how the browser's
+    // `<img>` tags and download navigations reach it.
+    let vault_assets = Router::new().route(
+        "/api/v1/vaults/{vault_id}/assets/{*path}",
+        get(vault_scoped_asset_handler),
+    );
+    // Gated on exactly the condition `vaults_v1` uses above, and for the same
+    // two reasons: a deployment with no web token configured serves this route
+    // openly (enabling MCP must not suddenly demand a credential the browser
+    // has never had), and #109's demo mode publishes reads unauthenticated,
+    // with asset visibility decided by the handler's own layer rules rather
+    // than by this token check.
+    let vault_assets = match web_bearer_token.clone() {
+        Some(token) if !state.demo_mode => {
+            vault_assets.layer(axum::middleware::from_fn_with_state(
+                AssetReadTokens {
+                    web: token,
+                    runtime_config: state.runtime_config.clone(),
+                    limiter: mcp_transport.limiter(),
+                },
+                require_web_or_live_mcp_read_token,
+            ))
+        }
+        Some(_) | None => vault_assets,
+    };
+
     // Vault-scoped attachment upload sits outside `vaults_v1`'s web-token-only
     // auth, mirroring the legacy `/api/attachment` route it replaces: an MCP
     // agent that already holds the MCP bearer token can use it directly,
@@ -577,6 +609,7 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .merge(model_setup)
         .merge(settings)
         .merge(vaults_v1)
+        .merge(vault_assets)
         .merge(vault_attachment)
         .merge(mcp)
         .route("/", get(spa_index_handler))
@@ -2570,6 +2603,281 @@ mod tests {
         assert_eq!(
             upload("re-disabled.png").await.status(),
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_accepts_a_read_only_mcp_token_and_the_web_token_in_either_position() {
+        // #176: `get_attachment`'s default response is a download_url pointing
+        // at this route, so the MCP credential must be able to fetch it —
+        // including in read-only mode, since the same bytes are already
+        // reachable through that tool's base64 encoding. The web token keeps
+        // both positions because the browser reaches assets through `<img>`
+        // tags that cannot set headers.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-auth");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n\n![[diagram.png]]\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"not-really-a-png")
+            .expect("write attachment");
+
+        let fetch = |header: Option<&'static str>, query: &'static str| {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.png{query}");
+            async move {
+                let mut request = Request::builder().uri(uri);
+                if let Some(token) = header {
+                    request = request.header("authorization", format!("Bearer {token}"));
+                }
+                app.oneshot(request.body(Body::empty()).expect("request"))
+                    .await
+                    .expect("response")
+            }
+        };
+
+        assert_eq!(fetch(None, "").await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            fetch(Some("not-a-real-token"), "").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(fetch(Some("web-secret"), "").await.status(), StatusCode::OK);
+        assert_eq!(
+            fetch(None, "?access_token=web-secret").await.status(),
+            StatusCode::OK,
+            "the web token must still work in the query position for <img> tags"
+        );
+
+        // The point of the change: write mode is off, and the MCP token still
+        // reads.
+        let with_mcp_token = fetch(Some("mcp-secret"), "").await;
+        assert_eq!(with_mcp_token.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(with_mcp_token.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), b"not-really-a-png");
+
+        // The MCP token is header-only here, so it never lands in a trace span.
+        assert_eq!(
+            fetch(None, "?access_token=mcp-secret").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_holds_the_mcp_token_to_its_own_base64_byte_ceiling() {
+        // The MCP credential's ceiling for attachment bytes is
+        // HATCHDOOR_MCP_MAX_BASE64_BYTES, enforced by get_attachment's base64
+        // encoding. The download_url that same tool advertises points here, at a
+        // route whose own bound is far larger, so without this clamp the URL
+        // would be a way around the setting. The web token is unaffected.
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("save a small base64 ceiling");
+
+        let vault_root = tmp.path().join("assets-ceiling");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("small.png"), b"12345678").expect("write small");
+        std::fs::write(vault_root.join("big.png"), b"0123456789abcdef").expect("write big");
+
+        let fetch = |name: &'static str, token: &'static str| {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/{name}");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+
+        assert_eq!(
+            fetch("small.png", "mcp-secret").await.status(),
+            StatusCode::OK
+        );
+
+        let refused = fetch("big.png", "mcp-secret").await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "an attachment over the MCP ceiling must not be served to the MCP token"
+        );
+        assert_eq!(json_body(refused).await["code"], "asset_too_large");
+
+        assert_eq!(
+            fetch("big.png", "web-secret").await.status(),
+            StatusCode::OK,
+            "the web token keeps the route's own larger bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_spends_the_mcp_tool_quota_and_answers_429_when_it_runs_out() {
+        // Without this the download_url would be an unmetered second channel:
+        // a credential rate-limited on /mcp could pull attachment bytes here
+        // without limit. The limiter instance is shared with the transport.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-quota");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"bytes").expect("write attachment");
+
+        let fetch = |token: &'static str| {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.png");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+
+        for _ in 0..crate::mcp::limits::TOOL_CALLS_PER_MINUTE {
+            assert_eq!(fetch("mcp-secret").await.status(), StatusCode::OK);
+        }
+
+        let throttled = fetch("mcp-secret").await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            throttled.headers().contains_key("retry-after"),
+            "a throttled asset read must say when to come back"
+        );
+
+        assert_eq!(
+            fetch("web-secret").await.status(),
+            StatusCode::OK,
+            "the web token is not on the MCP quota"
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_stays_open_with_no_web_token_even_once_mcp_is_enabled() {
+        // Enabling MCP in Settings must not start demanding a credential the
+        // browser has never had: a deployment with no web token configured
+        // served assets openly before, and still does.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            None,
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-open");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            None,
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"bytes").expect("write attachment");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/assets/diagram.png"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn asset_route_stops_accepting_the_mcp_token_the_moment_mcp_is_disabled() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-revocation");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"bytes").expect("write attachment");
+
+        let fetch = || {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.png");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", "Bearer mcp-secret")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+
+        assert_eq!(fetch().await.status(), StatusCode::OK);
+
+        state
+            .runtime_config
+            .save([("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string())])
+            .expect("save disabled");
+        assert_eq!(
+            fetch().await.status(),
+            StatusCode::UNAUTHORIZED,
+            "disabling MCP must revoke the credential on the very next request"
         );
     }
 

@@ -1,6 +1,13 @@
-//! Mutating MCP tools: note and attachment writes, plus the write-side
-//! helpers (index building, git-sync bookkeeping, result shaping). Gated by
-//! `HATCHDOOR_MCP_WRITE_ENABLED` at the dispatch layer in `mod.rs`.
+//! Vault-scoped MCP tools: note and attachment writes, plus the write-side
+//! helpers (index building, git-sync bookkeeping, result shaping). The
+//! mutations — [`WRITE_OPS`], dispatched by [`dispatch_write_tool`] — are gated
+//! by `HATCHDOOR_MCP_WRITE_ENABLED` at the dispatch layer in `mod.rs`.
+//!
+//! Three *read* tools live here too and are not gated: `list_note_attachments`,
+//! `get_attachment`, and `get_frontmatter`. They sit next to the mutations
+//! because they share this module's Vault-scoping helpers (`readable_vault`,
+//! `note_entry`, `current_index`), not because they need write permission —
+//! `mod.rs`'s `READ_OPS` is what decides that, and it lists all three.
 
 // The deserialization-only scope and retired legacy commit-summary fields are
 // intentionally retained until every old client gets a structured invalid
@@ -18,7 +25,7 @@ use crate::vault::{
     AttachmentOutcome, LayerMap, SectionMode, WriteError, WriteOutcome, append_note, archive_note,
     create_note, delete_attachment, delete_note, edit_note, import_attachment_bytes,
     list_note_attachments, move_attachment, move_or_rename_note, rename_attachment,
-    replace_section, update_note,
+    replace_section, update_note, update_note_frontmatter,
 };
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
@@ -99,6 +106,105 @@ fn vault_error(error: VaultReadError) -> JsonRpcFailure {
     JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message))
 }
 
+/// Shapes one structured read-side error using the same
+/// `{code, message, vault_id, retryable}` envelope as the other
+/// Vault-qualified failures (`note_not_found`, `capability_unavailable`).
+/// Shared by the frontmatter and attachment read tools.
+fn structured_read_error(
+    vault_id: VaultId,
+    code: &str,
+    message: impl std::fmt::Display,
+) -> JsonRpcFailure {
+    JsonRpcFailure::not_found(
+        json!({
+            "code": code,
+            "message": message.to_string(),
+            "vault_id": vault_id,
+            "retryable": false,
+        })
+        .to_string(),
+    )
+}
+
+/// Maps the existing `/assets/{*path}` route's own containment/extension
+/// check to the same structured error shape, so `get_attachment` reports the
+/// identical `code` a caller would see resolving the same path over HTTP.
+fn asset_error_to_jsonrpc(
+    vault_id: VaultId,
+    relative_path: &str,
+    error: crate::handlers::AssetPathError,
+) -> JsonRpcFailure {
+    let (code, _status, message) = crate::handlers::asset_error_parts(error, relative_path);
+    structured_read_error(vault_id, code, message)
+}
+
+/// Every note/attachment mutation tool, and the one list that says so. The
+/// top-level dispatcher (`mod.rs`), the `batch` allow-list (`batch.rs`), and
+/// [`dispatch_write_tool`] below all read this rather than repeating the names,
+/// so a new write tool is wired by adding it here and to the `match` — and
+/// `write_ops_match_the_advertised_catalogue` fails if it is added to the
+/// catalogue and forgotten here.
+///
+/// Vault-management tools (`create_vault` through `retry_vault`) are deliberately
+/// absent: they mutate the registry, not a Vault's content, and are dispatched
+/// and gated separately.
+pub(super) const WRITE_OPS: &[&str] = &[
+    "create_note",
+    "update_note",
+    "append_to_note",
+    "edit_note",
+    "replace_section",
+    "update_frontmatter",
+    "rename_note",
+    "move_note",
+    "move_rename_note",
+    "archive_note",
+    "delete_note",
+    "import_attachment",
+    "move_attachment",
+    "rename_attachment",
+    "delete_attachment",
+];
+
+/// Dispatches one write op to its underlying tool function. Shared by the
+/// top-level MCP dispatcher (`mod.rs`, one call per request) and the `batch`
+/// tool (`batch.rs`, one call per item): both resolve the target Vault and
+/// its mutation lock themselves before calling this, since they hold that
+/// lock on different schedules — a standalone call for just this one op, a
+/// batch item for as long as its whole call keeps touching the same Vault.
+pub(super) async fn dispatch_write_tool(
+    state: AppState,
+    vault: &McpVault,
+    op: &str,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    match op {
+        "create_note" => create_note_tool(state, vault, arguments).await,
+        "update_note" => update_note_tool(state, vault, arguments).await,
+        "append_to_note" => append_to_note_tool(state, vault, arguments).await,
+        "edit_note" => edit_note_tool(state, vault, arguments).await,
+        "replace_section" => replace_section_tool(state, vault, arguments).await,
+        "update_frontmatter" => update_frontmatter_tool(state, vault, arguments).await,
+        "rename_note" => rename_note_tool(state, vault, arguments).await,
+        "move_note" => move_note_tool(state, vault, arguments).await,
+        "move_rename_note" => move_rename_note_tool(state, vault, arguments).await,
+        "archive_note" => archive_note_tool(state, vault, arguments).await,
+        "delete_note" => delete_note_tool(state, vault, arguments).await,
+        "import_attachment" => import_attachment_tool(state, vault, arguments, config).await,
+        "move_attachment" => move_attachment_tool(state, vault, arguments).await,
+        "rename_attachment" => rename_attachment_tool(state, vault, arguments).await,
+        "delete_attachment" => delete_attachment_tool(state, vault, arguments).await,
+        // Unreachable while [`WRITE_OPS`] and the arms above agree, which
+        // `write_ops_match_the_advertised_catalogue` enforces. An error rather
+        // than a panic anyway: a name that drifts out of step must not be able
+        // to take the process down from a request.
+        _ => Err(JsonRpcFailure::invalid_params(format!(
+            "MCP tool is catalogued as a write tool but has no dispatch: {op}"
+        ))),
+    }
+}
+
 pub(super) async fn create_note_tool(
     _state: AppState,
     vault: &McpVault,
@@ -141,6 +247,57 @@ pub(super) async fn update_note_tool(
     let index = current_index(vault).await?;
     let entry = note_entry(&index, &args.slug)?;
     let outcome = update_note(&entry, &args.content, &args.expected_content_hash)
+        .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
+    Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
+}
+
+pub(super) async fn get_frontmatter_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: GetFrontmatterArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid get_frontmatter arguments: {error}"))
+    })?;
+    let index = current_index(vault).await?;
+    let entry = note_entry(&index, &args.slug)?;
+    // Reading the note's bytes is the same read `get_note` performs; the
+    // projection just never returns them. The canonical cache-layer parser
+    // decides what counts as frontmatter.
+    let content = std::fs::read_to_string(&entry.path).map_err(|error| {
+        structured_read_error(
+            vault.vault_id,
+            "note_unreadable",
+            format!("failed to read note '{}': {error}", entry.relative_path),
+        )
+    })?;
+    let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
+    let metadata = crate::cache::parse::parse_frontmatter_metadata(&content)
+        .map_err(|message| structured_read_error(vault.vault_id, "invalid_frontmatter", message))?;
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::GetFrontmatterResult {
+            vault_id: vault.vault_id.to_string(),
+            slug: entry.slug.clone(),
+            relative_path: entry.relative_path.clone(),
+            has_frontmatter,
+            tags: metadata.tags,
+            aliases: metadata.aliases,
+            properties: metadata.properties,
+        },
+    )))
+}
+
+pub(super) async fn update_frontmatter_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: UpdateFrontmatterArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid update_frontmatter arguments: {error}"))
+    })?;
+    let index = current_index(vault).await?;
+    let entry = note_entry(&index, &args.slug)?;
+    let outcome = update_note_frontmatter(&entry, args.frontmatter, &args.expected_content_hash)
         .map_err(|error| write_error_to_jsonrpc(vault.vault_id, error))?;
     Ok(finalize_note_write(vault.vault_id, &index.layers, outcome))
 }
@@ -477,6 +634,67 @@ pub(super) async fn delete_attachment_tool(
     Ok(attachment_success(vault.vault_id, outcome))
 }
 
+/// Fetch one attachment's bytes: an HTTP download URL by default, or
+/// base64-inline content as the fallback when an out-of-band HTTP request
+/// isn't possible or the URL's own credential isn't available to this
+/// client. Addressed by `relative_path`, no note or index build required —
+/// resolved through the same containment/extension check the existing
+/// `/assets/{*path}` route uses, which every `list_note_attachments` entry
+/// already satisfies (both share the same servable-extension allow-list).
+pub(super) async fn get_attachment_tool(
+    _state: AppState,
+    vault: &McpVault,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    let args: GetAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
+        JsonRpcFailure::invalid_params(format!("Invalid get_attachment arguments: {error}"))
+    })?;
+    let relative_path = non_empty_argument("relative_path", args.relative_path)?;
+    let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
+
+    let asset: crate::handlers::ResolvedAsset =
+        crate::handlers::describe_asset(&vault_path(vault), &relative_path)
+            .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
+    let size_bytes = asset.size_bytes;
+
+    let content = match encoding {
+        AttachmentEncoding::Url => crate::mcp::results::AttachmentContent::Url {
+            download_url: crate::handlers::asset_download_path(
+                &vault.vault_id.to_string(),
+                &relative_path,
+            ),
+            path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
+            auth: "Send this MCP session's own bearer token as an Authorization: Bearer header; the route accepts it for as long as MCP stays enabled. This deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) also works, as a header or an access_token query parameter. When neither token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
+        },
+        AttachmentEncoding::Base64 => {
+            if size_bytes > config.max_base64_bytes {
+                return Err(JsonRpcFailure::invalid_params(format!(
+                    "attachment exceeds max size for base64 encoding: {size_bytes} > {}; call get_attachment again with encoding \"url\" instead",
+                    config.max_base64_bytes
+                )));
+            }
+            let bytes = asset
+                .read_bytes()
+                .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
+            use base64::Engine as _;
+            crate::mcp::results::AttachmentContent::Base64 {
+                content: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }
+        }
+    };
+
+    Ok(tool_success(crate::mcp::results::result_to_value(
+        &crate::mcp::results::GetAttachmentResult {
+            vault_id: vault.vault_id.to_string(),
+            relative_path,
+            size_bytes,
+            content_type: asset.content_type.to_string(),
+            content,
+        },
+    )))
+}
+
 pub(super) async fn list_note_attachments_tool(
     _state: AppState,
     vault: &McpVault,
@@ -769,6 +987,22 @@ pub(super) fn write_tools_list() -> Vec<Value> {
             "annotations": write_tool_annotations(false, false)
         }),
         json!({
+            "name": "update_frontmatter",
+            "description": "Shallow top-level YAML merge into an existing note's frontmatter, leaving the body untouched. An explicit null value deletes a key; keys not mentioned survive; nested mappings replace wholesale (shallow semantics). A note with no frontmatter block gets one created. Requires expected_content_hash from get_note.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "minLength": 1},
+                    "frontmatter": {"type": "object", "additionalProperties": true, "description": "Top-level frontmatter keys to set or replace. A null value deletes the key."},
+                    "expected_content_hash": {"type": "string", "minLength": 1},
+                    "commit_summary": {"type": "string", "description": "Optional one-line summary of this change for the git commit body."}
+                },
+                "required": ["slug", "frontmatter", "expected_content_hash"],
+                "additionalProperties": false
+            },
+            "annotations": write_tool_annotations(true, false)
+        }),
+        json!({
             "name": "rename_note",
             "description": "Rename a note within its current folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note.",
             "inputSchema": {
@@ -995,6 +1229,24 @@ struct ReplaceSectionArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct UpdateFrontmatterArgs {
+    vault_id: VaultId,
+    slug: String,
+    frontmatter: serde_json::Map<String, serde_json::Value>,
+    expected_content_hash: String,
+    #[serde(default)]
+    commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetFrontmatterArgs {
+    vault_id: VaultId,
+    slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RenameNoteArgs {
     vault_id: VaultId,
     slug: String,
@@ -1056,6 +1308,22 @@ struct ImportAttachmentArgs {
     overwrite: Option<bool>,
     #[serde(default)]
     commit_summary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetAttachmentArgs {
+    vault_id: VaultId,
+    relative_path: String,
+    #[serde(default)]
+    encoding: Option<AttachmentEncoding>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AttachmentEncoding {
+    Url,
+    Base64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1163,6 +1431,26 @@ mod record_tests {
 #[cfg(test)]
 mod finalize_tests {
     use super::*;
+
+    #[test]
+    fn write_ops_match_the_advertised_catalogue() {
+        // The drift guard for the single source of truth: `WRITE_OPS` gates
+        // dispatch in `mod.rs` and membership in `batch.rs`, while
+        // `write_tools_list()` is what clients are actually told exists. A tool
+        // catalogued but missing here would be advertised and then refused; one
+        // listed here but not catalogued would be a gate on nothing.
+        let mut advertised: Vec<String> = write_tools_list()
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_string())
+            .collect();
+        let mut declared: Vec<String> = WRITE_OPS.iter().map(|op| (*op).to_string()).collect();
+        advertised.sort();
+        declared.sort();
+        assert_eq!(
+            advertised, declared,
+            "WRITE_OPS and write_tools_list() must name exactly the same tools"
+        );
+    }
 
     #[test]
     fn finalize_note_write_derives_layer_from_the_layer_map_alone() {

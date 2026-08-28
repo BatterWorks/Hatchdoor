@@ -1,0 +1,34 @@
+[
+  {
+    "id": "sep-2322-multi-round-r1",
+    "name": "InputRequiredResultMultiRoundR1",
+    "description": "Round 1: Server returns InputRequiredResult with requestState",
+    "status": "FAILURE",
+    "timestamp": "2026-08-28T15:50:54.589Z",
+    "errorMessage": "Expected InputRequiredResult with inputRequests and requestState",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ],
+    "details": {}
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:54.589Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

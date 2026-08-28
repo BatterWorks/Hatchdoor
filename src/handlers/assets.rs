@@ -42,6 +42,65 @@ pub(crate) fn read_asset_bytes(path: &FsPath) -> Result<Vec<u8>, AssetReadError>
     read_asset_bytes_with_limit(path, MAX_ASSET_RESPONSE_BYTES)
 }
 
+/// One attachment, resolved and described for a caller outside this HTTP route
+/// — today the MCP `get_attachment` tool (#176). It exists so that caller needs
+/// nothing from this module but [`describe_asset`] and the error type: path
+/// containment, the servable-extension allow-list, the content-type table, the
+/// size bound, and the shape of the route's own URL all stay here, rather than
+/// being reassembled by every consumer that wants an attachment's bytes.
+pub(crate) struct ResolvedAsset {
+    path: PathBuf,
+    pub(crate) size_bytes: u64,
+    pub(crate) content_type: &'static str,
+}
+
+impl ResolvedAsset {
+    /// The attachment's bytes, under the same bound the route itself serves.
+    pub(crate) fn read_bytes(&self) -> Result<Vec<u8>, AssetPathError> {
+        read_asset_bytes(&self.path).map_err(|error| match error {
+            AssetReadError::TooLarge => AssetPathError::TooLarge,
+            AssetReadError::Io(_) => AssetPathError::Internal,
+        })
+    }
+}
+
+/// Resolve one Vault-relative attachment path and describe what is there,
+/// without reading it. Applies exactly the checks
+/// `GET /api/v1/vaults/{vault_id}/assets/{*path}` applies — raw filesystem
+/// containment and the extension allow-list, no demo-surface gating — matching
+/// every other MCP attachment tool (`list_note_attachments`,
+/// `import_attachment`, ...), which likewise bypass `VaultReadCore`'s
+/// browse-surface policy entirely.
+pub(crate) fn describe_asset(
+    vault_root: &FsPath,
+    raw_path: &str,
+) -> Result<ResolvedAsset, AssetPathError> {
+    let path = resolve_asset_path(vault_root, raw_path)?;
+    let size_bytes = std::fs::metadata(&path)
+        .map_err(|_| AssetPathError::Internal)?
+        .len();
+    let content_type = content_type_for_path(&path);
+    Ok(ResolvedAsset {
+        path,
+        size_bytes,
+        content_type,
+    })
+}
+
+/// The path component of this route's own URL for one attachment, percent-encoded
+/// a segment at a time. Lives beside the route it addresses so a caller building
+/// a link to it (the MCP `get_attachment` tool) cannot drift from the real path,
+/// and mirrors the frontend's encoding of the same route
+/// (`frontend/src/components/note-page/wikilinks.ts`).
+pub(crate) fn asset_download_path(vault_id: &str, relative_path: &str) -> String {
+    let encoded = relative_path
+        .split('/')
+        .map(super::downloads::percent_encode_filename)
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("/api/v1/vaults/{vault_id}/assets/{encoded}")
+}
+
 fn read_asset_bytes_with_limit(path: &FsPath, maximum: u64) -> Result<Vec<u8>, AssetReadError> {
     let file = std::fs::File::open(path).map_err(|error| {
         AssetReadError::Io(format!(

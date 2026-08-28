@@ -65,7 +65,7 @@ These live in `settings.json`, not `.env` — leave them unset in `.env` to mana
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
 | `HATCHDOOR_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | instant | Size limit for an attachment uploaded through the Web UI or `POST /api/v1/vaults/{vault_id}/attachments`. |
-| `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for `import_attachment`, MCP's base64 fallback upload path for clients that can't make an out-of-band HTTP request. |
+| `HATCHDOOR_MCP_MAX_BASE64_BYTES` | `5242880` (5 MiB, decoded) | instant | Size limit for MCP's base64 fallback path, in both directions — `import_attachment` on the way in and `get_attachment` with `encoding: "base64"` on the way out — for clients that can't make an out-of-band HTTP request. |
 
 **Legacy — single-Vault import only**
 

@@ -48,9 +48,22 @@ pub(crate) const MAX_CONCURRENT_EXPENSIVE_SEARCHES: usize = 2;
 /// retry shortly rather than back off for a whole window.
 pub(crate) const CONCURRENCY_RETRY_AFTER: Duration = Duration::from_secs(1);
 
+/// Items one `batch` tool call may contain that answer a query rather than
+/// mutate the Vault (every allowed read tool). A whole batch is still one
+/// `tools/call` against the caps above; this is a separate, tool-internal cap
+/// enforced by `mcp::tools::batch` before any item in an over-limit batch
+/// executes.
+pub(crate) const BATCH_MAX_READ_ITEMS: usize = 50;
+
+/// Items one `batch` tool call may contain that mutate the Vault (every
+/// allowed write tool). Tighter than the read cap, mirroring the asymmetry
+/// between ordinary and expensive-search concurrency above: a write is more
+/// expensive per item than a read.
+pub(crate) const BATCH_MAX_WRITE_ITEMS: usize = 20;
+
 /// How the transport middleware classified one POST body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequestClass {
+pub enum RequestClass {
     /// Everything outside the tool quota: protocol lifecycle, discovery,
     /// list handling, notifications.
     Exempt,
@@ -83,7 +96,7 @@ pub(crate) fn retry_after_seconds(retry_in: Duration) -> u64 {
 /// Shared state behind one `/mcp` transport instance: the per-token rolling
 /// window plus the two process-wide concurrency pools. Cheap to construct per
 /// test; exactly one instance per transport in production.
-pub(crate) struct RateLimiter {
+pub struct RateLimiter {
     quota: Mutex<HashMap<Arc<str>, VecDeque<std::time::Instant>>>,
     ordinary: Arc<Semaphore>,
     expensive_searches: Arc<Semaphore>,
@@ -92,7 +105,7 @@ pub(crate) struct RateLimiter {
 /// Held for the duration of one admitted tool call; releasing on drop frees
 /// both its concurrency slots on every exit path.
 #[derive(Debug)]
-pub(crate) struct ConcurrencyGuard {
+pub struct ConcurrencyGuard {
     _ordinary: tokio::sync::OwnedSemaphorePermit,
     _expensive: Option<tokio::sync::OwnedSemaphorePermit>,
 }

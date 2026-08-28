@@ -116,7 +116,13 @@ removed; **Roots, Sampling, and Logging are deprecated**; server-initiated
 requests (elicitation, sampling) move to a request/retry pattern instead of
 being pushed mid-call. HTTP+SSE transport is now formally deprecated too.
 
-_Horizon: **v2.6.0**._
+_Horizon: **v2.6.0** — landed on `development`. The boundary now runs on rmcp
+(ADR-17) and advertises exactly `2026-07-28` and `2025-11-25`: stateless
+discovery with per-request `_meta`, a single opt-in `subscriptions/listen`
+stream, typed results with an `outputSchema` on every tool, and per-tool quotas
+with concurrency caps and `429 Retry-After`. The catalogue then grew from 35 to
+39 tools (`get_frontmatter`, `update_frontmatter`, `get_attachment`, `batch`),
+purely additively._
 
 ### User documentation, in-app and answerable by the agent
 
