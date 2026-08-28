@@ -66,6 +66,34 @@
   instant setting `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` (default on).
 
 ### ⚠️ Breaking changes — action required on upgrade
+- **Three instance-wide status routes are gone: `GET /api/index-status`,
+  `GET /api/git-status`, and `GET /api/vault-status`.** They described a single
+  Vault at a time when there was only ever one, and every question they answered
+  is now answered per Vault by `GET /api/v1/vaults`, which reports each Vault's
+  condition, its last search or versioning error, and whether it is indexing.
+  All three now return `404`. The two Settings consoles they fed — **Search
+  index** and **Versioning** — leave the Settings page with them, along with
+  their two-second polling; each Vault's own settings page keeps its condition,
+  its last error, and its **Sync now**, **Try again**, and **Rebuild search
+  index** buttons, and the scope zone and explorer keep showing a Vault as
+  indexing. `/api/startup-status` is unchanged and remains the unauthenticated
+  startup probe.
+  **Action:** if a script, dashboard, or uptime check polls any of the three,
+  point it at `/api/startup-status` for process startup, or at
+  `GET /api/v1/vaults` for per-Vault condition. Nothing in Hatchdoor's
+  configuration brings the old routes back.
+- **`PATCH /api/settings` no longer asks you to confirm `git_init` or
+  `git_downgrade`.** Those two consequences belonged to the instance-wide
+  versioning lifecycle that the retired **Versioning** console explained, and no
+  current deployment reaches it. A save that turns on local versioning, or
+  switches off remote versioning, now applies on the first request instead of
+  answering `409` and waiting for a resend. `reindex` is unaffected and is still
+  confirmed exactly as before, and per-Vault Git changes keep their own
+  confirmations on `/api/v1/vaults/{vault_id}`.
+  **Action:** if an API client sends `"confirm": ["git_init"]` or
+  `"confirm": ["git_downgrade"]`, remove those values — an unknown consequence
+  is refused as a validation error. A client that only ever sends `reindex`
+  needs no change.
 - **MCP protocol revisions `2025-03-26` and `2025-06-18` are no longer served.**
   The endpoint now advertises and accepts exactly `2026-07-28` and `2025-11-25`;
   a client pinned to one of the two dropped revisions is refused on the

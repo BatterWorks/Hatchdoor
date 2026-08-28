@@ -86,6 +86,26 @@ deployment contract and are not migrated. If they are present, Hatchdoor opens
 the same restricted recovery screen and names them; remove them, restart, and create or edit the
 Git-backed registry Vault instead.
 
+## Retired legacy routes
+
+The instance-wide status routes that described the single Vault are removed, and
+answer `404`:
+
+| Retired route | What replaces it |
+| --- | --- |
+| `GET /api/index-status` | `GET /api/v1/vaults` — each Vault reports its own `search` condition and last search error |
+| `GET /api/git-status` | `GET /api/v1/vaults` — each Vault reports its own `git` condition and last versioning error |
+| `GET /api/vault-status` | `GET /api/startup-status` for process startup; `GET /api/v1/vaults` for a Vault's own state |
+
+`GET /api/startup-status` is unchanged and stays unauthenticated. The two
+Settings consoles those routes fed, **Search index** and **Versioning**, are
+retired with them; per-Vault settings pages carry the same information.
+
+`PATCH /api/settings` loses the `git_init` and `git_downgrade` consequences for
+the same reason: they described the instance-wide versioning lifecycle no
+registry deployment runs. `reindex` is unchanged, and an unknown value in
+`confirm` is still refused as a validation error.
+
 ## Downgrade
 
 Downgrading to a single-Vault release after the registry has been committed is

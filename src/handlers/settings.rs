@@ -37,12 +37,12 @@ pub struct SettingResponse {
     pub kind: &'static str,
 }
 
-/// The consequences a save may need explicit consent for. Accumulated by the
-/// page across successive `409`s rather than carried one at a time, so a save
-/// needing two consents (e.g. downgrading remote versioning onto a vault that
-/// is no longer a git repository) does not ping-pong between them forever
-/// (issue #57).
-const KNOWN_CONSEQUENCES: &[&str] = &["reindex", "git_init", "git_downgrade"];
+/// The consequences a save may need explicit consent for. `reindex` is the
+/// only one left: #183 retired `git_init` and `git_downgrade` with the
+/// instance-wide Versioning console that explained them. `confirm` stays a
+/// list because the wire shape is unchanged, but one save can no longer need
+/// two consents, so nothing accumulates across `409`s any more (issue #57).
+const KNOWN_CONSEQUENCES: &[&str] = &["reindex"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -167,48 +167,6 @@ pub async fn get_settings_handler(State(state): State<AppState>) -> impl IntoRes
         &state.runtime_snapshot(),
         state.demo_mode,
     ))
-}
-
-/// Settings-only background reindex state. This deliberately stays separate
-/// from startup readiness: search continues to use its prior coherent SQLite
-/// snapshot while this status reports configuration drift.
-pub async fn get_index_status_handler(State(state): State<AppState>) -> Response {
-    let mut response = Json(state.index_status.status()).into_response();
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
-    );
-    response
-}
-
-/// Versioning has its own live surface because the settings document is the
-/// durable desired configuration, while this reports the task that is applying
-/// it right now.
-pub async fn get_git_status_handler(State(state): State<AppState>) -> Response {
-    let vault_path = state.vault_path().await;
-    let status = match state.git_sync.try_read() {
-        Ok(sync) => match sync.as_ref() {
-            Some(handle) => handle.status().read().await.clone(),
-            None => crate::git::GitSyncStatus::disabled(),
-        },
-        Err(_) => {
-            let mode = vault_path
-                .and_then(|vault_path| {
-                    crate::git::GitConfig::from_snapshot(vault_path, &state.runtime_snapshot())
-                        .ok()
-                        .flatten()
-                })
-                .map(|config| config.mode.as_str().to_string())
-                .unwrap_or_else(|| "off".to_string());
-            crate::git::GitSyncStatus {
-                enabled: mode != "off",
-                state: "stopping".to_string(),
-                mode,
-                ..Default::default()
-            }
-        }
-    };
-    no_store_json(serde_json::to_value(status).expect("git status serializes"))
 }
 
 /// A viewer who already authenticated with the web bearer token gains no new
@@ -411,8 +369,8 @@ async fn patch_settings_with_git_lifecycle(
 
 /// The single authoritative decision for a save: field validation, the
 /// reindex confirmation, and (when `vault_path` is `Some`, i.e. this save
-/// touches `HATCHDOOR_GIT_*`) the downgrade/init confirmations and git
-/// preflight. Runs inside `RuntimeConfig::validate_and_save`'s critical
+/// touches `HATCHDOOR_GIT_*`) the git preflight that decides whether local
+/// history has to be created. Runs inside `RuntimeConfig::validate_and_save`'s critical
 /// section, against the snapshot current at the moment of persistence, so two
 /// concurrent PATCHes cannot both validate against a snapshot the other has
 /// already invalidated (issue #54).
@@ -443,26 +401,16 @@ fn decide_patch(
     let vault_path = git_paths.vault_path;
 
     let prospective = snapshot.with_updates(&request.updates);
-    let git_config = crate::git::GitConfig::from_snapshot(vault_path.clone(), &prospective)
-        .map_err(|message| {
+    let git_config =
+        crate::git::GitConfig::from_snapshot(vault_path, &prospective).map_err(|message| {
             PatchRefusal::Validation(vec![FieldError::on("HATCHDOOR_GIT_SYNC_ENABLED", message)])
         })?;
-    let old_git_config = crate::git::GitConfig::from_snapshot(vault_path, snapshot)
-        .expect("current git configuration was validated when saved");
 
-    if old_git_config
-        .as_ref()
-        .is_some_and(|config| config.mode == crate::git::GitMode::Remote)
-        && git_config
-            .as_ref()
-            .is_none_or(|config| config.mode != crate::git::GitMode::Remote)
-        && !request.confirmed("git_downgrade")
-    {
-        return Err(PatchRefusal::Confirmation {
-            kind: "git_downgrade",
-        });
-    }
-
+    // The `git_downgrade` and `git_init` confirmations are retired (issue
+    // #183): they described the instance-wide Git lifecycle, which no longer
+    // has a Settings console to explain them and no longer runs on any
+    // deployment. Leaving remote versioning and creating fresh local history
+    // still happen here; they simply no longer stop to ask first.
     let mut initialize_local_repo = None;
     if let Some(config) = &git_config {
         let preflight = match config.mode {
@@ -471,9 +419,6 @@ fn decide_patch(
         };
         if let Err(error) = preflight {
             if config.mode == crate::git::GitMode::Local {
-                if !request.confirmed("git_init") {
-                    return Err(PatchRefusal::Confirmation { kind: "git_init" });
-                }
                 initialize_local_repo = Some(config.clone());
             } else {
                 return Err(PatchRefusal::Validation(vec![FieldError::on(
@@ -1081,7 +1026,7 @@ mod tests {
         .expect("runtime configuration loads before its first save");
         let request = PatchSettingsRequest {
             updates: BTreeMap::from([("HATCHDOOR_GIT_SYNC_ENABLED".into(), "local".into())]),
-            confirm: vec!["git_init".into()],
+            confirm: vec![],
         };
         let git_paths = GitPaths {
             vault_path: vault.clone(),

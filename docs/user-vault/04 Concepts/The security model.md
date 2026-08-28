@@ -69,7 +69,7 @@ This secret authenticates Hatchdoor *to the remote*, not a caller *to Hatchdoor*
 
 ## What's open regardless of any token
 
-`/health`, `/ready`, `/api/startup-status`, and `/api/vault-status` are never gated by any token — they're liveness/readiness probes, meant to be checked by infrastructure (a container orchestrator, a load balancer) that has no credential to present. They report process and indexing state, never Vault content.
+`/health`, `/ready`, and `/api/startup-status` are never gated by any token — they're liveness/readiness probes, meant to be checked by infrastructure (a container orchestrator, a load balancer) that has no credential to present. They report process and indexing state, never Vault content.
 
 ## Demo mode's narrower rule
 

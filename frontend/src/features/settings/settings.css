@@ -146,31 +146,6 @@
   color: var(--err-fg);
 }
 
-.settings-dot {
-  display: inline-block;
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  margin-right: 0.4rem;
-  background: var(--tertiary);
-}
-
-.settings-dot.is-running {
-  background: var(--co-success);
-}
-
-.settings-dot.is-starting,
-.settings-dot.is-stopping {
-  background: var(--warn-fg);
-  animation: settings-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes settings-pulse {
-  50% {
-    opacity: 0.25;
-  }
-}
-
 /* ── layout ─────────────────────────────────────────────────────────────── */
 
 .settings-layout {
@@ -376,9 +351,9 @@
   margin-bottom: 1.6rem;
 }
 
-/* The Vault Git sync console (#149) carries one live-state cell rather than
-   SettingsPage's two — its cell doesn't need to share the row with a
-   sibling. */
+/* The Vault Git sync console (#149) carries one live-state cell, so it opts
+   out of the two-column default. It is the only console left since #183
+   retired the instance-wide Settings console that used both columns. */
 .settings-git-console {
   grid-template-columns: 1fr;
 }
@@ -408,18 +383,6 @@
     "wdth" 88,
     "wght" 650;
   font-size: 0.95rem;
-}
-
-.settings-mini-bar {
-  height: 3px;
-  background: var(--rule);
-}
-
-.settings-mini-bar span {
-  display: block;
-  height: 100%;
-  background: var(--hot);
-  transition: width 0.6s linear;
 }
 
 /* The console condition block (#149's fourth owed design-system addition):
@@ -868,13 +831,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-dot.is-starting,
-  .settings-dot.is-stopping {
-    animation: none;
-  }
-
-  .settings-toggle-knob,
-  .settings-mini-bar span {
+  .settings-toggle-knob {
     transition: none;
   }
 }

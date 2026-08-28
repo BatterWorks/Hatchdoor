@@ -18,9 +18,9 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 
 | Surface | Auth |
 | --- | --- |
-| `/health`, `/ready`, `/api/startup-status`, `/api/vault-status` | None, always |
+| `/health`, `/ready`, `/api/startup-status` | None, always |
 | `/api/model/*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
-| `/api/settings*`, `/api/index-status`, `/api/git-status` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
+| `/api/settings*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
 | `/mcp` | Its own MCP bearer token — see [[Connect your agent]] |
 | `/api/v1/vaults/...` reads (`GET`) | Web bearer token if configured, **unauthenticated in demo mode** |
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
@@ -38,7 +38,6 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 | GET | `/health` | Liveness probe; also used by the container's own `--healthcheck`. Returns `200 ok` plaintext. |
 | GET | `/ready` | `200 ready` once legacy single-Vault startup (model + first index) is complete, else `503 not ready`. |
 | GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). `Cache-Control: no-store`. |
-| GET | `/api/vault-status` | JSON snapshot of the legacy startup Vault's state. `Cache-Control: no-store`. |
 
 ## Model setup
 
@@ -58,13 +57,11 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | --- | --- | --- |
 | GET | `/api/settings` | Every known setting: `key`, current `value` (secrets redacted), `configured`, `source`, `locked`, `class` (`instant`/`reindex`), `kind` (text/switch/secret/number/mode). |
 | PATCH | `/api/settings` | Update one or more settings. Body: `{"updates": {"KEY": "value", ...}, "confirm": ["reindex", ...]}`. |
-| GET | `/api/index-status` | Background reindex status — whether the live settings document has drifted from the built index. `no-store`. |
-| GET | `/api/git-status` | Legacy single-Vault Git sync task status (mode, running/stopping, last error). `no-store`. |
 | POST | `/api/settings/web-token/reveal` | Returns the current web bearer token, `{"value": "..."}`. `404` if none is set. |
 | POST | `/api/settings/mcp-token/generate` | Returns a freshly generated candidate token, `{"value": "..."}`. Not saved or made live by this call alone. |
 | POST | `/api/settings/mcp-token/reveal` | Returns the live MCP bearer token — only if it equals the caller's own web token (seeing it grants no new access). `404` otherwise. |
 
-**`PATCH /api/settings` consequences.** A save that would reindex, initialize a fresh local Git repo, or downgrade remote versioning off a Vault that is no longer a Git repository returns `409` with a machine-readable consequence (`reindex` | `git_init` | `git_downgrade`) instead of applying. Resend the same request with that value added to `confirm` to proceed. Consequences accumulate across retries rather than one-at-a-time.
+**`PATCH /api/settings` consequences.** A save that would reindex returns `409` with the machine-readable consequence `reindex` instead of applying. Resend the same request with that value added to `confirm` to proceed. `reindex` is the only consequence: the instance-wide `git_init` and `git_downgrade` consequences were retired along with the routes that reported on them, and per-Vault Git changes carry their own consequences on `/api/v1/vaults/{vault_id}`.
 
 **Setting keys**, with change class (`instant` applies immediately; `reindex` triggers a background reindex) and kind:
 

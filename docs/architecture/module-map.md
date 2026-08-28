@@ -1053,7 +1053,8 @@ entirely rather than acting on state they did not create, and
 `classify_local_history_error` reports an encountered `ManualRecovery` as the
 non-retryable `existing_git_local_history_manual_recovery_required`.
 The settings HTTP boundary owns the preflight → bounded drain → replacement
-protocol and exposes it through `GET /api/git-status`.
+protocol. It has no wire surface: `GET /api/git-status` was retired in #183
+along with the Settings console it fed.
 `GitSyncHandle::stop` preempts debounce and returns `Ok` only after one
 successful final drain. A timeout withdraws its stop request, and a failed
 final drain keeps the old task/status active: either way the task continues
@@ -1297,18 +1298,22 @@ values. A save whose consequence needs consent (a reindex, initializing local
 history, or downgrading away from remote versioning) is refused with `409` and
 a machine-readable `confirmation_required` consequence — the server is the
 authority, and sends no prose; the page owns the words and resends with a
-`confirm` list that accumulates every consequence accepted so far, so a save
-needing two consents does not ping-pong between them. Saves persist before
+`confirm` list. `reindex` is the only consequence: #183 retired `git_init` and
+`git_downgrade` with the instance-wide Versioning console that explained them,
+so enabling local history or leaving remote versioning now applies on the first
+request while still initializing the repository. Saves persist before
 rebuilding. A confirmed indexing-setting save requests one Index turn per
 active Vault through the shared work coordinator
 (`app_state::request_collection_reindex`), never the legacy instance-wide
 rebuild: each Vault reports its own `indexing` condition and keeps serving
 reads from its previous snapshot until its new one is published, and a
 disabled Vault has no active runtime so it is not queued.
-`/api/index-status` still reports the legacy dedicated rebuild's staleness,
-progress, ETA, and last failure, which the settings save path no longer
-starts. A save that flips `HATCHDOOR_MCP_WRITE_ENABLED` — the only setting
-that adds or removes tools from the advertised catalogue — broadcasts
+`app_state::IndexStatusTracker` still records the legacy dedicated rebuild's
+staleness, progress, ETA, and last failure, which the settings save path no
+longer starts; #183 retired its `/api/index-status` wire surface, so nothing
+reads it and the lane itself is removed in #185. A save that flips
+`HATCHDOOR_MCP_WRITE_ENABLED` — the only setting that adds or removes tools
+from the advertised catalogue — broadcasts
 `AppState::mcp_tools_changed` so subscribed MCP sessions re-list; a
 layer-marker change does not, because no tool schema is derived from it.
 A `HATCHDOOR_GIT_*` save takes the legacy versioning-task lifecycle branch
@@ -2471,10 +2476,11 @@ layout in the browser, confirms saves that rebuild indexing, generates an MCP
 token candidate without persisting it, reveals an MCP secret only when it
 grants the authenticated viewer no new capability, PATCHes only the active
 section's changed keys to `/api/settings` before replacing its state with the
-complete response, confirms local Git initialisation and remote downgrades
-when the server requests it, and polls `/api/index-status` plus
-`/api/git-status` for dedicated background progress without using the
-startup gate.
+complete response, and shows no instance-wide status console: #183 retired
+the **Search index** and **Versioning** consoles, their two-second polling of
+`/api/index-status` and `/api/git-status`, and the local-Git-initialisation
+and remote-downgrade confirmations that went with them. Each Vault's own
+settings page is where that information lives now.
 
 When `GET /api/v1/vaults` reports `recovery` (the registry file itself is
 unreadable, #150), `VaultSettingsIndex.tsx` replaces its whole `Vaults`
@@ -2584,8 +2590,8 @@ aggregation), `frontend/src/components/NotePage.tsx` (`?restoreEdit=1`
 handling and the held-drafts notice), `frontend/src/hooks/useNoteActions.ts`
 (`openCreateDialog`'s target-Vault override), `frontend/src/main.tsx` (runs
 the one-time legacy sweep and browser-state cleanup before rendering),
-`src/server.rs` (SPA/API routes), `src/handlers/settings.rs` (settings,
-index-status, and git-status wire producer), and `frontend/src/types.ts`
+`src/server.rs` (SPA/API routes), `src/handlers/settings.rs` (settings wire
+producer), and `frontend/src/types.ts`
 (`VaultSource`/`VaultGitMode`, mirroring `src/vault_registry.rs`'s
 same-named types, and `VaultSummary`'s `source` field, now typed rather than
 `unknown`; consumed by this section and by

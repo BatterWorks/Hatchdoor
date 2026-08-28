@@ -30,10 +30,9 @@ use crate::git::{self, GitConfig};
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
     disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
-    generate_mcp_token_handler, get_git_status_handler, get_index_status_handler,
-    get_settings_handler, health_handler, list_vaults_handler, patch_settings_handler,
-    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
+    generate_mcp_token_handler, get_settings_handler, health_handler, list_vaults_handler,
+    patch_settings_handler, refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler,
+    reveal_web_token_handler, spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
     vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
     vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
     vault_scoped_archive_note_handler, vault_scoped_asset_handler,
@@ -349,8 +348,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/settings",
                 get(get_settings_handler).patch(patch_settings_handler),
             )
-            .route("/api/index-status", get(get_index_status_handler))
-            .route("/api/git-status", get(get_git_status_handler))
             .route(
                 "/api/settings/web-token/reveal",
                 post(reveal_web_token_handler),
@@ -617,7 +614,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
-        .route("/api/vault-status", get(vault_status_handler))
         .merge(model_setup)
         .merge(settings)
         .merge(vaults_v1)
@@ -708,14 +704,6 @@ async fn reject_startup_recovery_mutation(
 
 async fn startup_status_handler(State(state): State<AppState>) -> Response {
     let mut response = Json(state.startup.status()).into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
-}
-
-async fn vault_status_handler(State(state): State<AppState>) -> Response {
-    let mut response = Json(state.startup.snapshot()).into_response();
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -3201,7 +3189,7 @@ mod tests {
             .set_unavailable("vault_unreadable", "Vault could not be read.");
         let app = build_router(state, None);
 
-        for path in ["/health", "/api/startup-status", "/api/vault-status"] {
+        for path in ["/health", "/api/startup-status"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -3238,10 +3226,14 @@ mod tests {
             "SPA route must reach the SPA handler rather than vault readiness middleware"
         );
 
+        // `/api/vault-status` was retired in #183; `/api/startup-status` is
+        // the remaining unauthenticated probe, and it still reports the
+        // unavailable Vault as a failed start without disclosing its
+        // filesystem path.
         let status = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/vault-status")
+                    .uri("/api/startup-status")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -3253,10 +3245,7 @@ mod tests {
                 .expect("status body"),
         )
         .expect("status json");
-        assert_eq!(payload["phase"], "unavailable");
-        assert_eq!(payload["source"], "local");
-        assert_eq!(payload["mode"], "local");
-        assert_eq!(payload["capabilities"]["mutate"], false);
+        assert_eq!(payload["state"], "failed");
         assert!(!payload.to_string().contains("/data/vault"));
     }
 
@@ -3700,7 +3689,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_routes_require_web_auth_and_are_absent_in_demo_mode() {
-        let (protected, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let (protected, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
         let unauthenticated = protected
             .clone()
             .oneshot(
@@ -3725,68 +3714,58 @@ mod tests {
             .expect("response");
         assert_eq!(authenticated.status(), StatusCode::OK);
 
-        state.index_status.queue_rebuild();
-        let index_status = protected
+        // #183 retired the two instance-wide consoles and the three routes
+        // that fed them. They are gone from the router, so a credential that
+        // opens `/api/settings` still finds nothing at any of them, and the
+        // unauthenticated probe surface no longer includes `/api/vault-status`.
+        for path in ["/api/index-status", "/api/git-status", "/api/vault-status"] {
+            let retired = protected
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("authorization", "Bearer web-secret")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(retired.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        // `/api/startup-status` is the probe that remains, and it is still
+        // reachable without a credential.
+        let startup_status = protected
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/index-status")
-                    .header("authorization", "Bearer web-secret")
+                    .uri("/api/startup-status")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(index_status.status(), StatusCode::OK);
-        assert_eq!(index_status.headers()["cache-control"], "no-store");
-
-        let git_status = protected
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/git-status")
-                    .header("authorization", "Bearer web-secret")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(git_status.status(), StatusCode::OK);
-        assert_eq!(git_status.headers()["cache-control"], "no-store");
+        assert_eq!(startup_status.status(), StatusCode::OK);
+        assert_eq!(startup_status.headers()["cache-control"], "no-store");
 
         let (demo, _tmp, _) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        let absent = demo
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
-        let index_status_absent = demo
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/index-status")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(index_status_absent.status(), StatusCode::NOT_FOUND);
-        let git_status_absent = demo
-            .oneshot(
-                Request::builder()
-                    .uri("/api/git-status")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(git_status_absent.status(), StatusCode::NOT_FOUND);
+        for path in [
+            "/api/settings",
+            "/api/index-status",
+            "/api/git-status",
+            "/api/vault-status",
+        ] {
+            let absent = demo
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(absent.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     /// The reindex consequence is still the server's to demand, and the new
@@ -3884,15 +3863,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabling_local_versioning_requires_confirmation_then_succeeds() {
-        // S4/S5: the server is the authority on the git_init confirmation (a
-        // 409 carrying only the machine-readable consequence, not prose —
-        // the page owns the words), and a resend with `confirm` containing
-        // it must actually create the local repository.
+    async fn enabling_local_versioning_no_longer_asks_for_confirmation() {
+        // #183 retired the `git_init` consequence along with the Versioning
+        // console that explained it. Enabling local versioning on a vault that
+        // is not yet a git repository now applies in one call and still
+        // creates the repository.
         let (app, tmp, state) = app_for_tests_with_state();
+        assert!(!tmp.path().join("vault/.git").exists());
 
-        let missing_confirmation = app
-            .clone()
+        let response = app
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
@@ -3905,32 +3884,7 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(missing_confirmation.status(), StatusCode::CONFLICT);
-        let body = axum::body::to_bytes(missing_confirmation.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(json["confirmation_required"], "git_init");
-        assert!(
-            json.get("error").is_none(),
-            "the server must not send prose for this consequence: {json}"
-        );
-        assert!(!tmp.path().join("vault/.git").exists());
-
-        let confirmed = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_init"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(confirmed.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(tmp.path().join("vault/.git").exists());
         assert_eq!(
             state
@@ -3943,14 +3897,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn downgrade_onto_a_non_repo_vault_accumulates_both_consents() {
-        // S4's two-consent case: switching remote -> local when the vault is
-        // no longer a git repository needs both `git_downgrade` (leaving
-        // remote sync) and `git_init` (creating fresh local history).
-        // Accepting one must not drop the other on the next round-trip: the
-        // page is expected to accumulate accepted consequences into one list
-        // across successive 409s, and the server must honor that list rather
-        // than only ever remembering the single most recent consent.
+    async fn downgrade_onto_a_non_repo_vault_no_longer_asks_for_confirmation() {
+        // The case that used to need both `git_downgrade` and `git_init`:
+        // switching remote -> local when the vault is not a git repository at
+        // all. Both consequences were retired in #183, so the save applies in
+        // one call rather than across two 409 round-trips.
         let (app, tmp, state) = app_for_tests_with_state();
         state
             .runtime_config
@@ -3966,8 +3917,7 @@ mod tests {
         // ever configured, never actually initialized on disk.
         assert!(!tmp.path().join("vault/.git").exists());
 
-        let no_confirmation = app
-            .clone()
+        let response = app
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
@@ -3980,53 +3930,7 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(no_confirmation.status(), StatusCode::CONFLICT);
-        let body = axum::body::to_bytes(no_confirmation.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(json["confirmation_required"], "git_downgrade");
-
-        // Accept the downgrade only: must not silently also accept git_init.
-        let downgrade_only = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_downgrade"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(downgrade_only.status(), StatusCode::CONFLICT);
-        let body = axum::body::to_bytes(downgrade_only.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(
-            json["confirmation_required"], "git_init",
-            "the second consequence, not a ping-pong back to git_downgrade"
-        );
-
-        // The page accumulates: resend with BOTH accepted consequences.
-        let both_confirmed = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_downgrade","git_init"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(both_confirmed.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(tmp.path().join("vault/.git").exists());
         assert_eq!(
             state

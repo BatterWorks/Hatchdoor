@@ -136,10 +136,6 @@ function mockPage(vaults = [vault("Field notes")]) {
   mockedApiFetch.mockImplementation(async (input) => {
     const url = String(input);
     if (url === "/api/settings") return json({ settings });
-    if (url === "/api/git-status")
-      return json({ state: "disabled", mode: "off" });
-    if (url === "/api/index-status")
-      return json({ state: "up_to_date", stale: false });
     if (url === "/api/v1/vaults")
       return json({
         registry_revision: 3,
@@ -155,6 +151,9 @@ function mockPage(vaults = [vault("Field notes")]) {
       });
     if (url.includes("/recent?limit=1"))
       return json({ data: [{ mtime_ns: 0 }] });
+    // `/api/index-status` and `/api/git-status` were retired with their
+    // consoles (#183): a request to either is now an unexpected request and
+    // fails this stub, which is how the page is held to never polling again.
     throw new Error(`Unexpected API request: ${url}`);
   });
 }
@@ -225,6 +224,24 @@ describe("SettingsPage", () => {
     expect(
       screen.queryByRole("button", { name: "Versioning" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders no instance-wide Search index or Versioning console", async () => {
+    mockPage();
+    renderSettingsPage();
+
+    // Every question the two consoles answered is answered per Vault now
+    // (#183), so the page no longer shows them and no longer polls the three
+    // routes that fed them — the stub throws on an unexpected request.
+    expect(
+      await screen.findByRole("heading", { name: /Notes handling/ }),
+    ).toBeVisible();
+    expect(screen.queryByText("Search index")).not.toBeInTheDocument();
+    expect(screen.queryByText("Up to date")).not.toBeInTheDocument();
+    expect(screen.queryByText("Behind your settings")).not.toBeInTheDocument();
+    const requested = mockedApiFetch.mock.calls.map((call) => String(call[0]));
+    expect(requested).not.toContain("/api/index-status");
+    expect(requested).not.toContain("/api/git-status");
   });
 
   it("surfaces a held draft under This server and withdraws once it is discarded", async () => {
