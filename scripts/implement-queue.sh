@@ -93,6 +93,28 @@ halt() {
   exit 1
 }
 
+# A kill from outside skips every gate, so without this the ledger silently
+# loses the run entirely: no row, no gate, no cost. Record what is known, name
+# the resumable child session, and leave the tree alone.
+on_signal() {
+  if [[ -n "$target" ]]; then
+    record "$target" "KILLED" "external-signal" \
+      "$(( $(date +%s) - ticket_started ))" \
+      "$(result_field "$ticket_log" total_cost_usd)" \
+      "$(result_field "$ticket_log" num_turns)" \
+      "-" "$title"
+    local child
+    child="$(grep -o '"session_id":"[^"]*"' "$ticket_log" 2>/dev/null | tail -1 | cut -d'"' -f4)"
+    log "#$target was killed mid-run. Its work is still in the worktree, and the"
+    log "issue stays assigned, so the queue will skip it until you resolve it."
+    [[ -n "$child" ]] && log "Resume that ticket with: claude --resume $child"
+  fi
+  log "Driver killed by signal."
+  summary
+  exit 143
+}
+trap on_signal TERM INT
+
 # --- Preflight ---------------------------------------------------------------
 
 command -v claude >/dev/null || halt "claude CLI not on PATH"
@@ -115,8 +137,11 @@ stranded="$(gh issue list --state open --limit 200 --json number,labels,assignee
                     | select([.labels[].name] | index("ready-for-agent"))
                     | select((.assignees | length) > 0)
                     | .number' | tr '\n' ' ')"
-[[ -z "$stranded" ]] \
-  || log "NOTE: ready-for-agent issues already assigned, so not queued: $stranded"
+if [[ -n "$stranded" ]]; then
+  log "NOTE: ready-for-agent issues already assigned, so not queued: $stranded"
+  log "      If one is left over from a halted or killed run, either resume its"
+  log "      child session (see that run's log) or unassign it to requeue it."
+fi
 
 # Eligible = open, ready-for-agent, unassigned, no OPEN blocker.
 #
