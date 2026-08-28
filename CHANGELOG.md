@@ -34,10 +34,7 @@
   - `get_attachment` returns an attachment's bytes, mirroring the upload flow in
     reverse: an HTTP `download_url` by default, base64 inline as the fallback for
     a client that can't fetch out-of-band, bounded by the same
-    `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap as `import_attachment`. The download URL
-    is served by the ordinary web route, so it wants the **web** bearer token,
-    not the MCP one — the response says so rather than assuming a credential the
-    client may not hold.
+    `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap as `import_attachment`.
   - `batch` runs an ordered list of note and attachment operations in one call:
     best-effort with a per-item result, no rollback, no mid-batch visibility.
     Vault-management tools can't go inside one, and a batch is capped at 50
@@ -47,6 +44,20 @@
     call without an intermediate read; a note the batch hasn't written validates
     its hash normally. That relaxation never escapes the call — each touched
     Vault's mutation lock is held for the rest of it.
+- **The Vault asset route now accepts a live MCP bearer token**, so an agent can
+  fetch the `download_url` `get_attachment` hands it without also being given the
+  web bearer token. `GET /api/v1/vaults/{vault_id}/assets/{*path}` takes either
+  credential as an `Authorization: Bearer` header; the web token additionally
+  keeps its `access_token` query form, which the browser needs for `<img>` tags,
+  while the MCP token is header-only. Crucially the URL is a cheaper transport,
+  not a larger allowance: a request admitted on the MCP token is held to the same
+  `HATCHDOOR_MCP_MAX_BASE64_BYTES` ceiling `get_attachment`'s base64 encoding
+  enforces (a larger attachment returns `413`) and spends the same per-token rate
+  quota and concurrency budget an MCP tool call spends, from the same counter,
+  answering `429` with `Retry-After` when exhausted. A web-token request is
+  subject to neither. Disabling MCP revokes it on the very next request, no
+  restart. Deployments with no web bearer token configured serve this route
+  openly, exactly as before.
 - MCP now has layered resource protection: a rolling 120-calls-per-minute quota
   per bearer token, plus process-wide concurrency caps (8 ordinary calls, 2
   concurrent `search_notes`). An over-limit request is rejected before dispatch

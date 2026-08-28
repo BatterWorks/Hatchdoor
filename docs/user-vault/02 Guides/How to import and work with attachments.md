@@ -55,8 +55,8 @@ Both return the same shape: `vault_id`, `attachment`, `rewritten_notes`, `trashe
 
 | `encoding` | Returns | When to use it |
 | --- | --- | --- |
-| `url` (default) | `content.download_url` — a path to resolve against the same scheme, host, and port as the MCP endpoint | The default. Note it's served by the ordinary web route, so it wants the **web** bearer token (`HATCHDOOR_WEB_BEARER_TOKEN`), as an `Authorization: Bearer` header or an `access_token` query parameter — not the MCP session's own token. With no web bearer token configured, or in demo mode, it needs no credential. |
-| `base64` | `content.content`, the bytes inline | The fallback, for a client that can't make an out-of-band HTTP request or can't get hold of that web token. Bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap as `import_attachment`; an oversized file is rejected with its measured size rather than truncated. |
+| `url` (default) | `content.download_url` — a path to resolve against the same scheme, host, and port as the MCP endpoint | The default. Send your MCP bearer token as an `Authorization: Bearer` header; the route accepts it while MCP is enabled, under the same size ceiling and rate quota as the base64 path (see [[The security model]]). The web bearer token also works, as a header or an `access_token` query parameter, and is not subject to those limits. With neither configured, or in demo mode, no credential is needed. |
+| `base64` | `content.content`, the bytes inline | The fallback, for a client that can't make an out-of-band HTTP request at all. Bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap as `import_attachment`; an oversized file is rejected with its measured size rather than truncated. |
 
 Reading an attachment is a read: `get_attachment` works whenever MCP is enabled, with no write mode required.
 

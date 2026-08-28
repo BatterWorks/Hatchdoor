@@ -10,16 +10,14 @@ mod vault_write;
 pub(crate) mod vaults;
 
 pub use api::health_handler;
-// Reused by the MCP `get_attachment` read tool, which resolves an attachment
-// the same way this route does — raw filesystem containment/extension
-// checks, no demo-surface gating — matching every other MCP attachment tool
-// (list_note_attachments, import_attachment, ...), which likewise bypass
-// `VaultReadCore`'s browse-surface policy entirely.
+// The seam the MCP `get_attachment` read tool consumes (#176): resolve and
+// describe one attachment, read its bytes, and build this route's own URL for
+// it. The resolution primitives behind these stay private to `assets`, so the
+// containment/extension checks, the content-type table, and the route's URL
+// shape have exactly one definition.
 pub(crate) use assets::{
-    AssetPathError, AssetReadError, asset_error_parts, content_type_for_path, read_asset_bytes,
-    resolve_asset_path,
+    AssetPathError, ResolvedAsset, asset_download_path, asset_error_parts, describe_asset,
 };
-pub(crate) use downloads::percent_encode_filename;
 pub use settings::{
     MAX_IN_MEMORY_UPLOAD_BYTES, generate_mcp_token_handler, get_git_status_handler,
     get_index_status_handler, get_settings_handler, patch_settings_handler,

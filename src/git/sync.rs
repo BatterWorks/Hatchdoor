@@ -2069,6 +2069,69 @@ mod tests {
     }
 
     #[test]
+    fn one_turn_commits_a_whole_batch_of_writes_as_a_single_commit() {
+        // #177's "ONE Git commit covers the whole batch" acceptance criterion.
+        // `batch` itself contains no Git handling by design: it writes Markdown
+        // exactly as the standalone tools do, and holds each touched Vault's
+        // mutation lock for the whole call so a sync turn cannot run between two
+        // of its items. What that buys is asserted here, at the layer that
+        // actually makes commits — a turn finding N dirty files makes one commit
+        // carrying all N, never one per file.
+        let temp = TempDir::new().unwrap();
+        let vault = temp.path().join("vault");
+        std::fs::create_dir(&vault).unwrap();
+        let mut config = base_config(&vault);
+        config.mode = GitMode::Local;
+        config.token.clear();
+        init_local_repo(
+            &config,
+            &vault.join("data/cache/hatchdoor-cache.sqlite3"),
+            &vault.join("data/cache/settings.json"),
+        )
+        .expect("initialize local history");
+
+        // A first turn, so the batch below has a parent commit to hang from.
+        std::fs::write(vault.join("Home.md"), "# Home\n").unwrap();
+        commit_local(&config, &[], "hatchdoor: seed").expect("seed commit");
+        let before = Repository::open(&vault)
+            .unwrap()
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id();
+
+        // Stand in for one batch call: several note writes, no turn between them.
+        std::fs::create_dir_all(vault.join("Inbox")).unwrap();
+        for (path, contents) in [
+            ("Inbox/One.md", "# One\n"),
+            ("Inbox/Two.md", "# Two\n"),
+            ("Inbox/Three.md", "# Three\n"),
+        ] {
+            std::fs::write(vault.join(path), contents).unwrap();
+        }
+
+        let outcome = commit_local(&config, &[], "hatchdoor: batch").expect("commit the batch");
+        assert!(outcome.committed);
+
+        let repo = Repository::open(&vault).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(
+            head.parent(0).unwrap().id(),
+            before,
+            "the batch must add exactly one commit, not one per written note"
+        );
+
+        let tree = head.tree().unwrap();
+        for path in ["Inbox/One.md", "Inbox/Two.md", "Inbox/Three.md"] {
+            assert!(
+                tree.get_path(Path::new(path)).is_ok(),
+                "{path} must be inside that single commit"
+            );
+        }
+    }
+
+    #[test]
     fn init_local_repo_ignores_nothing_when_cache_and_settings_live_outside_the_vault() {
         let temp = TempDir::new().unwrap();
         let vault = temp.path().join("vault");

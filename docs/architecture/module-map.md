@@ -514,13 +514,40 @@ across the registry cutover is unsupported.
 
 **Owned paths:** `src/auth.rs`.
 
-**Public contract:** `WebToken`, `WebOrLiveMcpToken`,
-`require_web_token`, and `require_web_or_live_mcp_token`. Hatchdoor's internal
-attachment middleware binds the MCP token from the current runtime snapshot
-instead of retaining a token captured at startup; it accepts that token only
-while MCP and MCP writes are enabled. Disabling MCP or MCP writes at runtime
-immediately revokes that credential's attachment-upload capability; web-token
-admission remains independent of MCP write mode.
+**Public contract:** `WebToken`, `WebOrLiveMcpToken`, `require_web_token`,
+`require_web_or_live_mcp_token`, and `require_web_or_live_mcp_read_token`. Both
+attachment middlewares bind the MCP token from the current runtime snapshot
+instead of retaining a token captured at startup, so disabling MCP at runtime
+immediately revokes that credential; web-token admission is independent of MCP
+state in both.
+
+The upload middleware accepts the MCP token only while MCP *and* MCP writes are
+enabled, so a write-mode disable revokes upload capability. The asset-read
+middleware accepts it whenever MCP is enabled, so that `get_attachment`'s
+default `download_url` is fetchable by the client that holds it (#176).
+
+Admission on the MCP token is **not** equivalent to admission on the web token,
+and two constraints carried by the read middleware are what keep it from
+widening that credential's reach. Over `/mcp` an MCP client reading attachment
+bytes is bounded by `HATCHDOOR_MCP_MAX_BASE64_BYTES` and by #171's tool quota
+and concurrency caps; the asset route's own bound is far larger (64 MiB) and it
+sits outside the `/mcp` transport, so an unconstrained `download_url` would be a
+way around both. Therefore an MCP-admitted request (a) spends the same quota and
+concurrency budget as a tool call, against the *same* `RateLimiter` instance the
+transport uses — obtained via `HatchdoorMcpTransport::limiter`, so the two
+channels share one budget rather than getting one each — answering `429` with
+`Retry-After` when exhausted, and (b) carries the `McpAssetRead` request
+extension, which `vault_content.rs`'s asset handler reads to apply
+`max_base64_bytes` as the response ceiling before the file is buffered. A
+web-token request carries no extension and keeps the route's own bound.
+
+The read middleware keeps `require_web_token`'s `access_token` query fallback
+for the *web* token alone, since the browser reaches assets through `<img>` tags
+and download navigations; the MCP token is header-only, keeping it out of the
+request trace span. It is layered on exactly the condition `vaults_v1` uses — a
+web token configured, and not demo mode — so a deployment with no web token
+keeps serving assets openly and enabling MCP never demands a credential the
+browser has never held.
 
 **Consumers:** `server.rs` and protected HTTP routes.
 
@@ -1227,7 +1254,16 @@ managed_sync` against local bare-repository fixtures; scheduling changes run
 
 **Public contract:** handler functions intentionally re-exported by
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
-behavior. `settings.rs` owns the additive `/api/settings` document: effective
+behavior. One non-handler seam is exported alongside them for the MCP boundary's
+`get_attachment` read tool (#176): `describe_asset` resolves and describes one
+Vault-relative attachment, `ResolvedAsset::read_bytes` reads it, and
+`asset_download_path` builds this module's own asset-route URL for it, with
+`AssetPathError`/`asset_error_parts` reporting failure. The resolution
+primitives behind them (path containment, the servable-extension allow-list,
+the content-type table, the size bound) stay private to `assets.rs`, so a
+consumer cannot reassemble a different policy from the parts. Attachment
+resolution here deliberately bypasses `VaultReadCore`'s browse-surface gating,
+matching every other MCP attachment tool. `settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
 full refreshed document. MCP enablement and its bearer token validate together
 against one prospective snapshot, so an invalid combination saves nothing and
@@ -1332,7 +1368,10 @@ rejection-mapping helpers (`parse_vault_id`, `json_rejection_response`,
 `{target, path}`, `path` null when nothing matched — additive, so a client
 resolving note links only sees exactly what it saw before, and the batch cap
 counts both target lists), `GET .../assets/{*path}` (serving both embedded
-assets and imported attachments, which share one containment rule), and `GET
+assets and imported attachments, which share one containment rule; mounted
+outside `vaults_v1`'s web-token-only gate, under
+`require_web_or_live_mcp_read_token`, so `get_attachment`'s advertised
+`download_url` is fetchable with the MCP credential), and `GET
 .../stats/detail` (#137's rich per-Vault statistics report). Every route but
 the last always inspects the requested Vault's authoritative Markdown
 directory through `VaultReadCore`, never the disposable cache; `stats/detail`
@@ -1450,16 +1489,9 @@ consumer of `VaultControlBlock::acquire_mutation` and of
 `VaultReadCore::control_block`/`vault_read::runtime_error` outside
 `vault_read.rs` itself.
 
-**Consumers:** route construction in `src/server.rs`. `assets.rs`'s
-`resolve_asset_path`/`content_type_for_path`/`read_asset_bytes`/
-`asset_error_parts`, and `downloads.rs`'s `percent_encode_filename`, are
-additionally re-exported `pub(crate)` from `handlers/mod.rs` for the MCP
-boundary's `get_attachment` read tool, which resolves an attachment the same
-way this route does without going through `VaultReadCore`'s browse-surface
-gating (irrelevant to MCP's always-full-access trust model, matching every
-other MCP attachment tool) and percent-encodes its advertised download URL's
-path segments with the same byte-level encoder `downloads.rs` already used
-for export filenames.
+**Consumers:** route construction in `src/server.rs`; the MCP boundary's
+`get_attachment` read tool, through the asset seam named in the public contract
+above.
 
 **Coordination paths:** `src/server.rs`, `src/api_types.rs`, frontend clients,
 and whichever domain a handler adapts.
@@ -1578,15 +1610,16 @@ default) returns an HTTP `download_url` under the existing Vault-scoped
 `/assets/{*path}` route, and `encoding: "base64"` inlines the bytes instead,
 bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment`
 enforces on the way in. Resolution reuses `handlers/assets.rs`'s
-`resolve_asset_path`/`content_type_for_path`/`read_asset_bytes`/
-`asset_error_parts` (now re-exported `pub(crate)` from `handlers/mod.rs` for
-this cross-boundary reuse) rather than `VaultReadCore`'s browse-surface path:
-like every other MCP attachment tool, it is a raw filesystem read against the
-Vault's authoritative directory with no demo-mode surface gating, which
-applies only to the public HTTP read model. The advertised `download_url`
-carries no credential of its own; the same Vault-scoped route it points at
-still requires that deployment's web bearer token, not this MCP session's,
-whenever one is configured. `update_frontmatter` is a
+`describe_asset`/`ResolvedAsset`/`asset_download_path` seam (re-exported
+`pub(crate)` from `handlers/mod.rs` for this cross-boundary reuse) rather than
+`VaultReadCore`'s browse-surface path: like every other MCP attachment tool, it
+is a raw filesystem read against the Vault's authoritative directory with no
+demo-mode surface gating, which applies only to the public HTTP read model. The
+advertised `download_url` carries no credential of its own, but the route it
+points at accepts this MCP session's own bearer token while MCP is enabled, as
+well as the web bearer token — see the auth boundary's public contract for why
+the read direction is gated differently from the upload direction.
+`update_frontmatter` is a
 write tool over `vault/write`'s shallow top-level YAML merge primitive
 (`update_note_frontmatter`): explicit null deletes a key, unmentioned keys
 survive, nested mappings replace wholesale, and the body outside the leading

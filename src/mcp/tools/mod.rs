@@ -1,7 +1,11 @@
-//! MCP tool surface. Dispatch and the shared helpers live here; the tool
-//! implementations and their JSON schemas are split by permission boundary
-//! into `read` (always available) and `write` (gated by
-//! `HATCHDOOR_MCP_WRITE_ENABLED`), mirroring how `McpConfig` gates them.
+//! MCP tool surface. Dispatch and the shared helpers live here, and permission
+//! is decided here alone: [`READ_OPS`] names what answers under read
+//! permission, [`write::WRITE_OPS`] what needs `HATCHDOOR_MCP_WRITE_ENABLED`.
+//!
+//! The `read`/`write` module split is about which helpers an implementation
+//! needs, not about permission — three Vault-scoped read tools live in `write`
+//! because they use its scoping helpers. Read the two op lists, not the module
+//! a function happens to sit in, to know what a tool requires.
 
 mod batch;
 mod read;
@@ -83,41 +87,12 @@ pub async fn handle_tools_call(
     }
 
     let outcome = match name {
+        // Collection discovery, deliberately outside `READ_OPS`: it answers
+        // about the Vault collection rather than about any Vault's content, so
+        // a `batch` item never names it.
         "list_vaults" => read::list_vaults_tool(state, arguments).await,
-        "search_notes" => read::search_notes_tool(state, arguments).await,
-        "get_note" => read::get_note_tool(state, arguments).await,
-        "get_note_links" => read::get_note_links_tool(state, arguments).await,
-        "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
-        "get_tree" => read::get_tree_tool(state, arguments).await,
-        "get_stats" => read::get_stats_tool(state, arguments).await,
-        "get_graph" => read::get_graph_tool(state, arguments).await,
-        "recently_modified" => read::recently_modified_tool(state, arguments).await,
-        // Not gated on `write_enabled`: the tool reports the write posture
-        // rather than exercising it, and an agent that cannot upload still
-        // needs to be told so, with the reason.
-        "get_attachment_import_config" => {
-            read::attachment_import_config_tool(&state, config, arguments)
-        }
-        // Reading which attachments a Note references is a read, and is
-        // answered under the same permission as reading the Note itself. It
-        // lived behind the write gate only because it was catalogued next to
-        // the attachment mutations.
-        "list_note_attachments" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::list_note_attachments_tool(state, &vault, arguments).await
-        }
-        // Fetching an attachment's bytes is a read, like list_note_attachments;
-        // it needs `config` for the base64 encoding's size cap.
-        "get_attachment" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::get_attachment_tool(state, &vault, arguments, config).await
-        }
-        // Reading a Note's frontmatter projection is a read, like reading the
-        // Note itself; it is answered under read permission even though its
-        // implementation lives next to the mutation helpers.
-        "get_frontmatter" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::get_frontmatter_tool(state, &vault, arguments).await
+        read_op if READ_OPS.contains(&read_op) => {
+            dispatch_read_tool(state, config, name, arguments).await
         }
         // Not gated on `write_enabled` at this level: a batch may be
         // read-only. Any write-shaped item inside it is gated individually,
@@ -132,12 +107,7 @@ pub async fn handle_tools_call(
         }
         "sync_vault" if config.write_enabled => read::sync_vault_tool(state, arguments).await,
         "retry_vault" if config.write_enabled => read::retry_vault_tool(state, arguments).await,
-        "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "update_frontmatter" | "rename_note" | "move_note" | "move_rename_note"
-        | "archive_note" | "delete_note" | "import_attachment" | "move_attachment"
-        | "rename_attachment" | "delete_attachment"
-            if config.write_enabled =>
-        {
+        write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
             let vault = write::scoped_vault(&state, &arguments)?;
             // This is the same per-Vault mutation lock used by the V1 HTTP
             // adapter.  The legacy instance-wide AppState lock deliberately
@@ -145,10 +115,7 @@ pub async fn handle_tools_call(
             let _guard = write::acquire_mutation(&vault).await?;
             write::dispatch_write_tool(state, &vault, name, arguments, config).await
         }
-        "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
-        | "update_frontmatter" | "rename_note" | "move_note" | "move_rename_note"
-        | "archive_note" | "delete_note" | "import_attachment" | "move_attachment"
-        | "rename_attachment" | "delete_attachment" => {
+        write_op if write::WRITE_OPS.contains(&write_op) => {
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
         }
         "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
@@ -187,6 +154,84 @@ fn select_model_tool(
         Err(crate::server::ModelChoiceError::Persist(error)) => {
             Err(JsonRpcFailure::internal(error))
         }
+    }
+}
+
+/// Every read tool that answers about a Vault's content, and the one list that
+/// says so. The top-level dispatcher above and the `batch` allow-list
+/// (`batch.rs`) both read this rather than repeating the names, mirroring
+/// [`write::WRITE_OPS`] on the mutation side.
+///
+/// `list_vaults` is deliberately absent — it is collection discovery, not
+/// content — and so are the setup tools, which are unreachable once setup has
+/// finished and have nothing to do with Note or attachment content.
+pub(super) const READ_OPS: &[&str] = &[
+    "search_notes",
+    "get_note",
+    "get_note_links",
+    "resolve_wikilink",
+    "get_tree",
+    "get_stats",
+    "get_graph",
+    "recently_modified",
+    "get_attachment_import_config",
+    "list_note_attachments",
+    "get_attachment",
+    "get_frontmatter",
+];
+
+/// Dispatches one read op to its underlying tool function. Shared by the
+/// top-level MCP dispatcher above (one call per request) and the `batch` tool
+/// (one call per item), so the two can never drift on how a read is answered —
+/// notably the `readable_vault` prologue the three Vault-scoped reads need.
+pub(super) async fn dispatch_read_tool(
+    state: AppState,
+    config: &McpConfig,
+    op: &str,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    match op {
+        "search_notes" => read::search_notes_tool(state, arguments).await,
+        "get_note" => read::get_note_tool(state, arguments).await,
+        "get_note_links" => read::get_note_links_tool(state, arguments).await,
+        "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
+        "get_tree" => read::get_tree_tool(state, arguments).await,
+        "get_stats" => read::get_stats_tool(state, arguments).await,
+        "get_graph" => read::get_graph_tool(state, arguments).await,
+        "recently_modified" => read::recently_modified_tool(state, arguments).await,
+        // Not gated on `write_enabled`: the tool reports the write posture
+        // rather than exercising it, and an agent that cannot upload still
+        // needs to be told so, with the reason.
+        "get_attachment_import_config" => {
+            read::attachment_import_config_tool(&state, config, arguments)
+        }
+        // Reading which attachments a Note references is a read, and is
+        // answered under the same permission as reading the Note itself. It
+        // lived behind the write gate only because it was catalogued next to
+        // the attachment mutations.
+        "list_note_attachments" => {
+            let vault = write::readable_vault(&state, &arguments)?;
+            write::list_note_attachments_tool(state, &vault, arguments).await
+        }
+        // Fetching an attachment's bytes is a read, like list_note_attachments;
+        // it needs `config` for the base64 encoding's size cap.
+        "get_attachment" => {
+            let vault = write::readable_vault(&state, &arguments)?;
+            write::get_attachment_tool(state, &vault, arguments, config).await
+        }
+        // Reading a Note's frontmatter projection is a read, like reading the
+        // Note itself; it is answered under read permission even though its
+        // implementation lives next to the mutation helpers.
+        "get_frontmatter" => {
+            let vault = write::readable_vault(&state, &arguments)?;
+            write::get_frontmatter_tool(state, &vault, arguments).await
+        }
+        // Unreachable while [`READ_OPS`] and the arms above agree, which
+        // `read_ops_are_all_advertised` enforces. An error rather than a panic:
+        // a name that drifts out of step must not take the process down.
+        _ => Err(JsonRpcFailure::invalid_params(format!(
+            "MCP tool is catalogued as a read tool but has no dispatch: {op}"
+        ))),
     }
 }
 

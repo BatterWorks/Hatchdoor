@@ -15,6 +15,24 @@
 //! touched in between: [`batch_tool`] acquires each touched Vault's mutation
 //! lock once and holds it for the rest of the call, rather than per item like
 //! a standalone write does, closing that window instead of narrowing it.
+//!
+//! Note what the caller pays for that: while a batch runs, every other writer
+//! to a Vault it has already written — the Web UI, the V1 HTTP adapter, another
+//! MCP call — waits. A batch is capped at [`BATCH_MAX_WRITE_ITEMS`] writes for
+//! this reason as much as for load.
+//!
+//! **One commit per batch** (#177) falls out of that same lock rather than any
+//! Git handling here: this module writes Markdown exactly as the standalone
+//! tools do, and a Vault's sync turn takes the same mutation lock, so no turn
+//! can interleave with a batch and split it across commits. The turn then finds
+//! every one of the batch's writes dirty together and commits them as one, which
+//! `git::sync::tests::one_turn_commits_a_whole_batch_of_writes_as_a_single_commit`
+//! asserts. This holds for Vaults synced through the per-Vault scheduler. It is
+//! *not* guaranteed on the legacy single-Vault sync path, which is driven by the
+//! instance-wide `AppState` lock that this scoped path deliberately does not
+//! participate in (see `mod.rs`); there a batch's writes may land in more than
+//! one commit. Nothing is lost or reordered either way — only the commit
+//! boundary differs.
 
 use std::collections::HashMap;
 
@@ -28,49 +46,8 @@ use super::super::config::McpConfig;
 use super::super::limits::{BATCH_MAX_READ_ITEMS, BATCH_MAX_WRITE_ITEMS};
 use super::super::protocol::{JsonRpcFailure, tool_success};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
-use super::{WRITE_DISABLED_MESSAGE, read, write, write_tool_annotations};
-
-/// Read-shaped ops a batch may contain — every read tool except `list_vaults`
-/// (a collection-discovery tool, not a note/attachment one) and the setup
-/// tools, which are unreachable before a Vault exists and have nothing to do
-/// with note/attachment content.
-const READ_OPS: &[&str] = &[
-    "search_notes",
-    "get_note",
-    "get_note_links",
-    "resolve_wikilink",
-    "get_tree",
-    "get_stats",
-    "get_graph",
-    "recently_modified",
-    "get_attachment_import_config",
-    "list_note_attachments",
-    "get_attachment",
-    "get_frontmatter",
-];
-
-/// Write-shaped ops a batch may contain — every note/attachment mutation
-/// tool. Vault-management tools (`create_vault` through `retry_vault`) are
-/// deliberately absent: this is the whole "vault-management tools are
-/// excluded" rule, expressed as what is NOT here rather than a separate
-/// exclusion list.
-const WRITE_OPS: &[&str] = &[
-    "create_note",
-    "update_note",
-    "append_to_note",
-    "edit_note",
-    "replace_section",
-    "update_frontmatter",
-    "rename_note",
-    "move_note",
-    "move_rename_note",
-    "archive_note",
-    "delete_note",
-    "import_attachment",
-    "move_attachment",
-    "rename_attachment",
-    "delete_attachment",
-];
+use super::write::WRITE_OPS;
+use super::{READ_OPS, WRITE_DISABLED_MESSAGE, dispatch_read_tool, write, write_tool_annotations};
 
 /// The write ops that carry both `slug` and `expected_content_hash` — the
 /// only ones eligible for within-batch hash chaining. `create_note` and the
@@ -233,29 +210,7 @@ async fn dispatch_one(
     locks: &mut VaultLocks,
 ) -> Result<Value, JsonRpcFailure> {
     match op {
-        "search_notes" => read::search_notes_tool(state, arguments).await,
-        "get_note" => read::get_note_tool(state, arguments).await,
-        "get_note_links" => read::get_note_links_tool(state, arguments).await,
-        "resolve_wikilink" => read::resolve_wikilink_tool(state, arguments).await,
-        "get_tree" => read::get_tree_tool(state, arguments).await,
-        "get_stats" => read::get_stats_tool(state, arguments).await,
-        "get_graph" => read::get_graph_tool(state, arguments).await,
-        "recently_modified" => read::recently_modified_tool(state, arguments).await,
-        "get_attachment_import_config" => {
-            read::attachment_import_config_tool(&state, config, arguments)
-        }
-        "list_note_attachments" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::list_note_attachments_tool(state, &vault, arguments).await
-        }
-        "get_attachment" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::get_attachment_tool(state, &vault, arguments, config).await
-        }
-        "get_frontmatter" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::get_frontmatter_tool(state, &vault, arguments).await
-        }
+        _ if READ_OPS.contains(&op) => dispatch_read_tool(state, config, op, arguments).await,
         _ if WRITE_OPS.contains(&op) => {
             if !config.write_enabled {
                 return Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE));
@@ -401,6 +356,34 @@ mod tests {
             assert!(
                 !READ_OPS.contains(&excluded) && !WRITE_OPS.contains(&excluded),
                 "{excluded} must not be an allowed batch op"
+            );
+        }
+    }
+
+    #[test]
+    fn every_batch_op_is_an_advertised_tool() {
+        // `READ_OPS` and `WRITE_OPS` gate what a batch may name. A name in
+        // either that the catalogue does not advertise would be a batch-only
+        // tool no client could discover; one that dispatch cannot answer would
+        // be advertised and then refused. Both are drift, and this is where it
+        // fails.
+        let config = McpConfig {
+            enabled: true,
+            write_enabled: true,
+            max_attachment_bytes: 0,
+            max_base64_bytes: 0,
+            bearer_token: None,
+            allowed_origins: Vec::new(),
+            rate_limits_enabled: true,
+        };
+        let advertised: Vec<String> = super::super::tools_list(&config)
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_string())
+            .collect();
+        for op in READ_OPS.iter().chain(WRITE_OPS.iter()) {
+            assert!(
+                advertised.contains(&(*op).to_string()),
+                "{op} is an allowed batch op but is not advertised in tools/list"
             );
         }
     }

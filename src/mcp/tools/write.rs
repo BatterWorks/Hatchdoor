@@ -1,6 +1,13 @@
-//! Mutating MCP tools: note and attachment writes, plus the write-side
-//! helpers (index building, git-sync bookkeeping, result shaping). Gated by
-//! `HATCHDOOR_MCP_WRITE_ENABLED` at the dispatch layer in `mod.rs`.
+//! Vault-scoped MCP tools: note and attachment writes, plus the write-side
+//! helpers (index building, git-sync bookkeeping, result shaping). The
+//! mutations — [`WRITE_OPS`], dispatched by [`dispatch_write_tool`] — are gated
+//! by `HATCHDOOR_MCP_WRITE_ENABLED` at the dispatch layer in `mod.rs`.
+//!
+//! Three *read* tools live here too and are not gated: `list_note_attachments`,
+//! `get_attachment`, and `get_frontmatter`. They sit next to the mutations
+//! because they share this module's Vault-scoping helpers (`readable_vault`,
+//! `note_entry`, `current_index`), not because they need write permission —
+//! `mod.rs`'s `READ_OPS` is what decides that, and it lists all three.
 
 // The deserialization-only scope and retired legacy commit-summary fields are
 // intentionally retained until every old client gets a structured invalid
@@ -131,6 +138,34 @@ fn asset_error_to_jsonrpc(
     structured_read_error(vault_id, code, message)
 }
 
+/// Every note/attachment mutation tool, and the one list that says so. The
+/// top-level dispatcher (`mod.rs`), the `batch` allow-list (`batch.rs`), and
+/// [`dispatch_write_tool`] below all read this rather than repeating the names,
+/// so a new write tool is wired by adding it here and to the `match` — and
+/// `write_ops_match_the_advertised_catalogue` fails if it is added to the
+/// catalogue and forgotten here.
+///
+/// Vault-management tools (`create_vault` through `retry_vault`) are deliberately
+/// absent: they mutate the registry, not a Vault's content, and are dispatched
+/// and gated separately.
+pub(super) const WRITE_OPS: &[&str] = &[
+    "create_note",
+    "update_note",
+    "append_to_note",
+    "edit_note",
+    "replace_section",
+    "update_frontmatter",
+    "rename_note",
+    "move_note",
+    "move_rename_note",
+    "archive_note",
+    "delete_note",
+    "import_attachment",
+    "move_attachment",
+    "rename_attachment",
+    "delete_attachment",
+];
+
 /// Dispatches one write op to its underlying tool function. Shared by the
 /// top-level MCP dispatcher (`mod.rs`, one call per request) and the `batch`
 /// tool (`batch.rs`, one call per item): both resolve the target Vault and
@@ -160,7 +195,13 @@ pub(super) async fn dispatch_write_tool(
         "move_attachment" => move_attachment_tool(state, vault, arguments).await,
         "rename_attachment" => rename_attachment_tool(state, vault, arguments).await,
         "delete_attachment" => delete_attachment_tool(state, vault, arguments).await,
-        _ => unreachable!("dispatch_write_tool called with a non-write op: {op}"),
+        // Unreachable while [`WRITE_OPS`] and the arms above agree, which
+        // `write_ops_match_the_advertised_catalogue` enforces. An error rather
+        // than a panic anyway: a name that drifts out of step must not be able
+        // to take the process down from a request.
+        _ => Err(JsonRpcFailure::invalid_params(format!(
+            "MCP tool is catalogued as a write tool but has no dispatch: {op}"
+        ))),
     }
 }
 
@@ -612,26 +653,19 @@ pub(super) async fn get_attachment_tool(
     let relative_path = non_empty_argument("relative_path", args.relative_path)?;
     let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
 
-    let resolved = crate::handlers::resolve_asset_path(&vault_path(vault), &relative_path)
-        .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
-    let content_type = crate::handlers::content_type_for_path(&resolved);
-    let size_bytes = std::fs::metadata(&resolved)
-        .map_err(|error| {
-            JsonRpcFailure::internal(format!(
-                "failed reading attachment metadata for '{relative_path}': {error}"
-            ))
-        })?
-        .len();
+    let asset: crate::handlers::ResolvedAsset =
+        crate::handlers::describe_asset(&vault_path(vault), &relative_path)
+            .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
+    let size_bytes = asset.size_bytes;
 
     let content = match encoding {
         AttachmentEncoding::Url => crate::mcp::results::AttachmentContent::Url {
-            download_url: format!(
-                "/api/v1/vaults/{}/assets/{}",
-                vault.vault_id,
-                encode_asset_url_path(&relative_path),
+            download_url: crate::handlers::asset_download_path(
+                &vault.vault_id.to_string(),
+                &relative_path,
             ),
             path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
-            auth: "Requires this deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) when one is configured — as an Authorization: Bearer header or an access_token query parameter, not this MCP session's own token. When no web bearer token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot obtain that token, call get_attachment again with encoding \"base64\".",
+            auth: "Send this MCP session's own bearer token as an Authorization: Bearer header; the route accepts it for as long as MCP stays enabled. This deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) also works, as a header or an access_token query parameter. When neither token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
         },
         AttachmentEncoding::Base64 => {
             if size_bytes > config.max_base64_bytes {
@@ -640,17 +674,9 @@ pub(super) async fn get_attachment_tool(
                     config.max_base64_bytes
                 )));
             }
-            let bytes = crate::handlers::read_asset_bytes(&resolved).map_err(|error| {
-                let message = match error {
-                    crate::handlers::AssetReadError::TooLarge => {
-                        "attachment is too large to read".to_string()
-                    }
-                    crate::handlers::AssetReadError::Io(message) => message,
-                };
-                JsonRpcFailure::internal(format!(
-                    "failed reading attachment '{relative_path}': {message}"
-                ))
-            })?;
+            let bytes = asset
+                .read_bytes()
+                .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
             use base64::Engine as _;
             crate::mcp::results::AttachmentContent::Base64 {
                 content: base64::engine::general_purpose::STANDARD.encode(&bytes),
@@ -663,23 +689,10 @@ pub(super) async fn get_attachment_tool(
             vault_id: vault.vault_id.to_string(),
             relative_path,
             size_bytes,
-            content_type: content_type.to_string(),
+            content_type: asset.content_type.to_string(),
             content,
         },
     )))
-}
-
-/// Percent-encode a Vault-relative attachment path for the existing
-/// `/assets/{*path}` route, one segment at a time — mirrors the frontend's
-/// own encoding of the same route
-/// (`frontend/src/components/note-page/wikilinks.ts`), reusing the same
-/// byte-level encoder `downloads.rs` already uses for export filenames.
-fn encode_asset_url_path(relative_path: &str) -> String {
-    relative_path
-        .split('/')
-        .map(crate::handlers::percent_encode_filename)
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 pub(super) async fn list_note_attachments_tool(
@@ -1418,6 +1431,26 @@ mod record_tests {
 #[cfg(test)]
 mod finalize_tests {
     use super::*;
+
+    #[test]
+    fn write_ops_match_the_advertised_catalogue() {
+        // The drift guard for the single source of truth: `WRITE_OPS` gates
+        // dispatch in `mod.rs` and membership in `batch.rs`, while
+        // `write_tools_list()` is what clients are actually told exists. A tool
+        // catalogued but missing here would be advertised and then refused; one
+        // listed here but not catalogued would be a gate on nothing.
+        let mut advertised: Vec<String> = write_tools_list()
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("tool name").to_string())
+            .collect();
+        let mut declared: Vec<String> = WRITE_OPS.iter().map(|op| (*op).to_string()).collect();
+        advertised.sort();
+        declared.sort();
+        assert_eq!(
+            advertised, declared,
+            "WRITE_OPS and write_tools_list() must name exactly the same tools"
+        );
+    }
 
     #[test]
     fn finalize_note_write_derives_layer_from_the_layer_map_alone() {

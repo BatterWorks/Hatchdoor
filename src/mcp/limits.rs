@@ -63,7 +63,7 @@ pub(crate) const BATCH_MAX_WRITE_ITEMS: usize = 20;
 
 /// How the transport middleware classified one POST body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RequestClass {
+pub enum RequestClass {
     /// Everything outside the tool quota: protocol lifecycle, discovery,
     /// list handling, notifications.
     Exempt,
@@ -96,7 +96,7 @@ pub(crate) fn retry_after_seconds(retry_in: Duration) -> u64 {
 /// Shared state behind one `/mcp` transport instance: the per-token rolling
 /// window plus the two process-wide concurrency pools. Cheap to construct per
 /// test; exactly one instance per transport in production.
-pub(crate) struct RateLimiter {
+pub struct RateLimiter {
     quota: Mutex<HashMap<Arc<str>, VecDeque<std::time::Instant>>>,
     ordinary: Arc<Semaphore>,
     expensive_searches: Arc<Semaphore>,
@@ -105,7 +105,7 @@ pub(crate) struct RateLimiter {
 /// Held for the duration of one admitted tool call; releasing on drop frees
 /// both its concurrency slots on every exit path.
 #[derive(Debug)]
-pub(crate) struct ConcurrencyGuard {
+pub struct ConcurrencyGuard {
     _ordinary: tokio::sync::OwnedSemaphorePermit,
     _expensive: Option<tokio::sync::OwnedSemaphorePermit>,
 }

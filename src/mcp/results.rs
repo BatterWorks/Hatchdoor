@@ -230,7 +230,15 @@ pub struct AttachmentWriteResult {
 /// `structuredContent` on success; `error` carries a structured failure in
 /// the same shape a standalone call to that tool would return (either the
 /// domain error object, or `{code, message}` for a protocol-level failure
-/// such as an unresolvable Vault). Exactly one of the two is present.
+/// such as an unresolvable Vault).
+///
+/// `ok` is authoritative and exactly one of `result`/`error` is present with
+/// it. This deliberately stays three flat fields rather than the tagged enum
+/// [`AttachmentContent`] uses for its own either/or: `ok` plus `result`/`error`
+/// is the shape MCP clients expect from a batch, and it is already the
+/// advertised `outputSchema`. The invariant is therefore held by the two
+/// construction sites in `mcp::tools::batch` — both set `ok` and its matching
+/// field together — not by the type. Keep them in step when editing either.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct BatchItemResult {
     pub index: usize,

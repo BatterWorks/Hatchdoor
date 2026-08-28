@@ -418,8 +418,16 @@ pub async fn vault_scoped_resolve_batch_handler(
 /// and are not otherwise distinguished on disk.
 pub async fn vault_scoped_asset_handler(
     State(state): State<AppState>,
+    mcp_read: Option<axum::Extension<crate::auth::McpAssetRead>>,
     Path((raw_vault_id, path)): Path<(String, String)>,
 ) -> Response {
+    // Present only when the auth layer admitted this request on the MCP bearer
+    // token (#176). That credential's ceiling for attachment bytes is
+    // `HATCHDOOR_MCP_MAX_BASE64_BYTES`, which `get_attachment`'s base64 encoding
+    // enforces; without this the `download_url` the same tool advertises would
+    // be a way around it, up to this route's own far larger bound. A web-token
+    // request carries no marker and keeps the route's bound.
+    let mcp_max_bytes = mcp_read.map(|axum::Extension(read)| read.max_bytes);
     let vault_id = match parse_vault_id(&raw_vault_id) {
         Ok(vault_id) => vault_id,
         Err(error) => return bad_request(error),
@@ -455,6 +463,18 @@ pub async fn vault_scoped_asset_handler(
             Ok(true) => {}
             Ok(false) => return Ok(AssetOutcome::PathError(AssetPathError::NotFound)),
             Err(error) => return Ok(AssetOutcome::VaultError(error)),
+        }
+        // The MCP credential's own ceiling, checked before the read rather than
+        // after, so an over-limit file is never buffered for a caller that may
+        // not have it.
+        if let Some(max_bytes) = mcp_max_bytes {
+            let size = match std::fs::metadata(&asset_path) {
+                Ok(metadata) => metadata.len(),
+                Err(error) => return Err(error.to_string()),
+            };
+            if size > max_bytes {
+                return Ok(AssetOutcome::PathError(AssetPathError::TooLarge));
+            }
         }
         let content_type = content_type_for_path(&asset_path);
         // Bounded read: an asset is buffered whole to build the response, so a

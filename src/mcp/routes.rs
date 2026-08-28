@@ -87,6 +87,15 @@ impl HatchdoorMcpTransport {
         }
     }
 
+    /// This transport's rate limiter, so the Vault asset route can spend the
+    /// same per-token quota and concurrency budget for a request admitted on the
+    /// MCP bearer token (#176). Sharing the instance is the point: an MCP client
+    /// must not get a second, independent budget by fetching attachment bytes
+    /// through `get_attachment`'s `download_url` instead of over `/mcp`.
+    pub fn limiter(&self) -> Arc<RateLimiter> {
+        self.limiter.clone()
+    }
+
     /// The `/mcp` sub-router: rmcp's Streamable HTTP service (GET/SSE + POST +
     /// DELETE) behind the authorization/body-limit/rate-limit middleware.
     /// Merged into the main application router by the composition root. The
