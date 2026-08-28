@@ -62,3 +62,11 @@ _Avoid_: Unavailable vault, broken vault
 A named classification of content within one vault. A vault contains layers;
 the collection of vaults is not itself another layer.
 _Avoid_: Vault layer
+
+**Index turn**:
+One unit of background indexing work for exactly one vault, requested through the shared work coordinator by the file watcher, a settings change, a manual rebuild, or activation. It scans that vault's Markdown, builds a candidate snapshot, and publishes it in two passes: structure first, so browsing does not wait, then vectors. A vault occupies at most one coordinator position, so repeated requests coalesce into the next turn.
+_Avoid_: Reindex, rebuild, refresh (when meant instance-wide)
+
+**Git turn**:
+One unit of background Git work for exactly one vault, requested through the same work coordinator by the managed-Git scheduler, a manual sync or retry, or activation, and run under that vault's mutation lock. The vault source and Git mode select the operation: acquire or reuse and synchronise a managed checkout, synchronise an existing checkout with its remote, or commit local history.
+_Avoid_: Sync task, git sync, debounce (when meant instance-wide)
