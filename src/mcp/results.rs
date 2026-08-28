@@ -226,6 +226,30 @@ pub struct AttachmentWriteResult {
     pub cleanup_warning: Option<String>,
 }
 
+/// One `batch` item's outcome. `result` carries the named tool's own
+/// `structuredContent` on success; `error` carries a structured failure in
+/// the same shape a standalone call to that tool would return (either the
+/// domain error object, or `{code, message}` for a protocol-level failure
+/// such as an unresolvable Vault). Exactly one of the two is present.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BatchItemResult {
+    pub index: usize,
+    pub op: String,
+    pub ok: bool,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+}
+
+/// `batch`'s answer: one ordered outcome per requested operation. Execution
+/// is best-effort — an earlier item's failure never stops a later item from
+/// running, and there is no rollback.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct BatchResult {
+    pub items: Vec<BatchItemResult>,
+    pub succeeded: usize,
+    pub failed: usize,
+}
+
 // ---------------------------------------------------------------------------
 // outputSchema registry
 // ---------------------------------------------------------------------------
@@ -264,6 +288,7 @@ output_schemas! {
     "list_note_attachments" => NoteAttachmentsResult,
     "get_attachment" => GetAttachmentResult,
     "get_frontmatter" => GetFrontmatterResult,
+    "batch" => BatchResult,
     // Management tools
     "create_vault" => CreateVaultResult,
     "edit_vault" => EditVaultResult,
@@ -337,12 +362,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 38,
-            "3 setup + 13 read + 7 management + 15 write tools"
+            total, 39,
+            "3 setup + 13 read + 1 batch + 7 management + 15 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 38, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 39, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(

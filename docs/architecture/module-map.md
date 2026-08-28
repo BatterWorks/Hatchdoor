@@ -1479,6 +1479,28 @@ files, checkouts, Git history, or credentials outside the registry record.
 revisions are exactly `2026-07-28` and `2025-11-25`; #170 adds honest
 `tools.listChanged` on the modern surface. The remaining Wayfinder children
 build on this seam: #171 (layered rate limits) and #172 (release evidence).
+#177 adds `batch`: one generic tool that executes a caller-supplied ordered
+list of note/attachment operations (`create_note` through `delete_attachment`,
+plus every read tool except `list_vaults`) in a single call, dispatching each
+item through the exact same `read`/`write` tool functions a standalone call
+uses. Vault-management ops and unrecognized op names are rejected up front,
+before any item executes; over the asymmetric per-batch caps in
+`src/mcp/limits.rs` (`BATCH_MAX_READ_ITEMS` = 50, `BATCH_MAX_WRITE_ITEMS` =
+20) the whole call is refused the same way. Execution is best-effort and in
+order — one item's failure never stops the rest, and there is no rollback —
+with `expected_content_hash` chaining between items in the same call that
+share a `(vault_id, slug)`: `mcp/tools/batch.rs` tracks each note's resulting
+hash as the batch runs and substitutes it for a later item's own
+`expected_content_hash`, so a caller can create or edit a note earlier in the
+batch and reference it again later without an intermediate read; a note not
+otherwise touched in the batch still validates its `expected_content_hash`
+normally. No Git-specific handling exists in the tool: it writes Markdown
+files exactly as the standalone tools do, and the existing per-Vault Git
+turn (`commit_vault_drift`, `src/git/managed_sync.rs`) already commits
+whatever is dirty at that turn in one commit — a batch's writes therefore
+land in one commit the same way any burst of individual write calls would,
+without changing ADR-10's debounced background-sync semantics. Catalogue
+grows 38 → 39, purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -1496,6 +1518,7 @@ build on this seam: #171 (layered rate limits) and #172 (release evidence).
 - `src/mcp/tools/mod.rs`
 - `src/mcp/tools/read.rs`
 - `src/mcp/tools/write.rs`
+- `src/mcp/tools/batch.rs`
 
 **Public contract (target):** `/mcp` is Streamable HTTP served through rmcp's
 `StreamableHttpService` (GET/SSE + POST + DELETE). Legacy `2025-11-25` traffic
@@ -1520,7 +1543,7 @@ requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
 window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
-38-tool catalogue.
+39-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport

@@ -602,7 +602,11 @@ mod tests {
             arguments["scope"] = json!(vault_id);
         } else if !matches!(
             name,
-            "list_vaults" | "get_model_setup_status" | "accept_gemma_terms" | "decline_gemma_terms"
+            "list_vaults"
+                | "get_model_setup_status"
+                | "accept_gemma_terms"
+                | "decline_gemma_terms"
+                | "batch"
         ) {
             arguments["vault_id"] = json!(vault_id);
         }
@@ -829,6 +833,7 @@ mod tests {
                 "get_attachment",
                 "get_attachment_import_config",
                 "recently_modified",
+                "batch",
             ]
         );
         assert!(
@@ -2735,5 +2740,276 @@ mod tests {
         assert_eq!(modern.status(), StatusCode::NOT_FOUND);
         let message = error_body(modern).await;
         assert_eq!(message["error"]["code"], -32601);
+    }
+
+    // ---------------------------------------------------------------------------
+    // `batch` (issue #177)
+    // ---------------------------------------------------------------------------
+
+    fn vault_id_of(state: &AppState) -> crate::vault_registry::VaultId {
+        *state
+            .vaults
+            .snapshot()
+            .vaults
+            .keys()
+            .next()
+            .expect("test Vault registered")
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_a_vault_management_op_before_executing_anything() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "disable_vault", "arguments": {"vault_id": vault_id, "expected_registry_revision": 0}},
+                {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": "Should/NotExist.md", "content": "x"}}
+            ]}),
+        )
+        .await;
+
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not a valid batch operation")
+        );
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Should/NotExist.md")
+                .exists(),
+            "nothing in the batch may execute once any op is rejected up front"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_an_unrecognized_op() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "not_a_real_tool", "arguments": {"vault_id": vault_id}}
+            ]}),
+        )
+        .await;
+
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_an_oversized_write_batch_wholesale() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let operations: Vec<Value> = (0..=crate::mcp::limits::BATCH_MAX_WRITE_ITEMS)
+            .map(|i| {
+                json!({
+                    "op": "create_note",
+                    "arguments": {
+                        "vault_id": vault_id,
+                        "relative_path": format!("Batch/Note{i}.md"),
+                        "content": "x"
+                    }
+                })
+            })
+            .collect();
+
+        let body = call_tool(&state, "batch", json!({"operations": operations})).await;
+
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("write-shaped items")
+        );
+        assert!(
+            !state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Batch/Note0.md")
+                .exists(),
+            "an over-cap batch must be refused before any item executes"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_an_oversized_read_batch_wholesale() {
+        let (state, _tmp) = test_state();
+        let vault_id = vault_id_of(&state);
+
+        let operations: Vec<Value> = (0..=crate::mcp::limits::BATCH_MAX_READ_ITEMS)
+            .map(|_| json!({"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}}))
+            .collect();
+
+        let body = call_tool(&state, "batch", json!({"operations": operations})).await;
+
+        assert_eq!(body["error"]["code"], -32602);
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("read-shaped items")
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_deletes_a_note_and_an_attachment_created_earlier_in_the_same_call() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "Batch/ToDelete.md", "content": "gone soon"
+                }},
+                // Deleted with a deliberately stale hash: chained from the
+                // create above, same as the append test — proves deletes
+                // participate in hash chaining too.
+                {"op": "delete_note", "arguments": {
+                    "vault_id": vault_id, "slug": "todelete",
+                    "expected_content_hash": "fnv1a64:deliberately-stale"
+                }},
+                {"op": "import_attachment", "arguments": {
+                    "vault_id": vault_id, "target_relative_path": "Batch/asset.png",
+                    "content": b64(b"asset-bytes")
+                }},
+                {"op": "delete_attachment", "arguments": {
+                    "vault_id": vault_id, "source_relative_path": "Batch/asset.png"
+                }}
+            ]}),
+        )
+        .await;
+
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["succeeded"], 4);
+        assert_eq!(content["failed"], 0);
+        assert_eq!(content["items"][1]["op"], "delete_note");
+        assert_eq!(content["items"][1]["result"]["ok"], true);
+        assert_eq!(content["items"][3]["op"], "delete_attachment");
+        assert_eq!(content["items"][3]["result"]["ok"], true);
+
+        let vault_path = state.vault_path().await.expect("ready vault");
+        assert!(!vault_path.join("Batch/ToDelete.md").exists());
+        assert!(!vault_path.join("Batch/asset.png").exists());
+        assert!(
+            vault_path
+                .join(".hatchdoor-trash/Batch/ToDelete.md")
+                .exists()
+        );
+        assert!(vault_path.join(".hatchdoor-trash/Batch/asset.png").exists());
+    }
+
+    #[tokio::test]
+    async fn batch_runs_read_only_operations_without_write_permission() {
+        let (state, _tmp) = test_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "home"}},
+                {"op": "get_note_links", "arguments": {"vault_id": vault_id, "slug": "home"}}
+            ]}),
+        )
+        .await;
+
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["succeeded"], 2);
+        assert_eq!(content["failed"], 0);
+        assert_eq!(content["items"][0]["result"]["note"]["slug"], "home");
+        assert_eq!(content["items"][1]["op"], "get_note_links");
+    }
+
+    #[tokio::test]
+    async fn batch_is_best_effort_and_chains_hashes_between_items_on_the_same_note() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "Batch/Chained.md", "content": "one"
+                }},
+                // A deliberately failing item in the middle: best-effort means
+                // this must not stop the append below from still running.
+                {"op": "get_note", "arguments": {"vault_id": vault_id, "slug": "does-not-exist"}},
+                // No intermediate read: this expected_content_hash is stale by
+                // construction, and must still succeed because the prior
+                // create in this same batch is chained into it.
+                {"op": "append_to_note", "arguments": {
+                    "vault_id": vault_id, "slug": "chained", "content": "\ntwo",
+                    "expected_content_hash": "fnv1a64:deliberately-stale"
+                }}
+            ]}),
+        )
+        .await;
+
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["succeeded"], 2);
+        assert_eq!(content["failed"], 1);
+
+        assert_eq!(content["items"][0]["ok"], true);
+        assert_eq!(content["items"][0]["op"], "create_note");
+
+        assert_eq!(content["items"][1]["ok"], false);
+        assert_eq!(content["items"][1]["op"], "get_note");
+        assert!(content["items"][1]["error"].is_object());
+
+        assert_eq!(content["items"][2]["ok"], true);
+        assert_eq!(content["items"][2]["op"], "append_to_note");
+
+        let written = std::fs::read_to_string(
+            state
+                .vault_path()
+                .await
+                .expect("ready vault")
+                .join("Batch/Chained.md"),
+        )
+        .expect("read written note");
+        assert_eq!(written, "one\ntwo\n");
+    }
+
+    #[tokio::test]
+    async fn batch_write_items_are_gated_by_mcp_write_enabled_per_item() {
+        let (state, _tmp) = test_state();
+        let vault_id = vault_id_of(&state);
+
+        let body = call_tool(
+            &state,
+            "batch",
+            json!({"operations": [
+                {"op": "create_note", "arguments": {
+                    "vault_id": vault_id, "relative_path": "Batch/Refused.md", "content": "x"
+                }}
+            ]}),
+        )
+        .await;
+
+        let content = &body["result"]["structuredContent"];
+        assert_eq!(content["succeeded"], 0);
+        assert_eq!(content["failed"], 1);
+        assert!(
+            content["items"][0]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("write tools are disabled")
+        );
     }
 }

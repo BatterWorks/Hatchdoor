@@ -3,6 +3,7 @@
 //! into `read` (always available) and `write` (gated by
 //! `HATCHDOOR_MCP_WRITE_ENABLED`), mirroring how `McpConfig` gates them.
 
+mod batch;
 mod read;
 mod write;
 
@@ -11,6 +12,13 @@ use serde_json::{Value, json};
 use super::config::McpConfig;
 use super::protocol::{JsonRpcFailure, tool_error, tool_structured_error, tool_success};
 use crate::app_state::AppState;
+
+/// Shared by every call site that rejects a write-shaped tool while
+/// `HATCHDOOR_MCP_WRITE_ENABLED` is off: the top-level dispatcher below (for
+/// both a standalone write tool and a vault-management tool) and `batch`'s
+/// own per-item gate, so the wording can't drift between them.
+pub(super) const WRITE_DISABLED_MESSAGE: &str =
+    "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED";
 
 pub async fn handle_tools_call(
     state: AppState,
@@ -111,6 +119,10 @@ pub async fn handle_tools_call(
             let vault = write::readable_vault(&state, &arguments)?;
             write::get_frontmatter_tool(state, &vault, arguments).await
         }
+        // Not gated on `write_enabled` at this level: a batch may be
+        // read-only. Any write-shaped item inside it is gated individually,
+        // the same way a standalone write tool call is below.
+        "batch" => batch::batch_tool(state, arguments, config).await,
         "create_vault" if config.write_enabled => read::create_vault_tool(state, arguments).await,
         "edit_vault" if config.write_enabled => read::edit_vault_tool(state, arguments).await,
         "enable_vault" if config.write_enabled => read::enable_vault_tool(state, arguments).await,
@@ -131,43 +143,18 @@ pub async fn handle_tools_call(
             // adapter.  The legacy instance-wide AppState lock deliberately
             // does not participate in this scoped path.
             let _guard = write::acquire_mutation(&vault).await?;
-            match name {
-                "create_note" => write::create_note_tool(state, &vault, arguments).await,
-                "update_note" => write::update_note_tool(state, &vault, arguments).await,
-                "append_to_note" => write::append_to_note_tool(state, &vault, arguments).await,
-                "edit_note" => write::edit_note_tool(state, &vault, arguments).await,
-                "replace_section" => write::replace_section_tool(state, &vault, arguments).await,
-                "update_frontmatter" => {
-                    write::update_frontmatter_tool(state, &vault, arguments).await
-                }
-                "rename_note" => write::rename_note_tool(state, &vault, arguments).await,
-                "move_note" => write::move_note_tool(state, &vault, arguments).await,
-                "move_rename_note" => write::move_rename_note_tool(state, &vault, arguments).await,
-                "archive_note" => write::archive_note_tool(state, &vault, arguments).await,
-                "delete_note" => write::delete_note_tool(state, &vault, arguments).await,
-                "import_attachment" => {
-                    write::import_attachment_tool(state, &vault, arguments, config).await
-                }
-                "move_attachment" => write::move_attachment_tool(state, &vault, arguments).await,
-                "rename_attachment" => {
-                    write::rename_attachment_tool(state, &vault, arguments).await
-                }
-                "delete_attachment" => {
-                    write::delete_attachment_tool(state, &vault, arguments).await
-                }
-                _ => unreachable!(),
-            }
+            write::dispatch_write_tool(state, &vault, name, arguments, config).await
         }
         "create_note" | "update_note" | "append_to_note" | "edit_note" | "replace_section"
         | "update_frontmatter" | "rename_note" | "move_note" | "move_rename_note"
         | "archive_note" | "delete_note" | "import_attachment" | "move_attachment"
-        | "rename_attachment" | "delete_attachment" => Err(JsonRpcFailure::invalid_params(
-            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
-        )),
+        | "rename_attachment" | "delete_attachment" => {
+            Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
+        }
         "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
-        | "sync_vault" | "retry_vault" => Err(JsonRpcFailure::invalid_params(
-            "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED",
-        )),
+        | "sync_vault" | "retry_vault" => {
+            Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
+        }
         other => Err(JsonRpcFailure::invalid_params(format!(
             "Unknown MCP tool: {other}"
         ))),
@@ -226,6 +213,7 @@ fn model_setup_status_result(state: &AppState) -> crate::mcp::results::ModelSetu
 
 pub fn tools_list(config: &McpConfig) -> Vec<Value> {
     let mut tools = read::read_tools_list();
+    tools.push(batch::batch_tool_schema());
     if config.write_enabled {
         tools.extend(read::management_tools_list());
         tools.extend(write::write_tools_list());

@@ -48,6 +48,19 @@ pub(crate) const MAX_CONCURRENT_EXPENSIVE_SEARCHES: usize = 2;
 /// retry shortly rather than back off for a whole window.
 pub(crate) const CONCURRENCY_RETRY_AFTER: Duration = Duration::from_secs(1);
 
+/// Items one `batch` tool call may contain that answer a query rather than
+/// mutate the Vault (every allowed read tool). A whole batch is still one
+/// `tools/call` against the caps above; this is a separate, tool-internal cap
+/// enforced by `mcp::tools::batch` before any item in an over-limit batch
+/// executes.
+pub(crate) const BATCH_MAX_READ_ITEMS: usize = 50;
+
+/// Items one `batch` tool call may contain that mutate the Vault (every
+/// allowed write tool). Tighter than the read cap, mirroring the asymmetry
+/// between ordinary and expensive-search concurrency above: a write is more
+/// expensive per item than a read.
+pub(crate) const BATCH_MAX_WRITE_ITEMS: usize = 20;
+
 /// How the transport middleware classified one POST body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RequestClass {

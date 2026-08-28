@@ -131,6 +131,39 @@ fn asset_error_to_jsonrpc(
     structured_read_error(vault_id, code, message)
 }
 
+/// Dispatches one write op to its underlying tool function. Shared by the
+/// top-level MCP dispatcher (`mod.rs`, one call per request) and the `batch`
+/// tool (`batch.rs`, one call per item): both resolve the target Vault and
+/// its mutation lock themselves before calling this, since they hold that
+/// lock on different schedules — a standalone call for just this one op, a
+/// batch item for as long as its whole call keeps touching the same Vault.
+pub(super) async fn dispatch_write_tool(
+    state: AppState,
+    vault: &McpVault,
+    op: &str,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    match op {
+        "create_note" => create_note_tool(state, vault, arguments).await,
+        "update_note" => update_note_tool(state, vault, arguments).await,
+        "append_to_note" => append_to_note_tool(state, vault, arguments).await,
+        "edit_note" => edit_note_tool(state, vault, arguments).await,
+        "replace_section" => replace_section_tool(state, vault, arguments).await,
+        "update_frontmatter" => update_frontmatter_tool(state, vault, arguments).await,
+        "rename_note" => rename_note_tool(state, vault, arguments).await,
+        "move_note" => move_note_tool(state, vault, arguments).await,
+        "move_rename_note" => move_rename_note_tool(state, vault, arguments).await,
+        "archive_note" => archive_note_tool(state, vault, arguments).await,
+        "delete_note" => delete_note_tool(state, vault, arguments).await,
+        "import_attachment" => import_attachment_tool(state, vault, arguments, config).await,
+        "move_attachment" => move_attachment_tool(state, vault, arguments).await,
+        "rename_attachment" => rename_attachment_tool(state, vault, arguments).await,
+        "delete_attachment" => delete_attachment_tool(state, vault, arguments).await,
+        _ => unreachable!("dispatch_write_tool called with a non-write op: {op}"),
+    }
+}
+
 pub(super) async fn create_note_tool(
     _state: AppState,
     vault: &McpVault,
