@@ -124,7 +124,16 @@ that production inventory are still checked for stale paths and duplicates.
   progress, ETA, and the last failure without changing startup readiness, while
   `AppState::runtime_config` supplies the immutable settings snapshot each
   reindex binds before it starts, including `HATCHDOOR_EMBED_LAYERS` for the
-  per-Vault disposable candidate cache.
+  per-Vault disposable candidate cache. `request_collection_reindex` is the
+  collection-lane entry point an indexing-setting save uses: it requests one
+  Index turn per active Vault through the same coordinator every other turn
+  goes through, adding no second execution lane, and skips disabled Vaults,
+  which have no active runtime.
+  The one dispatch loop binds each turn's instance-wide Git commit identity
+  from that turn's own settings snapshot (`git_author_defaults`) rather than
+  from a value captured at startup, so a saved `HATCHDOOR_GIT_AUTHOR_NAME` or
+  `HATCHDOOR_GIT_AUTHOR_EMAIL` applies to the next Git turn of any Vault
+  without its own commit identity, with no restart.
 - `AppConfig` is the environment-derived deployment contract and interprets the
   live values from the startup `RuntimeConfig` snapshot. Its process-level
   Vault source is always the local `VAULT_PATH`; Git source identity and Git
@@ -469,7 +478,12 @@ existing-registry, imported, or stable `legacy_migration_required` recovery
 outcome. Any existing registry, including an intentionally empty one,
 permanently suppresses legacy import. A safe import copies legacy exclusions,
 Git behavior, credentials, and commit identity into the ordinary Vault
-definition; the retired write-debounce value has no successor. Confirmed Start
+definition; the retired write-debounce value has no successor. A safe import of
+a plain `Local` source whose directory holds no Markdown writes the starter
+Vault into it (`vault::seed_new_vault`) after the registry commit and before
+the collection runtime activates it, so a first boot on an empty `VAULT_PATH`
+opens on the welcome notes; a Git-backed legacy deployment is never seeded, and
+a directory that already holds Markdown is left untouched. Confirmed Start
 with no Vaults writes an ordinary revisioned zero-Vault registry.
 
 **Consumers:** startup runtime composition calls this isolated adapter before
@@ -608,7 +622,14 @@ synchronized; no automated cross-language schema check currently exists.
 
 **Public contract:** the intentional re-exports from `src/vault.rs`, notably
 `VaultIndex`, note/tree/link types, path normalization helpers, layer and
-exclusion types, `is_servable_asset`, and `seed_empty_vault`. `VaultIndex`
+exclusion types, `is_servable_asset`, `seed_empty_vault`, and `seed_new_vault`.
+`seed_new_vault` is the single decision point for which newly defined Vaults
+receive the starter notes — a `Local` source whose directory holds no Markdown,
+judged with that Vault's own exclude matcher so trashed notes do not count —
+shared by the two callers that create Vault definitions (`handlers/vaults.rs`'s
+creation route and `vault_migration.rs`'s one-time import), so the rule cannot
+drift between them; it reports `SeedError` rather than deciding what a failure
+means, which is each caller's call. `VaultIndex`
 additionally carries an asset index (`asset_paths`, `assets_by_name`) filled by
 the same walk that collects the Markdown files, and `resolve_asset` reads it:
 Obsidian's default link format writes an attachment embed as a bare filename and
@@ -1275,9 +1296,24 @@ a machine-readable `confirmation_required` consequence — the server is the
 authority, and sends no prose; the page owns the words and resends with a
 `confirm` list that accumulates every consequence accepted so far, so a save
 needing two consents does not ping-pong between them. Saves persist before
-asynchronously rebuilding; `/api/index-status` reports that dedicated
-rebuild's staleness, progress, ETA, and last failure without reusing startup
-readiness.
+rebuilding. A confirmed indexing-setting save requests one Index turn per
+active Vault through the shared work coordinator
+(`app_state::request_collection_reindex`), never the legacy instance-wide
+rebuild: each Vault reports its own `indexing` condition and keeps serving
+reads from its previous snapshot until its new one is published, and a
+disabled Vault has no active runtime so it is not queued.
+`/api/index-status` still reports the legacy dedicated rebuild's staleness,
+progress, ETA, and last failure, which the settings save path no longer
+starts. A save that flips `HATCHDOOR_MCP_WRITE_ENABLED` — the only setting
+that adds or removes tools from the advertised catalogue — broadcasts
+`AppState::mcp_tools_changed` so subscribed MCP sessions re-list; a
+layer-marker change does not, because no tool schema is derived from it.
+A `HATCHDOOR_GIT_*` save takes the legacy versioning-task lifecycle branch
+(stop the task, preflight the repository, respawn) only while the legacy
+`ready_vault` is published; a registry deployment, where nothing publishes it,
+takes the ordinary save path instead of refusing `503`, so the
+`HATCHDOOR_GIT_AUTHOR_NAME`/`_EMAIL` commit-identity fallback the collection
+lane's Git turns read stays changeable without a restart.
 
 `vaults.rs` owns `/api/v1/vaults` discovery, collection management (create/
 edit/enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh,
@@ -1295,6 +1331,15 @@ registry itself needs operator recovery. Every response uses the shared
 `VaultApiError{code, message, vault_id?, retryable}` shape and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
 duplicating them. MCP discovery is #103.
+
+Creating a Vault on a `Local` source whose directory holds no Markdown writes
+the starter Vault into it (`vault::seed_new_vault`) between the registry
+commit and reconciliation, so the welcome notes are in that Vault's first
+index rather than arriving as a later watcher event. Emptiness is decided with
+the Vault's own exclude matcher, so trashed notes do not count. A Git-backed
+source is never seeded — its content belongs to the repository — and nothing
+but creation seeds, so a Vault whose notes were all deleted is never
+re-seeded by activation, enable, or restart.
 
 Discovery additionally reports `legacy_migration_recovery`
 (`{code: "legacy_migration_required", message}`) when `AppState`'s

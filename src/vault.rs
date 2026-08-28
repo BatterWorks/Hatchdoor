@@ -16,7 +16,7 @@ pub use paths::strip_md_extension;
 pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
 };
-pub use seed::seed_empty_vault;
+pub use seed::{SeedError, seed_empty_vault, seed_new_vault};
 pub use types::{
     ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,

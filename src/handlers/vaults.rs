@@ -756,6 +756,16 @@ pub async fn create_vault_handler(
     {
         Ok(snapshot) => {
             let vault_id = snapshot.vault_ids().find(|id| !before_ids.contains(id));
+            // Seed from the *committed* definition, not the request: the
+            // registry canonicalizes the path and normalizes the exclude
+            // patterns, and the emptiness decision has to be made against
+            // what was actually stored. Runs before `reconcile_after_commit`
+            // activates the Vault and queues its first Index turn, so the
+            // starter notes are in that first index rather than arriving
+            // later as a watcher event.
+            if let Some(definition) = vault_id.and_then(|vault_id| snapshot.definition(vault_id)) {
+                seed_new_vault_or_log(&definition);
+            }
             if let Err(error) = reconcile_after_commit(&state, &snapshot).await {
                 return internal_error_response(error, vault_id);
             }
@@ -766,6 +776,30 @@ pub async fn create_vault_handler(
                 .into_response()
         }
         Err(error) => registry_error_response(error, None),
+    }
+}
+
+/// Seed a newly created Vault, logging rather than failing the request when
+/// that does not work out.
+///
+/// Which Vaults qualify is `vault::seed_new_vault`'s decision, shared with the
+/// legacy import path so the rule cannot drift between the two ways a Vault
+/// definition comes into existence. All this adapter adds is the operator-
+/// facing log line: the Vault is already committed to the registry by the time
+/// this runs, and refusing the whole creation because the welcome notes could
+/// not be written would be a worse outcome than an empty Vault.
+fn seed_new_vault_or_log(definition: &VaultDefinition) {
+    match crate::vault::seed_new_vault(definition.source(), definition.exclude_patterns()) {
+        Ok(true) => tracing::info!(
+            vault_id = %definition.vault_id(),
+            "Seeded new Vault with Hatchdoor starter notes"
+        ),
+        Ok(false) => {}
+        Err(error) => error!(
+            vault_id = %definition.vault_id(),
+            %error,
+            "could not seed the new Vault with starter notes"
+        ),
     }
 }
 
@@ -1764,5 +1798,219 @@ mod tests {
 
         let retry = retry_vault_handler(State(state.clone()), Path(vault_id.to_string())).await;
         assert_eq!(retry.status(), StatusCode::CONFLICT);
+    }
+
+    /// The starter Vault is a documented first-run behaviour: a brand-new
+    /// `Local` Vault pointed at an empty directory opens on the welcome notes
+    /// rather than on nothing at all.
+    #[tokio::test]
+    async fn creating_a_local_vault_on_an_empty_directory_seeds_the_starter_vault() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("fresh-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Fresh notes".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: path.clone() },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        assert!(
+            path.join("README.md").is_file(),
+            "an empty new Local Vault must receive the starter notes"
+        );
+
+        // "before its first Index turn": that turn is still sitting in the
+        // coordinator, unrun, with the starter notes already on disk — so the
+        // index it builds will contain them rather than discovering them later
+        // through a watcher event.
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+        assert!(
+            state.vault_work.has_work(vault_id, VaultWorkKind::Index),
+            "the Vault's first Index turn must still be pending when seeding has finished"
+        );
+    }
+
+    /// Seeding must never touch a directory that already holds the operator's
+    /// own Markdown, and a Vault whose notes were all deleted is never
+    /// re-seeded: only creation seeds, and creation happens once.
+    #[tokio::test]
+    async fn creating_a_local_vault_on_a_directory_with_markdown_does_not_seed() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("existing-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+        std::fs::write(path.join("Home.md"), "home").expect("write note");
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Existing notes".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: path.clone() },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        assert!(
+            !path.join("README.md").exists(),
+            "a Vault that already holds Markdown must be left exactly as it was"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("Home.md")).expect("existing note"),
+            "home"
+        );
+    }
+
+    /// A trashed note is not content: the emptiness decision uses the Vault's
+    /// own exclude matcher, which excludes the trash folders by default, so a
+    /// directory holding only trash still gets the starter Vault.
+    #[tokio::test]
+    async fn a_directory_holding_only_trashed_notes_is_still_seeded() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("trash-only");
+        std::fs::create_dir_all(path.join(".hatchdoor-trash")).expect("trash dir");
+        std::fs::write(path.join(".hatchdoor-trash/Gone.md"), "gone").expect("write trashed note");
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Trash only".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: path.clone() },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        assert!(
+            path.join("README.md").is_file(),
+            "the trash folder does not count as Vault content"
+        );
+    }
+
+    /// Writing starter notes into a Git working tree would manufacture a
+    /// commit the operator never asked for, so a Git-backed source is never
+    /// seeded whatever its directory holds.
+    #[tokio::test]
+    async fn creating_a_git_backed_vault_never_seeds() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("cloned-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Cloned notes".to_string(),
+                enabled: true,
+                source: VaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        assert!(
+            !path.join("README.md").exists(),
+            "a Git-backed Vault's content belongs to its repository"
+        );
+    }
+
+    /// Disabling and re-enabling an emptied Vault must not resurrect the
+    /// starter notes: only creation seeds.
+    #[tokio::test]
+    async fn re_enabling_an_emptied_vault_does_not_re_seed_it() {
+        let (state, _worker, directory) = test_state();
+        let path = directory.path().join("emptied-notes");
+        std::fs::create_dir_all(&path).expect("vault dir");
+        std::fs::write(path.join("Home.md"), "home").expect("write note");
+
+        let response = create_vault_handler(
+            State(state.clone()),
+            Ok(Json(CreateVaultRequest {
+                expected_registry_revision: 0,
+                name: "Emptied notes".to_string(),
+                enabled: true,
+                source: VaultSource::Local { path: path.clone() },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let VaultRegistryState::Ready(snapshot) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let vault_id = snapshot.vault_ids().next().expect("one Vault");
+
+        // The operator deletes every note, then cycles the Vault.
+        std::fs::remove_file(path.join("Home.md")).expect("delete the only note");
+        let disabled = disable_vault_handler(
+            State(state.clone()),
+            Path(vault_id.to_string()),
+            Ok(Query(RevisionQuery {
+                expected_registry_revision: snapshot.revision(),
+            })),
+        )
+        .await;
+        assert_eq!(disabled.status(), StatusCode::OK);
+        let VaultRegistryState::Ready(after_disable) =
+            state.vault_registry.load().expect("load registry")
+        else {
+            panic!("registry entered recovery");
+        };
+        let enabled = enable_vault_handler(
+            State(state.clone()),
+            Path(vault_id.to_string()),
+            Ok(Query(RevisionQuery {
+                expected_registry_revision: after_disable.revision(),
+            })),
+        )
+        .await;
+        assert_eq!(enabled.status(), StatusCode::OK);
+
+        assert!(
+            !path.join("README.md").exists(),
+            "an intentionally emptied Vault must never be re-seeded"
+        );
     }
 }

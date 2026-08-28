@@ -125,6 +125,18 @@ impl VaultWorkDispatchContext {
     }
 }
 
+/// The instance-wide default commit identity for a Git turn, read from the
+/// settings snapshot bound to that turn. A Vault's own configured identity
+/// still overrides this (see `crate::git::config::resolve_commit_identity`).
+fn git_author_defaults(snapshot: &ConfigSnapshot) -> (String, String) {
+    (
+        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
+            .unwrap_or_else(|| "Hatchdoor".to_string()),
+        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
+            .unwrap_or_else(|| "hatchdoor@localhost".to_string()),
+    )
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -1173,12 +1185,6 @@ pub async fn run_server() {
     // worker loop below is the one global dispatcher for all admitted turns.
     let (vault_work, vault_worker) = VaultWorkCoordinator::new();
     let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
-    let git_author_name =
-        crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string());
-    let git_author_email =
-        crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string());
     match (&registry_state, legacy_migration_recovery.as_ref()) {
         (_, Some(recovery)) => warn!(
             code = recovery.code(),
@@ -1277,8 +1283,12 @@ pub async fn run_server() {
                     let cache = dispatch_cache.clone();
                     let embedder = dispatch_embedder.clone();
                     let runtime_snapshot = dispatch_runtime_config.snapshot();
-                    let author_name = git_author_name.clone();
-                    let author_email = git_author_email.clone();
+                    // Read per turn, not once at startup, so saving a new
+                    // author name or email applies to the next Git turn of
+                    // every Vault without its own commit identity — no
+                    // restart. Bound to the same snapshot the rest of this
+                    // turn observes.
+                    let (author_name, author_email) = git_author_defaults(&runtime_snapshot);
                     let startup = dispatch_startup.clone();
                     VaultWorkDispatchContext {
                         vaults,
@@ -1449,6 +1459,44 @@ mod tests {
         // refuse every one of them.
         check_legacy_environment_posture(&["VAULT_PATH".to_string()])
             .expect("VAULT_PATH is not a per-Vault setting");
+    }
+
+    /// The dispatch loop reads the author defaults from the snapshot bound to
+    /// each turn rather than from a value captured once at startup, so saving
+    /// a new name or email applies to the next Git turn of every Vault without
+    /// its own commit identity — with no restart.
+    #[test]
+    fn git_author_defaults_follow_a_saved_settings_change_without_a_restart() {
+        let runtime_config = crate::runtime_config::RuntimeConfig::for_tests();
+
+        assert_eq!(
+            git_author_defaults(&runtime_config.snapshot()),
+            ("Hatchdoor".to_string(), "hatchdoor@localhost".to_string()),
+            "an unconfigured instance falls back to the documented defaults"
+        );
+
+        runtime_config
+            .save([
+                (
+                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
+                    "Second Author".to_string(),
+                ),
+                (
+                    "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
+                    "second@example.test".to_string(),
+                ),
+            ])
+            .expect("save author defaults");
+
+        // A turn dispatched after the save binds a fresh snapshot, exactly as
+        // the dispatch closure does.
+        assert_eq!(
+            git_author_defaults(&runtime_config.snapshot()),
+            (
+                "Second Author".to_string(),
+                "second@example.test".to_string()
+            )
+        );
     }
 
     #[test]
@@ -3741,10 +3789,17 @@ mod tests {
         assert_eq!(git_status_absent.status(), StatusCode::NOT_FOUND);
     }
 
+    /// The reindex consequence is still the server's to demand, and the new
+    /// values are still durable before any rebuilding starts. What changed
+    /// (#181) is what a confirmed save then does: it requests one Index turn
+    /// per active Vault through the shared work coordinator instead of the
+    /// legacy instance-wide rebuild, so `index_status` — which only ever
+    /// described that legacy rebuild — stays untouched by a settings save.
+    /// The per-Vault queueing itself is proven in
+    /// `handlers::settings::tests`, which can observe the coordinator's queue.
     #[tokio::test]
-    async fn reindex_settings_persist_before_a_background_rebuild_and_then_converge() {
+    async fn reindex_settings_require_confirmation_and_persist_without_the_legacy_rebuild() {
         let (app, _tmp, state) = app_for_tests_with_state();
-        let held_refresh_lock = state.refresh_lock.lock().await;
 
         let missing_confirmation = app
             .clone()
@@ -3795,8 +3850,12 @@ mod tests {
                 .value,
             "generated/**"
         );
-        assert_eq!(state.index_status.status().state, "rebuilding");
-        assert!(state.index_status.status().stale);
+        assert_eq!(
+            state.index_status.status().state,
+            "up_to_date",
+            "a settings save must no longer start the legacy instance-wide rebuild"
+        );
+        assert!(!state.index_status.status().stale);
 
         let second_response = app
             .oneshot(
@@ -3820,18 +3879,7 @@ mod tests {
                 .value,
             "false"
         );
-
-        drop(held_refresh_lock);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if state.index_status.status().state == "up_to_date" {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("background rebuild finishes");
+        assert_eq!(state.index_status.status().state, "up_to_date");
         assert!(!state.index_status.status().stale);
     }
 

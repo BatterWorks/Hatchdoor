@@ -5,6 +5,7 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 use super::exclude::ExcludeMatcher;
+use crate::vault_registry::VaultSource;
 
 const STARTER_NOTES: &[(&str, &str)] = &[
     (
@@ -53,6 +54,61 @@ const STARTER_ASSETS: &[(&str, &[u8])] = &[(
     "40-reference/pdf-preview-sample.pdf",
     include_bytes!("../../docs/starter-vault/40-reference/pdf-preview-sample.pdf"),
 )];
+
+/// Seed a newly defined Vault with the starter notes, if its source and
+/// directory qualify. Returns whether anything was written.
+///
+/// This is the one place the "which new Vaults get the starter notes?" rule
+/// lives, shared by the two callers that create Vault definitions — the HTTP
+/// creation adapter and the one-time legacy import — so the rule cannot drift
+/// between them. Two conditions, both required:
+///
+/// - the source is `Local`. A Git-backed Vault's content belongs to its
+///   repository, and writing starter notes into a working tree would
+///   manufacture a commit the operator never asked for.
+/// - the directory holds no Markdown, judged with that Vault's own exclude
+///   matcher, so trashed notes do not count as content — the same judgement
+///   the index makes.
+///
+/// Only Vault *creation* calls this, so activation, enable, and restart never
+/// seed: a Vault whose notes were all deleted is never re-seeded.
+///
+/// A failure is reported to the caller but is never a reason to fail the
+/// creation that triggered it: the definition is already committed, and an
+/// unseeded Vault is a better outcome than a Vault that could not be created.
+pub fn seed_new_vault(
+    source: &VaultSource,
+    exclude_patterns: &[String],
+) -> Result<bool, SeedError> {
+    let VaultSource::Local { path } = source else {
+        return Ok(false);
+    };
+    let exclude = ExcludeMatcher::new(exclude_patterns).map_err(SeedError::Exclude)?;
+    seed_empty_vault(path, &exclude).map_err(SeedError::Write)
+}
+
+/// Why a new Vault could not be seeded. Separated from `io::Error` because an
+/// unusable exclude pattern and a failed write are different operator
+/// problems.
+#[derive(Debug)]
+pub enum SeedError {
+    /// The Vault's exclude patterns could not be compiled, so "does this
+    /// directory already hold notes?" cannot be answered safely.
+    Exclude(String),
+    /// The starter notes could not be written.
+    Write(io::Error),
+}
+
+impl std::fmt::Display for SeedError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exclude(message) => {
+                write!(formatter, "exclude patterns are unusable: {message}")
+            }
+            Self::Write(error) => write!(formatter, "could not write the starter notes: {error}"),
+        }
+    }
+}
 
 /// Seeds a fresh vault with starter notes when it holds no markdown. `exclude`
 /// is the same noise matcher the index build uses, so the "is this vault empty?"

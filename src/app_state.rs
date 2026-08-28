@@ -48,11 +48,15 @@ pub struct AppState {
     pub ready_vault: Arc<RwLock<Option<ReadyVault>>>,
     pub vault_revision: Arc<AtomicU64>,
     pub vault_events: broadcast::Sender<u64>,
-    /// Fires when a reindex changes the vault's layer marker set, so the MCP
-    /// `tools/list` (its per-vault `layers` enum) is now different. A future
-    /// streaming MCP transport turns each signal into a
-    /// `notifications/tools/list_changed`; today it is the tested seam that
-    /// backs the advertised `tools.listChanged` capability.
+    /// Fires when the advertised MCP tool catalogue actually changes, which
+    /// today means `HATCHDOOR_MCP_WRITE_ENABLED` was toggled: the write tools
+    /// appear or disappear from `tools/list`. A subscribed streaming MCP
+    /// session turns each signal into a `notifications/tools/list_changed`,
+    /// backing the advertised `tools.listChanged` capability.
+    ///
+    /// A layer-marker change deliberately does *not* fire this: no tool schema
+    /// is derived from the marker set, so re-listing would report no
+    /// difference.
     pub mcp_tools_changed: broadcast::Sender<()>,
     pub embedder: Arc<dyn Embedder>,
     /// Concrete startup slot behind `embedder`; populated only after a model is
@@ -518,9 +522,51 @@ pub(crate) async fn ensure_startup_git_sync(state: &AppState) {
     info!("Git sync enabled");
 }
 
+/// Request one Index turn for every currently active Vault after an indexing
+/// setting has been persisted.
+///
+/// This is the collection-lane replacement for [`schedule_settings_reindex`]:
+/// instead of one instance-wide rebuild it goes through the same admission
+/// queue every other Index turn uses, so the turns stay globally serial (no
+/// second execution lane, ADR-13) and each Vault's own condition reports
+/// `indexing` while its turn runs. A disabled Vault has no active runtime and
+/// is therefore never queued.
+///
+/// Returns the number of Vaults whose turn was accepted, for logging and
+/// tests. A turn coalesced into work already pending for the same Vault is not
+/// counted: the pending turn will read the newly persisted settings anyway,
+/// because each turn binds the runtime snapshot current when it is dispatched.
+pub fn request_collection_reindex(state: &AppState) -> usize {
+    let queued = state
+        .vaults
+        .active_vault_ids()
+        .into_iter()
+        .filter(|vault_id| {
+            matches!(
+                state
+                    .vault_work
+                    .request(*vault_id, crate::vault_work::VaultWorkKind::Index),
+                crate::vault_work::ScheduleResult::Queued
+            )
+        })
+        .count();
+    info!(
+        vaults = queued,
+        "Indexing settings changed; requested an Index turn per active Vault"
+    );
+    queued
+}
+
 /// Spawn an index-settings rebuild after its new settings have been persisted.
 /// Each request receives a generation; queued requests run serially and the
 /// final completed generation always reflects the latest stored configuration.
+///
+/// TODO(#185): dead. [`request_collection_reindex`] replaced its one production
+/// caller (the settings save path) and #185 deletes the whole legacy
+/// single-Vault indexing lane, this function and the `index_status` surface
+/// that reports it included. Retained unused only so that deletion stays one
+/// reviewable change; do not call it from new code.
+#[allow(dead_code)]
 pub fn schedule_settings_reindex(state: AppState) {
     let generation = state.index_status.queue_rebuild();
     tokio::spawn(async move {
@@ -564,12 +610,6 @@ async fn run_reindex(
     let runtime_snapshot = state.runtime_snapshot();
     let (scan_config, embed_layers) = AppState::runtime_index_options(&runtime_snapshot)?;
 
-    // The marker-set hash the last build persisted. Compared against the value
-    // after this reindex to detect a runtime layer change (a marker added,
-    // removed, renamed, or its description edited), which changes the MCP
-    // `tools/list` `layers` enum.
-    let previous_marker_hash = sqlite.get_metadata("marker_set_hash").ok().flatten();
-
     // The reindex writes inside a single SQLite transaction; WAL lets readers on
     // pooled connections keep serving the prior snapshot until it commits, so we
     // no longer hold the cache write lock for the whole rebuild (F-03).
@@ -605,17 +645,6 @@ async fn run_reindex(
     }
 
     debug!(vault_path = %logged_vault_path.display(), "SQLite vault cache refreshed");
-
-    let current_marker_hash = current_sqlite
-        .get_metadata("marker_set_hash")
-        .ok()
-        .flatten();
-    if previous_marker_hash != current_marker_hash {
-        info!("Layer marker set changed; MCP clients should re-list tools");
-        // No live receiver over the current stateless HTTP transport; a future
-        // streaming transport subscribes and emits notifications/tools/list_changed.
-        let _ = state.mcp_tools_changed.send(());
-    }
 
     // A successful reindex after a failed startup — e.g. the watcher picking up a
     // corrected `.hatchdoor-layer` marker — restores every configured background
@@ -817,7 +846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reindex_signals_mcp_tools_changed_only_when_the_marker_set_changes() {
+    async fn reindex_never_signals_mcp_tools_changed() {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(vault_path.join("sources")).expect("sources dir");
@@ -825,8 +854,6 @@ mod tests {
         let state = state_with_vault(vault_path.clone());
         let mut tools_changed = state.mcp_tools_changed.subscribe();
 
-        // An ordinary content reindex (no marker change) must NOT signal a
-        // tool-list change: the `layers` enum is unaffected.
         std::fs::write(vault_path.join("Second.md"), "second").expect("write note");
         refresh_now(&state).await.expect("refresh");
         assert!(
@@ -834,14 +861,14 @@ mod tests {
             "a content-only reindex must not signal a tools/list change"
         );
 
-        // Adding a layer marker changes the vault's layers, so the tool list's
-        // `layers` enum is now different and the signal must fire.
+        // No tool schema is derived from the layer marker set, so changing it
+        // must not claim the advertised catalogue changed either.
         std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources").expect("marker");
         std::fs::write(vault_path.join("sources/Clip.md"), "clip").expect("write note");
         refresh_now(&state).await.expect("refresh");
         assert!(
-            tools_changed.try_recv().is_ok(),
-            "adding a layer marker must signal a tools/list change"
+            tools_changed.try_recv().is_err(),
+            "a layer-marker change must not signal a tools/list change"
         );
     }
 

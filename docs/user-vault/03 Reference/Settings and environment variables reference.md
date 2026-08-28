@@ -41,21 +41,21 @@ Read once at process startup via `AppConfig::from_env`. Docker Compose fixes mos
 
 ## Live settings
 
-These live in `settings.json`, not `.env` — leave them unset in `.env` to manage them from **Settings** with no restart. A non-empty `.env` value pins that one setting until it's removed from `.env` and the instance restarted. Each entry's **Class** says what a change costs: `instant` applies immediately, `reindex` schedules a background reindex.
+These live in `settings.json`, not `.env` — leave them unset in `.env` to manage them from **Settings** with no restart. A non-empty `.env` value pins that one setting until it's removed from `.env` and the instance restarted. Each entry's **Class** says what a change costs: `instant` applies immediately, `reindex` rebuilds each Vault's search index in the background. A `reindex` save asks you to confirm first, then queues one rebuild per Vault that's turned on: each Vault shows as **indexing** while its own rebuild runs, and searching or browsing it keeps working the whole time — it just answers from the previous index until the new one is ready. Vaults you've turned off aren't touched.
 
 **Note handling**
 
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
 | `HATCHDOOR_ARCHIVE_PREFIX` | `90-archive/` | instant | The instance-wide default archive folder `archive_note` moves a note into, when a Vault doesn't override it with its own `archive_folder`. |
-| `HATCHDOOR_EMBED_LAYERS` | `true` | reindex | Whether notes on a demoted [[The layer system\|layer]] get semantic embeddings at all, not just structural indexing. Off trades semantic search over demoted content for a smaller, faster index. |
+| `HATCHDOOR_EMBED_LAYERS` | `true` | reindex | Whether notes on a demoted [[The layer system\|layer]] get semantic embeddings at all, not just structural indexing. Off trades semantic search over demoted content for a smaller, faster index. Changing it rebuilds every Vault that's turned on, one at a time. |
 
 **Agent access (MCP)**
 
 | Key | Default | Class | Purpose |
 | --- | --- | --- | --- |
 | `HATCHDOOR_MCP_ENABLED` | `false` | instant | Turns `/mcp` on or off. Off, the endpoint returns `404` rather than refusing — it isn't advertised as existing. |
-| `HATCHDOOR_MCP_WRITE_ENABLED` | `false` | instant | Separately gates every content- and Vault-mutating MCP tool. An agent can read with MCP enabled and this still off. |
+| `HATCHDOOR_MCP_WRITE_ENABLED` | `false` | instant | Separately gates every content- and Vault-mutating MCP tool. An agent can read with MCP enabled and this still off. Toggling it changes which tools Hatchdoor advertises, so connected agents are told to refresh their tool list — no reconnection needed. |
 | `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | `true` | instant | Layered resource protection on `/mcp`: at most 120 tool calls per minute per token, eight tool calls running at once (two of them expensive searches), with over-limit requests answered `429 Retry-After`. Protocol, discovery, and list handling are always exempt. Off removes the caps entirely. |
 | `HATCHDOOR_MCP_BEARER_TOKEN` | unset | instant | The MCP password, required even for read-only access — see [[The security model]]. Enabling `HATCHDOOR_MCP_ENABLED` without this set is a startup validation error if pinned in `.env`. |
 | `HATCHDOOR_MCP_ALLOWED_ORIGINS` | `http://127.0.0.1,http://localhost` | instant | Origin allow-list checked on every MCP request, as a defense against DNS-rebinding attacks. Mainly relevant to a browser-based MCP client, not a CLI agent. |
@@ -78,8 +78,10 @@ The following exist solely to import a pre-registry, single-Vault `.env` deploym
 | `HATCHDOOR_GIT_HTTPS_USERNAME` | `hatchdoor` | A Vault's `https_credentials` username |
 | `HATCHDOOR_GIT_HTTPS_TOKEN` | empty | A Vault's `https_credentials` token |
 | `HATCHDOOR_GIT_BRANCH` | `main` | A Vault's `branch` |
-| `HATCHDOOR_GIT_AUTHOR_NAME` / `HATCHDOOR_GIT_AUTHOR_EMAIL` | `Hatchdoor` / `hatchdoor@localhost` | A Vault's `commit_identity` |
+| `HATCHDOOR_GIT_AUTHOR_NAME` / `HATCHDOOR_GIT_AUTHOR_EMAIL` | `Hatchdoor` / `hatchdoor@localhost` | A Vault's `commit_identity` — see the note below |
 | `HATCHDOOR_GIT_DEBOUNCE_SECONDS` | `30` | No registry equivalent — retired once imported |
+
+`HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` are the one pair that keeps a live job after the import: they're the name and address Hatchdoor signs commits with for any Vault that hasn't been given a `commit_identity` of its own. Changing either in **Settings** applies to the next commit Hatchdoor makes in such a Vault, with no restart. A Vault that has its own `commit_identity` ignores them entirely.
 
 > [!warning]
 > Leave these exactly as they were in an upgraded single-Vault `.env` for one start so Hatchdoor can import them, then delete them — it refuses to start again while they're still set, since they aren't valid configuration for a registry Vault.
