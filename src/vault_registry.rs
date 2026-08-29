@@ -1575,7 +1575,7 @@ fn normalize_https_repository_url(repository_url: String) -> Result<String, Vaul
 /// fixture cannot get one through `VaultRegistryStore` and should not try;
 /// either exercise the git2 layer directly (as `managed_checkout.rs`/
 /// `managed_sync.rs`/`managed_task.rs` do), or inject a fake turn executor at
-/// the `vault_runtime::dispatch_managed_git_turn_with` seam to drive a
+/// the `vault_executor::dispatch_git_turn_with` seam to drive a
 /// fabricated result through the full async/status-publishing path instead.
 pub(crate) fn is_safe_https_repository_url(repository_url: &str) -> bool {
     let Some(remainder) = repository_url.strip_prefix("https://") else {
