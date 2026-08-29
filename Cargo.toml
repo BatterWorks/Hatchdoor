@@ -17,10 +17,13 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 blake3 = "1"
 bytemuck = "1"
-candle-core = "0.11"
+# Inference backend for the benchmark-only Qwen3 and Nomic v2 MoE embedders.
+# Optional, and reachable only through the `eval` feature: a default build ships
+# the ONNX embedders alone and compiles no candle crates.
+candle-core = { version = "0.11", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 dotenvy = "0.15"
-fastembed = { version = "5", features = ["qwen3", "nomic-v2-moe"] }
+fastembed = "5"
 hf-hub = { version = "0.5", default-features = false, features = ["ureq", "native-tls"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https"] }
 getrandom = "0.3"
@@ -39,8 +42,11 @@ tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 # FastEmbed 5 exposes its model tokenizer through tokenizers 0.22, while
 # text-splitter (application chunking) uses 0.23. Keep this version-matched
 # alias for the read-only index microbenchmark, which inspects the FastEmbed
-# model tokenizer directly and must speak its exact API version.
-tokenizers-fe = { package = "tokenizers", version = "0.22", default-features = false, features = ["onig"] }
+# model tokenizer directly and must speak its exact API version. Optional for
+# the same reason as candle-core: the microbenchmark is `eval`-only. Note this
+# only drops Hatchdoor's own edge — fastembed depends on tokenizers 0.22
+# unconditionally, so the second copy is still compiled by a default build.
+tokenizers-fe = { package = "tokenizers", version = "0.22", default-features = false, features = ["onig"], optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.7", features = ["fs", "trace"] }
@@ -54,6 +60,25 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 [features]
 default = []
 embedder-tests = []
+# The offline benchmark harness: the `eval` and `index_microbench` binaries, the
+# candle-backed embedders they sweep, and the dependencies only those reach.
+# Non-default on purpose — a benchmark sweep is not something a deployment runs,
+# so no deployment should pay to compile its inference stack. Measured effect on
+# `cargo tree --edges normal`: 368 unique crates down to 351, the 17 removed
+# being exactly the candle subtree.
+eval = ["dep:candle-core", "dep:tokenizers-fe", "fastembed/qwen3", "fastembed/nomic-v2-moe"]
+
+# Both binaries are `eval`-only; declared explicitly so a default build skips
+# them rather than failing on their missing dependencies.
+[[bin]]
+name = "eval"
+path = "src/bin/eval.rs"
+required-features = ["eval"]
+
+[[bin]]
+name = "index_microbench"
+path = "src/bin/index_microbench.rs"
+required-features = ["eval"]
 
 [dev-dependencies]
 jsonschema = { version = "0.30", default-features = false }

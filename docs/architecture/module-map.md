@@ -1173,23 +1173,32 @@ and evaluation-only checks when retrieval semantics change.
 - `src/embed/matryoshka.rs`
 
 **Public contract:** `Embedder`, `RuntimeEmbedder`, concrete embedders,
-`MatryoshkaEmbedder`, `StubEmbedder`, and contextual-document formatting.
+`MatryoshkaEmbedder`, `StubEmbedder`, and contextual-document formatting. The
+ONNX embedders are exported unconditionally; `NomicV2Embedder` and
+`Qwen3Embedder` are exported only under the `eval` feature, so a default build
+of the crate does not carry them.
 
 **Consumed dependencies:** local model runtimes, tokenizers, and Hugging Face
-model files.
+model files; under the `eval` feature also `candle-core` and FastEmbed's
+`qwen3` / `nomic-v2-moe` features.
 
 **Consumers:** cache building, runtime Search, startup/model setup, auxiliary
 evaluation binaries, and tests.
 
 **Coordination paths:** `src/model_setup.rs`, cache schema/identity handling,
-chunking, Docker model prefetch, and evaluation documentation.
+chunking, Docker model prefetch, `Cargo.toml`'s `eval` feature, and evaluation
+documentation.
 
 **Invariants:** local inference only (ADR-04); embedder identity must encode
 behavior affecting stored vectors; the `Embedder` trait remains the deliberate
-test seam rather than proliferating model abstractions (ADR-13).
+test seam rather than proliferating model abstractions (ADR-13); the production
+ONNX embedders are unconditional, while `src/embed/candle_embedder.rs` and the
+candle inference stack it needs stay behind the non-default `eval` feature and
+must never become reachable from a default build.
 
 **Validation:** `cargo test embed`; feature-gated or model-loading tests when
-applicable; cache identity/rebuild tests for identity changes.
+applicable; cache identity/rebuild tests for identity changes; `cargo clippy
+--all-targets --all-features` so the `eval`-gated embedders still compile.
 
 ### Reranking
 
@@ -1937,18 +1946,30 @@ arguments, and reproducible comparison behavior. Every cache-querying CLI mode
 a disposable-cache rebuild. Rerank reports preserve heading paths and publish
 correct-heading plus category/tier/language slices alongside post-rerank
 quality metrics. `index_microbench` validates the active representation stamp
-and labels the representation it measures.
+and labels the representation it measures. Both binaries declare
+`required-features = ["eval"]`, so every documented invocation carries
+`--features eval`.
 
-**Consumed dependencies:** cache, embeddings, chunking, Search, and Reranking.
+**Consumed dependencies:** cache, embeddings, chunking, Search, and Reranking,
+plus the `eval`-gated candle stack (`candle-core`, FastEmbed's `qwen3` and
+`nomic-v2-moe` features, and the version-matched `tokenizers-fe` alias).
 
-**Coordination paths:** `eval/**`, related findings under `docs/`, and model or
-chunking code when experiments become runtime decisions.
+**Coordination paths:** `eval/**`, `Cargo.toml`'s `eval` feature and `[[bin]]`
+entries, the contributor guide's verification commands, related findings under
+`docs/`, and model or chunking code when experiments become runtime decisions.
 
-**Invariant:** hybrid and rerank experiments remain offline unless ADR-05 is
-superseded.
+**Invariants:** hybrid and rerank experiments remain offline unless ADR-05 is
+superseded; the harness stays behind the non-default `eval` feature, so no
+default, verification, or production build compiles a crate that only the
+harness reaches. Crates a production dependency also needs are unaffected:
+`fastembed` requires tokenizers 0.22 unconditionally, so that second tokenizers
+version stays in the default tree even though Hatchdoor's own edge to it is now
+`eval`-only.
 
 **Validation:** `cargo test eval`, binary argument tests, and the relevant eval
-command for behavioral changes.
+command for behavioral changes. Because a default `cargo test --all` skips both
+binaries' test targets entirely, the guide's second run,
+`cargo test --all --all-features`, is what keeps them from rotting.
 
 ## Frontend
 

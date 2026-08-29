@@ -1,9 +1,13 @@
 //! Candle-backed embedders for FastEmbed v5's Qwen3 and Nomic v2 MoE models,
 //! which are not part of the ONNX `EmbeddingModel` enum and are only available
-//! behind the `qwen3` / `nomic-v2-moe` feature flags. Each wraps the fastembed
-//! candle type behind a `Mutex` (inference is `&mut`-free but the model is not
-//! guaranteed `Sync`) plus a separately-loaded tokenizer for `token_count`
-//! (the fastembed candle types don't expose their internal tokenizer).
+//! behind FastEmbed's `qwen3` / `nomic-v2-moe` feature flags. Benchmark-only,
+//! so the whole module — and the candle stack under it — lives behind this
+//! crate's non-default `eval` feature and is absent from a default build.
+//!
+//! Each wraps the fastembed candle type behind a `Mutex` (inference is
+//! `&mut`-free but the model is not guaranteed `Sync`) plus a separately-loaded
+//! tokenizer for `token_count` (the fastembed candle types don't expose their
+//! internal tokenizer).
 //!
 //! Native output dimensions are fixed by the model; the `--dim` sweep applies
 //! [`super::MatryoshkaEmbedder`] on top for the reduced-dimension variants.
