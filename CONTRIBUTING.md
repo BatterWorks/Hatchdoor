@@ -50,6 +50,45 @@ before the fix, and new behavior with tests that cover it.
 Do not commit real vault content, private eval queries, tokens, generated cache
 databases, or local model caches.
 
+## Documentation freshness
+
+`docs/user-vault/` is the canonical source of the user documentation. Before
+merging into `development`, check whether your branch left it stale:
+
+```bash
+just docs-freshness
+```
+
+It reports which user-facing surfaces the branch changed and which notes claim
+to document each one. The surfaces cover MCP tools, the HTTP API, settings,
+Git-backed Vaults, vault lifecycle, search and indexing, layers, attachments,
+Markdown, note mutations, security, starter content, startup, the Web UI, and
+deployment; the authoritative list is the table in the script. It exits
+non-zero, because it cannot tell you whether a note still reads true; only
+reading it can.
+
+Read every note it names, update whatever drifted, then record the review:
+
+```bash
+just docs-freshness-ack
+```
+
+A note the script marks "edited on this branch" only means the file moved. That
+is not evidence it is correct. Acknowledging without reading defeats the gate.
+
+The script's surface-to-note table lives in
+[`scripts/check-docs-freshness.mjs`](scripts/check-docs-freshness.mjs). When you
+add a user-facing surface it does not know about, or rename a note it points at,
+update the table and check that every entry still resolves:
+
+```bash
+node scripts/check-docs-freshness.mjs --validate-table
+node --test scripts/check-docs-freshness.test.mjs
+```
+
+A rule whose source path no longer exists matches nothing and silently stops
+guarding the surface it names, so the table is verified rather than trusted.
+
 ## Claiming scoped work
 
 Hatchdoor uses documented module boundaries so a contributor or coding agent can

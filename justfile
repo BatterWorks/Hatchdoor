@@ -134,6 +134,19 @@ dev-status:
 dev-clean: _prepare-cargo
     cargo clean
 
+# Exits non-zero so the review cannot be skipped silently. Pass a different
+# base with `just docs-freshness main`.
+#
+# Before merging into development: which user-vault notes need a re-read?
+docs-freshness base="development":
+    node scripts/check-docs-freshness.mjs --base '{{base}}'
+
+# Only run this after actually reading the notes it named.
+#
+# Record that the documentation freshness review happened.
+docs-freshness-ack base="development":
+    node scripts/check-docs-freshness.mjs --base '{{base}}' --acknowledge
+
 # Build the real frontend bundle and serve it from the backend on one port -
 # exactly what production runs. Foreground; Ctrl+C to stop. No hot reload.
 prod-check: _prepare-cargo
