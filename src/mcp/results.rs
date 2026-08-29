@@ -11,10 +11,10 @@
 //! - Result shapes owned by the MCP surface itself (the setup tools, the
 //!   attachment upload capability report, and the note/attachment write
 //!   receipts), defined in this module.
-//! - Re-exports of the shared Vault API response structures the read and
-//!   management tools already proxy through the V1 handlers — those handlers'
-//!   wire contracts are the contract, so their types are reused directly
-//!   rather than mirrored.
+//! - Re-exports of the shared Vault response structures the read tools proxy
+//!   through the V1 handlers, and of Vault collection management's own wire
+//!   types for the management tools — those wire contracts are the contract,
+//!   so their types are reused directly rather than mirrored.
 //!
 //! Wire compatibility is deliberate: every structure serializes to exactly
 //! the shape these tools returned before schemas existed, so existing clients
@@ -25,11 +25,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::handlers::vault_content::VaultResolveResponse;
-use crate::handlers::vaults::{
-    VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
-};
 use crate::search::vault_scoped::VaultSearchResponse;
 use crate::vault::AttachmentInfo;
+use crate::vault_management::{
+    VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
+};
 use crate::vault_read::{
     VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote, VaultStatistics,
     VaultTree,

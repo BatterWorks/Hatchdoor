@@ -438,14 +438,15 @@ projections and resolved paths; its managed-Git Git-turn dispatch
 is the first HTTP consumer of the `add`/`edit`/`enable`/`disable`/`disconnect`
 mutation contracts and of `load` for authenticated discovery, including its
 explicit `Recovery` state. `ManagedGitScheduler::activate` (runtime
-composition's reconcile loop) and `handlers/vaults.rs`'s manual sync/retry and
-credential-replacement-retry controls consume
+composition's reconcile loop) and Vault collection management's manual
+sync/retry and credential-replacement-retry controls consume
 `VaultSource::managed_git_poll_interval`. `AppState::vault_archive_prefix`
 (Vault mutation's three archive call sites: `handlers/vault_content.rs`,
 `handlers/vault_write.rs`, `mcp/tools/write.rs`) consumes `archive_folder`,
-falling back to `AppState::runtime_archive_prefix` when absent. MCP (its
-`create_vault`/`edit_vault` tools reuse the same HTTP request/patch types),
-frontend, cache, and search adapters remain separately owned later packets.
+falling back to `AppState::runtime_archive_prefix` when absent. Both the HTTP and MCP surfaces reach these
+writes through Vault collection management, which owns the
+`create_vault`/`edit_vault` request and credential-patch types they share.
+Frontend, cache, and search adapters remain separately owned later packets.
 
 **Coordination paths:** `src/lib.rs` exports the boundary; `src/server.rs` and
 `src/app_state.rs` construct and retain it; `/data/state` deployment
@@ -848,7 +849,9 @@ Reusing a control block the adapter already resolved also keeps every
 operation in one batch on a single Vault generation. `VaultOperationError` is the `{code, message, vault_id?, retryable}`
 envelope every surface already reported; it was the HTTP adapter's
 `VaultApiError`, which remains as an alias in `handlers/vaults.rs` (with the
-axum-shaped `respond`) until #187 moves the collection handlers off it.
+axum-shaped `respond`) — the spelling the sibling `/api/v1/vaults/...`
+adapters use, now that #187 has moved the collection routes onto the core's
+own name.
 
 **Scope:** #184 proved the shape on `update_note` and `archive_note`; #186
 brought the remaining thirteen primitives and write-capability discovery here,
@@ -893,6 +896,97 @@ a JSON-RPC failure. The core has no route or tool ownership.
 
 **Validation:** `cargo test vault_mutation`, the adapter mapping tests
 (`cargo test handlers`, `cargo test mcp`, `cargo test server`), and the full
+backend checks.
+
+### Vault collection management
+
+**Kind:** product capability/domain core.
+
+**Owned paths:** `src/vault_management.rs`.
+
+**Public contract:** `VaultCollectionManagement`, the collection wire types
+(`VaultSummary`, `VaultDiscoveryResponse`, `VaultMutationResponse`,
+`VaultScheduleResponse`, `RegistryRecoveryInfo`,
+`LegacyMigrationRecoveryInfo`), the two definition inputs
+(`CreateVaultRequest`, `EditVaultRequest`, with `HttpsCredentialsInput` and
+the three-state `HttpsCredentialsPatch`), and `parse_vault_id`. This is the
+one place a Vault definition changes, so it owns the sequence every change
+runs — commit to the registry, reconcile the live runtime through its
+foreground-mutation safe boundary, then answer from a single collection
+snapshot so the reported `collection_revision` and the returned Vault's status
+can never disagree — plus `list` (with its authenticated and demo
+projections), `create`, `edit`, `set_enabled`, `disconnect`, the manual
+`sync`/`retry`/`refresh` controls, and the confirmed `start_with_no_vaults`
+recovery. Failures leave as the transport-neutral `VaultOperationError`
+(ADR-19). Creating a Vault on a `Local` source whose directory holds no
+Markdown seeds the starter Vault (`vault::seed_new_vault`) between the
+registry commit and reconciliation, so both surfaces seed identically and the
+welcome notes are in that Vault's first index rather than arriving as a later
+watcher event; emptiness is decided with the Vault's own exclude matcher, a
+Git-backed source is never seeded, and nothing but creation seeds. An edit
+whose `https_credentials` was `Replace` additionally requests an immediate Git
+turn and notifies a definition change, because `VaultDefinition` equality
+cannot observe a credential value change (#97's and #98's reopening
+findings).
+
+Discovery reports two independent recovery signals. `recovery` means the
+persisted registry file itself is unreadable; `legacy_migration_recovery`
+(`{code: "legacy_migration_required", message}`) means the registry loaded fine
+(empty, revision 0) but automatic legacy import could not prove the deployment
+and is still pending (#150), in which case no Vaults are listed at all.
+`start_with_no_vaults` is the confirmed action for the second: it requires a
+pending failed import and an explicit `confirm`, commits an ordinary empty
+revision-1 registry (refusing `registry_revision_conflict` if the registry
+already holds real state), reconciles like every other commit here, and clears
+the flag. Because clearing it must work without a restart, `AppState` holds it
+as `Arc<StdRwLock<Option<LegacyMigrationRecovery>>>` rather than a plain
+`Option` fixed at construction.
+
+**Scope:** #187 moved this out of `handlers/vaults.rs`, where the seven MCP
+management tools reached it by calling handler functions with hand-built axum
+extractors and decoding the HTTP response body. No wire shape changed.
+
+**Consumed dependencies:** `VaultRegistryStore::{load, add, edit, enable,
+disable, disconnect}`, `VaultCollectionRuntime::{snapshot,
+reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
+notify_definition_changed, subscribe_revisions}`, `ManagedGitScheduler::{sync_now, retry_now}`,
+`VaultWorkCoordinator::request`, `vault_migration::start_with_no_vaults`,
+`vault::seed_new_vault`, and `AppState`'s composed handles including
+`demo_mode` and the pending `legacy_migration_recovery` flag.
+
+**Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
+`mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
+`enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`,
+`retry_vault`). Each is a wire-shaping adapter: it parses transport input,
+calls this core once, and maps the typed response or the structured error onto
+a status code or a structured tool error. No MCP tool calls a handler function
+or decodes an HTTP response for Vault management. `mcp/results.rs` aliases the
+collection wire types as its management tool result types, so the advertised
+`outputSchema` is generated from the same structures the core returns.
+
+**Coordination paths:** `src/lib.rs` (module export).
+
+**Invariants:**
+
+- HTTPS credentials never appear in any projection, error, or status;
+  `credential_configured` is the only signal (#133).
+- Demo mode lists only enabled Vaults and withholds `source`, exclusion
+  patterns, archive folder, commit identity, and runtime error details (#109);
+  per-Vault `capabilities` are deliberately unchanged there.
+- An instance-side failure is logged with its detail and reported with a
+  sanitized message here, so neither surface can leak a filesystem path by
+  skipping the scrubbing.
+- Every registry mutation reconciles within the same call, so the collection
+  revision and the SSE stream never lag a commit.
+- Status codes, rejection wording, the demo-mode refusal, and the SSE
+  `Event`/keep-alive framing stay adapter-owned; none of those meanings lives
+  in the core. The revision channel the stream publishes from is reached
+  through `subscribe_revisions` here, so the adapter never reaches past a core
+  into the runtime (ADR-19).
+- ADR-07, ADR-09, ADR-13, ADR-19.
+
+**Validation:** `cargo test vault_management`, the adapter mapping tests
+(`cargo test vaults`, `cargo test mcp`, `cargo test server`), and the full
 backend checks.
 
 ### Cache and query read model
@@ -1401,89 +1495,56 @@ validation — and both only refuse a start.
 the commit-identity fallback the collection lane's Git turns read per turn, so
 a change to them still reaches the next turn without a restart.
 
-`vaults.rs` owns `/api/v1/vaults` discovery, collection management (create/
-edit/enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh,
-and the collection-wide
-SSE event stream — the first `/api/v1` surface. It is the first HTTP consumer
-of the Vault collection registry's write operations and of
-`VaultCollectionRuntime::reconcile_and_reconstruct`, which every mutation calls
-in the same request through its foreground-mutation safe boundary; background
-Index/Git draining may continue asynchronously, while a newly enabled Vault's
-work is still requested without a separate reconciliation pass. Discovery and
-creating the first Vault stay reachable at zero enabled Vaults, and discovery
-reports an explicit `recovery` object rather than erroring when the persisted
-registry itself needs operator recovery. Every response uses the shared
-`VaultApiError{code, message, vault_id?, retryable}` shape and reuses
+`vaults.rs` is the HTTP adapter over **Vault collection management**: it owns
+the `/api/v1/vaults` routes — discovery, collection management (create/edit/
+enable/disable/disconnect), manual Git sync/retry, one-Vault Index refresh, the
+confirmed `start-with-no-vaults` recovery, and the collection-wide SSE event
+stream — and nothing else. Since #187 each route parses its own path, query,
+and body, calls `vault_management::VaultCollectionManagement` once, and maps
+the typed response or the structured `VaultOperationError` onto a status code
+and a JSON body. The registry commit, the runtime reconciliation, the
+authenticated and demo projections, the starter-Vault seeding, the
+credential-replacement Git retry, and the recovery action all live in that
+core, shared with the MCP management tools, which no longer proxy these
+handlers.
+
+This is the first `/api/v1` surface, and it carries no instance-wide readiness
+gate: discovery and creating the first Vault stay reachable at zero enabled
+Vaults, and discovery reports an explicit `recovery` object rather than erroring
+when the persisted registry itself needs operator recovery. Every response uses
+the shared `VaultApiError{code, message, vault_id?, retryable}` shape — the
+adapter spelling of the core's `VaultOperationError` — and reuses
 `vault_registry::VaultSource`/`VaultGitMode` directly on the wire rather than
-duplicating them. MCP discovery is #103.
+duplicating them.
 
-Creating a Vault on a `Local` source whose directory holds no Markdown writes
-the starter Vault into it (`vault::seed_new_vault`) between the registry
-commit and reconciliation, so the welcome notes are in that Vault's first
-index rather than arriving as a later watcher event. Emptiness is decided with
-the Vault's own exclude matcher, so trashed notes do not count. A Git-backed
-source is never seeded — its content belongs to the repository — and nothing
-but creation seeds, so a Vault whose notes were all deleted is never
-re-seeded by activation, enable, or restart.
-
-Discovery additionally reports `legacy_migration_recovery`
-(`{code: "legacy_migration_required", message}`) when `AppState`'s
-field of the same name — set once at startup from a failed safe legacy
-import, `src/vault_migration.rs`'s `LegacyMigrationOutcome::Recovery` — is
-still pending (#150). This is distinct from the sibling `recovery` field
-above: `legacy_migration_recovery` means the registry itself loaded fine
-(empty, revision 0) but automatic import could not prove the legacy
-deployment, where `recovery` means the persisted registry file itself is
-unreadable. Because a confirmed recovery action needs to clear this flag
-without a restart, the field is `Arc<StdRwLock<Option<LegacyMigrationRecovery>>>`
-rather than a plain `Option` fixed at construction.
-`POST /api/v1/vaults/start-with-no-vaults` (`start_with_no_vaults_handler`)
-is the confirmed recovery action: it requires `legacy_migration_recovery` to
-be pending and a `{"confirm": true}` body, calls
-`vault_migration::start_with_no_vaults` (an ordinary revision-0 commit,
-refusing `registry_revision_conflict` if the registry already holds real
-state), reconciles through `reconcile_after_commit` and responds through
-`mutation_response` exactly like every other registry-mutating handler
-here (so `state.vaults`'s own collection revision and the
-`/api/v1/vaults/events` SSE stream never lag this commit, even though
-today's transition is empty registry to empty registry), and clears the
-flag on success. Demo-gated like every other collection-management route.
-
-`edit_vault_handler` requests an immediate Git turn after a successful edit
-whose `https_credentials` was `Replace` (issue #97's reopening finding 3):
-`VaultDefinition`'s redaction-safe equality only ever compares
-`credential_configured: bool`, never the credential value, by design — so a
-replaced-but-still-configured credential leaves `reconcile()` retaining the
-existing `VaultControlBlock` and never re-evaluating a prior authentication
-failure. The trigger is source-agnostic (issue #132): any source with a
-`VaultSource::managed_git_poll_interval` — `ManagedGit`, and an `ExistingGit`
-Vault in `PullOnly`/`TwoWay` mode — retries through
-`ManagedGitScheduler::retry_now` (tracked, self-registering, coalesces with
-any pending turn); `Local` and an `ExistingGit` Vault in `LocalHistory` mode
-carry no interval and are skipped. `edit_vault_handler` is the sole call site
-of `VaultRegistryStore::edit`/`VaultDefinitionEdit` — including its MCP
-`edit_vault` proxy, which calls this same handler — so this handler-level
-trigger covers every path that can write `https_credentials`.
+The status mapping is the whole of this adapter's error contract, asserted
+directly by `every_management_error_code_keeps_its_historical_status`:
+`invalid_vault_id`/`invalid_vault_definition`/`confirmation_required` are
+`400`; `vault_not_found` is `404`; the registry-state conflicts
+(`duplicate_vault_name`, `vault_path_overlap`, the two identity-change
+refusals, `registry_revision_conflict`,
+`legacy_migration_recovery_not_pending`, `vault_disabled`,
+`capability_unavailable`) are `409`; `vault_registry_recovery_required`,
+`legacy_environment_cleanup_required`, and `vault_unavailable` are `503`; and
+`internal_error`/`registry_revision_exhausted` are `500`. On top of that the
+adapter adds the two statuses the core does not model: `201` for a creation and
+`202` for admitted background work. `internal_error` is logged and sanitized by
+the core, so nothing here re-reports it.
 
 Discovery and the event stream are pure reads and stay reachable in demo mode
 (#109: demo mode publishes every enabled Vault in the instance as a public
 read-only collection, unlike `settings.rs`'s operator-controls posture, which
-remains absent). Because that read is unauthenticated, discovery forks its
-projection: demo mode lists only *enabled* definitions and builds each through
-`public_vault_summary`, which withholds `source`, `exclude_patterns`,
-`archive_folder`, `commit_identity`, and the four `*_error` details — the
-deployment's absolute paths, tracked remotes, and operator configuration —
-while keeping identity, the four independent statuses, `capabilities`, and
-`credential_configured` (#133's designated credential signal). `source` is
-therefore `Option` on the wire, always present on an authenticated read and
-always absent on a demo one. Per-Vault `capabilities` are deliberately
-unchanged in demo mode: #133 settles that the browser branches on the
-instance-level `demo_mode` flag, not on a rewritten per-Vault capability. Collection management, manual Git sync/retry, and one-Vault
-Index refresh are Vault-control operations, so `src/server.rs` wraps each of their routes —
+remains absent), where the core answers with its public projection. Collection
+management, manual Git sync/retry, and one-Vault Index refresh are
+Vault-control operations, so `src/server.rs` wraps each of their routes —
 individually, since some share a path with a read (`POST /api/v1/vaults`
 alongside `GET`) — in `reject_demo_mutation`, which calls this file's
 `demo_read_only_response` to refuse with a shared `403 demo_read_only`
 `VaultApiError` before any registry mutation runs, rather than being absent.
+That refusal body and the SSE stream's `Event` framing are the two things that
+stay here because they are transport with no MCP counterpart; the stream's
+underlying revision channel is obtained from the core's `subscribe_revisions`
+rather than from the runtime directly.
 
 `vault_content.rs` owns exact Vault-scoped content reads and their contained
 resources, mounted in the same `/api/v1/vaults/{vault_id}/...` router group as
@@ -1713,9 +1774,11 @@ dispatcher, and `routes.rs` mounts it.
 `list_vaults` exposes the shared redacted
 Vault discovery/status/capability and revision shape. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
-existing-Vault control names `vault_id`. Revisioned registry management uses
-the same shared collection shapes as HTTP; `create_vault` is the only zero-ID
-exception because the registry atomically generates its immutable ID. MCP
+existing-Vault control names `vault_id`. Revisioned registry management calls the
+Vault collection management core directly (#187) rather than proxying an HTTP
+handler, and answers with the same shared collection shapes HTTP returns;
+`create_vault` is the only zero-ID exception because the registry atomically
+generates its immutable ID. MCP
 returns shared domain failures as structured error tool results. No
 scope-less/default/sole-Vault tool remains reachable.
 `get_attachment_import_config` names one Vault and answers under every write
@@ -1723,11 +1786,12 @@ posture, reporting the instance-wide write switch and that Vault's own
 mutation capability as separate fields rather than refusing the call.
 Typed results live in `src/mcp/results.rs`: each tool's success response is
 produced from one Rust structure — MCP-owned shapes there, shared V1 handler
-response structures re-exported for the proxied reads and registry controls —
-and that same structure generates the tool's advertised `outputSchema`. Read
-tools decode their proxied handler payload into the declared result type and
+response structures re-exported for the proxied reads, and Vault collection
+management's own wire types for the registry controls — and that same
+structure generates the tool's advertised `outputSchema`. The read tools that
+still proxy a handler decode its payload into the declared result type and
 re-serialize it, so a handler drift from its schema fails loudly instead of
-silently.
+silently; the management tools serialize the core's typed response directly.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
 MCP write permission and without the mutation capability, as is
 `get_frontmatter` — a body-free tags/aliases/properties projection of one note

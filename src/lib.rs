@@ -17,6 +17,7 @@ pub mod server;
 pub mod startup;
 pub mod vault;
 pub mod vault_error;
+pub mod vault_management;
 pub mod vault_migration;
 pub mod vault_mutation;
 pub mod vault_read;

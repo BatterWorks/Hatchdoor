@@ -8,11 +8,11 @@
 //! neither surface. The HTTP adapter still owns the mapping to a status code
 //! (`VaultOperationError::respond`, which stays in `handlers/vaults.rs`
 //! because it is axum-shaped), and the MCP adapter owns the mapping to a
-//! JSON-RPC failure.
+//! JSON-RPC failure or a structured tool error.
 //!
-//! `handlers::vaults::VaultApiError` remains as an alias for this type until
-//! the Vault collection management ticket (#187) finishes moving the
-//! collection handlers off it.
+//! `handlers::vaults::VaultApiError` remains as an alias for this type: #187
+//! moved the collection handlers onto the core's own spelling, and the alias
+//! is now just the name the sibling `/api/v1/vaults/...` adapters use.
 
 use serde::{Deserialize, Serialize};
 

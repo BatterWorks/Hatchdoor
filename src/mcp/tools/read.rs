@@ -1,7 +1,15 @@
-//! Vault-scoped MCP read tools.  These are deliberately thin in-process
-//! adapters over the same V1 handlers and shared cores used by HTTP: MCP owns
-//! JSON-RPC framing, while scope parsing, projections, and error shapes stay
-//! in the Vault API surface.
+//! Vault-scoped MCP read tools, plus the eight Vault collection management
+//! tools. These are deliberately thin in-process adapters over the same
+//! shared cores used by HTTP: MCP owns JSON-RPC framing, while scope parsing,
+//! projections, and error shapes stay in the core.
+//!
+//! The read tools still proxy their V1 handler and decode its payload back
+//! into the declared result type. The management tools do not: since #187
+//! `list_vaults`, `create_vault`, `edit_vault`, `enable_vault`,
+//! `disable_vault`, `disconnect_vault`, `sync_vault`, and `retry_vault` call
+//! `vault_management::VaultCollectionManagement` directly and shape its typed
+//! response or structured error themselves, rather than building axum
+//! extractors around a handler and decoding an HTTP response body.
 
 use axum::body::to_bytes;
 use axum::extract::{Path, Query, State};
@@ -12,8 +20,11 @@ use serde_json::{Value, json};
 use std::str::FromStr;
 
 use crate::app_state::AppState;
-use crate::handlers::{vault_collection_reads, vault_content, vaults};
+use crate::handlers::{vault_collection_reads, vault_content};
 use crate::vault::allowed_attachment_extensions;
+use crate::vault_management::{
+    CreateVaultRequest, EditVaultRequest, HttpsCredentialsPatch, VaultCollectionManagement,
+};
 use crate::vault_read::VaultReadCore;
 use crate::vault_registry::VaultId;
 
@@ -125,24 +136,13 @@ struct EditVaultArgs {
     #[serde(default)]
     exclude_patterns: Vec<String>,
     #[serde(default)]
-    https_credentials: Option<crate::handlers::vaults::HttpsCredentialsPatch>,
+    https_credentials: Option<HttpsCredentialsPatch>,
     #[serde(default)]
     confirm_identity_change: bool,
     #[serde(default)]
     archive_folder: Option<String>,
     #[serde(default)]
     commit_identity: Option<crate::vault_registry::VaultCommitIdentity>,
-}
-
-pub(super) async fn list_vaults_tool(
-    state: AppState,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let _: EmptyArgs = parse("list_vaults", arguments)?;
-    handler_payload::<crate::mcp::results::ListVaultsResult>(
-        vaults::list_vaults_handler(State(state)).await,
-    )
-    .await
 }
 
 pub(super) async fn search_notes_tool(
@@ -339,20 +339,61 @@ pub(super) fn attachment_import_config_tool(
     )))
 }
 
-/// Registry writes deliberately call the same revisioned collection handlers
-/// as HTTP.  The create operation is the sole control exception without a
-/// `vault_id`: the shared registry generates the immutable ID atomically when
-/// the expected registry revision commits; every control of an existing Vault
-/// takes exactly one `vault_id`.
+/// The MCP half of the mapping for Vault collection management: one
+/// structured core error becomes a tool error carrying that same
+/// `{code, message, vault_id?, retryable}` payload, byte-identical to the
+/// body these tools used to decode back out of a proxied HTTP response.
+/// Instance-side detail is already sanitized by the core, so both surfaces
+/// report the same message.
+fn management_error(error: crate::vault_error::VaultOperationError) -> Value {
+    tool_structured_error(
+        serde_json::to_value(&error).unwrap_or_else(|_| json!({ "code": error.code })),
+    )
+}
+
+/// The success half: the core's typed response, serialized through exactly
+/// the structure whose schema `tools/list` advertises.
+fn management_result<T: Serialize>(
+    result: Result<T, crate::vault_error::VaultOperationError>,
+) -> Result<Value, JsonRpcFailure> {
+    Ok(match result {
+        Ok(response) => tool_success(crate::mcp::results::result_to_value(&response)),
+        Err(error) => management_error(error),
+    })
+}
+
+/// The Vault ID every control of an existing Vault carries, parsed by the
+/// same core function the HTTP adapter uses so a malformed ID is refused
+/// identically on both surfaces. Its refusal is an ordinary structured
+/// management error, so it flows through `management_result` with every other
+/// outcome rather than returning early on its own path.
+fn management_vault_id(raw: &str) -> Result<VaultId, crate::vault_error::VaultOperationError> {
+    crate::vault_management::parse_vault_id(raw)
+}
+
+pub(super) async fn list_vaults_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let _: EmptyArgs = parse("list_vaults", arguments)?;
+    management_result::<crate::mcp::results::ListVaultsResult>(
+        VaultCollectionManagement::new(&state).list(),
+    )
+}
+
+/// Registry writes go straight to the Vault collection management core, the
+/// same one the HTTP routes call. The create operation is the sole control
+/// without a `vault_id`: the shared registry generates the immutable ID
+/// atomically when the expected registry revision commits; every control of
+/// an existing Vault takes exactly one `vault_id`.
 pub(super) async fn create_vault_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let request: vaults::CreateVaultRequest = parse("create_vault", arguments)?;
-    handler_payload::<crate::mcp::results::CreateVaultResult>(
-        vaults::create_vault_handler(State(state), Ok(axum::Json(request))).await,
+    let request: CreateVaultRequest = parse("create_vault", arguments)?;
+    management_result::<crate::mcp::results::CreateVaultResult>(
+        VaultCollectionManagement::new(&state).create(request).await,
     )
-    .await
 }
 
 pub(super) async fn edit_vault_tool(
@@ -360,23 +401,24 @@ pub(super) async fn edit_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: EditVaultArgs = parse("edit_vault", arguments)?;
-    let request = vaults::EditVaultRequest {
+    let request = EditVaultRequest {
         expected_registry_revision: args.expected_registry_revision,
         name: args.name,
         source: args.source,
         exclude_patterns: args.exclude_patterns,
         https_credentials: args
             .https_credentials
-            .unwrap_or(vaults::HttpsCredentialsPatch::Keep),
+            .unwrap_or(HttpsCredentialsPatch::Keep),
         confirm_identity_change: args.confirm_identity_change,
         archive_folder: args.archive_folder,
         commit_identity: args.commit_identity,
     };
-    handler_payload::<crate::mcp::results::EditVaultResult>(
-        vaults::edit_vault_handler(State(state), Path(args.vault_id), Ok(axum::Json(request)))
-            .await,
-    )
-    .await
+    let core = VaultCollectionManagement::new(&state);
+    let result = match management_vault_id(&args.vault_id) {
+        Ok(vault_id) => core.edit(vault_id, request).await,
+        Err(error) => Err(error),
+    };
+    management_result::<crate::mcp::results::EditVaultResult>(result)
 }
 
 pub(super) async fn enable_vault_tool(
@@ -384,17 +426,15 @@ pub(super) async fn enable_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultControlArgs = parse("enable_vault", arguments)?;
-    handler_payload::<crate::mcp::results::EnableVaultResult>(
-        vaults::enable_vault_handler(
-            State(state),
-            Path(args.vault_id),
-            Ok(Query(vaults::RevisionQuery {
-                expected_registry_revision: args.expected_registry_revision,
-            })),
-        )
-        .await,
-    )
-    .await
+    let core = VaultCollectionManagement::new(&state);
+    let result = match management_vault_id(&args.vault_id) {
+        Ok(vault_id) => {
+            core.set_enabled(vault_id, args.expected_registry_revision, true)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    management_result::<crate::mcp::results::EnableVaultResult>(result)
 }
 
 pub(super) async fn disable_vault_tool(
@@ -402,17 +442,15 @@ pub(super) async fn disable_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultControlArgs = parse("disable_vault", arguments)?;
-    handler_payload::<crate::mcp::results::DisableVaultResult>(
-        vaults::disable_vault_handler(
-            State(state),
-            Path(args.vault_id),
-            Ok(Query(vaults::RevisionQuery {
-                expected_registry_revision: args.expected_registry_revision,
-            })),
-        )
-        .await,
-    )
-    .await
+    let core = VaultCollectionManagement::new(&state);
+    let result = match management_vault_id(&args.vault_id) {
+        Ok(vault_id) => {
+            core.set_enabled(vault_id, args.expected_registry_revision, false)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    management_result::<crate::mcp::results::DisableVaultResult>(result)
 }
 
 pub(super) async fn disconnect_vault_tool(
@@ -420,17 +458,15 @@ pub(super) async fn disconnect_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultControlArgs = parse("disconnect_vault", arguments)?;
-    handler_payload::<crate::mcp::results::DisconnectVaultResult>(
-        vaults::disconnect_vault_handler(
-            State(state),
-            Path(args.vault_id),
-            Ok(Query(vaults::RevisionQuery {
-                expected_registry_revision: args.expected_registry_revision,
-            })),
-        )
-        .await,
-    )
-    .await
+    let core = VaultCollectionManagement::new(&state);
+    let result = match management_vault_id(&args.vault_id) {
+        Ok(vault_id) => {
+            core.disconnect(vault_id, args.expected_registry_revision)
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    management_result::<crate::mcp::results::DisconnectVaultResult>(result)
 }
 
 pub(super) async fn sync_vault_tool(
@@ -438,10 +474,10 @@ pub(super) async fn sync_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("sync_vault", arguments)?;
-    handler_payload::<crate::mcp::results::SyncVaultResult>(
-        vaults::sync_vault_handler(State(state), Path(args.vault_id)).await,
+    let core = VaultCollectionManagement::new(&state);
+    management_result::<crate::mcp::results::SyncVaultResult>(
+        management_vault_id(&args.vault_id).and_then(|vault_id| core.sync(vault_id)),
     )
-    .await
 }
 
 pub(super) async fn retry_vault_tool(
@@ -449,10 +485,10 @@ pub(super) async fn retry_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("retry_vault", arguments)?;
-    handler_payload::<crate::mcp::results::RetryVaultResult>(
-        vaults::retry_vault_handler(State(state), Path(args.vault_id)).await,
+    let core = VaultCollectionManagement::new(&state);
+    management_result::<crate::mcp::results::RetryVaultResult>(
+        management_vault_id(&args.vault_id).and_then(|vault_id| core.retry(vault_id)),
     )
-    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -873,7 +909,7 @@ mod tests {
     }
 
     /// Same acceptance criterion, `create_vault` half: `create_vault_tool`
-    /// parses straight into `vaults::CreateVaultRequest`, which embeds the
+    /// parses straight into the collection core's `CreateVaultRequest`, which embeds the
     /// same `VaultSource`.
     #[test]
     fn create_vault_request_accepts_the_schedule_on_an_existing_git_source() {
@@ -890,7 +926,7 @@ mod tests {
                 "poll_interval_secs": 60
             }
         });
-        let request: vaults::CreateVaultRequest = serde_json::from_value(value)
+        let request: CreateVaultRequest = serde_json::from_value(value)
             .expect("create_vault must accept poll_interval_secs on an existing_git source");
         assert!(matches!(
             request.source,
@@ -999,7 +1035,7 @@ mod tests {
             json!({"action":"remove"}),
             json!({"action":"replace","token":"secret"}),
         ] {
-            serde_json::from_value::<vaults::HttpsCredentialsPatch>(value.clone())
+            serde_json::from_value::<HttpsCredentialsPatch>(value.clone())
                 .unwrap_or_else(|error| panic!("{value} must deserialize: {error}"));
         }
     }
