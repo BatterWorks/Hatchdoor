@@ -3233,9 +3233,15 @@ mod tests {
 
     #[tokio::test]
     async fn vault_scoped_pull_only_vault_disables_mutation() {
+        // The gate itself is asserted at the mutation core
+        // (`vault_mutation.rs`), for every primitive and for the capability
+        // probe. This is the route's mapping proof: that
+        // `capability_unavailable` reaches the client as a `409`, and that the
+        // capabilities route turns the same posture into its own warning.
+        //
         // A Pull-only Vault's `capabilities.mutate` is false regardless of local
         // content (issue #62): no real Git remote traffic is needed to prove
-        // the adapter's `ensure_mutable` gate, but the registry still requires
+        // the gate, but the registry still requires
         // `repository_path` to be a real Git working checkout to accept an
         // `existing_git` source at all.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -4168,6 +4174,9 @@ mod tests {
 
     #[tokio::test]
     async fn vault_scoped_update_note_rejects_stale_hash() {
+        // The mapping proof for `write_conflict`, which every hash-checked
+        // route shares; the concurrency rule itself is asserted at the
+        // mutation core (`vault_mutation.rs`).
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_id = create_vault_with_files(
             &app,
@@ -4312,124 +4321,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_scoped_create_note_rejects_a_noise_path() {
-        // A note written to this Vault's own noise-exclusion pattern would be
-        // indexed away; the create route must refuse it, matching the MCP write
-        // path and the legacy single-Vault write API.
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_root = tmp.path().join("noise");
-        let vault_id = create_vault_with_files(&app, "Noise", &vault_root, &[], 0).await;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r##"{"relative_path":"Notes/scratch.tmp","content":"# Ignored\n"}"##,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
-        assert!(!vault_root.join("Notes/scratch.tmp").exists());
-    }
-
-    #[tokio::test]
-    async fn vault_scoped_move_note_rejects_a_vault_owned_noise_path() {
-        // Moving an already-indexed note into a Vault-configured exclude pattern
-        // would make it disappear on the next read. Every write target, not just
-        // creates, must be checked against that Vault's own exclude patterns —
-        // not the legacy instance-wide HATCHDOOR_EXCLUDE setting.
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_root = tmp.path().join("noise-move");
-        std::fs::create_dir_all(&vault_root).expect("create vault directory");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let created = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "expected_registry_revision": 0,
-                            "name": "NoiseMove",
-                            "enabled": true,
-                            "source": {"type": "local", "path": vault_root.to_string_lossy()},
-                            "exclude_patterns": [".trash/"],
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let vault_id = json_body(created).await["vault"]["vault_id"]
-            .as_str()
-            .expect("vault id")
-            .to_string();
-        let hash = crate::cache::parse::content_hash("# Home\n");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home/move"))
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"target_folder":".trash","expected_content_hash":"{hash}"}}"#
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
-        assert!(vault_root.join("Home.md").exists());
-        assert!(!vault_root.join(".trash/Home.md").exists());
-    }
-
-    #[tokio::test]
-    async fn vault_scoped_move_note_rebuilds_the_index_from_this_vaults_own_content() {
-        // Write routes rebuild a short-lived index for slug/path work, scoped to
-        // this Vault's own directory — unrelated Vaults or the legacy instance
-        // config must not affect it. A note absent from this Vault's directory
-        // is simply not found.
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_id =
-            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
-        let hash = crate::cache::parse::content_hash("# Ignored\n");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/ignored"))
-                    .method("PUT")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r##"{{"content":"# Changed\n","expected_content_hash":"{hash}"}}"##
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
     async fn vault_scoped_archive_note_rejects_a_vault_owned_noise_path() {
-        // The refusal itself is asserted at the mutation core's interface
-        // (`vault_mutation.rs`). This stays as the route's mapping proof:
-        // that `noise_excluded_write` reaches the client as a `400` with its
-        // code intact, and that nothing was written.
+        // Every write target is checked against the Vault's own exclude
+        // patterns, and the refusal itself is asserted once at the mutation
+        // core's interface (`vault_mutation.rs`), for every primitive. This
+        // is the route's mapping proof: `noise_excluded_write` reaches the
+        // client as a `400` with its code intact, and nothing was written.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_root = tmp.path().join("noise-archive");
         std::fs::create_dir_all(&vault_root).expect("create vault directory");
@@ -4482,92 +4379,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_scoped_create_note_rejects_path_traversal() {
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_id =
-            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r##"{"relative_path":"../escape.md","content":"# Nope\n"}"##,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn vault_scoped_delete_note_rejects_stale_hash() {
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_id = create_vault_with_files(
-            &app,
-            "Notes",
-            &tmp.path().join("notes"),
-            &[("Home.md", "# Home\n")],
-            0,
-        )
-        .await;
-
-        let note_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let original_hash = json_body(note_response).await["note"]["content_hash"]
-            .as_str()
-            .expect("hash")
-            .to_string();
-
-        let update = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
-                    .method("PUT")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r##"{{"content":"# Home\nfresh content\n","expected_content_hash":"{original_hash}"}}"##
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(update.status(), StatusCode::OK);
-
-        let stale_delete = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
-                    .method("DELETE")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"expected_content_hash":"{original_hash}"}}"#
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(stale_delete).await["code"], "write_conflict");
-    }
-
-    #[tokio::test]
     async fn vault_scoped_creates_renames_moves_archives_and_deletes_note() {
+        // One status-and-envelope mapping pass over all five note routes.
+        // What each mutation does to the Vault is asserted at the mutation
+        // core (`vault_mutation.rs`); what this proves is that each route
+        // reaches it and shapes its outcome into the documented body.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_id =
             create_vault_with_files(&app, "Lifecycle", &tmp.path().join("lifecycle"), &[], 0).await;

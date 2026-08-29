@@ -681,13 +681,14 @@ operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
 
 **Consumed dependencies:** vault index/types and the local filesystem.
 
-**Consumers:** the Vault-qualified mutation core (`src/vault_mutation.rs`) for
-the primitives it has taken over, and the HTTP write handlers and MCP write
-tools directly for the primitives that have not moved yet (#186).
+**Consumers:** the Vault-qualified mutation core (`src/vault_mutation.rs`),
+which since #186 is the sole caller of every write primitive. The one
+exception is `list_note_attachments`, a read that lives here for its path
+handling and is called by the MCP `list_note_attachments` tool through the
+core's own `write_operation_error` translation.
 
-**Coordination paths:** `src/vault_mutation.rs`,
-`src/handlers/vault_write.rs`, `src/mcp/tools/write.rs`, Git write records,
-frontend write API/types, and configuration for archive or upload limits.
+**Coordination paths:** `src/vault_mutation.rs`, Git write records, frontend
+write API/types, and configuration for archive or upload limits.
 
 **Invariants:**
 
@@ -697,16 +698,15 @@ frontend write API/types, and configuration for archive or upload limits.
 - Paths remain within the canonical vault root.
 - Layer marker and excluded/noise writes remain protected at adapter and domain
   boundaries as applicable.
-- **Known gap resolved by #103:** `vault_write.rs`
-  serializes concurrent writes to one Vault through
-  `VaultControlBlock::acquire_mutation` (a genuine per-Vault lock). MCP write
-  tools resolve one registered Vault and acquire that same control-block lock
-  before calling `vault/write`. It is now the only vault write lock: the
-  instance-wide `AppState::vault_write_lock` went with the legacy Git-sync
-  task (#185).
+- Concurrent writes to one Vault are serialized through
+  `VaultControlBlock::acquire_mutation`, a genuine per-Vault lock and the only
+  vault write lock there is — the instance-wide `AppState::vault_write_lock`
+  went with the legacy Git-sync task (#185). Since #186 that lock is taken in
+  exactly one place, `src/vault_mutation.rs`, on behalf of both surfaces; the
+  known gap #103 opened is closed.
 
-**Validation:** `cargo test vault::write`, adapter write tests, and the full
-backend checks.
+**Validation:** `cargo test vault::write`, `cargo test vault_mutation`, and
+the full backend checks.
 
 ### Vault-qualified read projections
 
@@ -832,9 +832,14 @@ Vault's own archive folder or the instance default; running the blocking write
 off the async runtime; and returning `NoteWriteOutcome` or a structured
 `VaultOperationError`. `NoteWriteOutcome` carries the note's resulting layer,
 resolved from the `LayerMap` the write's own pre-write index build already
-holds rather than from a post-write rescan (#101). `VaultMutationCore::update_note`
-and `archive_note` are the one-shot form — gate, lock, write — that a
-standalone caller wants. A caller whose critical section spans several
+holds rather than from a post-write rescan (#101). `VaultMutationCore` carries a one-shot form — gate, lock, write — for each of
+the fifteen primitives, which is what a standalone caller wants:
+`create_note`, `update_note`, `append_to_note`, `edit_note`,
+`replace_section`, `update_frontmatter`, `rename_note`, `move_note`,
+`move_rename_note`, `archive_note`, `delete_note`, `import_attachment`,
+`move_attachment`, `rename_attachment`, and `delete_attachment`. It also
+answers `write_capabilities`, which deliberately does *not* gate on mutability:
+a Vault that refuses writes has to answer that question rather than fail it. A caller whose critical section spans several
 operations on one Vault builds a `VaultMutation` with `VaultMutation::gated`
 and takes the lock itself through its `acquire_mutation`: the MCP `batch` tool
 holds one Vault's lock for a whole call, and `tokio::sync::Mutex` is not
@@ -845,22 +850,24 @@ envelope every surface already reported; it was the HTTP adapter's
 `VaultApiError`, which remains as an alias in `handlers/vaults.rs` (with the
 axum-shaped `respond`) until #187 moves the collection handlers off it.
 
-**Scope:** the tracer bullet (#184) covers `update_note` and `archive_note`.
-The remaining write primitives move here in #186, at which point the adapters'
-own index-build, entry-lookup, noise-refusal, and write-error helpers
-disappear with them.
+**Scope:** #184 proved the shape on `update_note` and `archive_note`; #186
+brought the remaining thirteen primitives and write-capability discovery here,
+and the adapters' own index-build, entry-lookup, marker- and noise-refusal,
+filename-replacement, and write-error helpers disappeared with them. The free
+function `write_operation_error` is public because the MCP
+`list_note_attachments` read tool calls a `vault/write` function without being
+a mutation and must not grow a second copy of that translation.
 
 **Consumed dependencies:** `vault/write` primitives (unchanged),
 `VaultReadCore::control_block` for the Vault gate, `VaultControlBlock`'s
 authoritative index and mutation lock, `AppState::vault_archive_prefix`, and
 the live settings snapshot.
 
-**Consumers:** `handlers/vault_write.rs` (the update and archive routes) and
-`mcp/tools/write.rs` (the `update_note` and `archive_note` tools, standalone
-and inside `batch`). Each is a wire-shaping adapter: it parses transport
-input, calls this core once, and maps the typed outcome or the structured
-error onto a status code or a JSON-RPC failure. The core has no route or tool
-ownership.
+**Consumers:** `handlers/vault_write.rs` (all eight routes) and
+`mcp/tools/write.rs` (all fifteen write tools, standalone and inside `batch`).
+Each is a wire-shaping adapter: it parses transport input, calls this core
+once, and maps the typed outcome or the structured error onto a status code or
+a JSON-RPC failure. The core has no route or tool ownership.
 
 **Coordination paths:** `src/lib.rs` (module export),
 `src/handlers/vaults.rs` (the `VaultApiError` alias and its axum `respond`).
@@ -876,7 +883,13 @@ ownership.
 - A caller holding the mutation lock is what serializes writes to one Vault;
   the core never re-takes a lock a caller already holds.
 - Wire shapes stay adapter-owned: HTTP sanitizes a `write_failed` message,
-  MCP reports it, and neither meaning lives in the core.
+  MCP reports it, MCP reports `noise_excluded_write` and `layer_marker_write`
+  at the protocol level as invalid parameters while HTTP answers `400`, and
+  none of those meanings lives in the core.
+- Argument-shaped complaints stay adapter-owned too, because the two
+  transports word them differently: an empty required field, a `new_title`
+  carrying a path separator, the `replace_section` mode spelling, and the MCP
+  base64 envelope are all parsed before the core is called.
 
 **Validation:** `cargo test vault_mutation`, the adapter mapping tests
 (`cargo test handlers`, `cargo test mcp`, `cargo test server`), and the full
@@ -1540,34 +1553,22 @@ application API in the same change (#101): `POST .../notes`, `PUT
 .../notes/{slug}`, `PATCH .../notes/{slug}/rename|move|move-rename|archive`,
 `DELETE .../notes/{slug}`, `POST .../attachments` (mounted separately from the
 rest of this group so it can also accept a live MCP bearer token, mirroring
-the retired `/api/attachment` route), and `GET .../write-capabilities`. `PUT .../notes/{slug}` and `PATCH .../notes/{slug}/archive` are the first two
-routes converted to ADR-19's shape (#184): they parse their path and body,
-call `VaultMutationCore` once, and map its typed outcome or its structured
-`VaultOperationError` onto a status code — including this surface's own
-sanitizing of a `write_failed` message into the generic internal error. They
-hold no gating, locking, index-build, noise-refusal, or archive-prefix logic
-of their own. The paragraph below describes the routes that have not moved
-yet; they follow in #186. Those routes still
-call unchanged `vault/write/**` functions exactly as the legacy write API
-did, gate every mutation on the requested Vault's own control block —
-`VaultControlBlock::acquire_mutation` (a genuine per-Vault lock, shared by the
-MCP and HTTP write adapters, and since #185 the only vault write lock — see
-the "Vault mutation" boundary's known-gap invariant) and
-`capabilities.mutate` (a `capability_unavailable`/
-`409` for a Pull-only or otherwise non-mutable Vault, new in #101 since the
-legacy single-Vault write
-API had no per-Vault mode to check) — and checks noise-exclusion against that
-Vault's own `exclude_patterns` rather than the legacy instance-wide
-`HATCHDOOR_EXCLUDE` setting. `VaultReadCore::control_block` and the free
-function `runtime_error` (`vault_read.rs`) are widened to `pub(crate)` so this
-file reuses the exact same not-found/disabled/no-runtime gate and error
-mapping exact reads already use, instead of a duplicate copy. Archive prefix
-and attachment size limit stay instance-wide settings (issue #62), read via
-the same `AppState::runtime_snapshot`/`runtime_archive_prefix`/
-`runtime_mcp_config` calls the legacy write API used. A mutation response
-omits `git_sync_warning`: the managed-Git scheduler has no debounced-on-write
-hook, unlike the retired instance-wide sync task, so there is nothing
-per-write to report that Vault discovery does not already expose. `vaults.rs` owns the
+the retired `/api/attachment` route), and `GET .../write-capabilities`. Since
+#186 every one of those eight routes has ADR-19's shape: it parses its path
+and body, calls `VaultMutationCore` once, and maps the typed outcome or the
+structured `VaultOperationError` onto a status code — including this surface's
+own sanitizing of a `write_failed` message into the generic internal error,
+and its own operator-facing `warnings` on the capabilities route, which fold
+in the instance's web-auth posture the core knows nothing about. No route here
+holds gating, locking, index-build, entry-lookup, marker or noise refusal,
+archive-prefix, or write-error-translation logic; each of those steps has
+exactly one implementation, in `vault_mutation.rs`, shared with the MCP write
+tools. Archive prefix and attachment size limit stay instance-wide settings
+(issue #62), read via `AppState::runtime_snapshot`/`runtime_archive_prefix`/
+`runtime_mcp_config`. A mutation response omits `git_sync_warning`: the
+managed-Git scheduler has no debounced-on-write hook, unlike the retired
+instance-wide sync task, so there is nothing per-write to report that Vault
+discovery does not already expose. `vaults.rs` owns the
 additive authenticated `POST /api/v1/vaults/{vault_id}/refresh` control: it
 requires one enabled Vault with usable local Markdown, asks
 `VaultWorkCoordinator` for `VaultWorkKind::Index`, and returns its immediate
@@ -1586,12 +1587,15 @@ mutations share a path with a read (`PUT`/`DELETE .../notes/{slug}` alongside
 unlike `vault_content.rs`'s exact reads and `vault_collection_reads.rs`'s
 one-or-all reads, which are pure reads and stay reachable in demo mode.
 
+The attachment upload is the one route that still reads its own body:
 `vault_write.rs` binds one live configuration snapshot *before* consuming any
-attachment multipart field and reads each field incrementally against its
-fail-closed byte limit, so lowering the limit takes effect on the next request
-rather than after the bytes are already buffered; an invalid pinned upload
-limit never falls back to a larger default. A `WriteError` carrying recovery
-guidance is reported as `write_recovery_required` rather than collapsing into
+multipart field and reads each field incrementally against its fail-closed
+byte limit, so lowering the limit takes effect on the next request rather than
+after the bytes are already buffered; an invalid pinned upload limit never
+falls back to a larger default. That streaming discipline has to stay where
+the bytes arrive, so the core exposes the import primitive over already-decoded
+bytes rather than over a stream. A `WriteError` carrying recovery guidance
+reaches the client as `write_recovery_required` rather than collapsing into
 the sanitized generic internal error. `vault_content.rs` bounds Vault asset
 and generated note-download responses so these convenience endpoints are not
 unbounded transfer buffers; an over-limit asset or export receives the shared
@@ -1607,11 +1611,11 @@ via `AppState::{vault_work, managed_git}`. `vault_content.rs` is the first HTTP 
 Vault-qualified read projections (`vault_read.rs`'s `VaultReadCore`, including
 its `vault_directory` accessor); `vault_collection_reads.rs` is the first HTTP
 consumer of that core's collection-read projections and of
-`search::vault_scoped::VaultSearchCore`. `vault_write.rs` is the first
-consumer of `VaultControlBlock::acquire_mutation` and of
-`VaultReadCore::control_block`/`vault_read::runtime_error` outside
-`vault_read.rs` itself, and the first HTTP consumer of the Vault-qualified
-mutation core (`vault_mutation.rs`), for the update and archive routes.
+`search::vault_scoped::VaultSearchCore`. `vault_write.rs` consumes the
+Vault-qualified mutation core (`vault_mutation.rs`) and nothing else on the
+write side: every `vault/write` primitive, `VaultControlBlock` lock, and
+`VaultReadCore` gate it used to reach for directly now reaches it through that
+core.
 
 **Consumers:** route construction in `src/server.rs`; the MCP boundary's
 `get_attachment` read tool, through the asset seam named in the public contract
@@ -1779,24 +1783,36 @@ Origin allowlist → constant-time bearer compare → protocol-version header.
 The MCP bearer token is accepted by the multipart attachment endpoint only while
 MCP *and* MCP write mode are both live-enabled, checked per request; token
 changes, write enablement, Origins, and attachment limits apply to the next
-request, and attachment authorization never retains a rotated MCP token. Write
-tools use `vault/write`, the requested Vault's `acquire_mutation` lock, and retain
-optimistic concurrency and path protections (ADR-03).
+request, and attachment authorization never retains a rotated MCP token.
 
-The `update_note` and `archive_note` tools are the first two converted to
-ADR-19's shape (#184): they validate their arguments and then call the
-Vault-qualified mutation core once, mapping its typed outcome or its
-structured `VaultOperationError` onto a tool result or a JSON-RPC failure —
-an unwritable target path stays an `invalid_params` error and an instance-side
-failure an internal one, which is the only place those two meanings live. Both
-now run their write off the async runtime, because the core offloads it for
-every caller; before #184 this surface ran them inline while HTTP offloaded
-them. `scoped_vault` gates with the core's own `ensure_mutable`, and
-`acquire_mutation` takes the core's lock; the dispatcher keeps holding that
-guard itself (`mod.rs` for one tool call, `batch.rs` for a whole batch call on
-one Vault) because a batch's critical section is wider than any single
-operation. The remaining thirteen write tools still orchestrate `vault/write`
-themselves and move to the core in #186.
+Since #186 every one of the fifteen write tools has ADR-19's shape: it
+validates its own arguments and then calls the Vault-qualified mutation core
+once, mapping the typed outcome or the structured `VaultOperationError` onto a
+tool result or a JSON-RPC failure. Two meanings live only here — a target path
+this instance will not write (noise-excluded, or the reserved
+`.hatchdoor-layer` marker) stays an `invalid_params` error, and an
+instance-side failure an internal one whose detail this surface, unlike HTTP,
+reports. `vault/write`, the `acquire_mutation` lock, the index build, the slug
+lookup, the archive prefix, optimistic concurrency, and the path protections
+(ADR-03) are all reached through that core, so both surfaces share one
+implementation of each. Every write also runs off the async runtime, because
+the core offloads it for every caller; before #184 this surface ran them
+inline while HTTP offloaded them. `scoped_vault` gates with the core's own
+`ensure_mutable`, and `acquire_mutation` takes the core's lock; the dispatcher
+keeps holding that guard itself (`mod.rs` for one tool call, `batch.rs` for a
+whole batch call on one Vault) because a batch's critical section is wider
+than any single operation. `batch` is a loop over that same per-item dispatch,
+with its `expected_content_hash` chaining and its asymmetric read/write caps
+unchanged.
+
+What stays in this adapter is what only this transport knows: its own argument
+names and empty-field wording, the `new_title` path-separator rule, the
+`replace_section` mode spelling, and `import_attachment`'s base64 envelope —
+whitespace-tolerant, capped on the *encoded* length before it is decoded, with
+the core then applying the authoritative check to the decoded bytes. Three
+read tools (`list_note_attachments`, `get_attachment`, `get_frontmatter`) sit
+in `tools/write.rs` for its Vault-scoping helpers and keep a local index build
+and slug lookup for that reason alone; they move to the read core in #188.
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes,
 server router tests, and golden wire tests locking both supported revisions'
