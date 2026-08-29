@@ -29,7 +29,7 @@ transitive dependencies will be refreshed through `Cargo.lock` and
 | rusqlite | 0.39.0 | 0.40.1 |
 | serde | 1.0.229 | retain |
 | serde_json | 1.0.150 | 1.0.151 |
-| serde_yaml | 0.9.34+deprecated | retain |
+| serde_yaml | 0.9.34+deprecated | retain — superseded by #196, replaced with serde_yaml_ng 0.10 |
 | sqlite-vec | 0.1.9 | retain |
 | text-splitter | 0.27.0 | 0.32.0 |
 | tokenizers | 0.21.4 | 0.23.1 |

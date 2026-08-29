@@ -231,7 +231,7 @@ pub fn update_note(
 ///
 /// Only the body is promised byte-stable: the block itself is re-serialized
 /// through `serde_json::Map`, so surviving keys come back deterministically
-/// sorted and untouched values are re-formatted to serde_yaml's canonical
+/// sorted and untouched values are re-formatted to serde_yaml_ng's canonical
 /// style even when they themselves were not mentioned. Reuses the canonical
 /// cache-layer frontmatter parsing (`cache/parse.rs`) so reads and writes
 /// agree on what the block is.
@@ -250,13 +250,13 @@ pub fn update_note_frontmatter(
     let span = frontmatter_span(&content);
     let had_frontmatter = span.is_some();
     // Surface the same frontmatter quality contract as the sibling note
-    // primitives: a merge parses the block through serde_yaml, which silently
-    // collapses duplicate keys (last one wins), so that loss is reported as a
-    // warning rather than dropped silently.
+    // primitives: a merge parses the block through serde_yaml_ng, which
+    // silently collapses duplicate keys (last one wins), so that loss is
+    // reported as a warning rather than dropped silently.
     let warnings = frontmatter_warnings(&content);
     let mut merged = match &content[span.map(|(start, end)| start..end).unwrap_or(0..0)] {
         "" => serde_json::Map::new(),
-        frontmatter => match serde_yaml::from_str::<serde_json::Value>(frontmatter) {
+        frontmatter => match serde_yaml_ng::from_str::<serde_json::Value>(frontmatter) {
             Ok(serde_json::Value::Object(properties)) => properties,
             Ok(_) | Err(_) => {
                 return Err(WriteError::InvalidInput(format!(
@@ -285,7 +285,7 @@ pub fn update_note_frontmatter(
         // so the body keeps its exact bytes including any leading newline.
         content[span.map(|(_, end)| end + 4).unwrap_or_default()..].to_string()
     } else {
-        let yaml = serde_yaml::to_string(&merged).map_err(|error| {
+        let yaml = serde_yaml_ng::to_string(&merged).map_err(|error| {
             WriteError::InvalidInput(format!(
                 "updated frontmatter cannot be serialized as YAML: {error}"
             ))
