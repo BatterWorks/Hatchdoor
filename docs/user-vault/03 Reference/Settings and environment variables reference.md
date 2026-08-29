@@ -77,6 +77,7 @@ The following exist solely to import a pre-registry, single-Vault `.env` deploym
 | `HATCHDOOR_GIT_SYNC_ENABLED` | `false` | A Vault's Git `mode` |
 | `HATCHDOOR_GIT_HTTPS_USERNAME` | `hatchdoor` | A Vault's `https_credentials` username |
 | `HATCHDOOR_GIT_HTTPS_TOKEN` | empty | A Vault's `https_credentials` token |
+| `HATCHDOOR_GIT_REMOTE` | `origin` | Which remote in the legacy repository to read: its URL becomes the imported Vault's `source` repository URL |
 | `HATCHDOOR_GIT_BRANCH` | `main` | A Vault's `branch` |
 | `HATCHDOOR_GIT_AUTHOR_NAME` / `HATCHDOOR_GIT_AUTHOR_EMAIL` | `Hatchdoor` / `hatchdoor@localhost` | A Vault's `commit_identity` — see the note below |
 | `HATCHDOOR_GIT_DEBOUNCE_SECONDS` | `30` | No registry equivalent — retired once imported |
