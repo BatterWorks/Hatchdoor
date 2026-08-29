@@ -3,65 +3,91 @@
 //! shared cores used by HTTP: MCP owns JSON-RPC framing, while scope parsing,
 //! projections, and error shapes stay in the core.
 //!
-//! The read tools still proxy their V1 handler and decode its payload back
-//! into the declared result type. The management tools do not: since #187
-//! `list_vaults`, `create_vault`, `edit_vault`, `enable_vault`,
-//! `disable_vault`, `disconnect_vault`, `sync_vault`, and `retry_vault` call
-//! `vault_management::VaultCollectionManagement` directly and shape its typed
-//! response or structured error themselves, rather than building axum
-//! extractors around a handler and decoding an HTTP response body.
+//! Since #188 no tool here proxies an HTTP handler. Each read parses its
+//! arguments, calls `VaultReadCore`, `VaultSearchCore`, or (for the
+//! collection tools) `vault_management::VaultCollectionManagement` through the
+//! read core's own off-runtime offload, and serialises the resulting
+//! projection once, through exactly the structure whose schema `tools/list`
+//! advertises. There is no axum extractor, no HTTP response body, and no byte
+//! cap between a tool and its answer — that was ADR-19's last piece of
+//! MCP-to-handler proxying.
 
-use axum::body::to_bytes;
-use axum::extract::{Path, Query, State};
-use axum::response::Response;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use std::str::FromStr;
 
 use crate::app_state::AppState;
-use crate::handlers::{vault_collection_reads, vault_content};
+use crate::mcp::results;
+use crate::search::NoteFilters;
+use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::vault::allowed_attachment_extensions;
+use crate::vault_error::VaultOperationError;
 use crate::vault_management::{
     CreateVaultRequest, EditVaultRequest, HttpsCredentialsPatch, VaultCollectionManagement,
 };
-use crate::vault_read::VaultReadCore;
+use crate::vault_read::{
+    AssetPathError, AssetReadError, OffloadedReadError, ResolvedAsset, VaultReadError, VaultReads,
+    VaultResolveResponse, VaultScope, asset_download_path, clamp_recent_limit, clamp_search_limit,
+    clamp_search_per_note_cap, note_not_found,
+};
 use crate::vault_registry::VaultId;
 
 use super::super::config::McpConfig;
 use super::super::protocol::{JsonRpcFailure, tool_structured_error, tool_success};
 use super::read_only_tool_annotations;
 
-const MAX_TOOL_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+/// One tool's answer: the structure whose schema `tools/list` advertises,
+/// serialised once.
+fn tool_result<T: Serialize>(result: &T) -> Value {
+    tool_success(results::result_to_value(result))
+}
 
-/// Decodes a proxied V1 handler's success body into its typed MCP result and
-/// serializes the result back out. The round-trip is the point: tool
-/// responses are produced from exactly the structures whose schemas
-/// `tools/list` advertises (single source of truth), and a handler payload
-/// that no longer fits its declared result type fails loudly here instead of
-/// silently drifting from the advertised contract.
-pub(super) async fn handler_payload<T>(response: Response) -> Result<Value, JsonRpcFailure>
-where
-    T: DeserializeOwned + Serialize,
-{
-    let status = response.status();
-    let bytes = to_bytes(response.into_body(), MAX_TOOL_RESPONSE_BYTES)
-        .await
-        .map_err(|error| JsonRpcFailure::internal(format!("read Vault response body: {error}")))?;
-    if !status.is_success() {
-        // Error bodies stay untyped passthroughs of the shared Vault API's
-        // stable error object so agents can branch on `code`.
-        let payload = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
-            JsonRpcFailure::internal(format!("decode Vault response body: {error}"))
-        })?;
-        return Ok(tool_structured_error(payload));
+/// The MCP half of ADR-19's mapping for a Vault read: one structured core
+/// failure becomes a tool error carrying that same
+/// `{code, message, vault_id?, retryable}` payload — byte-identical to the
+/// body these tools used to decode back out of a proxied HTTP response — while
+/// a blocking task that never completed is an instance-side fault, reported as
+/// a JSON-RPC internal error whose detail the dispatcher masks.
+fn read_failure(error: OffloadedReadError) -> Result<Value, JsonRpcFailure> {
+    match error {
+        OffloadedReadError::Read(error) => Ok(structured_error(error.into_operation_error())),
+        OffloadedReadError::Failed(message) => Err(JsonRpcFailure::internal(message)),
     }
-    let result = serde_json::from_slice::<T>(&bytes).map_err(|error| {
-        JsonRpcFailure::internal(format!(
-            "tool result does not match its advertised schema: {error}"
-        ))
-    })?;
-    Ok(tool_success(crate::mcp::results::result_to_value(&result)))
+}
+
+/// A domain failure as a tool error carrying the shared
+/// `{code, message, vault_id?, retryable}` object, so an agent branches on
+/// `code` rather than on human text. Byte-identical to the body these tools
+/// used to decode back out of a proxied HTTP response.
+fn structured_error(error: VaultOperationError) -> Value {
+    tool_structured_error(
+        serde_json::to_value(&error).unwrap_or_else(|_| json!({ "code": error.code })),
+    )
+}
+
+/// The `vault_id` argument of a Vault-qualified *read*, refused with the same
+/// structured `invalid_vault_id` error the HTTP adapter reports for the same
+/// malformed path segment — the shape these tools have always returned, back
+/// when they decoded that route's `400` body.
+fn read_vault_id(raw: &str) -> Result<VaultId, Value> {
+    crate::vault_management::parse_vault_id(raw).map_err(structured_error)
+}
+
+/// The `vault_id` argument of the attachment and frontmatter tools, which have
+/// always refused a malformed ID at the protocol level instead: they resolved
+/// their Vault before parsing any other argument, rather than through a route
+/// that had already shaped one. Kept distinct from [`read_vault_id`] so neither
+/// group's existing refusal changes.
+fn scoped_vault_id(raw: &str) -> Result<VaultId, JsonRpcFailure> {
+    VaultId::from_str(raw)
+        .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))
+}
+
+/// The `scope` argument of a collection read, refused as the core's structured
+/// `invalid_scope` error.
+fn tool_scope(raw: &str) -> Result<VaultScope, Value> {
+    VaultScope::parse(raw).map_err(|error| structured_error(error.into_operation_error()))
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(tool: &str, arguments: Value) -> Result<T, JsonRpcFailure> {
@@ -150,22 +176,47 @@ pub(super) async fn search_notes_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: SearchArgs = parse("search_notes", arguments)?;
-    let query = vault_collection_reads::VaultScopeSearchQuery {
-        q: args.query,
-        mode: args.mode,
-        limit: args.limit,
-        per_note_cap: args.per_note_cap,
-        layers: (!args.layers.is_empty()).then(|| args.layers.join(",")),
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
     };
-    handler_payload::<crate::mcp::results::SearchNotesResult>(
-        vault_collection_reads::vault_scope_search_handler(
-            State(state),
-            Path(args.scope),
-            Ok(Query(query)),
-        )
-        .await,
-    )
-    .await
+    let reads = VaultReads::new(&state);
+    let surface = reads.surface();
+    // The same comma-separated token grammar the `layers=` query uses, so a
+    // selector means the same thing on both surfaces.
+    let layers = surface.layer_selection(
+        (!args.layers.is_empty())
+            .then(|| args.layers.join(","))
+            .as_deref(),
+    );
+    let request = VaultSearchRequest {
+        scope,
+        query: args.query,
+        mode: args.mode.unwrap_or_default(),
+        limit: clamp_search_limit(args.limit),
+        per_note_cap: clamp_search_per_note_cap(args.per_note_cap),
+        filters: NoteFilters::default(),
+        include_properties: Vec::new(),
+        layers,
+    };
+    let cache = state.startup_sqlite.clone();
+    let vaults = state.vaults.clone();
+    let embedder = state.embedder.clone();
+    // Query embedding (semantic mode) and SQLite work both run off the async
+    // runtime, exactly as the HTTP search route runs them.
+    let result = tokio::task::spawn_blocking(move || {
+        VaultSearchCore::new(&cache, &vaults, embedder.as_ref())
+            .on_surface(surface)
+            .search(request)
+    })
+    .await;
+    match result {
+        Ok(Ok(projection)) => Ok(tool_result::<results::SearchNotesResult>(&projection)),
+        Ok(Err(error)) => Ok(structured_error(error.into_operation_error())),
+        Err(join_error) => Err(JsonRpcFailure::internal(format!(
+            "background task panicked: {join_error}"
+        ))),
+    }
 }
 
 pub(super) async fn get_note_tool(
@@ -173,11 +224,19 @@ pub(super) async fn get_note_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: ExactSlugArgs = parse("get_note", arguments)?;
-    handler_payload::<crate::mcp::results::GetNoteResult>(
-        vault_content::vault_scoped_note_handler(State(state), Path((args.vault_id, args.slug)))
-            .await,
-    )
-    .await
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.exact_note(vault_id, &slug))
+        .await
+    {
+        Ok(Some(note)) => Ok(tool_result::<results::GetNoteResult>(&note)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
 }
 
 pub(super) async fn get_note_links_tool(
@@ -185,14 +244,19 @@ pub(super) async fn get_note_links_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: ExactSlugArgs = parse("get_note_links", arguments)?;
-    handler_payload::<crate::mcp::results::GetNoteLinksResult>(
-        vault_content::vault_scoped_note_links_handler(
-            State(state),
-            Path((args.vault_id, args.slug)),
-        )
-        .await,
-    )
-    .await
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    let slug = args.slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.exact_note_links(vault_id, &slug))
+        .await
+    {
+        Ok(Some(links)) => Ok(tool_result::<results::GetNoteLinksResult>(&links)),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &args.slug))),
+        Err(error) => read_failure(error),
+    }
 }
 
 pub(super) async fn resolve_wikilink_tool(
@@ -200,27 +264,31 @@ pub(super) async fn resolve_wikilink_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: ResolveArgs = parse("resolve_wikilink", arguments)?;
-    handler_payload::<crate::mcp::results::ResolveWikilinkResult>(
-        vault_content::vault_scoped_resolve_handler(
-            State(state),
-            Path(args.vault_id),
-            Ok(Query(crate::api_types::ResolveQuery {
-                target: args.target,
-            })),
-        )
-        .await,
-    )
-    .await
+    let vault_id = match read_vault_id(&args.vault_id) {
+        Ok(vault_id) => vault_id,
+        Err(refusal) => return Ok(refusal),
+    };
+    match VaultReads::new(&state)
+        .read(move |core| core.resolve_wikilink(vault_id, &args.target))
+        .await
+    {
+        Ok(resolved) => Ok(tool_result::<results::ResolveWikilinkResult>(
+            &VaultResolveResponse {
+                vault_id,
+                slug: resolved.map(|resolved| resolved.slug),
+            },
+        )),
+        Err(error) => read_failure(error),
+    }
 }
 
 pub(super) async fn get_tree_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: ScopeArgs = parse("get_tree", arguments)?;
-    handler_payload::<crate::mcp::results::GetTreeResult>(
-        vault_collection_reads::vault_scope_tree_handler(State(state), Path(args.scope)).await,
-    )
+    collection_read(state, "get_tree", arguments, |core, scope| {
+        core.trees(scope)
+    })
     .await
 }
 
@@ -228,10 +296,9 @@ pub(super) async fn get_stats_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: ScopeArgs = parse("get_stats", arguments)?;
-    handler_payload::<crate::mcp::results::GetStatsResult>(
-        vault_collection_reads::vault_scope_stats_handler(State(state), Path(args.scope)).await,
-    )
+    collection_read(state, "get_stats", arguments, |core, scope| {
+        core.statistics(scope)
+    })
     .await
 }
 
@@ -239,11 +306,38 @@ pub(super) async fn get_graph_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    let args: ScopeArgs = parse("get_graph", arguments)?;
-    handler_payload::<crate::mcp::results::GetGraphResult>(
-        vault_collection_reads::vault_scope_graph_handler(State(state), Path(args.scope)).await,
-    )
+    collection_read(state, "get_graph", arguments, |core, scope| {
+        core.graphs(scope)
+    })
     .await
+}
+
+/// The three scope-only collection reads differ by nothing but the projection
+/// they ask the core for.
+async fn collection_read<T, F>(
+    state: AppState,
+    tool: &str,
+    arguments: Value,
+    project: F,
+) -> Result<Value, JsonRpcFailure>
+where
+    T: Serialize + Send + 'static,
+    F: FnOnce(&crate::vault_read::VaultReadCore<'_>, VaultScope) -> Result<T, VaultReadError>
+        + Send
+        + 'static,
+{
+    let args: ScopeArgs = parse(tool, arguments)?;
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    match VaultReads::new(&state)
+        .read(move |core| project(core, scope))
+        .await
+    {
+        Ok(projection) => Ok(tool_result(&projection)),
+        Err(error) => read_failure(error),
+    }
 }
 
 pub(super) async fn recently_modified_tool(
@@ -251,17 +345,191 @@ pub(super) async fn recently_modified_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: RecentArgs = parse("recently_modified", arguments)?;
-    handler_payload::<crate::mcp::results::RecentlyModifiedResult>(
-        vault_collection_reads::vault_scope_recent_handler(
-            State(state),
-            Path(args.scope),
-            Ok(Query(crate::api_types::RecentlyModifiedQuery {
-                limit: args.limit,
-            })),
-        )
-        .await,
-    )
-    .await
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    let limit = clamp_recent_limit(args.limit);
+    match VaultReads::new(&state)
+        .read(move |core| core.recently_modified(scope, limit))
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::RecentlyModifiedResult>(&projection)),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn get_frontmatter_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ExactSlugArgs = parse("get_frontmatter", arguments)?;
+    let vault_id = scoped_vault_id(&args.vault_id)?;
+    // The empty-slug refusal this tool has always applied before looking a
+    // Note up, kept at the protocol level rather than folded into not-found.
+    let slug = super::non_empty_argument("slug", args.slug)?;
+    let lookup_slug = slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.exact_note_frontmatter(vault_id, &lookup_slug))
+        .await
+    {
+        Ok(Some(frontmatter)) => Ok(tool_result(&results::GetFrontmatterResult {
+            vault_id: vault_id.to_string(),
+            slug: frontmatter.slug,
+            relative_path: frontmatter.relative_path,
+            has_frontmatter: frontmatter.has_frontmatter,
+            tags: frontmatter.metadata.tags,
+            aliases: frontmatter.metadata.aliases,
+            properties: frontmatter.metadata.properties,
+        })),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+pub(super) async fn list_note_attachments_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: ExactSlugArgs = parse("list_note_attachments", arguments)?;
+    let vault_id = scoped_vault_id(&args.vault_id)?;
+    let slug = super::non_empty_argument("slug", args.slug)?;
+    let lookup_slug = slug.clone();
+    match VaultReads::new(&state)
+        .read(move |core| core.note_attachments(vault_id, &lookup_slug))
+        .await
+    {
+        Ok(Some(attachments)) => Ok(tool_result(&results::NoteAttachmentsResult {
+            vault_id: vault_id.to_string(),
+            attachments,
+        })),
+        Ok(None) => Ok(structured_error(note_not_found(vault_id, &slug))),
+        Err(error) => read_failure(error),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetAttachmentArgs {
+    vault_id: String,
+    relative_path: String,
+    #[serde(default)]
+    encoding: Option<AttachmentEncoding>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AttachmentEncoding {
+    Url,
+    Base64,
+}
+
+/// One attachment resolved for this tool: what to report about it, and its
+/// bytes when the caller asked for base64 and they fit under the cap. The
+/// attachment keeps being named by the `relative_path` the caller asked with,
+/// which is also what `download_url` addresses.
+struct FetchedAttachment {
+    size_bytes: u64,
+    content_type: &'static str,
+    bytes: Option<Vec<u8>>,
+}
+
+/// Fetch one attachment's bytes: an HTTP download URL by default, or
+/// base64-inline content as the fallback when an out-of-band HTTP request
+/// isn't possible or the URL's own credential isn't available to this client.
+/// Addressed by `relative_path`, resolved through the read core's
+/// contained-resource seam — the same Vault gate, containment check, extension
+/// allow-list, and browse surface the `/assets/{*path}` route answers on, so a
+/// path one surface refuses is refused identically by the other.
+pub(super) async fn get_attachment_tool(
+    state: AppState,
+    arguments: Value,
+    config: &McpConfig,
+) -> Result<Value, JsonRpcFailure> {
+    let args: GetAttachmentArgs = parse("get_attachment", arguments)?;
+    let vault_id = scoped_vault_id(&args.vault_id)?;
+    let relative_path = super::non_empty_argument("relative_path", args.relative_path)?;
+    let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
+    let max_base64_bytes = config.max_base64_bytes;
+
+    // Resolution, the size check, and the read are all blocking filesystem
+    // work; they happen in one offloaded trip rather than on a tokio worker.
+    let lookup_path = relative_path.clone();
+    let fetched = VaultReads::new(&state)
+        .read(move |core| {
+            let asset: ResolvedAsset = match core.contained_asset(vault_id, &lookup_path)? {
+                Ok(asset) => asset,
+                Err(error) => return Ok(Err(AttachmentFailure::Path(error))),
+            };
+            let bytes = match encoding {
+                AttachmentEncoding::Url => None,
+                AttachmentEncoding::Base64 => {
+                    if asset.size_bytes > max_base64_bytes {
+                        return Ok(Err(AttachmentFailure::TooLargeForBase64(asset.size_bytes)));
+                    }
+                    match asset.read_bytes() {
+                        Ok(bytes) => Some(bytes),
+                        Err(AssetReadError::TooLarge) => {
+                            return Ok(Err(AttachmentFailure::Path(AssetPathError::TooLarge)));
+                        }
+                        Err(AssetReadError::Io(_)) => {
+                            return Ok(Err(AttachmentFailure::Path(AssetPathError::Internal)));
+                        }
+                    }
+                }
+            };
+            Ok(Ok(FetchedAttachment {
+                size_bytes: asset.size_bytes,
+                content_type: asset.content_type,
+                bytes,
+            }))
+        })
+        .await;
+
+    let fetched = match fetched {
+        Ok(Ok(fetched)) => fetched,
+        Ok(Err(AttachmentFailure::Path(error))) => {
+            return Ok(structured_error(VaultOperationError::new(
+                error.code(),
+                error.message(&relative_path),
+                Some(vault_id),
+                false,
+            )));
+        }
+        Ok(Err(AttachmentFailure::TooLargeForBase64(size_bytes))) => {
+            return Err(JsonRpcFailure::invalid_params(format!(
+                "attachment exceeds max size for base64 encoding: {size_bytes} > {max_base64_bytes}; call get_attachment again with encoding \"url\" instead"
+            )));
+        }
+        Err(error) => return read_failure(error),
+    };
+
+    let content = match fetched.bytes {
+        None => results::AttachmentContent::Url {
+            download_url: asset_download_path(&vault_id.to_string(), &relative_path),
+            path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
+            auth: "Send this MCP session's own bearer token as an Authorization: Bearer header; the route accepts it for as long as MCP stays enabled. This deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) also works, as a header or an access_token query parameter. When neither token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
+        },
+        Some(bytes) => {
+            use base64::Engine as _;
+            results::AttachmentContent::Base64 {
+                content: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }
+        }
+    };
+
+    Ok(tool_result(&results::GetAttachmentResult {
+        vault_id: vault_id.to_string(),
+        relative_path,
+        size_bytes: fetched.size_bytes,
+        content_type: fetched.content_type.to_string(),
+        content,
+    }))
+}
+
+enum AttachmentFailure {
+    Path(AssetPathError),
+    TooLargeForBase64(u64),
 }
 
 /// Report how an agent may upload an attachment into one Vault.  Advertised
@@ -274,25 +542,26 @@ pub(super) async fn recently_modified_tool(
 /// instance-wide and operator-owned, while `capabilities.mutate` belongs to
 /// this Vault's own source mode and lifecycle phase (a pull-only or
 /// not-yet-Ready Vault refuses writes on an instance where write mode is on).
-pub(super) fn attachment_import_config_tool(
-    state: &AppState,
+pub(super) async fn attachment_import_config_tool(
+    state: AppState,
     config: &McpConfig,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("get_attachment_import_config", arguments)?;
-    let vault_id = VaultId::from_str(&args.vault_id)
-        .map_err(|_| JsonRpcFailure::invalid_params("vault_id must be a canonical Vault ID"))?;
-    let control = VaultReadCore::new(&state.startup_sqlite, &state.vaults)
-        .control_block(vault_id)
-        .map_err(|error| {
-            JsonRpcFailure::not_found(serde_json::to_string(&error).unwrap_or(error.message))
-        })?;
-    let vault_mutable = control.snapshot().capabilities.mutate;
+    let vault_id = scoped_vault_id(&args.vault_id)?;
+    let capabilities = match VaultReads::new(&state)
+        .read(move |core| core.vault_capabilities(vault_id))
+        .await
+    {
+        Ok(capabilities) => capabilities,
+        Err(error) => return read_failure(error),
+    };
+    let vault_mutable = capabilities.mutate;
     let enabled = config.write_enabled && vault_mutable;
 
-    let methods: Vec<crate::mcp::results::AttachmentImportMethod> = if enabled {
+    let methods: Vec<results::AttachmentImportMethod> = if enabled {
         vec![
-            crate::mcp::results::AttachmentImportMethod::HttpMultipart {
+            results::AttachmentImportMethod::HttpMultipart {
                 role: "default",
                 method: "POST",
                 path: format!("/api/v1/vaults/{vault_id}/attachments"),
@@ -303,7 +572,7 @@ pub(super) fn attachment_import_config_tool(
                 requires: "ability to make an HTTP request outside MCP (e.g. shell/curl)",
                 usage: "POST multipart/form-data with fields `target_relative_path` and `file`.",
             },
-            crate::mcp::results::AttachmentImportMethod::McpBase64 {
+            results::AttachmentImportMethod::McpBase64 {
                 tool: "import_attachment",
                 role: "fallback",
                 max_bytes: config.max_base64_bytes,
@@ -323,42 +592,29 @@ pub(super) fn attachment_import_config_tool(
         "Attachment upload is unavailable for this Vault's current source mode and lifecycle phase, though MCP write mode is enabled. Read this Vault's status and capabilities from list_vaults; another Vault may still accept uploads."
     };
 
-    Ok(tool_success(crate::mcp::results::result_to_value(
-        &crate::mcp::results::AttachmentImportConfigResult {
-            vault_id: vault_id.to_string(),
-            enabled,
-            write_mode_enabled: config.write_enabled,
-            vault_accepts_mutation: vault_mutable,
-            allowed_extensions: allowed_attachment_extensions()
-                .iter()
-                .map(|extension| extension.to_string())
-                .collect(),
-            methods,
-            usage: usage.to_string(),
-        },
-    )))
+    Ok(tool_result(&results::AttachmentImportConfigResult {
+        vault_id: vault_id.to_string(),
+        enabled,
+        write_mode_enabled: config.write_enabled,
+        vault_accepts_mutation: vault_mutable,
+        allowed_extensions: allowed_attachment_extensions()
+            .iter()
+            .map(|extension| extension.to_string())
+            .collect(),
+        methods,
+        usage: usage.to_string(),
+    }))
 }
 
-/// The MCP half of the mapping for Vault collection management: one
-/// structured core error becomes a tool error carrying that same
-/// `{code, message, vault_id?, retryable}` payload, byte-identical to the
-/// body these tools used to decode back out of a proxied HTTP response.
-/// Instance-side detail is already sanitized by the core, so both surfaces
-/// report the same message.
-fn management_error(error: crate::vault_error::VaultOperationError) -> Value {
-    tool_structured_error(
-        serde_json::to_value(&error).unwrap_or_else(|_| json!({ "code": error.code })),
-    )
-}
-
-/// The success half: the core's typed response, serialized through exactly
-/// the structure whose schema `tools/list` advertises.
+/// One Vault collection management outcome: the core's typed response
+/// serialized through exactly the structure whose schema `tools/list`
+/// advertises, or its structured failure as a tool error.
 fn management_result<T: Serialize>(
-    result: Result<T, crate::vault_error::VaultOperationError>,
+    result: Result<T, VaultOperationError>,
 ) -> Result<Value, JsonRpcFailure> {
     Ok(match result {
-        Ok(response) => tool_success(crate::mcp::results::result_to_value(&response)),
-        Err(error) => management_error(error),
+        Ok(response) => tool_result(&response),
+        Err(error) => structured_error(error),
     })
 }
 
@@ -367,7 +623,7 @@ fn management_result<T: Serialize>(
 /// identically on both surfaces. Its refusal is an ordinary structured
 /// management error, so it flows through `management_result` with every other
 /// outcome rather than returning early on its own path.
-fn management_vault_id(raw: &str) -> Result<VaultId, crate::vault_error::VaultOperationError> {
+fn management_vault_id(raw: &str) -> Result<VaultId, VaultOperationError> {
     crate::vault_management::parse_vault_id(raw)
 }
 
@@ -376,9 +632,7 @@ pub(super) async fn list_vaults_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let _: EmptyArgs = parse("list_vaults", arguments)?;
-    management_result::<crate::mcp::results::ListVaultsResult>(
-        VaultCollectionManagement::new(&state).list(),
-    )
+    management_result::<results::ListVaultsResult>(VaultCollectionManagement::new(&state).list())
 }
 
 /// Registry writes go straight to the Vault collection management core, the
@@ -391,7 +645,7 @@ pub(super) async fn create_vault_tool(
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
     let request: CreateVaultRequest = parse("create_vault", arguments)?;
-    management_result::<crate::mcp::results::CreateVaultResult>(
+    management_result::<results::CreateVaultResult>(
         VaultCollectionManagement::new(&state).create(request).await,
     )
 }
@@ -418,7 +672,7 @@ pub(super) async fn edit_vault_tool(
         Ok(vault_id) => core.edit(vault_id, request).await,
         Err(error) => Err(error),
     };
-    management_result::<crate::mcp::results::EditVaultResult>(result)
+    management_result::<results::EditVaultResult>(result)
 }
 
 pub(super) async fn enable_vault_tool(
@@ -434,7 +688,7 @@ pub(super) async fn enable_vault_tool(
         }
         Err(error) => Err(error),
     };
-    management_result::<crate::mcp::results::EnableVaultResult>(result)
+    management_result::<results::EnableVaultResult>(result)
 }
 
 pub(super) async fn disable_vault_tool(
@@ -450,7 +704,7 @@ pub(super) async fn disable_vault_tool(
         }
         Err(error) => Err(error),
     };
-    management_result::<crate::mcp::results::DisableVaultResult>(result)
+    management_result::<results::DisableVaultResult>(result)
 }
 
 pub(super) async fn disconnect_vault_tool(
@@ -466,7 +720,7 @@ pub(super) async fn disconnect_vault_tool(
         }
         Err(error) => Err(error),
     };
-    management_result::<crate::mcp::results::DisconnectVaultResult>(result)
+    management_result::<results::DisconnectVaultResult>(result)
 }
 
 pub(super) async fn sync_vault_tool(
@@ -475,7 +729,7 @@ pub(super) async fn sync_vault_tool(
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("sync_vault", arguments)?;
     let core = VaultCollectionManagement::new(&state);
-    management_result::<crate::mcp::results::SyncVaultResult>(
+    management_result::<results::SyncVaultResult>(
         management_vault_id(&args.vault_id).and_then(|vault_id| core.sync(vault_id)),
     )
 }
@@ -486,7 +740,7 @@ pub(super) async fn retry_vault_tool(
 ) -> Result<Value, JsonRpcFailure> {
     let args: VaultIdArgs = parse("retry_vault", arguments)?;
     let core = VaultCollectionManagement::new(&state);
-    management_result::<crate::mcp::results::RetryVaultResult>(
+    management_result::<results::RetryVaultResult>(
         management_vault_id(&args.vault_id).and_then(|vault_id| core.retry(vault_id)),
     )
 }

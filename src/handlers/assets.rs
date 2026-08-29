@@ -1,13 +1,17 @@
-use std::io::Read;
-use std::path::{Component, Path as FsPath, PathBuf};
+//! HTTP wire shaping for the Vault asset route in `handlers/vault_content.rs`:
+//! the success response's headers, and the status each contained-resource
+//! failure carries.
+//!
+//! The policy itself — path containment, the servable-extension allow-list, the
+//! content-type table, the size bound, and the route's own URL shape — is not
+//! here. It belongs to the read core (`vault_read::assets`, reached through
+//! `VaultReadCore::contained_asset`), so the MCP `get_attachment` tool answers
+//! on exactly the same rules rather than importing this adapter (#188, ADR-19).
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-/// Asset serving is intentionally bounded until a streaming response primitive
-/// is introduced. It keeps direct `<img>` and PDF responses from turning one
-/// request into an unbounded in-memory allocation.
-const MAX_ASSET_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+use crate::vault_read::AssetPathError;
 
 /// Shared response shape for a resolved, in-bounds asset/attachment file,
 /// used by the Vault-scoped route in `handlers/vault_content.rs`.
@@ -38,327 +42,58 @@ pub(crate) fn asset_response(content_type: &'static str, bytes: Vec<u8>) -> Resp
     (StatusCode::OK, headers, bytes).into_response()
 }
 
-pub(crate) fn read_asset_bytes(path: &FsPath) -> Result<Vec<u8>, AssetReadError> {
-    read_asset_bytes_with_limit(path, MAX_ASSET_RESPONSE_BYTES)
-}
-
-/// One attachment, resolved and described for a caller outside this HTTP route
-/// — today the MCP `get_attachment` tool (#176). It exists so that caller needs
-/// nothing from this module but [`describe_asset`] and the error type: path
-/// containment, the servable-extension allow-list, the content-type table, the
-/// size bound, and the shape of the route's own URL all stay here, rather than
-/// being reassembled by every consumer that wants an attachment's bytes.
-pub(crate) struct ResolvedAsset {
-    path: PathBuf,
-    pub(crate) size_bytes: u64,
-    pub(crate) content_type: &'static str,
-}
-
-impl ResolvedAsset {
-    /// The attachment's bytes, under the same bound the route itself serves.
-    pub(crate) fn read_bytes(&self) -> Result<Vec<u8>, AssetPathError> {
-        read_asset_bytes(&self.path).map_err(|error| match error {
-            AssetReadError::TooLarge => AssetPathError::TooLarge,
-            AssetReadError::Io(_) => AssetPathError::Internal,
-        })
-    }
-}
-
-/// Resolve one Vault-relative attachment path and describe what is there,
-/// without reading it. Applies exactly the checks
-/// `GET /api/v1/vaults/{vault_id}/assets/{*path}` applies — raw filesystem
-/// containment and the extension allow-list, no demo-surface gating — matching
-/// every other MCP attachment tool (`list_note_attachments`,
-/// `import_attachment`, ...), which likewise bypass `VaultReadCore`'s
-/// browse-surface policy entirely.
-pub(crate) fn describe_asset(
-    vault_root: &FsPath,
-    raw_path: &str,
-) -> Result<ResolvedAsset, AssetPathError> {
-    let path = resolve_asset_path(vault_root, raw_path)?;
-    let size_bytes = std::fs::metadata(&path)
-        .map_err(|_| AssetPathError::Internal)?
-        .len();
-    let content_type = content_type_for_path(&path);
-    Ok(ResolvedAsset {
-        path,
-        size_bytes,
-        content_type,
-    })
-}
-
-/// The path component of this route's own URL for one attachment, percent-encoded
-/// a segment at a time. Lives beside the route it addresses so a caller building
-/// a link to it (the MCP `get_attachment` tool) cannot drift from the real path,
-/// and mirrors the frontend's encoding of the same route
-/// (`frontend/src/components/note-page/wikilinks.ts`).
-pub(crate) fn asset_download_path(vault_id: &str, relative_path: &str) -> String {
-    let encoded = relative_path
-        .split('/')
-        .map(super::downloads::percent_encode_filename)
-        .collect::<Vec<_>>()
-        .join("/");
-    format!("/api/v1/vaults/{vault_id}/assets/{encoded}")
-}
-
-fn read_asset_bytes_with_limit(path: &FsPath, maximum: u64) -> Result<Vec<u8>, AssetReadError> {
-    let file = std::fs::File::open(path).map_err(|error| {
-        AssetReadError::Io(format!(
-            "failed opening asset '{}': {error}",
-            path.display()
-        ))
-    })?;
-    let mut bytes = Vec::new();
-    file.take(maximum.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| {
-            AssetReadError::Io(format!(
-                "failed reading asset '{}': {error}",
-                path.display()
-            ))
-        })?;
-    if bytes.len() as u64 > maximum {
-        return Err(AssetReadError::TooLarge);
-    }
-    Ok(bytes)
-}
-
-pub(crate) fn resolve_asset_path(
-    vault_root: &FsPath,
-    raw_path: &str,
-) -> Result<PathBuf, AssetPathError> {
-    let relative = sanitize_asset_path(raw_path).ok_or(AssetPathError::BadRequest)?;
-    if !is_allowed_asset_extension(&relative) {
-        return Err(AssetPathError::Forbidden);
-    }
-
-    let root = std::fs::canonicalize(vault_root).map_err(|_| AssetPathError::Internal)?;
-    let candidate = vault_root.join(relative);
-    let resolved = match std::fs::canonicalize(candidate) {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AssetPathError::NotFound);
-        }
-        Err(_) => return Err(AssetPathError::Internal),
-    };
-
-    if !resolved.starts_with(&root) {
-        return Err(AssetPathError::Forbidden);
-    }
-    if !resolved.is_file() {
-        return Err(AssetPathError::NotFound);
-    }
-
-    Ok(resolved)
-}
-
-fn sanitize_asset_path(raw_path: &str) -> Option<PathBuf> {
-    let mut sanitized = PathBuf::new();
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() || FsPath::new(trimmed).is_absolute() {
-        return None;
-    }
-
-    for component in FsPath::new(trimmed).components() {
-        match component {
-            Component::Normal(segment) => sanitized.push(segment),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir => return None,
-            _ => return None,
-        }
-    }
-
-    if sanitized.as_os_str().is_empty() {
-        return None;
-    }
-
-    Some(sanitized)
-}
-
-fn is_allowed_asset_extension(path: &FsPath) -> bool {
-    // Shared with the asset index (#158) so wikilink resolution can never name
-    // a path this route then refuses.
-    crate::vault::is_servable_asset(path)
-}
-
-pub(crate) fn content_type_for_path(path: &FsPath) -> &'static str {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("avif") => "image/avif",
-        Some("bmp") => "image/bmp",
-        Some("pdf") => "application/pdf",
-        _ => "application/octet-stream",
-    }
-}
-
-/// One `AssetPathError` -> (structured code, HTTP status, human message)
-/// mapping, shared by this route's `ErrorResponse{error}` shape and
-/// `handlers/vault_content.rs`'s Vault-scoped `VaultApiError{code, ...}`
-/// shape, so the two wire shapes cannot silently diverge on the same
-/// underlying containment outcome.
+/// The HTTP status one contained-resource failure carries. The `code` and the
+/// message come from the core's own [`AssetPathError`], so this route's
+/// `VaultApiError{code, ...}` body and the MCP tool error cannot silently
+/// diverge on the same underlying containment outcome.
 pub(crate) fn asset_error_parts(
     kind: AssetPathError,
     requested_path: &str,
 ) -> (&'static str, StatusCode, String) {
-    match kind {
-        AssetPathError::BadRequest => (
-            "invalid_asset_path",
-            StatusCode::BAD_REQUEST,
-            format!("Invalid asset path: {requested_path}"),
-        ),
-        AssetPathError::Forbidden => (
-            "asset_access_denied",
-            StatusCode::FORBIDDEN,
-            format!("Asset access denied: {requested_path}"),
-        ),
-        AssetPathError::NotFound => (
-            "asset_not_found",
-            StatusCode::NOT_FOUND,
-            format!("Asset not found: {requested_path}"),
-        ),
-        AssetPathError::TooLarge => (
-            "asset_too_large",
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("Asset is too large to serve: {requested_path}"),
-        ),
-        AssetPathError::Internal => (
-            "internal_error",
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Asset resolution failed".to_string(),
-        ),
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AssetPathError {
-    BadRequest,
-    Forbidden,
-    NotFound,
-    Internal,
-    TooLarge,
-}
-
-pub(crate) enum AssetReadError {
-    TooLarge,
-    Io(String),
+    let status = match kind {
+        AssetPathError::BadRequest => StatusCode::BAD_REQUEST,
+        AssetPathError::Forbidden => StatusCode::FORBIDDEN,
+        AssetPathError::NotFound => StatusCode::NOT_FOUND,
+        AssetPathError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+        AssetPathError::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (kind.code(), status, kind.message(requested_path))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
     #[test]
-    fn sanitize_asset_path_rejects_invalid_paths() {
-        assert!(sanitize_asset_path("").is_none());
-        assert!(sanitize_asset_path("../secrets.png").is_none());
-        assert!(sanitize_asset_path("/abs/path.png").is_none());
-        assert!(sanitize_asset_path("folder/../../escape.png").is_none());
-    }
-
-    #[test]
-    fn sanitize_asset_path_normalizes_valid_path() {
-        let path = sanitize_asset_path("./images/diagram.png").expect("valid path");
-        assert_eq!(path, PathBuf::from("images/diagram.png"));
-    }
-
-    #[test]
-    fn is_allowed_asset_extension_filters_by_embeddable_asset_types() {
-        assert!(is_allowed_asset_extension(FsPath::new("diagram.png")));
-        assert!(is_allowed_asset_extension(FsPath::new("photo.JPEG")));
-        assert!(is_allowed_asset_extension(FsPath::new("manual.PDF")));
-        assert!(!is_allowed_asset_extension(FsPath::new("notes.md")));
-        assert!(!is_allowed_asset_extension(FsPath::new("noext")));
-    }
-
-    #[test]
-    fn content_type_for_path_serves_pdf_attachments_inline() {
+    fn asset_error_parts_pairs_each_core_code_with_its_http_meaning() {
         assert_eq!(
-            content_type_for_path(FsPath::new("Attachments/manual.pdf")),
-            "application/pdf"
+            asset_error_parts(AssetPathError::NotFound, "a.png"),
+            (
+                "asset_not_found",
+                StatusCode::NOT_FOUND,
+                "Asset not found: a.png".to_string()
+            )
+        );
+        assert_eq!(
+            asset_error_parts(AssetPathError::Forbidden, "secret.txt").1,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            asset_error_parts(AssetPathError::TooLarge, "big.pdf").1,
+            StatusCode::PAYLOAD_TOO_LARGE
         );
     }
 
     #[test]
-    fn read_asset_bytes_rejects_files_past_the_response_cap() {
-        let tmp = TempDir::new().expect("temp dir");
-        let path = tmp.path().join("large.png");
-        let file = std::fs::File::create(&path).expect("file");
-        file.set_len(5).expect("set sparse length");
-
-        assert!(matches!(
-            read_asset_bytes_with_limit(&path, 4),
-            Err(AssetReadError::TooLarge)
-        ));
-    }
-
-    #[test]
-    fn resolve_asset_path_returns_file_within_vault() {
-        let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        let notes_dir = vault_root.join("Notes");
-        fs::create_dir_all(&notes_dir).expect("create dir");
-        let image_path = notes_dir.join("diagram.png");
-        fs::write(&image_path, b"png").expect("write image");
-
-        let resolved =
-            resolve_asset_path(&vault_root, "Notes/diagram.png").expect("path should resolve");
-
+    fn svg_responses_are_sandboxed_and_forced_to_download_on_navigation() {
+        let response = asset_response("image/svg+xml", b"<svg/>".to_vec());
         assert_eq!(
-            resolved,
-            std::fs::canonicalize(image_path).expect("canonical image path")
-        );
-    }
-
-    #[test]
-    fn resolve_asset_path_serves_assets_under_noise_paths() {
-        // Noise patterns must never gate /vault-assets/ serving: an image
-        // embedded in a demoted or otherwise noise-matched folder still renders.
-        // A user HATCHDOOR_EXCLUDE glob silently breaking an embedded image would
-        // be a nasty surprise, so the asset route deliberately ignores exclusion.
-        let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        let noise_dir = vault_root.join(".trash");
-        fs::create_dir_all(&noise_dir).expect("create noise dir");
-        let image_path = noise_dir.join("diagram.png");
-        fs::write(&image_path, b"png").expect("write image");
-
-        let resolved = resolve_asset_path(&vault_root, ".trash/diagram.png")
-            .expect("a noise-path asset must still resolve and serve");
-        assert_eq!(
-            resolved,
-            std::fs::canonicalize(image_path).expect("canonical image path")
-        );
-    }
-
-    #[test]
-    fn resolve_asset_path_blocks_traversal_and_non_images() {
-        let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        fs::create_dir_all(&vault_root).expect("create dir");
-        fs::write(vault_root.join("secret.txt"), b"secret").expect("write text");
-
-        assert_eq!(
-            resolve_asset_path(&vault_root, "../outside.png"),
-            Err(AssetPathError::BadRequest)
+            response.headers().get(header::CONTENT_SECURITY_POLICY),
+            Some(&HeaderValue::from_static("sandbox"))
         );
         assert_eq!(
-            resolve_asset_path(&vault_root, "secret.txt"),
-            Err(AssetPathError::Forbidden)
-        );
-        assert_eq!(
-            resolve_asset_path(&vault_root, "missing.png"),
-            Err(AssetPathError::NotFound)
+            response.headers().get(header::CONTENT_DISPOSITION),
+            Some(&HeaderValue::from_static("attachment"))
         );
     }
 }

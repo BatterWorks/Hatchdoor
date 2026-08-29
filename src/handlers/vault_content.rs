@@ -20,35 +20,28 @@ use axum::extract::rejection::{JsonRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::api_types::{
     ResolveAssetResult, ResolveBatchRequest, ResolveQuery, ResolveTargetResult,
 };
-use crate::app_state::{AppState, run_blocking};
+use crate::app_state::{AppState, internal_error};
 use crate::handlers::api::MAX_RESOLVE_BATCH;
-use crate::handlers::assets::{
-    AssetPathError, AssetReadError, asset_error_parts, asset_response, content_type_for_path,
-    read_asset_bytes, resolve_asset_path,
-};
+use crate::handlers::assets::{asset_error_parts, asset_response};
 use crate::handlers::downloads::{ExportError, NoteExport, build_note_export, download_response};
 use crate::handlers::vaults::{
     VaultApiError, internal_error_response, json_rejection_response, parse_vault_id,
     query_rejection_response,
 };
-use crate::vault_read::{BrowseSurface, VaultReadCore, VaultReadError};
+use crate::vault_read::{
+    AssetPathError, AssetReadError, OffloadedReadError, VaultReadError, VaultReads,
+    VaultResolveResponse,
+};
 use crate::vault_registry::VaultId;
 
 // ---------------------------------------------------------------------------
 // Wire types
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, JsonSchema, Deserialize)]
-pub struct VaultResolveResponse {
-    pub vault_id: VaultId,
-    pub slug: Option<String>,
-}
 
 #[derive(Debug, Serialize)]
 pub struct VaultResolveBatchResponse {
@@ -81,13 +74,18 @@ fn bad_request(error: VaultApiError) -> Response {
 }
 
 fn note_not_found_response(vault_id: VaultId, slug: &str) -> Response {
-    VaultApiError::new(
-        "note_not_found",
-        format!("Note not found: {slug}"),
-        Some(vault_id),
-        false,
-    )
-    .respond(StatusCode::NOT_FOUND)
+    crate::vault_read::note_not_found(vault_id, slug).respond(StatusCode::NOT_FOUND)
+}
+
+/// Maps one offloaded read's failure onto a response: the Vault's own
+/// structured failure through the bucket map below, and a blocking task that
+/// never completed through the same opaque `500` every other instance-side
+/// fault reports.
+fn read_error_response(error: OffloadedReadError) -> Response {
+    match error {
+        OffloadedReadError::Read(error) => vault_read_error_response(error),
+        OffloadedReadError::Failed(message) => internal_error(message).into_response(),
+    }
 }
 
 /// Maps a [`VaultReadError`] (from exact-read/asset-directory gating, and
@@ -100,26 +98,21 @@ fn note_not_found_response(vault_id: VaultId, slug: &str) -> Response {
 /// configuration is a `500` — it depends on saved exclusion patterns, not on
 /// this request, so retrying the same request cannot help.
 pub(crate) fn vault_read_error_response(error: VaultReadError) -> Response {
-    let (code, status): (&'static str, StatusCode) = match error.code.as_str() {
-        "vault_not_found" => ("vault_not_found", StatusCode::NOT_FOUND),
-        "vault_disabled" => ("vault_disabled", StatusCode::CONFLICT),
-        "vault_scan_config_invalid" => (
-            "vault_scan_config_invalid",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        ),
-        "vault_read_unavailable" => ("vault_read_unavailable", StatusCode::SERVICE_UNAVAILABLE),
-        "vault_runtime_not_active" => ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
-        "invalid_search_query" => ("invalid_search_query", StatusCode::BAD_REQUEST),
-        "invalid_layer_selection" => ("invalid_layer_selection", StatusCode::BAD_REQUEST),
-        "search_unavailable" => ("search_unavailable", StatusCode::SERVICE_UNAVAILABLE),
-        _ => ("vault_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+    let error = error.into_operation_error();
+    let status = match error.code.as_str() {
+        "vault_not_found" | "note_not_found" => StatusCode::NOT_FOUND,
+        "vault_disabled" => StatusCode::CONFLICT,
+        "vault_scan_config_invalid" => StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid_scope" | "invalid_search_query" | "invalid_layer_selection" => {
+            StatusCode::BAD_REQUEST
+        }
+        _ => StatusCode::SERVICE_UNAVAILABLE,
     };
-    VaultApiError::new(code, error.message, error.vault_id, error.retryable).respond(status)
+    error.respond(status)
 }
 
-/// Maps `resolve_asset_path`'s containment outcome onto the shared
-/// `VaultApiError` shape, mirroring `assets.rs::asset_error_response`'s
-/// `AssetPathError` -> (status, message) choice for the legacy unscoped route.
+/// Maps the read core's containment outcome onto the shared `VaultApiError`
+/// shape, with the status `handlers/assets.rs` pairs with that outcome.
 fn vault_asset_error_response(
     kind: AssetPathError,
     requested_path: &str,
@@ -142,20 +135,14 @@ pub async fn vault_scoped_note_handler(
         Ok(vault_id) => vault_id,
         Err(error) => return bad_request(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_slug = slug.clone();
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.exact_note(vault_id, &lookup_slug))
-    })
-    .await;
+    let result = VaultReads::new(&state)
+        .read(move |core| core.exact_note(vault_id, &lookup_slug))
+        .await;
     match result {
-        Ok(Ok(Some(note))) => (StatusCode::OK, Json(note)).into_response(),
-        Ok(Ok(None)) => note_not_found_response(vault_id, &slug),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+        Ok(Some(note)) => (StatusCode::OK, Json(note)).into_response(),
+        Ok(None) => note_not_found_response(vault_id, &slug),
+        Err(error) => read_error_response(error),
     }
 }
 
@@ -168,20 +155,14 @@ pub async fn vault_scoped_note_links_handler(
         Ok(vault_id) => vault_id,
         Err(error) => return bad_request(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_slug = slug.clone();
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.exact_note_links(vault_id, &lookup_slug))
-    })
-    .await;
+    let result = VaultReads::new(&state)
+        .read(move |core| core.exact_note_links(vault_id, &lookup_slug))
+        .await;
     match result {
-        Ok(Ok(Some(links))) => (StatusCode::OK, Json(links)).into_response(),
-        Ok(Ok(None)) => note_not_found_response(vault_id, &slug),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+        Ok(Some(links)) => (StatusCode::OK, Json(links)).into_response(),
+        Ok(None) => note_not_found_response(vault_id, &slug),
+        Err(error) => read_error_response(error),
     }
 }
 
@@ -199,24 +180,17 @@ pub async fn vault_scoped_stats_detail_handler(
         Ok(vault_id) => vault_id,
         Err(error) => return bad_request(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.statistics_detail(vault_id))
-    })
-    .await;
+    let result = VaultReads::new(&state)
+        .read(move |core| core.statistics_detail(vault_id))
+        .await;
     match result {
-        Ok(Ok(stats)) => (StatusCode::OK, Json(stats)).into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
 enum DownloadOutcome {
     NotFound,
-    ReadError(VaultReadError),
     ExportError(String),
     TooLarge,
     Export(NoteExport),
@@ -231,39 +205,34 @@ pub async fn vault_scoped_note_download_handler(
         Ok(vault_id) => vault_id,
         Err(error) => return bad_request(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_slug = slug.clone();
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        // Note content and its containing directory must come from the same
-        // Vault control-block fetch: a concurrent edit reconciles a
-        // *replacement* control block rather than mutating the current one in
-        // place, so two independent lookups could otherwise pair this note's
-        // content with a different Vault generation's directory.
-        let (note, vault_root) = match core.exact_note_for_download(vault_id, &lookup_slug) {
-            Ok(Some(found)) => found,
-            Ok(None) => return Ok(DownloadOutcome::NotFound),
-            Err(error) => return Ok(DownloadOutcome::ReadError(error)),
-        };
-        Ok(match build_note_export(&vault_root, &note.note) {
-            Ok(export) => DownloadOutcome::Export(export),
-            Err(ExportError::TooLarge) => DownloadOutcome::TooLarge,
-            Err(ExportError::Failed(message)) => DownloadOutcome::ExportError(message),
+    let result = VaultReads::new(&state)
+        .read(move |core| {
+            // Note content and its containing directory must come from the same
+            // Vault control-block fetch: a concurrent edit reconciles a
+            // *replacement* control block rather than mutating the current one
+            // in place, so two independent lookups could otherwise pair this
+            // note's content with a different Vault generation's directory.
+            let Some((note, vault_root)) = core.exact_note_for_download(vault_id, &lookup_slug)?
+            else {
+                return Ok(DownloadOutcome::NotFound);
+            };
+            Ok(match build_note_export(&vault_root, &note.note) {
+                Ok(export) => DownloadOutcome::Export(export),
+                Err(ExportError::TooLarge) => DownloadOutcome::TooLarge,
+                Err(ExportError::Failed(message)) => DownloadOutcome::ExportError(message),
+            })
         })
-    })
-    .await;
+        .await;
 
     let outcome = match result {
         Ok(outcome) => outcome,
-        Err(error) => return error.into_response(),
+        Err(error) => return read_error_response(error),
     };
 
     match outcome {
         DownloadOutcome::Export(export) => download_response(export),
         DownloadOutcome::NotFound => note_not_found_response(vault_id, &slug),
-        DownloadOutcome::ReadError(error) => vault_read_error_response(error),
         DownloadOutcome::ExportError(message) => internal_error_response(message, Some(vault_id)),
         DownloadOutcome::TooLarge => VaultApiError::new(
             "note_export_too_large",
@@ -289,16 +258,11 @@ pub async fn vault_scoped_resolve_handler(
         Ok(query) => query,
         Err(error) => return query_rejection_response(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.resolve_wikilink(vault_id, &query.target))
-    })
-    .await;
+    let result = VaultReads::new(&state)
+        .read(move |core| core.resolve_wikilink(vault_id, &query.target))
+        .await;
     match result {
-        Ok(Ok(resolved)) => (
+        Ok(resolved) => (
             StatusCode::OK,
             Json(VaultResolveResponse {
                 vault_id,
@@ -306,8 +270,7 @@ pub async fn vault_scoped_resolve_handler(
             }),
         )
             .into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
@@ -335,10 +298,9 @@ pub async fn vault_scoped_resolve_batch_handler(
         .respond(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
+    let reads = VaultReads::new(&state);
     let snapshot = state.runtime_snapshot();
+    let vaults = state.vaults.clone();
     let control = vaults.runtime(vault_id);
     let archive_prefix = match AppState::vault_archive_prefix(
         control.as_ref().map(|control| control.definition()),
@@ -348,55 +310,52 @@ pub async fn vault_scoped_resolve_batch_handler(
         Err(error) => return internal_error_response(error, Some(vault_id)),
     };
 
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        // One authoritative-index build for the whole batch: `resolve_batch`
-        // resolves every target — note and asset alike — against it, rather
-        // than paying a full Vault scan per target the way looping
-        // `resolve_wikilink` would.
-        let note_dir = payload
-            .note_path
-            .as_deref()
-            .map(note_parent_dir)
-            .unwrap_or_default();
-        let (resolved, resolved_assets) = match core.resolve_batch(
-            vault_id,
-            &payload.targets,
-            &payload.asset_targets,
-            &note_dir,
-        ) {
-            Ok(resolved) => resolved,
-            Err(error) => return Ok(Err(error)),
-        };
-        let asset_results = payload
-            .asset_targets
-            .into_iter()
-            .zip(resolved_assets)
-            .map(|(target, path)| ResolveAssetResult { target, path })
-            .collect::<Vec<_>>();
-        let results = payload
-            .targets
-            .into_iter()
-            .zip(resolved)
-            .map(|(target, resolved)| match resolved {
-                Some(resolved) => ResolveTargetResult {
-                    target,
-                    slug: Some(resolved.slug),
-                    archived: resolved.relative_path.starts_with(&*archive_prefix),
-                },
-                None => ResolveTargetResult {
-                    target,
-                    slug: None,
-                    archived: false,
-                },
-            })
-            .collect::<Vec<_>>();
-        Ok(Ok((results, asset_results)))
-    })
-    .await;
+    let result = reads
+        .read(move |core| {
+            // One authoritative-index build for the whole batch: `resolve_batch`
+            // resolves every target — note and asset alike — against it, rather
+            // than paying a full Vault scan per target the way looping
+            // `resolve_wikilink` would.
+            let note_dir = payload
+                .note_path
+                .as_deref()
+                .map(note_parent_dir)
+                .unwrap_or_default();
+            let (resolved, resolved_assets) = core.resolve_batch(
+                vault_id,
+                &payload.targets,
+                &payload.asset_targets,
+                &note_dir,
+            )?;
+            let asset_results = payload
+                .asset_targets
+                .into_iter()
+                .zip(resolved_assets)
+                .map(|(target, path)| ResolveAssetResult { target, path })
+                .collect::<Vec<_>>();
+            let results = payload
+                .targets
+                .into_iter()
+                .zip(resolved)
+                .map(|(target, resolved)| match resolved {
+                    Some(resolved) => ResolveTargetResult {
+                        target,
+                        slug: Some(resolved.slug),
+                        archived: resolved.relative_path.starts_with(&*archive_prefix),
+                    },
+                    None => ResolveTargetResult {
+                        target,
+                        slug: None,
+                        archived: false,
+                    },
+                })
+                .collect::<Vec<_>>();
+            Ok((results, asset_results))
+        })
+        .await;
 
     match result {
-        Ok(Ok((results, asset_results))) => (
+        Ok((results, asset_results)) => (
             StatusCode::OK,
             Json(VaultResolveBatchResponse {
                 vault_id,
@@ -405,17 +364,17 @@ pub async fn vault_scoped_resolve_batch_handler(
             }),
         )
             .into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
-/// `GET /api/v1/vaults/{vault_id}/assets/{*path}` — the same containment
-/// (extension allowlist, traversal rejection, canonicalize + `starts_with`
-/// containment) the legacy `/vault-assets/{*path}` route applied (retired in
-/// #101), scoped to the requested Vault ID's own directory. Serves both
-/// embedded assets and imported attachments, which share one containment rule
-/// and are not otherwise distinguished on disk.
+/// `GET /api/v1/vaults/{vault_id}/assets/{*path}` — one Vault's contained
+/// assets and imported attachments, which share one containment rule and are
+/// not otherwise distinguished on disk. Every check behind it — the Vault gate,
+/// path containment, the servable-extension allow-list, the content type, the
+/// browse surface, and the response bound — belongs to
+/// `VaultReadCore::contained_asset`, which the MCP `get_attachment` tool
+/// answers on too; what is left here is the response's own wire shape.
 pub async fn vault_scoped_asset_handler(
     State(state): State<AppState>,
     mcp_read: Option<axum::Extension<crate::auth::McpAssetRead>>,
@@ -432,78 +391,50 @@ pub async fn vault_scoped_asset_handler(
         Ok(vault_id) => vault_id,
         Err(error) => return bad_request(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
     let lookup_path = path.clone();
     // Directory lookup, canonicalize-and-contain path resolution, and the
     // file read are all blocking filesystem work; do all three in one
-    // `run_blocking` trip rather than only the final read.
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        let vault_root = match core.vault_directory(vault_id) {
-            Ok(root) => root,
-            Err(error) => return Ok(AssetOutcome::VaultError(error)),
-        };
-        let asset_path = match resolve_asset_path(&vault_root, &lookup_path) {
-            Ok(path) => path,
-            Err(kind) => return Ok(AssetOutcome::PathError(kind)),
-        };
-        let canonical_root = match std::fs::canonicalize(&vault_root) {
-            Ok(path) => path,
-            Err(error) => return Err(error.to_string()),
-        };
-        let relative_path = match asset_path.strip_prefix(canonical_root) {
-            Ok(path) => path.to_string_lossy().replace('\\', "/"),
-            // `resolve_asset_path` already established containment. This is
-            // defensive in case the two filesystem observations diverge.
-            Err(_) => return Ok(AssetOutcome::PathError(AssetPathError::Forbidden)),
-        };
-        match core.asset_on_surface(vault_id, &relative_path) {
-            Ok(true) => {}
-            Ok(false) => return Ok(AssetOutcome::PathError(AssetPathError::NotFound)),
-            Err(error) => return Ok(AssetOutcome::VaultError(error)),
-        }
-        // The MCP credential's own ceiling, checked before the read rather than
-        // after, so an over-limit file is never buffered for a caller that may
-        // not have it.
-        if let Some(max_bytes) = mcp_max_bytes {
-            let size = match std::fs::metadata(&asset_path) {
-                Ok(metadata) => metadata.len(),
-                Err(error) => return Err(error.to_string()),
+    // offloaded trip rather than only the final read.
+    let result = VaultReads::new(&state)
+        .read(move |core| {
+            let asset = match core.contained_asset(vault_id, &lookup_path)? {
+                Ok(asset) => asset,
+                Err(kind) => return Ok(AssetOutcome::PathError(kind)),
             };
-            if size > max_bytes {
+            // The MCP credential's own ceiling, checked before the read rather
+            // than after, so an over-limit file is never buffered for a caller
+            // that may not have it.
+            if mcp_max_bytes.is_some_and(|max_bytes| asset.size_bytes > max_bytes) {
                 return Ok(AssetOutcome::PathError(AssetPathError::TooLarge));
             }
-        }
-        let content_type = content_type_for_path(&asset_path);
-        // Bounded read: an asset is buffered whole to build the response, so a
-        // single request must not turn into an unbounded allocation.
-        match read_asset_bytes(&asset_path) {
-            Ok(bytes) => Ok(AssetOutcome::Bytes {
-                content_type,
-                bytes,
-            }),
-            Err(AssetReadError::TooLarge) => Ok(AssetOutcome::PathError(AssetPathError::TooLarge)),
-            Err(AssetReadError::Io(error)) => Err(error),
-        }
-    })
-    .await;
+            let content_type = asset.content_type;
+            // Bounded read: an asset is buffered whole to build the response, so
+            // a single request must not turn into an unbounded allocation.
+            Ok(match asset.read_bytes() {
+                Ok(bytes) => AssetOutcome::Bytes {
+                    content_type,
+                    bytes,
+                },
+                Err(AssetReadError::TooLarge) => AssetOutcome::PathError(AssetPathError::TooLarge),
+                Err(AssetReadError::Io(error)) => AssetOutcome::Internal(error),
+            })
+        })
+        .await;
 
     match result {
         Ok(AssetOutcome::Bytes {
             content_type,
             bytes,
         }) => asset_response(content_type, bytes),
-        Ok(AssetOutcome::VaultError(error)) => vault_read_error_response(error),
         Ok(AssetOutcome::PathError(kind)) => vault_asset_error_response(kind, &path, vault_id),
-        Err(error) => error.into_response(),
+        Ok(AssetOutcome::Internal(message)) => internal_error(message).into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
 enum AssetOutcome {
-    VaultError(VaultReadError),
     PathError(AssetPathError),
+    Internal(String),
     Bytes {
         content_type: &'static str,
         bytes: Vec<u8>,

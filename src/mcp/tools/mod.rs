@@ -2,10 +2,10 @@
 //! is decided here alone: [`READ_OPS`] names what answers under read
 //! permission, [`write::WRITE_OPS`] what needs `HATCHDOOR_MCP_WRITE_ENABLED`.
 //!
-//! The `read`/`write` module split is about which helpers an implementation
-//! needs, not about permission — three Vault-scoped read tools live in `write`
-//! because they use its scoping helpers. Read the two op lists, not the module
-//! a function happens to sit in, to know what a tool requires.
+//! Every read tool now lives in `read`, every mutation in `write`; the split
+//! that once put three Vault-scoped reads next to the mutations (for their
+//! scoping helpers) went with #188, which moved that gating into the read
+//! core. Read the two op lists to know what a tool requires.
 
 mod batch;
 mod read;
@@ -182,8 +182,7 @@ pub(super) const READ_OPS: &[&str] = &[
 
 /// Dispatches one read op to its underlying tool function. Shared by the
 /// top-level MCP dispatcher above (one call per request) and the `batch` tool
-/// (one call per item), so the two can never drift on how a read is answered —
-/// notably the `readable_vault` prologue the three Vault-scoped reads need.
+/// (one call per item), so the two can never drift on how a read is answered.
 pub(super) async fn dispatch_read_tool(
     state: AppState,
     config: &McpConfig,
@@ -203,29 +202,19 @@ pub(super) async fn dispatch_read_tool(
         // rather than exercising it, and an agent that cannot upload still
         // needs to be told so, with the reason.
         "get_attachment_import_config" => {
-            read::attachment_import_config_tool(&state, config, arguments)
+            read::attachment_import_config_tool(state, config, arguments).await
         }
         // Reading which attachments a Note references is a read, and is
         // answered under the same permission as reading the Note itself. It
         // lived behind the write gate only because it was catalogued next to
         // the attachment mutations.
-        "list_note_attachments" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::list_note_attachments_tool(state, &vault, arguments).await
-        }
+        "list_note_attachments" => read::list_note_attachments_tool(state, arguments).await,
         // Fetching an attachment's bytes is a read, like list_note_attachments;
         // it needs `config` for the base64 encoding's size cap.
-        "get_attachment" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::get_attachment_tool(state, &vault, arguments, config).await
-        }
+        "get_attachment" => read::get_attachment_tool(state, arguments, config).await,
         // Reading a Note's frontmatter projection is a read, like reading the
-        // Note itself; it is answered under read permission even though its
-        // implementation lives next to the mutation helpers.
-        "get_frontmatter" => {
-            let vault = write::readable_vault(&state, &arguments)?;
-            write::get_frontmatter_tool(state, &vault, arguments).await
-        }
+        // Note itself.
+        "get_frontmatter" => read::get_frontmatter_tool(state, arguments).await,
         // Unreachable while [`READ_OPS`] and the arms above agree, which
         // `read_ops_are_all_advertised` enforces. An error rather than a panic:
         // a name that drifts out of step must not take the process down.

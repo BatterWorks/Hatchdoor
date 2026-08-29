@@ -13,12 +13,10 @@
 //! `replace_section` mode spelling, and the base64 envelope `import_attachment`
 //! arrives in.
 //!
-//! Three *read* tools live here too and are not gated: `list_note_attachments`,
-//! `get_attachment`, and `get_frontmatter`. They sit next to the mutations
-//! because they share this module's Vault-scoping helpers (`readable_vault`,
-//! `note_entry`, `current_index`), not because they need write permission —
-//! `mod.rs`'s `READ_OPS` is what decides that, and it lists all three. Those
-//! helpers exist for them alone now, and move to the read core in #188.
+//! Only mutations live here. The three read tools that used to sit alongside
+//! them for this module's Vault-scoping helpers (`list_note_attachments`,
+//! `get_attachment`, `get_frontmatter`) moved to `read.rs` in #188, once the
+//! read core took over the gating those helpers provided.
 
 // The deserialization-only scope and retired legacy commit-summary fields are
 // intentionally retained until every old client gets a structured invalid
@@ -33,9 +31,9 @@ use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::runtime_config::ConfigSnapshot;
-use crate::vault::{AttachmentOutcome, SectionMode, VaultIndex, list_note_attachments};
+use crate::vault::{AttachmentOutcome, SectionMode};
 use crate::vault_error::VaultOperationError;
-use crate::vault_mutation::{NoteWriteOutcome, VaultMutation, write_operation_error};
+use crate::vault_mutation::{NoteWriteOutcome, VaultMutation};
 use crate::vault_read::{VaultReadCore, VaultReadError};
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultControlBlock;
@@ -71,13 +69,9 @@ impl McpVault {
 }
 
 /// Resolve the explicit `vault_id` without asserting anything about the
-/// Vault's write posture.  Reading a Vault's notes and reading which
-/// attachments they reference are the same permission; a pull-only or
-/// otherwise non-mutating Vault answers both.
-pub(super) fn readable_vault(
-    state: &AppState,
-    arguments: &Value,
-) -> Result<McpVault, JsonRpcFailure> {
+/// Vault's write posture, so [`scoped_vault`] can apply the capability check
+/// separately and report it as its own outcome.
+fn readable_vault(state: &AppState, arguments: &Value) -> Result<McpVault, JsonRpcFailure> {
     let raw = arguments
         .get("vault_id")
         .and_then(Value::as_str)
@@ -153,38 +147,6 @@ fn note_write_result(vault_id: VaultId, outcome: NoteWriteOutcome) -> Value {
             trashed_path: outcome.trashed_path,
         },
     ))
-}
-
-/// Shapes one structured read-side error using the same
-/// `{code, message, vault_id, retryable}` envelope as the other
-/// Vault-qualified failures (`note_not_found`, `capability_unavailable`).
-/// Shared by the frontmatter and attachment read tools.
-fn structured_read_error(
-    vault_id: VaultId,
-    code: &str,
-    message: impl std::fmt::Display,
-) -> JsonRpcFailure {
-    JsonRpcFailure::not_found(
-        json!({
-            "code": code,
-            "message": message.to_string(),
-            "vault_id": vault_id,
-            "retryable": false,
-        })
-        .to_string(),
-    )
-}
-
-/// Maps the existing `/assets/{*path}` route's own containment/extension
-/// check to the same structured error shape, so `get_attachment` reports the
-/// identical `code` a caller would see resolving the same path over HTTP.
-fn asset_error_to_jsonrpc(
-    vault_id: VaultId,
-    relative_path: &str,
-    error: crate::handlers::AssetPathError,
-) -> JsonRpcFailure {
-    let (code, _status, message) = crate::handlers::asset_error_parts(error, relative_path);
-    structured_read_error(vault_id, code, message)
 }
 
 /// Every note/attachment mutation tool, and the one list that says so. The
@@ -290,42 +252,6 @@ pub(super) async fn update_note_tool(
         .await
         .map_err(mutation_error)?;
     Ok(note_write_result(vault.vault_id, outcome))
-}
-
-pub(super) async fn get_frontmatter_tool(
-    _state: AppState,
-    vault: &McpVault,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: GetFrontmatterArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_frontmatter arguments: {error}"))
-    })?;
-    let index = current_index(vault).await?;
-    let entry = note_entry(&index, &args.slug)?;
-    // Reading the note's bytes is the same read `get_note` performs; the
-    // projection just never returns them. The canonical cache-layer parser
-    // decides what counts as frontmatter.
-    let content = std::fs::read_to_string(&entry.path).map_err(|error| {
-        structured_read_error(
-            vault.vault_id,
-            "note_unreadable",
-            format!("failed to read note '{}': {error}", entry.relative_path),
-        )
-    })?;
-    let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
-    let metadata = crate::cache::parse::parse_frontmatter_metadata(&content)
-        .map_err(|message| structured_read_error(vault.vault_id, "invalid_frontmatter", message))?;
-    Ok(tool_success(crate::mcp::results::result_to_value(
-        &crate::mcp::results::GetFrontmatterResult {
-            vault_id: vault.vault_id.to_string(),
-            slug: entry.slug.clone(),
-            relative_path: entry.relative_path.clone(),
-            has_frontmatter,
-            tags: metadata.tags,
-            aliases: metadata.aliases,
-            properties: metadata.properties,
-        },
-    )))
 }
 
 pub(super) async fn update_frontmatter_tool(
@@ -632,125 +558,6 @@ pub(super) async fn delete_attachment_tool(
         .await
         .map_err(mutation_error)?;
     Ok(attachment_success(vault.vault_id, outcome))
-}
-
-/// Fetch one attachment's bytes: an HTTP download URL by default, or
-/// base64-inline content as the fallback when an out-of-band HTTP request
-/// isn't possible or the URL's own credential isn't available to this
-/// client. Addressed by `relative_path`, no note or index build required —
-/// resolved through the same containment/extension check the existing
-/// `/assets/{*path}` route uses, which every `list_note_attachments` entry
-/// already satisfies (both share the same servable-extension allow-list).
-pub(super) async fn get_attachment_tool(
-    _state: AppState,
-    vault: &McpVault,
-    arguments: Value,
-    config: &McpConfig,
-) -> Result<Value, JsonRpcFailure> {
-    let args: GetAttachmentArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid get_attachment arguments: {error}"))
-    })?;
-    let relative_path = non_empty_argument("relative_path", args.relative_path)?;
-    let encoding = args.encoding.unwrap_or(AttachmentEncoding::Url);
-
-    let asset: crate::handlers::ResolvedAsset =
-        crate::handlers::describe_asset(&vault_path(vault), &relative_path)
-            .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
-    let size_bytes = asset.size_bytes;
-
-    let content = match encoding {
-        AttachmentEncoding::Url => crate::mcp::results::AttachmentContent::Url {
-            download_url: crate::handlers::asset_download_path(
-                &vault.vault_id.to_string(),
-                &relative_path,
-            ),
-            path_note: "Relative path — resolve it against the same scheme, host, and port as this MCP endpoint.",
-            auth: "Send this MCP session's own bearer token as an Authorization: Bearer header; the route accepts it for as long as MCP stays enabled. This deployment's web bearer token (HATCHDOOR_WEB_BEARER_TOKEN) also works, as a header or an access_token query parameter. When neither token is configured, or demo mode is enabled, the URL needs no credential. If this client cannot make an out-of-band HTTP request at all, call get_attachment again with encoding \"base64\".",
-        },
-        AttachmentEncoding::Base64 => {
-            if size_bytes > config.max_base64_bytes {
-                return Err(JsonRpcFailure::invalid_params(format!(
-                    "attachment exceeds max size for base64 encoding: {size_bytes} > {}; call get_attachment again with encoding \"url\" instead",
-                    config.max_base64_bytes
-                )));
-            }
-            let bytes = asset
-                .read_bytes()
-                .map_err(|error| asset_error_to_jsonrpc(vault.vault_id, &relative_path, error))?;
-            use base64::Engine as _;
-            crate::mcp::results::AttachmentContent::Base64 {
-                content: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            }
-        }
-    };
-
-    Ok(tool_success(crate::mcp::results::result_to_value(
-        &crate::mcp::results::GetAttachmentResult {
-            vault_id: vault.vault_id.to_string(),
-            relative_path,
-            size_bytes,
-            content_type: asset.content_type.to_string(),
-            content,
-        },
-    )))
-}
-
-pub(super) async fn list_note_attachments_tool(
-    _state: AppState,
-    vault: &McpVault,
-    arguments: Value,
-) -> Result<Value, JsonRpcFailure> {
-    let args: VaultSlugArgs = serde_json::from_value(arguments).map_err(|error| {
-        JsonRpcFailure::invalid_params(format!("Invalid list_note_attachments arguments: {error}"))
-    })?;
-    let index = current_index(vault).await?;
-    let entry = note_entry(&index, &args.slug)?;
-    let attachments = list_note_attachments(&vault_path(vault), &index.layers, &entry)
-        .map_err(|error| mutation_error(write_operation_error(vault.vault_id, error)))?;
-    Ok(tool_success(crate::mcp::results::result_to_value(
-        &crate::mcp::results::NoteAttachmentsResult {
-            vault_id: vault.vault_id.to_string(),
-            attachments,
-        },
-    )))
-}
-
-/// Build the vault index off the async runtime. Write tools need the full
-/// index to rewrite backlinks/assets, but the O(vault) walk must not block a
-/// tokio worker.
-async fn current_index(vault: &McpVault) -> Result<VaultIndex, JsonRpcFailure> {
-    let control = vault.control.clone();
-    match tokio::task::spawn_blocking(move || control.authoritative_index()).await {
-        Ok(Ok(index)) => Ok(index),
-        Ok(Err(error)) => Err(vault_error(crate::vault_read::runtime_error(
-            vault.vault_id,
-            error,
-        ))),
-        Err(join_error) => Err(JsonRpcFailure::internal(format!(
-            "vault index build panicked: {join_error}"
-        ))),
-    }
-}
-
-fn vault_path(vault: &McpVault) -> std::path::PathBuf {
-    vault.control.vault_path().to_path_buf()
-}
-
-fn note_entry(index: &VaultIndex, slug: &str) -> Result<crate::vault::NoteEntry, JsonRpcFailure> {
-    let slug = slug.trim();
-    if slug.is_empty() {
-        return Err(JsonRpcFailure::invalid_params("slug cannot be empty"));
-    }
-    index.find_by_slug(slug).cloned().ok_or_else(|| {
-        JsonRpcFailure::not_found(
-            json!({
-                "code": "note_not_found",
-                "message": format!("Note not found: {slug}"),
-                "retryable": false,
-            })
-            .to_string(),
-        )
-    })
 }
 
 fn attachment_success(vault_id: VaultId, outcome: AttachmentOutcome) -> Value {
@@ -1255,7 +1062,7 @@ mod record_tests {
         // The translation is the core's; this asserts what reaches an MCP
         // client through this surface's own mapping of it.
         let vault_id = crate::vault_registry::VaultId::generate().expect("generate Vault id");
-        let failure = mutation_error(write_operation_error(
+        let failure = mutation_error(crate::vault_mutation::write_operation_error(
             vault_id,
             crate::vault::WriteError::recovery_required(
                 "vault mutation rollback was incomplete: restore rewritten note [Backlink.md]"

@@ -622,6 +622,24 @@ mod tests {
         arguments
     }
 
+    /// Call one tool with the arguments exactly as written, without
+    /// `scoped_arguments` substituting the registered Vault's real ID — for
+    /// the tests that are about a malformed `vault_id` or `scope`.
+    async fn call_tool_unscoped(state: &AppState, name: &str, arguments: Value) -> Value {
+        let app = transport(state);
+        let (session, _) = initialize(&app).await;
+        let response = rpc(
+            &app,
+            &session,
+            json!({
+                "jsonrpc":"2.0","id":91,"method":"tools/call",
+                "params":{"name":name,"arguments":arguments}
+            }),
+        )
+        .await;
+        response_message(response).await
+    }
+
     async fn call_tool(state: &AppState, name: &str, arguments: Value) -> Value {
         let app = transport(state);
         let (session, _) = initialize(&app).await;
@@ -1786,6 +1804,115 @@ mod tests {
         assert_eq!(body["error"]["code"], -32602);
     }
 
+    /// The refusal each read tool gives a malformed `vault_id`. The two groups
+    /// answer differently and always have: a tool that used to proxy an
+    /// `/api/v1` route reports that route's structured `invalid_vault_id`
+    /// object, which an agent branches on, while the attachment and
+    /// frontmatter tools resolved their Vault before any route shaped an error
+    /// and refuse at the protocol level. #188 moved both off their old paths,
+    /// so this pins the shapes that used to be produced by code that no longer
+    /// exists.
+    #[tokio::test]
+    async fn a_malformed_vault_id_keeps_each_read_tools_own_refusal() {
+        let (state, _tmp) = test_state();
+
+        for (name, arguments) in [
+            (
+                "get_note",
+                json!({"vault_id": "not-a-uuid", "slug": "home"}),
+            ),
+            (
+                "get_note_links",
+                json!({"vault_id": "not-a-uuid", "slug": "home"}),
+            ),
+            (
+                "resolve_wikilink",
+                json!({"vault_id": "not-a-uuid", "target": "Home"}),
+            ),
+        ] {
+            let body = call_tool_unscoped(&state, name, arguments).await;
+            assert_eq!(body["result"]["isError"], true, "{name}: {body:#}");
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], "invalid_vault_id",
+                "{name}: {body:#}"
+            );
+        }
+
+        for (name, arguments) in [
+            (
+                "get_frontmatter",
+                json!({"vault_id": "not-a-uuid", "slug": "home"}),
+            ),
+            (
+                "list_note_attachments",
+                json!({"vault_id": "not-a-uuid", "slug": "home"}),
+            ),
+            (
+                "get_attachment",
+                json!({"vault_id": "not-a-uuid", "relative_path": "a.png"}),
+            ),
+            (
+                "get_attachment_import_config",
+                json!({"vault_id": "not-a-uuid"}),
+            ),
+        ] {
+            let body = call_tool_unscoped(&state, name, arguments).await;
+            assert_eq!(body["error"]["code"], -32602, "{name}: {body:#}");
+        }
+
+        // A malformed `scope` is the core's own structured refusal, on every
+        // collection read.
+        for name in ["get_tree", "get_stats", "get_graph", "recently_modified"] {
+            let body = call_tool_unscoped(&state, name, json!({"scope": "not-a-scope"})).await;
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], "invalid_scope",
+                "{name}: {body:#}"
+            );
+        }
+    }
+
+    /// `get_attachment` names the attachment back the way the caller asked for
+    /// it, not by the canonicalised path resolution produces internally, so the
+    /// `relative_path` it echoes and the `download_url` it builds agree — and
+    /// that URL escapes each segment, since a Vault names attachments with
+    /// spaces and non-ASCII freely.
+    #[tokio::test]
+    async fn get_attachment_echoes_the_relative_path_it_was_asked_with() {
+        let (state, _tmp) = test_state();
+        let vault_path = registered_vault_path(&state);
+        std::fs::create_dir_all(vault_path.join("Media")).expect("media dir");
+        std::fs::write(vault_path.join("Media/a shot.png"), b"png").expect("asset");
+
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "Media/a shot.png"}),
+        )
+        .await;
+        let result = &body["result"]["structuredContent"];
+        assert_eq!(result["relative_path"], "Media/a shot.png");
+        assert!(
+            result["content"]["download_url"]
+                .as_str()
+                .expect("download_url")
+                .ends_with("/assets/Media/a%20shot.png"),
+            "{result:#}"
+        );
+
+        // The same file reached by a path that resolves to it: the echo stays
+        // the caller's spelling rather than the resolved one.
+        let body = call_tool(
+            &state,
+            "get_attachment",
+            json!({"relative_path": "./Media/a shot.png"}),
+        )
+        .await;
+        assert_eq!(
+            body["result"]["structuredContent"]["relative_path"],
+            "./Media/a shot.png"
+        );
+    }
+
     #[tokio::test]
     async fn missing_note_is_a_tool_error_not_a_protocol_error() {
         let (state, tmp0) = test_state();
@@ -1994,6 +2121,110 @@ mod tests {
             traversal["result"]["structuredContent"]["code"],
             "invalid_asset_path"
         );
+    }
+
+    /// #188's cross-surface gating criterion. The four attachment and
+    /// frontmatter tools used to bypass `VaultReadCore` entirely, so a Note or
+    /// asset the browse surface withholds was still readable over MCP. They now
+    /// go through the same core the HTTP routes do, and refuse identically.
+    ///
+    /// Demo mode and MCP cannot run in the same process (ADR-07), so this drives
+    /// the tool dispatcher and the HTTP handler directly on a demo-mode state
+    /// rather than through the MCP transport, which such an instance never
+    /// exposes. Nothing visible changes on a production instance; the point is
+    /// that the two surfaces answer from one policy.
+    #[tokio::test]
+    async fn a_withheld_note_and_asset_are_refused_identically_over_mcp_and_http() {
+        let (state, _tmp) = layered_test_state();
+        let vault_path = registered_vault_path(&state);
+        std::fs::write(vault_path.join("sources/clip.png"), b"png").expect("demoted asset");
+        let vault_id = vault_id_of(&state);
+
+        let mut demo = state.clone();
+        demo.demo_mode = true;
+
+        let tool = |state: AppState, name: &'static str, arguments: Value| async move {
+            let result = crate::mcp::tools::handle_tools_call(
+                state,
+                Some(json!({"name": name, "arguments": arguments})),
+                &McpConfig::disabled(),
+            )
+            .await
+            .expect("tool result");
+            result["structuredContent"]["code"]
+                .as_str()
+                .map(str::to_string)
+        };
+
+        // An ordinary instance still reads all three.
+        for (name, arguments) in [
+            (
+                "get_frontmatter",
+                json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "list_note_attachments",
+                json!({"vault_id": vault_id, "slug": "clip"}),
+            ),
+            (
+                "get_attachment",
+                json!({"vault_id": vault_id, "relative_path": "sources/clip.png"}),
+            ),
+        ] {
+            assert_eq!(
+                tool(state.clone(), name, arguments).await,
+                None,
+                "{name} answers on an ordinary instance"
+            );
+        }
+
+        // On a restricted surface the demoted Note is withheld from both
+        // Note-shaped tools, as the ordinary not-found an absent Note gets.
+        assert_eq!(
+            tool(
+                demo.clone(),
+                "get_frontmatter",
+                json!({"vault_id": vault_id, "slug": "clip"})
+            )
+            .await
+            .as_deref(),
+            Some("note_not_found")
+        );
+        assert_eq!(
+            tool(
+                demo.clone(),
+                "list_note_attachments",
+                json!({"vault_id": vault_id, "slug": "clip"})
+            )
+            .await
+            .as_deref(),
+            Some("note_not_found")
+        );
+
+        // And the demoted asset is refused with the same code the HTTP asset
+        // route reports for the same path on the same instance.
+        assert_eq!(
+            tool(
+                demo.clone(),
+                "get_attachment",
+                json!({"vault_id": vault_id, "relative_path": "sources/clip.png"})
+            )
+            .await
+            .as_deref(),
+            Some("asset_not_found")
+        );
+        let response = crate::handlers::vault_scoped_asset_handler(
+            axum::extract::State(demo.clone()),
+            None,
+            axum::extract::Path((vault_id.to_string(), "sources/clip.png".to_string())),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("asset error body");
+        let body: Value = serde_json::from_slice(&body).expect("json body");
+        assert_eq!(body["code"], "asset_not_found");
     }
 
     #[tokio::test]

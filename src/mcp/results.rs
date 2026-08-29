@@ -24,15 +24,14 @@ use schemars::{JsonSchema, Schema};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::handlers::vault_content::VaultResolveResponse;
 use crate::search::vault_scoped::VaultSearchResponse;
 use crate::vault::AttachmentInfo;
 use crate::vault_management::{
     VaultDiscoveryResponse, VaultMutationResponse, VaultScheduleResponse,
 };
 use crate::vault_read::{
-    VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote, VaultStatistics,
-    VaultTree,
+    VaultGraph, VaultQualifiedLinks, VaultReadProjection, VaultRecentNote, VaultResolveResponse,
+    VaultStatistics, VaultTree,
 };
 
 // ---------------------------------------------------------------------------

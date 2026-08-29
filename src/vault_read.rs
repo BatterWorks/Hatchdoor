@@ -3,14 +3,21 @@
 
 use schemars::JsonSchema;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize, Serializer};
 use std::str::FromStr;
 
 use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
+use crate::search::LayerSelection;
 use crate::vault::{Note, NoteLink, NoteLinks};
+use crate::vault_error::VaultOperationError;
 use crate::vault_registry::VaultId;
-use crate::vault_runtime::VaultCollectionRuntime;
+use crate::vault_runtime::{VaultCapabilities, VaultCollectionRuntime};
+
+mod assets;
+
+pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
 
 /// An explicit collection read target. There is deliberately no selected,
 /// default, or sole-Vault variant.
@@ -18,6 +25,56 @@ use crate::vault_runtime::VaultCollectionRuntime;
 pub enum VaultScope {
     One(VaultId),
     All,
+}
+
+impl VaultScope {
+    /// Parse the `scope` a caller supplies — the literal `all`, or a canonical
+    /// Vault ID. One implementation for both adapters: HTTP takes it from the
+    /// `{scope}` path segment and MCP from a tool argument, and a scope one
+    /// surface accepts must not be a scope the other refuses. Anything else is
+    /// the structured `invalid_scope` failure.
+    pub fn parse(raw: &str) -> Result<Self, VaultReadError> {
+        if raw == "all" {
+            return Ok(VaultScope::All);
+        }
+        VaultId::from_str(raw)
+            .map(VaultScope::One)
+            .map_err(|_| VaultReadError {
+                code: "invalid_scope".to_string(),
+                message: "scope must be the literal 'all' or a canonical Vault ID".to_string(),
+                vault_id: None,
+                retryable: false,
+            })
+    }
+}
+
+/// The default and bounds every collection read applies to `limit`, shared so
+/// the two adapters cannot clamp differently. They mirror the legacy
+/// `/api/recently-modified` and `/api/search` behaviour the Vault-scoped routes
+/// replaced, and match the bounds the MCP tool schemas advertise.
+pub(crate) fn clamp_recent_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(5).clamp(1, 25)
+}
+
+pub(crate) fn clamp_search_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(10).clamp(1, 50)
+}
+
+pub(crate) fn clamp_search_per_note_cap(per_note_cap: Option<usize>) -> usize {
+    per_note_cap.unwrap_or(2).clamp(1, 10)
+}
+
+/// The `note_not_found` failure both adapters report when an exact read
+/// resolves its slug to nothing on the caller's browse surface. Shared so a
+/// Note withheld by the demo surface (#109) is indistinguishable from an absent
+/// one on either surface, down to the message.
+pub(crate) fn note_not_found(vault_id: VaultId, slug: &str) -> VaultOperationError {
+    VaultOperationError::new(
+        "note_not_found",
+        format!("Note not found: {slug}"),
+        Some(vault_id),
+        false,
+    )
 }
 
 /// Serializes as the flat scalar `docs/migrations/vault-scoped-clients.md`'s
@@ -78,6 +135,50 @@ pub struct VaultReadError {
     pub message: String,
     pub vault_id: Option<VaultId>,
     pub retryable: bool,
+}
+
+impl VaultReadError {
+    /// The stable, caller-facing `code` for this failure.
+    ///
+    /// The list is exactly what this core can produce, so a code neither
+    /// surface knows never leaks as a novel one: the core's own internal
+    /// spelling `vault_runtime_not_active`, and anything unforeseen, collapse
+    /// to `vault_unavailable`. Adapters go through this rather than each
+    /// keeping their own translation table. Widen it only alongside the status
+    /// and meaning each adapter should give the new code.
+    pub fn public_code(&self) -> &str {
+        match self.code.as_str() {
+            // Vault gating, collection reads, and search.
+            "vault_not_found"
+            | "vault_disabled"
+            | "vault_scan_config_invalid"
+            | "vault_read_unavailable"
+            | "invalid_scope"
+            | "invalid_search_query"
+            | "invalid_layer_selection"
+            | "search_unavailable"
+            // Exact reads of one Note's contents.
+            | "note_not_found"
+            | "note_unreadable"
+            | "invalid_frontmatter"
+            // `note_attachments` reads the Note through the write module's
+            // attachment lister, whose only failure on a read is I/O.
+            | "write_failed" => self.code.as_str(),
+            _ => "vault_unavailable",
+        }
+    }
+
+    /// This failure in the `{code, message, vault_id?, retryable}` shape every
+    /// surface reports, with its public code applied.
+    pub fn into_operation_error(self) -> VaultOperationError {
+        let code = self.public_code().to_string();
+        VaultOperationError {
+            code,
+            message: self.message,
+            vault_id: self.vault_id,
+            retryable: self.retryable,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
@@ -255,6 +356,62 @@ impl BrowseSurface {
         self == Self::DefaultOnly && layer.is_some()
     }
 
+    /// The [`LayerSelection`] a collection read applies, from the caller's raw
+    /// comma-separated tokens (`"all"`, `"default"`, or exact layer names).
+    /// One implementation for both adapters: HTTP reads the tokens from a
+    /// `layers=` query and MCP joins its `layers` array, and a selector one
+    /// surface honours must not mean something else on the other.
+    ///
+    /// Deliberately does not consult any one Vault's known-layer catalog while
+    /// parsing, unlike [`LayerSelection::parse`] (built for the single-Vault
+    /// surface, where an unrecognized token degrades to the default surface
+    /// with a warning): issue #62 applies one layer selector *independently* to
+    /// every participant, so a name valid in one Vault and absent from another
+    /// is not a parse-time concern — `VaultSearchCore::search`'s own
+    /// `invalid_layer_selection` check already covers the only real error case,
+    /// a named layer absent from every usable participant.
+    ///
+    /// `DefaultOnly` ignores the tokens entirely (#109): a demo has no operator
+    /// and no layer toggle, so the selector is not an escape hatch out of the
+    /// default surface. Clamping rather than rejecting keeps a saved link with
+    /// `?layers=` working and returning what an unadorned read would, so the
+    /// demoted Notes' existence cannot be inferred from a differing error.
+    pub fn layer_selection(self, raw: Option<&str>) -> LayerSelection {
+        if self == Self::DefaultOnly {
+            return LayerSelection::default_surface();
+        }
+        let Some(raw) = raw else {
+            return LayerSelection::default_surface();
+        };
+        let tokens: Vec<&str> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .collect();
+        if tokens.is_empty() {
+            return LayerSelection::default_surface();
+        }
+        if tokens.iter().any(|token| token.eq_ignore_ascii_case("all")) {
+            return LayerSelection::All;
+        }
+        let mut include_default = false;
+        let mut layers = BTreeSet::new();
+        for token in tokens {
+            if token.eq_ignore_ascii_case("default") {
+                include_default = true;
+            } else {
+                layers.insert(token.to_string());
+            }
+        }
+        if !include_default && layers.is_empty() {
+            include_default = true;
+        }
+        LayerSelection::Set {
+            include_default,
+            layers,
+        }
+    }
+
     /// Drop every demoted row from one published snapshot before anything
     /// projects it, so a restricted surface (#109's demo mode) cannot reveal a
     /// demoted Note through a tree, graph, recent list, statistic, or a search
@@ -299,6 +456,91 @@ impl BrowseSurface {
             tags_by_note,
             chunks,
             layer_catalog: Vec::new(),
+        }
+    }
+}
+
+/// One Vault's resolution of a wikilink target: the Note it names, or nothing.
+///
+/// A read projection rather than an HTTP response body — it began life in
+/// `handlers/vault_content.rs`, which MCP reached by decoding that route's
+/// response, and now sits beside the exact-read projections both adapters
+/// serialize (#188).
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
+pub struct VaultResolveResponse {
+    pub vault_id: VaultId,
+    pub slug: Option<String>,
+}
+
+/// One Note's frontmatter, without its Markdown body.
+#[derive(Debug, Clone)]
+pub struct VaultNoteFrontmatter {
+    pub slug: String,
+    pub relative_path: String,
+    pub has_frontmatter: bool,
+    pub metadata: crate::cache::parse::FrontmatterMetadata,
+}
+
+/// Why one read run off the async runtime did not produce a value.
+pub enum OffloadedReadError {
+    /// The read's own structured failure.
+    Read(VaultReadError),
+    /// The blocking task never completed — a panic or a cancelled runtime.
+    /// Distinct from `Read` because it says nothing about the Vault: it is an
+    /// instance-side fault, and each adapter reports it the way it reports its
+    /// own internal errors.
+    Failed(String),
+}
+
+/// An owned handle to the read core, for an adapter that must run a read off
+/// the async runtime.
+///
+/// ADR-19 puts that offload behind the core rather than in each adapter:
+/// [`VaultReadCore`] borrows the cache and the runtime, so every call site
+/// would otherwise repeat the same clone-and-`spawn_blocking` prologue — and
+/// they had already drifted, with the MCP tools running index builds and
+/// filesystem reads straight on a tokio worker while HTTP offloaded them.
+#[derive(Clone)]
+pub struct VaultReads {
+    cache: Arc<SqliteCache>,
+    vaults: VaultCollectionRuntime,
+    surface: BrowseSurface,
+}
+
+impl VaultReads {
+    /// The handle for one request, on the browse surface this instance serves.
+    pub fn new(state: &crate::app_state::AppState) -> Self {
+        Self {
+            cache: state.startup_sqlite.clone(),
+            vaults: state.vaults.clone(),
+            surface: BrowseSurface::for_demo_mode(state.demo_mode),
+        }
+    }
+
+    pub(crate) fn surface(&self) -> BrowseSurface {
+        self.surface
+    }
+
+    /// Run one read off the async runtime and hand back its outcome. The work
+    /// returns the core's own failure; only this handle can produce the
+    /// task-never-completed one.
+    pub async fn read<T, F>(&self, work: F) -> Result<T, OffloadedReadError>
+    where
+        F: FnOnce(&VaultReadCore<'_>) -> Result<T, VaultReadError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let cache = self.cache.clone();
+        let vaults = self.vaults.clone();
+        let surface = self.surface;
+        match tokio::task::spawn_blocking(move || {
+            work(&VaultReadCore::new(&cache, &vaults).on_surface(surface))
+        })
+        .await
+        {
+            Ok(outcome) => outcome.map_err(OffloadedReadError::Read),
+            Err(join_error) => Err(OffloadedReadError::Failed(format!(
+                "background task panicked: {join_error}"
+            ))),
         }
     }
 }
@@ -591,6 +833,116 @@ impl<'a> VaultReadCore<'a> {
             ));
         }
         Ok(path.to_path_buf())
+    }
+
+    /// What this Vault's own source mode and lifecycle phase currently allow,
+    /// under the same not-found/disabled/no-runtime gate every other read
+    /// applies. For an adapter reporting a Vault's posture rather than
+    /// exercising it (the MCP `get_attachment_import_config` tool).
+    pub fn vault_capabilities(
+        &self,
+        vault_id: VaultId,
+    ) -> Result<VaultCapabilities, VaultReadError> {
+        Ok(self.control_block(vault_id)?.snapshot().capabilities)
+    }
+
+    /// One Note's frontmatter — tags, aliases, and properties — without its
+    /// Markdown body, on this core's browse surface. `Ok(None)` is a Note this
+    /// caller may not see, whether it is absent or withheld.
+    ///
+    /// Reading the note's bytes is the same read `exact_note` performs; the
+    /// projection just never returns them, and the canonical cache-layer
+    /// parser decides what counts as frontmatter.
+    pub fn exact_note_frontmatter(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<VaultNoteFrontmatter>, VaultReadError> {
+        let index = self.authoritative_index(vault_id)?;
+        let Some(entry) = self.visible_entry(&index, slug) else {
+            return Ok(None);
+        };
+        let content = std::fs::read_to_string(&entry.path).map_err(|error| {
+            unavailable(
+                vault_id,
+                "note_unreadable",
+                format!("failed to read note '{}': {error}", entry.relative_path),
+                false,
+            )
+        })?;
+        let has_frontmatter = crate::cache::parse::frontmatter_span(&content).is_some();
+        let metadata = crate::cache::parse::parse_frontmatter_metadata(&content)
+            .map_err(|message| unavailable(vault_id, "invalid_frontmatter", message, false))?;
+        Ok(Some(VaultNoteFrontmatter {
+            slug: entry.slug.clone(),
+            relative_path: entry.relative_path.clone(),
+            has_frontmatter,
+            metadata,
+        }))
+    }
+
+    /// The existing attachments one Note references, on this core's browse
+    /// surface. `Ok(None)` is a Note this caller may not see.
+    pub fn note_attachments(
+        &self,
+        vault_id: VaultId,
+        slug: &str,
+    ) -> Result<Option<Vec<crate::vault::AttachmentInfo>>, VaultReadError> {
+        let (control, index) = self.control_and_index(vault_id)?;
+        let Some(entry) = self.visible_entry(&index, slug) else {
+            return Ok(None);
+        };
+        crate::vault::list_note_attachments(control.vault_path(), &index.layers, &entry)
+            .map(Some)
+            .map_err(|error| {
+                let error = crate::vault_mutation::write_operation_error(vault_id, error);
+                VaultReadError {
+                    code: error.code,
+                    message: error.message,
+                    vault_id: error.vault_id,
+                    retryable: error.retryable,
+                }
+            })
+    }
+
+    /// The Note entry `slug` names, or nothing when this surface withholds it.
+    /// Withheld and absent are deliberately the same answer: a demo visitor
+    /// must not be able to infer a demoted Note's existence from a different
+    /// outcome.
+    fn visible_entry(
+        &self,
+        index: &crate::vault::VaultIndex,
+        slug: &str,
+    ) -> Option<crate::vault::NoteEntry> {
+        index
+            .find_by_slug(slug.trim())
+            .filter(|entry| !self.surface.hides(entry.layer.as_deref()))
+            .cloned()
+    }
+
+    /// One contained attachment or embedded asset, resolved against the
+    /// requested Vault's gated Markdown directory and described without being
+    /// read.
+    ///
+    /// This is the single home for the contained-resource policy both surfaces
+    /// answer on (#188): the Vault gate, path containment against the canonical
+    /// root, the servable-extension allow-list, the content-type table, and the
+    /// browse surface. The outer error is the Vault's own; the inner one is the
+    /// path's, which each adapter maps to its wire shape.
+    pub(crate) fn contained_asset(
+        &self,
+        vault_id: VaultId,
+        relative_path: &str,
+    ) -> Result<Result<ResolvedAsset, AssetPathError>, VaultReadError> {
+        let vault_root = self.vault_directory(vault_id)?;
+        let asset = match assets::describe_asset(&vault_root, relative_path) {
+            Ok(asset) => asset,
+            Err(error) => return Ok(Err(error)),
+        };
+        if !self.asset_on_surface(vault_id, &asset.relative_path)? {
+            return Ok(Err(AssetPathError::NotFound));
+        }
+        Ok(Ok(asset))
     }
 
     /// Whether a contained asset path belongs to this core's selected browse
@@ -1226,6 +1578,99 @@ fn strip_frontmatter(content: &str) -> &str {
         return "";
     }
     content
+}
+
+#[cfg(test)]
+mod parsing_tests {
+    use super::*;
+
+    #[test]
+    fn vault_scope_parses_all_and_canonical_ids_and_rejects_everything_else() {
+        assert_eq!(
+            VaultScope::parse("all").expect("all parses"),
+            VaultScope::All
+        );
+
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        assert_eq!(
+            VaultScope::parse(&vault_id.to_string()).expect("uuid parses"),
+            VaultScope::One(vault_id)
+        );
+
+        let error = VaultScope::parse("not-a-scope").expect_err("malformed scope rejected");
+        assert_eq!(error.code, "invalid_scope");
+        assert!(!error.retryable);
+        assert_eq!(error.vault_id, None);
+
+        let error = VaultScope::parse("All").expect_err("case-sensitive literal only");
+        assert_eq!(error.code, "invalid_scope");
+    }
+
+    #[test]
+    fn layer_selection_matches_default_all_and_named_token_semantics() {
+        let surface = BrowseSurface::Everything;
+        assert_eq!(
+            surface.layer_selection(None),
+            LayerSelection::default_surface()
+        );
+        assert_eq!(
+            surface.layer_selection(Some("")),
+            LayerSelection::default_surface()
+        );
+        assert_eq!(surface.layer_selection(Some("all")), LayerSelection::All);
+        assert_eq!(surface.layer_selection(Some("ALL")), LayerSelection::All);
+
+        assert_eq!(
+            surface.layer_selection(Some("sources")),
+            LayerSelection::Set {
+                include_default: false,
+                layers: ["sources".to_string()].into_iter().collect(),
+            }
+        );
+        assert_eq!(
+            surface.layer_selection(Some("default, sources")),
+            LayerSelection::Set {
+                include_default: true,
+                layers: ["sources".to_string()].into_iter().collect(),
+            }
+        );
+    }
+
+    /// #109: on a restricted surface the selector is not an escape hatch, and
+    /// it is clamped rather than rejected, so a `layers=` link keeps working
+    /// and returns what an unadorned read would.
+    #[test]
+    fn a_restricted_surface_clamps_every_selector_to_the_default_surface() {
+        for raw in [None, Some("all"), Some("sources"), Some("default,sources")] {
+            assert_eq!(
+                BrowseSurface::DefaultOnly.layer_selection(raw),
+                LayerSelection::default_surface(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    /// A code neither surface knows must not leak as a novel one, and the
+    /// core's internal spelling for a missing runtime must not either.
+    #[test]
+    fn public_read_error_codes_collapse_unknown_and_internal_spellings() {
+        let vault_id = VaultId::generate().expect("generate Vault id");
+        let error = unavailable(
+            vault_id,
+            "vault_runtime_not_active",
+            "no runtime".to_string(),
+            true,
+        );
+        assert_eq!(error.public_code(), "vault_unavailable");
+
+        let error = unavailable(vault_id, "something_new", "?".to_string(), false);
+        let operation = error.into_operation_error();
+        assert_eq!(operation.code, "vault_unavailable");
+        assert_eq!(operation.vault_id, Some(vault_id));
+
+        let error = unavailable(vault_id, "vault_disabled", "off".to_string(), false);
+        assert_eq!(error.into_operation_error().code, "vault_disabled");
+    }
 }
 
 #[cfg(test)]

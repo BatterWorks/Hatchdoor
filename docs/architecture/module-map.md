@@ -638,8 +638,9 @@ the same walk that collects the Markdown files, and `resolve_asset` reads it:
 Obsidian's default link format writes an attachment embed as a bare filename and
 resolves it by searching the vault, so a purely note-relative reading broke every
 embed in a vault using one top-level attachments folder (#158). `is_servable_asset`
-is shared with `handlers/assets.rs`, so resolution can never name a path the
-asset route would refuse.
+is shared with the read core's contained-resource seam
+(`src/vault_read/assets.rs`), so resolution can never name a path the asset
+route or the MCP `get_attachment` tool would refuse.
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
 currently supplies content hashing to the index.
@@ -713,7 +714,7 @@ the full backend checks.
 
 **Kind:** product capability/domain core.
 
-**Owned paths:** `src/vault_read.rs`.
+**Owned paths:** `src/vault_read.rs`, `src/vault_read/assets.rs`.
 
 **Public contract:** `VaultReadCore`, `BrowseSurface`, explicit `VaultScope`,
 the common `VaultReadProjection` envelope, participant state/error types, and
@@ -730,9 +731,12 @@ withheld is indistinguishable from absent), and `BrowseSurface::restrict` drops
 its rows from a published snapshot before any projection reads it, covering
 tree, graph, recent, statistics, and a surviving search hit's outbound links. A
 link is dropped when either endpoint is withheld, since a surviving edge would
-name the hidden Note. `handlers/vault_collection_reads.rs` additionally clamps
-the request's own `LayerSelection` so the `layers=` query is not an escape
-hatch. `statistics_detail` (#137) is the exact-read counterpart to the
+name the hidden Note. `BrowseSurface::layer_selection` parses the caller's raw
+comma-separated layer tokens and clamps a restricted surface's selection to the
+default surface, so the `layers=` query is not an escape hatch; it and
+`VaultScope::parse` are the one implementation both adapters use, together with
+the `clamp_recent_limit`/`clamp_search_limit`/`clamp_search_per_note_cap`
+bounds and the shared `note_not_found` failure (#188). `statistics_detail` (#137) is the exact-read counterpart to the
 lean collection `statistics` projection: it returns `VaultQualifiedStats`
 directly (never wrapped in `VaultReadProjection`, like `exact_note`), scoped
 to exactly one Vault via `collection`'s `VaultScope::One` gating, computing
@@ -769,6 +773,29 @@ and survive `BrowseSurface` layer selection. A demo therefore cannot bypass
 its default-only Note surface by requesting a demoted, noise, or excluded asset
 directly; ordinary `Everything` reads retain the legacy contained-asset
 behavior.
+`exact_note_frontmatter` and `note_attachments` are the surface-gated
+counterparts of the frontmatter and attachment-listing reads the MCP tools used
+to answer from a raw index build of their own (#188); both return `Ok(None)`
+for a Note this surface withholds, indistinguishable from an absent one.
+`vault_capabilities` reports one Vault's own mutation/sync posture under the
+same gate, for an adapter describing a Vault rather than reading it.
+`contained_asset` is the single home for the contained-resource policy both
+surfaces answer on: the Vault gate, path containment against the canonical
+root, the servable-extension allow-list, the content-type table, the response
+bound, and `asset_on_surface`. Its primitives stay private to
+`src/vault_read/assets.rs`; adapters see only `ResolvedAsset`,
+`AssetPathError` (which owns each outcome's stable `code` and message, while
+the HTTP status stays in `handlers/assets.rs`), `AssetReadError`, and
+`asset_download_path`. `VaultResolveResponse` is the wikilink-resolution
+projection, relocated here from `handlers/vault_content.rs` in #188 so both
+adapters serialize the same type. `VaultReads` is the owned handle that runs a
+read off the async runtime (`OffloadedReadError` separates the Vault's own
+structured failure from a blocking task that never completed), so neither
+adapter re-implements the clone-and-`spawn_blocking` prologue — MCP had drifted
+into running index builds and filesystem reads straight on a tokio worker.
+`VaultReadError::public_code`/`into_operation_error` give one translation from
+the core's internal spellings to the stable `{code, message, vault_id?,
+retryable}` object both surfaces report.
 `exact_note_for_download` returns a Note together with its containing
 directory from one Vault control-block fetch — required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control
@@ -783,16 +810,16 @@ conditions.
 the shared cache's published Vault snapshot seam, and existing Vault note/link
 types.
 
-**Consumers:** `handlers/vault_content.rs` is the first HTTP consumer (exact
-note/link/resolve reads and `vault_directory`). `handlers/vault_collection_reads.rs`
-is the first HTTP consumer of the collection-read projections (`trees`,
-`statistics`, `graphs`, `recently_modified`) — a thin adapter with no
-collection-read domain logic of its own. Future MCP Vault-scoped adapters
-remain a later consumer. The core has no adapter or route ownership.
+**Consumers:** `handlers/vault_content.rs` (exact note/link/resolve reads,
+`vault_directory`, and the contained-asset route),
+`handlers/vault_collection_reads.rs` (the collection-read projections `trees`,
+`statistics`, `graphs`, `recently_modified`), and — since #188 — `mcp/tools/read.rs`
+for every one of the twelve Vault read tools. All three are thin adapters with
+no read domain logic of their own. The core has no adapter or route ownership.
 
 **Coordination paths:** `src/cache/vault_snapshots.rs` for read-only
 Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
-and `src/vault_runtime.rs` for the authoritative exact-read index boundary.
+`src/vault_runtime.rs` for the authoritative exact-read index boundary.
 
 **Invariants:**
 
@@ -1450,16 +1477,13 @@ managed_sync` against local bare-repository fixtures; scheduling changes run
 
 **Public contract:** handler functions intentionally re-exported by
 `src/handlers/mod.rs`; their route, authentication, status, and serialized HTTP
-behavior. One non-handler seam is exported alongside them for the MCP boundary's
-`get_attachment` read tool (#176): `describe_asset` resolves and describes one
-Vault-relative attachment, `ResolvedAsset::read_bytes` reads it, and
-`asset_download_path` builds this module's own asset-route URL for it, with
-`AssetPathError`/`asset_error_parts` reporting failure. The resolution
-primitives behind them (path containment, the servable-extension allow-list,
-the content-type table, the size bound) stay private to `assets.rs`, so a
-consumer cannot reassemble a different policy from the parts. Attachment
-resolution here deliberately bypasses `VaultReadCore`'s browse-surface gating,
-matching every other MCP attachment tool. `settings.rs` owns the additive `/api/settings` document: effective
+behavior — and nothing else. The one non-handler seam this module used to export
+for the MCP `get_attachment` tool (#176) went with #188: attachment resolution,
+the servable-extension allow-list, the content-type table, and the size bound
+now belong to the read core (`src/vault_read/assets.rs`), which applies
+`VaultReadCore`'s browse-surface gating to them, so both surfaces refuse the
+same paths. What `assets.rs` keeps is this route's own wire shaping.
+`settings.rs` owns the additive `/api/settings` document: effective
 value/provenance/lock/class/kind metadata and partial PATCH saves returning the
 full refreshed document. MCP enablement and its bearer token validate together
 against one prospective snapshot, so an invalid combination saves nothing and
@@ -1570,17 +1594,15 @@ is the sole exception, reading the same published snapshot the collection
 `{scope}/stats` route reads (word/mtime/size data `VaultReadCore`'s
 authoritative-index path does not carry), so it can briefly lag a write the
 way collection reads do, unlike every other route here. Exact reads run all blocking
-filesystem/index work off the async runtime via `run_blocking` (one trip per
-request, not one per batch entry or per path-resolution step), and are gated
-per-request by that Vault's own
+filesystem/index work off the async runtime via the read core's `VaultReads`
+handle (one trip per request, not one per batch entry or per path-resolution
+step), and are gated per-request by that Vault's own
 `vault_not_found`/`vault_disabled`/`vault_unavailable` status rather than any
-single-configured-Vault readiness gate. Asset/download path resolution and response
-shaping reuse `assets.rs`'s and `downloads.rs`'s existing containment, export,
-and response-building logic (`resolve_asset_path`, `content_type_for_path`,
-`asset_error_parts`, `asset_response`, `build_note_export`,
-`download_response`, widened to `pub(crate)`, with `asset_response`/
-`download_response` factored out of the legacy handlers' inline header-building
-so both routes share one response shape), unchanged.
+single-configured-Vault readiness gate. Since #188 asset resolution is the
+core's (`VaultReadCore::contained_asset`); what is left in `assets.rs` is this
+route's own wire shaping — the success response's headers and the HTTP status
+each `AssetPathError` carries — and `downloads.rs` still owns export and
+download-response building (`build_note_export`, `download_response`).
 
 `vault_collection_reads.rs` owns one-or-all collection reads and search:
 `GET /api/v1/vaults/{scope}/tree`, `.../recent`, `.../stats`, `.../graph`, and
@@ -1591,15 +1613,16 @@ demo-mode/auth posture, `VaultApiError` shape, and `query_rejection_response`/
 `invalid_layer_selection` (`400`) and `search_unavailable` (`503`) arms for
 reuse here) rather than duplicating them. `{scope}` reuses the path segment
 name `vault_id` for router-tree consistency with every sibling route in this
-group, parsed by this file's own `parse_vault_scope` into either a Vault ID or
+group, parsed by the core's `VaultScope::parse` into either a Vault ID or
 `VaultScope::All`; anything else is the structured `invalid_scope` error
-(`400`). This file is a thin adapter with no collection-read domain logic of
+(`400`). Since #188 that parser, the `layers` grammar, and the limit/per-note
+clamps live in the core so the MCP tools apply exactly the same ones. This file is a thin adapter with no collection-read domain logic of
 its own: `tree`/`stats`/`graph` return `vault_read.rs`'s existing
 `VaultReadCore::{trees, statistics, graphs}` projections unchanged (grouped
 per Vault); `recent` returns `recently_modified` (flattened across Vaults);
 `search` returns `search::vault_scoped::VaultSearchCore::search`'s projection
 (flattened, one global ranking). `search`'s `layers` query parameter is a
-comma-separated token list parsed by this file's own `parse_layer_selection`
+comma-separated token list parsed by `BrowseSurface::layer_selection`
 into a `LayerSelection` applied identically to every participant — unlike
 `search::LayerSelection::parse` (built for the single-Vault MCP surface, where
 an unrecognized token degrades to the default surface), it does not consult
@@ -1785,13 +1808,12 @@ scope-less/default/sole-Vault tool remains reachable.
 posture, reporting the instance-wide write switch and that Vault's own
 mutation capability as separate fields rather than refusing the call.
 Typed results live in `src/mcp/results.rs`: each tool's success response is
-produced from one Rust structure — MCP-owned shapes there, shared V1 handler
-response structures re-exported for the proxied reads, and Vault collection
-management's own wire types for the registry controls — and that same
-structure generates the tool's advertised `outputSchema`. The read tools that
-still proxy a handler decode its payload into the declared result type and
-re-serialize it, so a handler drift from its schema fails loudly instead of
-silently; the management tools serialize the core's typed response directly.
+produced from one Rust structure — MCP-owned shapes there, the read core's own
+projections aliased for the Vault reads, and Vault collection management's wire
+types for the registry controls — and that same structure generates the tool's
+advertised `outputSchema`. Since #188 every read tool serializes that
+projection exactly once, straight from the core; the decode-and-re-serialize
+round trip through a proxied HTTP response body, and its 2 MiB cap, are gone.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
 MCP write permission and without the mutation capability, as is
 `get_frontmatter` — a body-free tags/aliases/properties projection of one note
@@ -1801,12 +1823,12 @@ same `relative_path` `list_note_attachments` reports: `encoding: "url"` (the
 default) returns an HTTP `download_url` under the existing Vault-scoped
 `/assets/{*path}` route, and `encoding: "base64"` inlines the bytes instead,
 bounded by the same `HATCHDOOR_MCP_MAX_BASE64_BYTES` cap `import_attachment`
-enforces on the way in. Resolution reuses `handlers/assets.rs`'s
-`describe_asset`/`ResolvedAsset`/`asset_download_path` seam (re-exported
-`pub(crate)` from `handlers/mod.rs` for this cross-boundary reuse) rather than
-`VaultReadCore`'s browse-surface path: like every other MCP attachment tool, it
-is a raw filesystem read against the Vault's authoritative directory with no
-demo-mode surface gating, which applies only to the public HTTP read model. The
+enforces on the way in. Resolution goes through
+`VaultReadCore::contained_asset` (#188), so the Vault gate, containment, the
+extension allow-list, the content type, and the browse surface are the same
+ones the `/assets/{*path}` route answers on — a demoted or excluded asset is
+refused identically on both surfaces, rather than MCP bypassing the surface
+policy as it did while it reached into `handlers/assets.rs` directly. The
 advertised `download_url` carries no credential of its own, but the route it
 points at accepts this MCP session's own bearer token while MCP is enabled, as
 well as the web bearer token — see the auth boundary's public contract for why
@@ -1827,13 +1849,16 @@ request bound; write-enabled requests may use the current base64-attachment
 allowance plus bounded JSON framing. Invalid pinned attachment limits fail
 closed rather than widening to defaults. JSON-RPC replies are also bounded; an
 oversized reply becomes a bounded protocol error rather than an unbounded
-response buffer. Because the read tools delegate to the `/api/v1` handlers,
-those handlers' own blocking-work offload covers the tool path too.
+response buffer. Blocking work — index builds, snapshot reads, query embedding,
+and filesystem reads — runs off the async runtime for every tool, through the
+read core's own `VaultReads` offload rather than a per-adapter prologue.
 
-**Consumed dependencies:** `AppState`, the Vault discovery/content/collection
-read/write HTTP adapters as shared contract producers, Vault registry/runtime,
-Search, `vault/write`, model setup, attachment limits, and the live
-configuration snapshot bound at each request.
+**Consumed dependencies:** `AppState`, the four Vault-qualified cores
+(`VaultReadCore`/`VaultReads`, `VaultSearchCore`, the Vault mutation core, and
+Vault collection management), Vault registry/runtime, model setup, attachment
+limits, and the live configuration snapshot bound at each request. No HTTP
+adapter is consumed: since #188 no file under `src/mcp/` imports
+`crate::handlers`, and ADR-19's MCP-to-handler proxying debt is retired.
 
 **Coordination paths:** `src/server.rs`, domains exposed as tools, and
 documentation describing agent behavior.
@@ -1869,14 +1894,20 @@ than any single operation. `batch` is a loop over that same per-item dispatch,
 with its `expected_content_hash` chaining and its asymmetric read/write caps
 unchanged.
 
+Since #188 the read tools have the same shape, in `tools/read.rs`: parse the
+arguments, call `VaultReadCore`, `VaultSearchCore`, or Vault collection
+management once through the core's offload, and map the typed projection or the
+structured failure onto a tool result. `list_note_attachments`,
+`get_attachment`, `get_frontmatter`, and `get_attachment_import_config` moved
+out of `tools/write.rs` with that change, and the local index build, slug
+lookup, and raw asset resolution they kept there are gone.
+
 What stays in this adapter is what only this transport knows: its own argument
 names and empty-field wording, the `new_title` path-separator rule, the
-`replace_section` mode spelling, and `import_attachment`'s base64 envelope —
+`replace_section` mode spelling, the base64 encoding option on
+`get_attachment`, and `import_attachment`'s base64 envelope —
 whitespace-tolerant, capped on the *encoded* length before it is decoded, with
-the core then applying the authoritative check to the decoded bytes. Three
-read tools (`list_note_attachments`, `get_attachment`, `get_frontmatter`) sit
-in `tools/write.rs` for its Vault-scoping helpers and keep a local index build
-and slug lookup for that reason alone; they move to the read core in #188.
+the core then applying the authoritative check to the decoded bytes.
 
 **Validation:** `cargo test mcp`, vault write tests for mutation changes,
 server router tests, and golden wire tests locking both supported revisions'
