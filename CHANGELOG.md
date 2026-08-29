@@ -126,6 +126,13 @@
   retryable `vault_read_unavailable` the HTTP route already returned, instead
   of a generic internal error. Success responses and every other field are
   unchanged.
+- **The HTTP write surface now refuses to create or upload a `.hatchdoor-layer`
+  marker**, returning `400 layer_marker_write` the way the MCP tools always
+  have. Writing one through `create_note`, an attachment import, or an
+  attachment move or rename silently reclassified a whole subtree as a demoted
+  layer; only the MCP surface guarded against it, and both surfaces now share
+  one implementation. Editing a marker file you already have on disk is
+  unaffected — this is about creating one through the API.
 
 ## v2.5.0 - 2026-08-17
 

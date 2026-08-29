@@ -27,12 +27,10 @@
 //! can interleave with a batch and split it across commits. The turn then finds
 //! every one of the batch's writes dirty together and commits them as one, which
 //! `git::sync::tests::one_turn_commits_a_whole_batch_of_writes_as_a_single_commit`
-//! asserts. This holds for Vaults synced through the per-Vault scheduler. It is
-//! *not* guaranteed on the legacy single-Vault sync path, which is driven by the
-//! instance-wide `AppState` lock that this scoped path deliberately does not
-//! participate in (see `mod.rs`); there a batch's writes may land in more than
-//! one commit. Nothing is lost or reordered either way — only the commit
-//! boundary differs.
+//! asserts. The per-Vault turn is now the only synchronisation mechanism
+//! (ADR-18, #185), so this holds for every synced Vault; the legacy
+//! single-Vault sync path that could split a batch across commits no longer
+//! exists.
 
 use std::collections::HashMap;
 

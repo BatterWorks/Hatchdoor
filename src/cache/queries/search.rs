@@ -8,6 +8,19 @@ use crate::embed::Embedder;
 use crate::search::LayerSelection;
 use crate::vault_registry::VaultId;
 
+/// The Vault-qualified default-surface KNN query. Built here rather than
+/// inline so the plan-guard test EXPLAINs exactly what production executes: a
+/// copy of this string in the test could drift back to a full scan unnoticed,
+/// which is the failure the guard exists to catch.
+fn default_layer_knn_sql(ids: &str) -> String {
+    format!(
+        "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
+         FROM vault_chunk_vectors v JOIN vault_chunks c ON c.id = v.chunk_id \
+         WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_id IN ({ids}) \
+         ORDER BY v.distance"
+    )
+}
+
 /// The default-surface semantic KNN query (against `chunk_vectors`), used by
 /// the evaluation binaries' `semantic_search` entry point.
 const DEFAULT_SEMANTIC_KNN_SQL: &str = r#"
@@ -109,12 +122,7 @@ impl SqliteCache {
         };
 
         if selection.includes_default() {
-            collect(format!(
-                "SELECT c.vault_id, v.chunk_id, c.note_slug, c.heading_path, c.content, v.distance \
-                 FROM vault_chunk_vectors v JOIN vault_chunks c ON c.id = v.chunk_id \
-                 WHERE v.embedding MATCH ?1 AND v.k = ?2 AND v.vault_id IN ({ids}) \
-                 ORDER BY v.distance"
-            ))?;
+            collect(default_layer_knn_sql(&ids))?;
         }
         if selection.is_all() {
             collect(format!(
@@ -344,6 +352,115 @@ mod semantic_search_tests {
             .semantic_search(embedder.as_ref(), "anything", 2)
             .expect("search");
         assert_eq!(hits.len(), 2);
+    }
+
+    /// #182 deleted the plan guard along with the legacy query it covered,
+    /// leaving the surviving production KNN path with none: a SQL edit that
+    /// silently degraded vec0 KNN to a full scan would pass every other test
+    /// while making every semantic search scan the whole vector table.
+    #[test]
+    fn the_vault_qualified_default_query_uses_the_vec0_knn_plan_not_a_full_scan() {
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let conn = cache.read().expect("read conn");
+
+        let knn_plan: String = conn
+            .query_row(
+                &format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    super::default_layer_knn_sql("'12345678-1234-4567-89ab-1234567890ab'")
+                ),
+                rusqlite::params![bytemuck::cast_slice(&vec![0.0f32; 384]) as &[u8], 10_i64],
+                |row| row.get(3),
+            )
+            .expect("explain vault-qualified knn");
+        assert!(
+            knn_plan.contains("VIRTUAL TABLE INDEX 0:3"),
+            "the default semantic surface must use the vec0 KNN plan (0:3), got: {knn_plan}"
+        );
+
+        let scan_plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT v.chunk_id FROM vault_chunk_vectors v \
+                 JOIN vault_chunks c ON c.id = v.chunk_id",
+                [],
+                |row| row.get(3),
+            )
+            .expect("explain full scan");
+        assert!(
+            scan_plan.contains("VIRTUAL TABLE INDEX 0:1"),
+            "the full-scan shape must be a vec0 fullscan (0:1), so the assertion above \
+             distinguishes the two plans, got: {scan_plan}"
+        );
+    }
+
+    /// #182 deleted the cache-level layer-visibility tests along with the
+    /// legacy queries they covered. The vault-qualified path kept demo-mode and
+    /// layer-selection coverage higher up, but nothing asserted the rule
+    /// directly against the KNN query itself: that the default surface hides a
+    /// demoted chunk and `layers=all` returns it.
+    #[test]
+    fn the_default_surface_hides_a_demoted_chunk_and_layers_all_returns_it() {
+        use crate::search::LayerSelection;
+        use crate::vault_registry::VaultId;
+
+        let dir = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("sources")).expect("sources dir");
+        std::fs::write(
+            dir.path().join("Home.md"),
+            "# Home\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("write default note");
+        std::fs::write(
+            dir.path().join("sources/Clip.md"),
+            "# Clip\n\nmelatonin regulates the circadian rhythm",
+        )
+        .expect("write demoted note");
+        std::fs::write(dir.path().join("sources/.hatchdoor-layer"), "sources").expect("marker");
+
+        let cache = SqliteCache::in_memory(384).expect("open");
+        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+        let vault_id: VaultId = "12345678-1234-4567-89ab-1234567890ab"
+            .parse()
+            .expect("vault id");
+        let index = VaultIndex::build(dir.path()).expect("build");
+        cache
+            .replace_vault_snapshot(vault_id, &index, embedder.as_ref())
+            .expect("publish snapshot");
+
+        let conn = cache.read().expect("read conn");
+        let query_vec = embedder
+            .embed(&["melatonin".to_string()])
+            .expect("embed")
+            .remove(0);
+
+        let slugs = |selection: LayerSelection| -> Vec<String> {
+            let mut found = cache
+                .vault_semantic_search_layered_with_vector(
+                    &conn,
+                    &[vault_id],
+                    &query_vec,
+                    10,
+                    &selection,
+                )
+                .expect("vault semantic search")
+                .into_iter()
+                .map(|hit| hit.note_slug)
+                .collect::<Vec<_>>();
+            found.sort();
+            found.dedup();
+            found
+        };
+
+        assert_eq!(
+            slugs(LayerSelection::default()),
+            vec!["home".to_string()],
+            "the default surface must return the undemoted note and hide the demoted one"
+        );
+        assert_eq!(
+            slugs(LayerSelection::All),
+            vec!["clip".to_string(), "home".to_string()],
+            "layers=all must return the demoted chunk alongside the default surface"
+        );
     }
 
     #[test]
