@@ -1869,3 +1869,82 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         "readiness is an Index-turn conclusion only"
     );
 }
+
+/// Regression: a managed-Git Vault must keep polling on its own schedule,
+/// turn after turn. The seams were each covered in isolation — the
+/// scheduler's re-arm, the dispatch path's outcome publication — but not
+/// the cycle they form, which is the only thing that makes a Vault poll
+/// twice.
+/// One full production cycle — the scheduler's tick requests the turn, the
+/// dispatch path runs and publishes it, and the recorded outcome re-arms the
+/// next attempt one poll interval out — driven through the same seams
+/// `spawn_scheduler_tick` and the coordinator's worker loop use in
+/// production.
+#[tokio::test]
+async fn a_managed_git_vault_keeps_polling_on_its_configured_interval() {
+    let directory = tempdir().expect("temporary state directory");
+    let (collection, registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    std::fs::create_dir_all(control_block.vault_path()).expect("already-acquired checkout");
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let poll_interval = std::time::Duration::from_secs(3600);
+    managed_git.activate(vault_id, poll_interval);
+
+    // The first tick after activation must find the Vault due immediately.
+    let started = std::time::Instant::now();
+    managed_git.tick(started);
+    let first = worker
+        .run_next(|request| {
+            dispatch_git_turn_with(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+            )
+        })
+        .await
+        .expect("the tick queued an initial Git turn");
+    assert_eq!(first.request.kind(), VaultWorkKind::Git);
+    first.result.expect("initial sync succeeds");
+    // Drain the Index turn the successful Git turn queued.
+    worker
+        .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+        .await
+        .expect("Index turn queued by the successful Git turn");
+
+    // Nothing is due before the interval elapses.
+    managed_git.tick(std::time::Instant::now());
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Git),
+        ScheduleResult::Queued,
+        "a Vault must not be re-requested before its interval elapses"
+    );
+    coordinator.drain_vault(vault_id);
+    coordinator.activate_vault(vault_id);
+
+    // Once the interval has elapsed, the tick must request the next turn.
+    managed_git.tick(started + poll_interval + std::time::Duration::from_secs(1));
+    let second = worker
+        .run_next(|request| {
+            dispatch_git_turn_with(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+            )
+        })
+        .await
+        .expect("the interval tick queued the next Git turn");
+    assert_eq!(second.request.kind(), VaultWorkKind::Git);
+    assert_eq!(second.request.vault_id(), vault_id);
+    second.result.expect("scheduled re-sync succeeds");
+}

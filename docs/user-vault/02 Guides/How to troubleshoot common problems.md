@@ -71,6 +71,12 @@ Check the Vault's Sync console for the specific failure rather than assuming —
 > [!note]
 > A Vault reporting `git: pending` isn't stuck by default — that's the normal state while a clone or fetch is in flight. Only treat it as a problem if it stays `pending` well past the configured sync interval.
 
+## "Is this Vault still syncing on schedule?"
+
+`GET /api/v1/vaults` reports `last_synced_at` and `next_attempt_at` for every Vault with a remote — answer the question from those rather than from the repository's Git history. A check that finds nothing new leaves no trace in `git log` or `git reflog`, so an unchanged remote-tracking branch is not evidence that Hatchdoor stopped checking; it usually means there was nothing to fetch.
+
+If `next_attempt_at` is in the past by more than a minute or so, something is genuinely wrong. If it's in the future, the Vault is simply waiting out its interval — **Sync now** on the Vault's page overrides it. Note that restarting Hatchdoor no longer forces a sync: a Vault inside its interval resumes the countdown across a restart, so restarting is no longer a way to prod a Vault into checking.
+
 ## Search returns nothing, or not what you expected
 
 Before assuming something's broken: search only considers the **default surface** unless you explicitly ask for more. If the note you expected lives under a [[The layer system|layer]], it won't appear in an ordinary search — see [[How to organize a Vault with layers]] for how to search across layers deliberately. If a Vault's `search` status is `browsable` rather than `ready` (see above), semantic search over it isn't available yet, but keyword search and browsing already work.

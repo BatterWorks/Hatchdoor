@@ -1098,7 +1098,18 @@ pub async fn run_server() {
     // #90 establishes durable reconstruction and lifecycle admission. The
     // worker loop below is the one global dispatcher for all admitted turns.
     let (vault_work, vault_worker) = VaultWorkCoordinator::new();
-    let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+    // Beside the registry, in the same durable state directory: a Vault's
+    // poll interval is measured from its last remembered turn, so a redeploy
+    // resumes the countdown instead of restarting it (and no longer forces a
+    // Git turn on every start).
+    let managed_git = Arc::new(crate::git::ManagedGitScheduler::with_state_store(
+        vault_work.clone(),
+        Arc::new(
+            crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(
+                vault_registry.path(),
+            ),
+        ),
+    ));
     match (&registry_state, legacy_migration_recovery.as_ref()) {
         (_, Some(recovery)) => warn!(
             code = recovery.code(),

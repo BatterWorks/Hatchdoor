@@ -1199,6 +1199,14 @@ impl VaultCollectionRuntime {
             .keys()
             .copied()
             .collect::<BTreeSet<_>>();
+        // A Vault in `previously_present` but not `currently_present` has left
+        // the collection: prune the durable Git-turn record along with its
+        // disposable cache rows, so nothing that reconnects under this Vault
+        // ID inherits its countdown. Disabling keeps both — the Vault is
+        // still in the collection and resumes its schedule when re-enabled.
+        for vault_id in previously_present.difference(&currently_present) {
+            managed_git.forget_persisted_state(*vault_id);
+        }
         for vault_id in previously_present.difference(&currently_present) {
             if active_retired.contains(vault_id) {
                 continue;
@@ -1287,11 +1295,29 @@ impl VaultCollectionRuntime {
             // Git status: an edit that only changes `poll_interval_secs`
             // still produces a non-retained control block here (its
             // `VaultDefinition` compares unequal), but must not itself
-            // request a Git turn — only a `Pending` status does that, below.
-            if let Some(poll_interval) = runtime.definition().source().managed_git_poll_interval() {
+            // request a Git turn.
+            let scheduled = runtime.definition().source().managed_git_poll_interval();
+            if let Some(poll_interval) = scheduled {
                 managed_git.activate(*vault_id, poll_interval);
+                // Due now — a Vault that has never synced, or one already
+                // past its interval — starts its turn here rather than
+                // waiting out a tick. One still inside its interval is left
+                // to the schedule its last turn armed.
+                managed_git.request_if_due(*vault_id);
             }
-            if snapshot.git == VaultGitStatus::Pending {
+            // A scheduler-tracked Vault has already had its due-check above,
+            // which is the only thing that should start one of its turns.
+            // Requesting here on `Pending` as well would undo it: activation
+            // publishes `Pending` on every fresh process, so every restart
+            // would re-sync and then re-arm the interval from the restart —
+            // exactly how a deployment redeployed more often than its poll
+            // interval never reached a scheduled turn.
+            //
+            // A Git-capable source the scheduler does *not* track — an
+            // `ExistingGit` Vault in `LocalHistory` mode, which has no remote
+            // to poll — still needs its activation turn from here, because
+            // nothing else will ever request one for it.
+            if snapshot.git == VaultGitStatus::Pending && scheduled.is_none() {
                 coordinator.request(*vault_id, VaultWorkKind::Git);
             }
         }

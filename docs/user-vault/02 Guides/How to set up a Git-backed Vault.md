@@ -48,6 +48,8 @@ These appear whenever the chosen behaviour talks to a remote (**Pull-only** or *
 - **Sign-in** — **No sign-in** for a public repository, or **Access token** for a private one. The token is HTTPS-only, write-only (never shown again once saved), and stored separately from every other credential Hatchdoor holds.
 - **Sync schedule** — how often Hatchdoor checks the remote absent a manual sync, since "Hatchdoor has no way to be told when something is pushed." Anywhere from 1 minute to 1440 minutes (24 hours); the default is the slowest setting, once a day, so a Vault you want to stay current sooner needs a shorter interval set deliberately.
 
+The schedule is measured from the Vault's last completed check and survives a restart: Hatchdoor remembers when each Vault last synced, so restarting or redeploying resumes the countdown instead of starting a fresh one. A Vault that is already past its interval when Hatchdoor starts syncs straight away, and one still inside its interval waits out the remainder rather than checking again. This matters on a deployment that redeploys often — before, a Vault set to check once a day would sync on every restart and never actually reach a scheduled check.
+
 ## Editing an existing Vault's Git settings
 
 Open the Vault from **Settings** and its own page has a **Save Vault** button in the header, plus a **Sync** console (when Git applies) showing whether the last sync was healthy and a **Sync now** (or **Try again**, if something failed) button.

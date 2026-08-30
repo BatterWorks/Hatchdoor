@@ -877,7 +877,15 @@ fn publish_managed_git_turn_outcome(
     result: &Result<ManagedGitOutcome, VaultWorkError>,
 ) {
     match result {
-        Ok(_) => {
+        Ok(outcome) => {
+            // One line per completed poll, so an operator can tell a Vault
+            // that polled and found nothing from one that is not polling at
+            // all. A Git turn's only other trace is a remote-side ref
+            // update, which a fetch that brought nothing new never writes —
+            // leaving `git reflog` unable to answer "is this Vault still on
+            // its schedule?" Failures already carry their own `warn!` (see
+            // `VaultWorkExecutor::publish_outcome`) plus per-Vault status.
+            info!(%vault_id, ?outcome, "Vault Git turn completed");
             let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
             publish_local_content_after_git_success(control_block);
             if control_block.is_accepting_operations()

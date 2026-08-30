@@ -24,5 +24,6 @@ pub mod vault_mutation;
 pub mod vault_read;
 pub mod vault_registry;
 pub mod vault_runtime;
+pub mod vault_runtime_state;
 pub mod vault_watcher;
 pub mod vault_work;
