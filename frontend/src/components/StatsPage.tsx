@@ -3,7 +3,8 @@ import { Link } from "react-router-dom";
 
 import { apiFetch } from "../api/api";
 import { readErrorMessage } from "../api/apiError";
-import { useVaultDiscovery, useVaultScope } from "../hooks/useVaultScope";
+import { useVaultScope } from "../hooks/useVaultScope";
+import { useVaultCollection } from "../vaults";
 
 import { StateBlock } from "./ui";
 import type {
@@ -258,7 +259,7 @@ function vaultsInScope(
 
 export function StatsPage() {
   const [scope] = useVaultScope();
-  const { vaults, loading: loadingVaults } = useVaultDiscovery();
+  const { vaults, loading: loadingVaults } = useVaultCollection();
   const targets = vaultsInScope(scope, vaults);
   // Statistics stay grouped per Vault (#62) and `stats/detail` is an exact
   // single-Vault read, so `all` is N reads presented as N sections rather

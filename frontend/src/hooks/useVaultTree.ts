@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { apiFetch, withAccessToken } from "../api/api";
+import { apiFetch } from "../api/api";
+import { useVaultCollection } from "../vaults";
 import { readErrorMessage } from "../api/apiError";
 import { collectFolderPaths } from "../lib/folderPaths";
 import { flattenNoteCandidates } from "../lib/noteCandidates";
@@ -36,9 +37,12 @@ function mergeVaultTrees(vaultTrees: VaultTree[]): ExplorerFolder | null {
 
 /**
  * Owns the vault explorer tree and its live-refresh machinery for the given
- * scope: initial load, the SSE `vault-collection-revision` subscription that
- * bumps `vaultRevision`, and reload on revision change. Also derives the
- * folder-path and note-candidate lists the shell and dialogs consume.
+ * scope: initial load, and reload whenever the collection client's revision
+ * moves. The `vault-collection-revision` subscription itself belongs to the
+ * collection client (#198) — one stream for the whole app, so the tree and
+ * every other surface invalidate on the same event rather than each opening
+ * their own. Also derives the folder-path and note-candidate lists the shell
+ * and dialogs consume.
  */
 export function useVaultTree(scope: VaultScope) {
   const [tree, setTree] = useState<ExplorerFolder | null>(null);
@@ -51,7 +55,7 @@ export function useVaultTree(scope: VaultScope) {
   const [modifiedNotesMissingVaults, setModifiedNotesMissingVaults] = useState<
     string[]
   >([]);
-  const [vaultRevision, setVaultRevision] = useState(0);
+  const { revision: vaultRevision } = useVaultCollection();
 
   const loadTree = useCallback(async () => {
     setTreeError(null);
@@ -108,38 +112,6 @@ export function useVaultTree(scope: VaultScope) {
       setLoadingTree(false);
     })();
   }, [loadModifiedNotes, loadTree]);
-
-  useEffect(() => {
-    if (!("EventSource" in window)) {
-      return;
-    }
-
-    const events = new EventSource(withAccessToken("/api/v1/vaults/events"));
-    const onCollectionRevision = (event: MessageEvent<string>) => {
-      try {
-        const payload = JSON.parse(event.data) as {
-          collection_revision?: unknown;
-        };
-        if (typeof payload.collection_revision === "number") {
-          const revision = payload.collection_revision;
-          setVaultRevision((current) =>
-            revision > current ? revision : current,
-          );
-        }
-      } catch {
-        // Ignore malformed event payloads; the next valid revision will resync.
-      }
-    };
-    events.addEventListener("vault-collection-revision", onCollectionRevision);
-
-    return () => {
-      events.removeEventListener(
-        "vault-collection-revision",
-        onCollectionRevision,
-      );
-      events.close();
-    };
-  }, []);
 
   useEffect(() => {
     if (vaultRevision === 0) {

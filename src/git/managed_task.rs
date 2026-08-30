@@ -5,9 +5,9 @@
 //!
 //! This boundary decides *when* to request a Git turn for a Vault and *what*
 //! one turn does. It does not know about `VaultControlBlock`, the Vault
-//! registry, or the coordinator's worker loop: runtime composition (#97's
-//! `src/vault_runtime.rs` seam) resolves a Vault's current configuration,
-//! runs the turn, and publishes the result.
+//! registry, or the coordinator's worker loop: the Vault work executor
+//! (`src/vault_executor.rs`) resolves a Vault's current configuration, runs
+//! the turn, and publishes the result.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -271,7 +271,7 @@ fn resolve_checked_out_branch(repository_path: &Path) -> Result<String, ()> {
 /// backs off and retries automatically or waits for the normal schedule, a
 /// manual retry, a configuration change, or a restart.
 ///
-/// `pub(crate)`: also used by `vault_runtime::dispatch_managed_git_turn_with`
+/// `pub(crate)`: also used by `vault_executor::dispatch_git_turn_with`
 /// to classify a lease-acquisition failure at dispatch time (before
 /// `run_managed_git_turn` runs), so both classify the same
 /// `ManagedCheckoutError` the same way instead of duplicating this table.
@@ -605,18 +605,18 @@ impl ManagedGitScheduler {
     /// Request a Git turn for every tracked Vault whose schedule is due as of
     /// `now`.
     ///
-    /// Skips a Vault whose Git turn is already active or already has a
-    /// pending rerun queued, rather than calling
-    /// [`VaultWorkCoordinator::request`] unconditionally. `request` itself
-    /// only coalesces *duplicate* requests of an already-active turn into
-    /// one guaranteed rerun — it cannot know that rerun would fire the
-    /// instant the active turn's `execute` closure returns, before
-    /// `record_outcome` (called from inside that same closure, once the
-    /// turn's result is known) has a chance to arm backoff. A Git turn can
-    /// easily outlast `DEFAULT_TICK_INTERVAL`, so an unconditional `request`
-    /// here would pre-queue that zero-delay rerun on every tick during the
-    /// active window, defeating backoff on every retryable failure. This
-    /// check is intentionally scoped to `tick()`'s own automatic due-check;
+    /// Uses [`VaultWorkCoordinator::request_if_idle`] rather than
+    /// [`VaultWorkCoordinator::request`], so a Vault whose Git turn is
+    /// already active or already has a pending rerun queued is skipped.
+    /// `request` only coalesces *duplicate* requests of an already-active
+    /// turn into one guaranteed rerun — and that rerun would fire the instant
+    /// the active turn's `execute` closure returns, before `record_outcome`
+    /// (called from inside that same closure, once the turn's result is
+    /// known) has a chance to arm backoff. A Git turn can easily outlast
+    /// `DEFAULT_TICK_INTERVAL`, so an unconditional `request` here would
+    /// pre-queue that zero-delay rerun on every tick during the active
+    /// window, defeating backoff on every retryable failure. The skip is
+    /// intentionally scoped to `tick()`'s own automatic due-check;
     /// [`Self::sync_now`]/[`Self::retry_now`] must still coalesce a manual
     /// request into the turn's one guaranteed rerun exactly as before — a
     /// user explicitly asking for a resync is not a case this skip should
@@ -631,10 +631,8 @@ impl ManagedGitScheduler {
                 .collect::<Vec<_>>()
         };
         for vault_id in due {
-            if self.coordinator.has_work(vault_id, VaultWorkKind::Git) {
-                continue;
-            }
-            self.coordinator.request(vault_id, VaultWorkKind::Git);
+            self.coordinator
+                .request_if_idle(vault_id, VaultWorkKind::Git);
         }
     }
 }
@@ -1338,7 +1336,7 @@ mod tests {
     /// contradicting the documented process-lifetime ownership lease. This
     /// proves the fix: across two consecutive turns for the same Vault
     /// driven through `ManagedGitScheduler`'s lease-holding methods (the
-    /// same ones `dispatch_managed_git_turn_with` uses in production), a
+    /// same ones `dispatch_git_turn_with` uses in production), a
     /// second process's `ManagedCheckoutLease::acquire` for the same
     /// `(state_directory, vault_id)` fails with `OwnershipUnavailable`
     /// *during the gap between those two turns* — the lock is held

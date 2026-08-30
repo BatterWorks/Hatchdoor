@@ -111,7 +111,7 @@ pub fn parse_frontmatter_metadata(content: &str) -> Result<FrontmatterMetadata, 
         return Ok(FrontmatterMetadata::default());
     }
 
-    let value: serde_json::Value = serde_yaml::from_str(frontmatter)
+    let value: serde_json::Value = serde_yaml_ng::from_str(frontmatter)
         .map_err(|error| format!("invalid YAML frontmatter: {error}"))?;
     let mut properties = match value {
         serde_json::Value::Null => serde_json::Map::new(),
@@ -281,6 +281,62 @@ mod tests {
             build_fts_query("réseau dns"),
             Some("\"réseau\" OR \"dns\"".to_string())
         );
+    }
+
+    #[test]
+    fn frontmatter_scalar_types_survive_parsing_unchanged() {
+        // The YAML parser is the one seam where a scalar can silently change
+        // type — a quoted number becoming an integer, a date becoming a
+        // timestamp object — and every later read and every write round-trip
+        // inherits whatever it decides. Pin the decisions explicitly.
+        let content = concat!(
+            "---\n",
+            "quoted_number: \"123\"\n",
+            "bare_number: 123\n",
+            "quoted_bool: \"true\"\n",
+            "bare_bool: true\n",
+            "float: 1.50\n",
+            "date: 2026-08-29\n",
+            "quoted_date: \"2026-08-29\"\n",
+            "unicode: \"réseau — 日本語 🌱\"\n",
+            "multiline: |\n",
+            "  first line\n",
+            "  second line\n",
+            "folded: >\n",
+            "  folded one\n",
+            "  folded two\n",
+            "empty_value:\n",
+            "leading_zero: \"007\"\n",
+            "---\n",
+            "Body text.\n",
+        );
+
+        let metadata = parse_frontmatter_metadata(content).expect("valid frontmatter");
+        let properties = &metadata.properties;
+
+        assert_eq!(properties["quoted_number"], serde_json::json!("123"));
+        assert_eq!(properties["bare_number"], serde_json::json!(123));
+        assert_eq!(properties["quoted_bool"], serde_json::json!("true"));
+        assert_eq!(properties["bare_bool"], serde_json::json!(true));
+        assert_eq!(properties["float"], serde_json::json!(1.5));
+        // Dates stay strings either way: nothing downstream expects a
+        // timestamp type, and a silent conversion would rewrite the note.
+        assert_eq!(properties["date"], serde_json::json!("2026-08-29"));
+        assert_eq!(properties["quoted_date"], serde_json::json!("2026-08-29"));
+        assert_eq!(
+            properties["unicode"],
+            serde_json::json!("réseau — 日本語 🌱")
+        );
+        assert_eq!(
+            properties["multiline"],
+            serde_json::json!("first line\nsecond line\n")
+        );
+        assert_eq!(
+            properties["folded"],
+            serde_json::json!("folded one folded two\n")
+        );
+        assert_eq!(properties["empty_value"], serde_json::Value::Null);
+        assert_eq!(properties["leading_zero"], serde_json::json!("007"));
     }
 
     #[test]

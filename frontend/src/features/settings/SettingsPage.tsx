@@ -273,14 +273,10 @@ function plaqueValue(setting: Setting): string {
 
 export function SettingsPage({
   vaults = [],
-  onVaultDiscoveryRefresh,
   onRestoreCreateDraft,
 }: {
   /** Enabled Vaults, for the held-draft destination picker (#151). */
   vaults?: VaultSummary[];
-  /** Refreshes the app-wide Vault discovery `App.tsx` drives the sidebar and
-   * scope zone from, on top of this page's own Vault list (issue #153). */
-  onVaultDiscoveryRefresh?: () => void;
   /** Held drafts that need a new note stay unrecoverable without it. */
   onRestoreCreateDraft?: RestoreCreateDraft;
 } = {}) {
@@ -729,7 +725,6 @@ export function SettingsPage({
               setSelectedVaultId(vaultId);
             }}
             autoOpenCreation={autoOpenCreation}
-            onVaultCreated={onVaultDiscoveryRefresh}
           />
           <p className="settings-index-group">This server</p>
           <nav aria-label="Settings sections">

@@ -4,8 +4,9 @@ import { type Simulation } from "d3-force";
 
 import { apiFetch } from "../../api/api";
 import { readErrorMessage } from "../../api/apiError";
-import { deriveVaultSlot, type VaultSlotState } from "../../app/vaultSlotLogic";
-import { useVaultDiscovery, useVaultScope } from "../../hooks/useVaultScope";
+import { type VaultSlotState } from "../../app/vaultSlotLogic";
+import { useVaultScope } from "../../hooks/useVaultScope";
+import { useVaultCollection, useVaultProjection } from "../../vaults";
 import { describeVaultsNotDrawn } from "../../lib/vaultParticipants";
 import type {
   GraphData,
@@ -129,7 +130,8 @@ interface RenderIsland extends GraphIsland {
 export function GraphPage() {
   const navigate = useNavigate();
   const [scope] = useVaultScope();
-  const { vaults, demoMode, loading: loadingVaults } = useVaultDiscovery();
+  const { vaults, loading: loadingVaults } = useVaultCollection();
+  const vaultProjection = useVaultProjection();
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -706,8 +708,7 @@ export function GraphPage() {
         if (dist > maxDist) maxDist = dist;
       }
       const radius = maxDist + ISLAND_ENCLOSURE_MARGIN;
-      const captionHeight =
-        ISLAND_CAPTION_GAP + ISLAND_CAPTION_LINE_HEIGHT * 2;
+      const captionHeight = ISLAND_CAPTION_GAP + ISLAND_CAPTION_LINE_HEIGHT * 2;
       minX = Math.min(minX, island.cx - radius);
       maxX = Math.max(maxX, island.cx + radius);
       minY = Math.min(minY, island.cy - radius - captionHeight);
@@ -837,8 +838,10 @@ export function GraphPage() {
     simLinksRef.current = links;
     islandsRef.current = islands.map((island) => {
       const vault = vaultById.get(island.vaultId);
+      // The island's own node count is the count source here — the graph
+      // reports what it drew, not what the Vault holds.
       const slot: VaultSlotState = vault
-        ? deriveVaultSlot(vault, island.nodeCount, demoMode)
+        ? vaultProjection.slotFor(vault, island.nodeCount)
         : { kind: "count", count: island.nodeCount };
       return { ...island, slot };
     });
@@ -859,7 +862,7 @@ export function GraphPage() {
   }, [
     vaultGraphs,
     vaults,
-    demoMode,
+    vaultProjection,
     loadingVaults,
     participants,
     scope,

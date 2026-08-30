@@ -144,7 +144,7 @@ pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
 /// `VaultGitMode::LocalHistory`: validate the enclosing checkout, then commit
 /// whatever Vault-subtree drift has accumulated since the last turn. Never
 /// contacts a remote, regardless of what the enclosing checkout's `origin`
-/// might be — this is `dispatch_managed_git_turn_with`'s counterpart to
+/// might be — this is `dispatch_git_turn_with`'s counterpart to
 /// `run_managed_git_turn` for that source/mode combination, the concrete
 /// blocking `git2` operation `VaultWorkKind::Git` executes. Must run from
 /// `spawn_blocking`.
@@ -644,7 +644,7 @@ mod tests {
         );
     }
 
-    /// `run_local_history_git_turn` is `dispatch_managed_git_turn_with`'s
+    /// `run_local_history_git_turn` is `dispatch_git_turn_with`'s
     /// `ExistingGit` + `VaultGitMode::LocalHistory` counterpart to
     /// `run_managed_git_turn`. The composed `vault_runtime` test exercises it
     /// through the full async dispatch path; this proves its own contract

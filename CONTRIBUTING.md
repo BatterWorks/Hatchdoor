@@ -19,9 +19,24 @@ Backend (Rust):
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
+cargo test --all --all-features
 ```
+
+The offline benchmark harness — the `eval` and `index_microbench` binaries and
+the candle-backed embedders they sweep — sits behind the non-default `eval`
+feature, so a default build compiles none of it. That is why the checks run
+twice: the default run is what a deployment actually ships, and the all-features
+run is the only thing that compiles the gated lines and executes the harness's
+own test targets, which a default `cargo test` skips entirely. Without the
+second run, gated code rots with nothing to say so.
+
+`--all-features` also enables `embedder-tests`, whose tests load real model
+weights. The first such run downloads them from Hugging Face — allow for that
+once, and for the disk it costs; afterwards they come from the local cache. If
+you need an offline run, `cargo test --all --features eval` covers the harness
+without the model downloads.
 
 Frontend (`frontend/`):
 

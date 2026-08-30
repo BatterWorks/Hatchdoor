@@ -407,7 +407,7 @@ fn update_note_frontmatter_rejects_empty_updates_and_all_null_creation() {
 #[test]
 fn update_note_frontmatter_warns_when_duplicate_keys_are_collapsed() {
     let tmp = TempDir::new().expect("tempdir");
-    // serde_yaml parses this last-wins, so `keep: second` silently replaces
+    // serde_yaml_ng parses this last-wins, so `keep: second` silently replaces
     // `keep: first` — surfaced as a quality warning like sibling primitives.
     let original = "---\nkeep: first\nkeep: second\n---\nbody\n";
     let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
@@ -424,6 +424,103 @@ fn update_note_frontmatter_warns_when_duplicate_keys_are_collapsed() {
             .any(|warning| warning.contains("duplicate key")),
         "duplicate-key collapse is warned about: {:?}",
         outcome.quality_warnings
+    );
+}
+
+#[test]
+fn update_note_frontmatter_round_trips_edge_case_values_without_changing_their_types() {
+    // A merge re-serializes the whole block, so every untouched value makes a
+    // parse -> serialize -> parse trip. Style may change (that is documented);
+    // the value and its type may not, or a note gains or loses meaning behind
+    // its author's back.
+    let tmp = TempDir::new().expect("tempdir");
+    let original = concat!(
+        "---\n",
+        "quoted_number: \"123\"\n",
+        "bare_number: 123\n",
+        "quoted_bool: \"true\"\n",
+        "float: 1.50\n",
+        "date: 2026-08-29\n",
+        "unicode: \"réseau — 日本語 🌱\"\n",
+        "colon_in_value: \"key: value\"\n",
+        "multiline: |\n",
+        "  first line\n",
+        "  second line\n",
+        "nested:\n",
+        "  keep: me\n",
+        "  deeper:\n",
+        "    count: 2\n",
+        "    label: \"2\"\n",
+        // tags and aliases are the two keys the parser lifts out of
+        // `properties`, so they need asserting separately from the loop below.
+        "tags:\n",
+        "  - alpha\n",
+        "aliases:\n",
+        "  - Alt Name\n",
+        "---\n",
+        "\n",
+        "body text\n",
+    );
+    let (_index, entry) = frontmatter_entry(tmp.path(), original, "Home");
+    let before = crate::cache::parse::parse_frontmatter_metadata(original)
+        .expect("original frontmatter parses");
+
+    let mut updates = serde_json::Map::new();
+    updates.insert("status".to_string(), serde_json::json!("active"));
+    update_note_frontmatter(&entry, updates, &content_hash(original)).expect("frontmatter update");
+
+    let updated = fs::read_to_string(&entry.path).expect("read");
+    let after =
+        crate::cache::parse::parse_frontmatter_metadata(&updated).expect("updated frontmatter");
+
+    for (key, value) in &before.properties {
+        assert_eq!(
+            after.properties.get(key),
+            Some(value),
+            "{key} changed across the merge round trip: {updated}"
+        );
+    }
+    assert_eq!(after.tags, before.tags, "tags survive: {updated}");
+    assert_eq!(after.aliases, before.aliases, "aliases survive: {updated}");
+    assert_eq!(
+        after.properties.get("status"),
+        Some(&serde_json::json!("active")),
+        "the merged key is present: {updated}"
+    );
+
+    // Reparsing with the same crate would hide an emitter change that is
+    // stable under its own reader, so pin the bytes it writes as well. This
+    // block is what serde_yaml 0.9 emitted for the same input; it is the
+    // assertion that would fail if the swap were not behaviour preserving.
+    assert_eq!(
+        updated,
+        concat!(
+            "---\n",
+            "aliases:\n",
+            "- Alt Name\n",
+            "bare_number: 123\n",
+            "colon_in_value: 'key: value'\n",
+            "date: 2026-08-29\n",
+            "float: 1.5\n",
+            "multiline: |\n",
+            "  first line\n",
+            "  second line\n",
+            "nested:\n",
+            "  deeper:\n",
+            "    count: 2\n",
+            "    label: '2'\n",
+            "  keep: me\n",
+            "quoted_bool: 'true'\n",
+            "quoted_number: '123'\n",
+            "status: active\n",
+            "tags:\n",
+            "- alpha\n",
+            "unicode: réseau — 日本語 🌱\n",
+            "---\n",
+            "\n",
+            "body text\n",
+        ),
+        "emitter output is byte-stable across the crate swap"
     );
 }
 

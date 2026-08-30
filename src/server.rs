@@ -15,7 +15,7 @@ use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::app_state::AppState;
 use crate::auth::{
@@ -45,94 +45,20 @@ use crate::handlers::{
 };
 use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
-use crate::runtime_config::{
-    ConfigSnapshot, RuntimeConfig, live_settings_defaults, settings_file_path,
-};
+use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
+use crate::vault_executor::VaultWorkExecutor;
 use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
-use crate::vault_runtime::{
-    VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
-    dispatch_vault_index_turn_with_progress,
-};
-use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
+use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
+#[cfg(test)]
+use crate::vault_work::VaultWorkError;
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkKind};
 
 /// Hosts that only accept connections from the local machine. Binding to any
 /// other address exposes the port to the network.
 fn is_loopback_host(host: &str) -> bool {
     matches!(host.trim(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
-}
-
-/// Dependencies captured once for one worker turn. The runtime snapshot is
-/// deliberately part of this value so an admitted operation observes one
-/// immutable configuration view even if settings change later.
-#[derive(Clone)]
-struct VaultWorkDispatchContext {
-    vaults: VaultCollectionRuntime,
-    registry: VaultRegistryStore,
-    work: VaultWorkCoordinator,
-    managed_git: Arc<crate::git::ManagedGitScheduler>,
-    cache: Arc<SqliteCache>,
-    embedder: Arc<dyn Embedder>,
-    runtime_snapshot: Arc<ConfigSnapshot>,
-    author_name: String,
-    author_email: String,
-    startup: StartupTracker,
-}
-
-impl VaultWorkDispatchContext {
-    async fn dispatch(self, request: VaultWorkRequest) -> Result<(), VaultWorkError> {
-        match request.kind() {
-            VaultWorkKind::Git => {
-                dispatch_managed_git_turn(
-                    &self.vaults,
-                    &self.registry,
-                    &self.work,
-                    &self.managed_git,
-                    &self.author_name,
-                    &self.author_email,
-                    request,
-                )
-                .await
-            }
-            VaultWorkKind::Index => {
-                let embed_layers = self
-                    .runtime_snapshot
-                    .setting("HATCHDOOR_EMBED_LAYERS")
-                    .map(|setting| crate::runtime_config::is_truthy(&setting.value))
-                    .unwrap_or(true);
-                let progress_startup = self.startup.clone();
-                dispatch_vault_index_turn_with_progress(
-                    &self.vaults,
-                    self.cache,
-                    self.embedder,
-                    embed_layers,
-                    Some(Arc::new(move |progress| {
-                        progress_startup.set_indexing(progress);
-                    })),
-                    request,
-                )
-                .await
-            }
-            VaultWorkKind::Repair => Err(VaultWorkError::new(
-                "vault_work_kind_not_yet_implemented",
-                format!("{:?} dispatch is not implemented yet", request.kind()),
-                false,
-            )),
-        }
-    }
-}
-
-/// The instance-wide default commit identity for a Git turn, read from the
-/// settings snapshot bound to that turn. A Vault's own configured identity
-/// still overrides this (see `crate::git::config::resolve_commit_identity`).
-fn git_author_defaults(snapshot: &ConfigSnapshot) -> (String, String) {
-    (
-        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string()),
-        crate::git::config::non_empty_setting(snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string()),
-    )
 }
 
 async fn shutdown_signal() {
@@ -1231,88 +1157,17 @@ pub async fn run_server() {
         }
     });
 
-    // The one global consumer of `vault_work`/`vault_worker`: dispatches
-    // Git turns through the managed-Git scheduler and Index turns through the
-    // Vault-qualified disposable snapshot builder. Repair remains owned by
-    // its later packet.
+    // The one global consumer of `vault_work`/`vault_worker`. It takes the
+    // next coordinator position and hands it to the executor, which owns what
+    // a turn does and what the collection concludes from it. Repair remains
+    // owned by its later packet.
     // Exits on its own once `vault_work.shutdown()` drains to quiescence.
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
-        let dispatch_vaults = state.vaults.clone();
-        let dispatch_registry = state.vault_registry.clone();
-        let dispatch_work = vault_work.clone();
-        let dispatch_managed_git = managed_git.clone();
-        let dispatch_cache = state.startup_sqlite.clone();
-        let dispatch_embedder = state.embedder.clone();
-        let dispatch_runtime_config = state.runtime_config.clone();
-        let dispatch_startup = state.startup.clone();
-        let dispatch_model_setup_started = state.model_setup_started.clone();
+        let executor = VaultWorkExecutor::from_state(&state);
         async move {
-            while let Some(outcome) = vault_worker
-                .run_next(|request| {
-                    let vaults = dispatch_vaults.clone();
-                    let registry = dispatch_registry.clone();
-                    let work = dispatch_work.clone();
-                    let managed_git = dispatch_managed_git.clone();
-                    let cache = dispatch_cache.clone();
-                    let embedder = dispatch_embedder.clone();
-                    let runtime_snapshot = dispatch_runtime_config.snapshot();
-                    // Read per turn, not once at startup, so saving a new
-                    // author name or email applies to the next Git turn of
-                    // every Vault without its own commit identity — no
-                    // restart. Bound to the same snapshot the rest of this
-                    // turn observes.
-                    let (author_name, author_email) = git_author_defaults(&runtime_snapshot);
-                    let startup = dispatch_startup.clone();
-                    VaultWorkDispatchContext {
-                        vaults,
-                        registry,
-                        work,
-                        managed_git,
-                        cache,
-                        embedder,
-                        runtime_snapshot,
-                        author_name,
-                        author_email,
-                        startup,
-                    }
-                    .dispatch(request)
-                })
-                .await
-            {
-                if outcome.request.kind() == VaultWorkKind::Index {
-                    match &outcome.result {
-                        Ok(()) if collection_indexes_ready(&dispatch_vaults) => {
-                            dispatch_startup.set_ready();
-                            dispatch_model_setup_started.store(false, Ordering::Release);
-                            info!("Vault collection indexing complete");
-                        }
-                        Err(error) if error.code() != "embedder_not_ready" => {
-                            dispatch_startup.set_failed();
-                            dispatch_model_setup_started.store(false, Ordering::Release);
-                        }
-                        _ => {}
-                    }
-                }
-                if let Err(error) = outcome.result {
-                    // Repair remains expected until its dedicated packet;
-                    // Index and Git failures are actionable per-Vault status.
-                    if error.code() == "vault_work_kind_not_yet_implemented" {
-                        debug!(
-                            vault_id = %outcome.request.vault_id(),
-                            kind = ?outcome.request.kind(),
-                            "Vault background work kind not yet implemented"
-                        );
-                    } else {
-                        warn!(
-                            vault_id = %outcome.request.vault_id(),
-                            kind = ?outcome.request.kind(),
-                            code = error.code(),
-                            message = error.message(),
-                            "Vault background work turn failed"
-                        );
-                    }
-                }
+            while let Some(outcome) = vault_worker.run_next(|request| executor.run(request)).await {
+                executor.publish_outcome(&outcome);
             }
         }
     });
@@ -1407,16 +1262,6 @@ fn forward_vault_change_intent(
     }
 }
 
-fn collection_indexes_ready(vaults: &VaultCollectionRuntime) -> bool {
-    let active = vaults.active_vault_ids();
-    !active.is_empty()
-        && active.into_iter().all(|vault_id| {
-            vaults.runtime(vault_id).is_some_and(|runtime| {
-                runtime.snapshot().search == crate::vault_runtime::VaultSearchStatus::Ready
-            })
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1427,44 +1272,6 @@ mod tests {
         // refuse every one of them.
         check_legacy_environment_posture(&["VAULT_PATH".to_string()])
             .expect("VAULT_PATH is not a per-Vault setting");
-    }
-
-    /// The dispatch loop reads the author defaults from the snapshot bound to
-    /// each turn rather than from a value captured once at startup, so saving
-    /// a new name or email applies to the next Git turn of every Vault without
-    /// its own commit identity — with no restart.
-    #[test]
-    fn git_author_defaults_follow_a_saved_settings_change_without_a_restart() {
-        let runtime_config = crate::runtime_config::RuntimeConfig::for_tests();
-
-        assert_eq!(
-            git_author_defaults(&runtime_config.snapshot()),
-            ("Hatchdoor".to_string(), "hatchdoor@localhost".to_string()),
-            "an unconfigured instance falls back to the documented defaults"
-        );
-
-        runtime_config
-            .save([
-                (
-                    "HATCHDOOR_GIT_AUTHOR_NAME".to_string(),
-                    "Second Author".to_string(),
-                ),
-                (
-                    "HATCHDOOR_GIT_AUTHOR_EMAIL".to_string(),
-                    "second@example.test".to_string(),
-                ),
-            ])
-            .expect("save author defaults");
-
-        // A turn dispatched after the save binds a fresh snapshot, exactly as
-        // the dispatch closure does.
-        assert_eq!(
-            git_author_defaults(&runtime_config.snapshot()),
-            (
-                "Second Author".to_string(),
-                "second@example.test".to_string()
-            )
-        );
     }
 
     #[test]
@@ -1556,43 +1363,6 @@ mod tests {
             &coordinator,
             &vaults,
         ));
-    }
-
-    #[test]
-    fn startup_readiness_follows_collection_index_completion() {
-        let directory = tempfile::tempdir().expect("temporary state directory");
-        let vault_path = directory.path().join("vault");
-        std::fs::create_dir_all(&vault_path).expect("create Vault directory");
-        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
-        let snapshot = registry
-            .add(
-                0,
-                crate::vault_registry::NewVaultDefinition {
-                    name: "Startup Vault".to_string(),
-                    enabled: true,
-                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
-                    exclude_patterns: Vec::new(),
-                    https_credentials: None,
-                    archive_folder: None,
-                    commit_identity: None,
-                },
-            )
-            .expect("add Vault");
-        let vault_id = snapshot
-            .definitions()
-            .next()
-            .expect("Vault definition")
-            .vault_id();
-        let vaults = VaultCollectionRuntime::new();
-        vaults.reconcile(&registry, &snapshot);
-
-        assert!(!collection_indexes_ready(&vaults));
-        vaults
-            .runtime(vault_id)
-            .expect("active Vault")
-            .set_search_status(crate::vault_runtime::VaultSearchStatus::Ready, None)
-            .expect("publish ready search status");
-        assert!(collection_indexes_ready(&vaults));
     }
 
     #[test]
@@ -1825,9 +1595,6 @@ mod tests {
 
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
-    use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
-    use crate::search::{LayerSelection, NoteFilters, SearchMode};
-    use crate::vault_read::VaultScope;
 
     fn app_for_tests() -> (Router, TempDir) {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -1917,124 +1684,6 @@ mod tests {
 
     fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         app_for_tests_with_web_auth(None)
-    }
-
-    #[tokio::test]
-    async fn queued_index_turn_uses_the_runtime_snapshot_captured_by_server_dispatch() {
-        let directory = TempDir::new_in("/tmp").expect("temporary state directory");
-        let vault_path = directory.path().join("vault");
-        std::fs::create_dir_all(vault_path.join("sources")).expect("create Vault directory");
-        std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources")
-            .expect("write layer marker");
-        std::fs::write(
-            vault_path.join("sources/Clip.md"),
-            "# Clip\n\nmelatonin regulates the circadian rhythm",
-        )
-        .expect("write demoted note");
-
-        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
-        let snapshot = registry
-            .add(
-                0,
-                crate::vault_registry::NewVaultDefinition {
-                    name: "Only".to_string(),
-                    enabled: true,
-                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
-                    exclude_patterns: Vec::new(),
-                    https_credentials: None,
-                    archive_folder: None,
-                    commit_identity: None,
-                },
-            )
-            .expect("add Vault");
-        let vault_id = snapshot
-            .definitions()
-            .next()
-            .expect("Vault definition")
-            .vault_id();
-        let vaults = VaultCollectionRuntime::new();
-        let (work, mut worker) = VaultWorkCoordinator::new();
-        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(work.clone()));
-        vaults
-            .reconcile_and_reconstruct(&registry, &snapshot, &work, &managed_git)
-            .await;
-        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
-        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let runtime_config = RuntimeConfig::for_tests();
-        runtime_config
-            .save([("HATCHDOOR_EMBED_LAYERS".to_string(), "false".to_string())])
-            .expect("save disabled setting");
-        let captured = runtime_config.snapshot();
-        runtime_config
-            .save([("HATCHDOOR_EMBED_LAYERS".to_string(), "true".to_string())])
-            .expect("save later setting");
-
-        let outcome = worker
-            .run_next({
-                let vaults = vaults.clone();
-                let registry = registry.clone();
-                let work = work.clone();
-                let cache = cache.clone();
-                let embedder = embedder.clone();
-                move |request| {
-                    VaultWorkDispatchContext {
-                        vaults,
-                        registry,
-                        work,
-                        managed_git,
-                        cache,
-                        embedder,
-                        runtime_snapshot: captured,
-                        author_name: "Hatchdoor".to_string(),
-                        author_email: "hatchdoor@example.test".to_string(),
-                        startup: StartupTracker::scanning(),
-                    }
-                    .dispatch(request)
-                }
-            })
-            .await
-            .expect("queued Index turn");
-        outcome.result.expect("Index publication succeeds");
-
-        let (layers, _) = LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
-        let search = VaultSearchCore::new(&cache, &vaults, embedder.as_ref());
-        let keyword = search
-            .search(VaultSearchRequest {
-                scope: VaultScope::One(vault_id),
-                query: "melatonin".to_string(),
-                mode: SearchMode::Keyword,
-                limit: 10,
-                per_note_cap: 1,
-                filters: NoteFilters::default(),
-                include_properties: Vec::new(),
-                layers: layers.clone(),
-            })
-            .expect("keyword search");
-        assert!(
-            keyword
-                .data
-                .results
-                .iter()
-                .any(|hit| hit.note_slug == "clip")
-        );
-        assert!(
-            search
-                .search(VaultSearchRequest {
-                    scope: VaultScope::One(vault_id),
-                    query: "melatonin circadian".to_string(),
-                    mode: SearchMode::Semantic,
-                    limit: 10,
-                    per_note_cap: 1,
-                    filters: NoteFilters::default(),
-                    include_properties: Vec::new(),
-                    layers,
-                })
-                .expect("semantic search")
-                .data
-                .results
-                .is_empty(),
-            "the turn must retain the false setting captured before the later save"
-        );
     }
 
     fn app_for_tests_with_web_and_mcp_auth(

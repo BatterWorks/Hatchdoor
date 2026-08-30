@@ -8,13 +8,13 @@
 
 import { apiFetch } from "../../api/api";
 import type {
-  VaultDiscoveryResponse,
   VaultId,
   VaultRuntimeError,
   VaultRuntimeErrorDetail,
   VaultSource,
   VaultSummary,
 } from "../../types";
+import { fetchRegistryRevision } from "../../vaults";
 
 /** `apiFetch` throws on a network failure, a timeout, or an aborted request
  * — not just on a non-2xx response. The identity round trip below needs to
@@ -389,19 +389,13 @@ export function isRecoveryPending(vaultId: VaultId): boolean {
   }
 }
 
-/** The current `expected_registry_revision`, fetched fresh rather than
- * trusted from whenever a caller last read it — every mutation that needs a
- * revision (pause recovery, Vault creation) reads it immediately before
- * acting, since the registry can change between when a form opens and when
- * it submits. */
-export async function fetchRegistryRevision(): Promise<number | null> {
-  const discovery = await requestJson("/api/v1/vaults");
-  const registryRevision = (discovery.payload as VaultDiscoveryResponse)
-    .registry_revision;
-  return discovery.ok && registryRevision !== undefined
-    ? registryRevision
-    : null;
-}
+/** The current `expected_registry_revision`, read fresh through the collection
+ * client rather than trusted from whenever a caller last looked — every
+ * mutation that needs a revision (pause recovery, Vault creation) reads it
+ * immediately before acting, since the registry can change between when a form
+ * opens and when it submits. Re-exported here so a settings caller reaches the
+ * whole Git-behaviour vocabulary through one module. */
+export { fetchRegistryRevision };
 
 /** The single recovery action: re-enable with whatever revision is current
  * right now, since the marker may be read on a visit long after the failure.
