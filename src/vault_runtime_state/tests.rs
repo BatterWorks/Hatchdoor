@@ -21,6 +21,7 @@ fn a_recorded_git_turn_is_readable_by_a_later_store_over_the_same_file() {
                 completed_at,
                 outcome: GitTurnOutcome::UpToDate,
                 code: None,
+                message: None,
             },
         )
         .expect("record the turn");
@@ -33,6 +34,7 @@ fn a_recorded_git_turn_is_readable_by_a_later_store_over_the_same_file() {
             completed_at,
             outcome: GitTurnOutcome::UpToDate,
             code: None,
+            message: None,
         })
     );
 }
@@ -69,6 +71,7 @@ fn a_future_schema_file_is_read_as_unknown_and_never_overwritten() {
             completed_at: SystemTime::UNIX_EPOCH,
             outcome: GitTurnOutcome::UpToDate,
             code: None,
+            message: None,
         },
     );
 

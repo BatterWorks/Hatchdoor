@@ -1299,6 +1299,25 @@ impl VaultCollectionRuntime {
             let scheduled = runtime.definition().source().managed_git_poll_interval();
             if let Some(poll_interval) = scheduled {
                 managed_git.activate(*vault_id, poll_interval);
+                // A fresh process publishes `Pending` for every Vault, which
+                // is only true of one that has never completed a turn. Now
+                // that a restart no longer forces an immediate turn, leaving
+                // it at `Pending` would report nothing wrong about a Vault
+                // that is in fact failing, for up to a whole poll interval.
+                // Republishing the remembered outcome carries the previous
+                // process's conclusion across the restart that erased it.
+                //
+                // Guarded on `Pending` so an in-process definition edit keeps
+                // whatever status it was carrying (`reconcile` preserves it
+                // through `prior_git`) — a Vault mid-backoff from a transient
+                // failure must not be reset to the last *interval-arming*
+                // outcome, which is older.
+                if snapshot.git == VaultGitStatus::Pending
+                    && let Some(remembered) = managed_git.remembered_turn(*vault_id)
+                {
+                    let (status, error) = remembered_git_status(&remembered);
+                    let _ = runtime.set_git_status(status, error);
+                }
                 // Due now — a Vault that has never synced, or one already
                 // past its interval — starts its turn here rather than
                 // waiting out a tick. One still inside its interval is left
@@ -1453,6 +1472,32 @@ fn collection_snapshots(
 /// kind of forced immediate retry). `None` means "no prior control block to
 /// carry over" — a genuinely new Vault or one transitioning from disabled
 /// to enabled — where `Pending` (an immediate first sync) is correct.
+/// The Git status a restarted instance should publish for a Vault whose last
+/// interval-arming turn is remembered. Only non-retryable failures are ever
+/// remembered as failures, so a remembered failure is never retryable.
+fn remembered_git_status(
+    remembered: &crate::vault_runtime_state::GitTurnRecord,
+) -> (VaultGitStatus, Option<VaultRuntimeError>) {
+    match remembered.outcome {
+        crate::vault_runtime_state::GitTurnOutcome::Failed => (
+            VaultGitStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: remembered
+                    .code
+                    .clone()
+                    .unwrap_or_else(|| "managed_git_turn_failed".to_string()),
+                message: remembered.message.clone().unwrap_or_else(|| {
+                    "The last Git turn before this restart did not succeed.".to_string()
+                }),
+                retryable: false,
+                detail: None,
+            }),
+        ),
+        crate::vault_runtime_state::GitTurnOutcome::UpToDate
+        | crate::vault_runtime_state::GitTurnOutcome::Synchronized => (VaultGitStatus::Ready, None),
+    }
+}
+
 fn activation_snapshot(
     definition: &VaultDefinition,
     vault_path: &Path,

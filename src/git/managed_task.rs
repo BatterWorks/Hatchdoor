@@ -384,11 +384,11 @@ struct VaultScheduleEntry {
     /// in-progress backoff.
     poll_interval: Duration,
     lease: Option<ManagedCheckoutLease>,
-    /// When this Vault's last interval-arming turn completed, in wall clock,
-    /// restored from durable state at activation and refreshed by every later
-    /// turn. Held here purely so a status read is a memory read: the file is
-    /// consulted once per activation, never per request.
-    last_completed_at: Option<SystemTime>,
+    /// This Vault's last interval-arming turn, restored from durable state at
+    /// activation and refreshed by every later turn. Held here purely so a
+    /// status read is a memory read: the file is consulted once per
+    /// activation, never per request.
+    last_completed: Option<GitTurnRecord>,
 }
 
 /// One Vault's polling clock, as wall-clock instants a status read can
@@ -474,7 +474,7 @@ impl ManagedGitScheduler {
                 occupied.get_mut().poll_interval = poll_interval;
             }
             std::collections::btree_map::Entry::Vacant(vacant) => {
-                let (next_attempt, last_completed_at) =
+                let (next_attempt, last_completed) =
                     self.restored_schedule(vault_id, poll_interval);
                 vacant.insert(VaultScheduleEntry {
                     schedule: ScheduleState {
@@ -483,7 +483,7 @@ impl ManagedGitScheduler {
                     },
                     poll_interval,
                     lease: None,
-                    last_completed_at,
+                    last_completed,
                 });
             }
         }
@@ -503,7 +503,7 @@ impl ManagedGitScheduler {
         &self,
         vault_id: VaultId,
         poll_interval: Duration,
-    ) -> (Instant, Option<SystemTime>) {
+    ) -> (Instant, Option<GitTurnRecord>) {
         let now = Instant::now();
         let Some(state) = &self.state else {
             return (now, None);
@@ -516,10 +516,19 @@ impl ManagedGitScheduler {
         let Ok(elapsed) = SystemTime::now().duration_since(record.completed_at) else {
             return (now, None);
         };
-        (
-            now + poll_interval.saturating_sub(elapsed),
-            Some(record.completed_at),
-        )
+        (now + poll_interval.saturating_sub(elapsed), Some(record))
+    }
+
+    /// This Vault's last remembered interval-arming turn, if any. Activation
+    /// uses it to republish the Git status the previous process had reached,
+    /// which a fresh process would otherwise report as a blank `pending`
+    /// until the next scheduled turn.
+    pub fn remembered_turn(&self, vault_id: VaultId) -> Option<GitTurnRecord> {
+        self.entries
+            .lock()
+            .expect("managed Git scheduler poisoned")
+            .get(&vault_id)
+            .and_then(|entry| entry.last_completed.clone())
     }
 
     /// This Vault's polling clock, or `None` when it is not tracked (a
@@ -528,7 +537,10 @@ impl ManagedGitScheduler {
         let entries = self.entries.lock().expect("managed Git scheduler poisoned");
         let entry = entries.get(&vault_id)?;
         Some(GitPollingClock {
-            last_completed_at: entry.last_completed_at,
+            last_completed_at: entry
+                .last_completed
+                .as_ref()
+                .map(|record| record.completed_at),
             next_attempt_at: SystemTime::now()
                 + entry
                     .schedule
@@ -729,7 +741,7 @@ impl ManagedGitScheduler {
                 }
             };
             if arms_interval {
-                entry.last_completed_at = Some(completed_at);
+                entry.last_completed = Some(remembered_record(result, completed_at));
             }
             arms_interval
         };
@@ -760,16 +772,7 @@ impl ManagedGitScheduler {
         let Some(state) = &self.state else {
             return;
         };
-        let (outcome, code) = match result {
-            Ok(ManagedGitOutcome::UpToDate) => (GitTurnOutcome::UpToDate, None),
-            Ok(ManagedGitOutcome::Synchronized) => (GitTurnOutcome::Synchronized, None),
-            Err(error) => (GitTurnOutcome::Failed, Some(error.code().to_string())),
-        };
-        let record = GitTurnRecord {
-            completed_at,
-            outcome,
-            code,
-        };
+        let record = remembered_record(result, completed_at);
         if let Err(message) = state.record_git_turn(vault_id, record) {
             warn!(%vault_id, %message, "could not remember this Vault's Git turn; its schedule will restart from the next activation");
         }
@@ -834,6 +837,29 @@ impl ManagedGitScheduler {
                 .request_if_idle(vault_id, VaultWorkKind::Git);
         }
         due
+    }
+}
+
+/// One completed turn as it is remembered, in memory and on disk. The two
+/// must describe the same turn, so both are built here.
+fn remembered_record(
+    result: &Result<ManagedGitOutcome, VaultWorkError>,
+    completed_at: SystemTime,
+) -> GitTurnRecord {
+    let (outcome, code, message) = match result {
+        Ok(ManagedGitOutcome::UpToDate) => (GitTurnOutcome::UpToDate, None, None),
+        Ok(ManagedGitOutcome::Synchronized) => (GitTurnOutcome::Synchronized, None, None),
+        Err(error) => (
+            GitTurnOutcome::Failed,
+            Some(error.code().to_string()),
+            Some(error.message().to_string()),
+        ),
+    };
+    GitTurnRecord {
+        completed_at,
+        outcome,
+        code,
+        message,
     }
 }
 
@@ -1724,6 +1750,7 @@ mod tests {
                     completed_at: std::time::SystemTime::now() - Duration::from_secs(23 * 60 * 60),
                     outcome: crate::vault_runtime_state::GitTurnOutcome::UpToDate,
                     code: None,
+                    message: None,
                 },
             )
             .expect("record the previous process's turn");
@@ -1861,6 +1888,7 @@ mod tests {
                     completed_at: std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60),
                     outcome: crate::vault_runtime_state::GitTurnOutcome::UpToDate,
                     code: None,
+                    message: None,
                 },
             )
             .expect("record an old turn");
@@ -1895,6 +1923,7 @@ mod tests {
                     completed_at: std::time::SystemTime::now() - Duration::from_secs(2 * 60 * 60),
                     outcome: crate::vault_runtime_state::GitTurnOutcome::UpToDate,
                     code: None,
+                    message: None,
                 },
             )
             .expect("record a turn two hours ago");

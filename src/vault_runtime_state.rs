@@ -48,6 +48,11 @@ pub struct GitTurnRecord {
     pub outcome: GitTurnOutcome,
     /// The failure's error code, present only for [`GitTurnOutcome::Failed`].
     pub code: Option<String>,
+    /// The failure's already-redacted message, present only for
+    /// [`GitTurnOutcome::Failed`]. Carried so a restarted instance can
+    /// republish the same sentence the previous process showed, rather than
+    /// falling back to a generic one.
+    pub message: Option<String>,
 }
 
 /// Reader/writer for the durable per-Vault runtime state file.
@@ -83,6 +88,7 @@ impl VaultRuntimeStateStore {
             completed_at: parse_timestamp(&turn.completed_at)?,
             outcome: turn.outcome,
             code: turn.code.clone(),
+            message: turn.message.clone(),
         })
     }
 
@@ -112,6 +118,7 @@ impl VaultRuntimeStateStore {
             completed_at: format_timestamp(record.completed_at),
             outcome: record.outcome,
             code: record.code,
+            message: record.message,
         });
         self.persist(&stored)
     }
@@ -206,6 +213,8 @@ struct StoredGitTurn {
     outcome: GitTurnOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
 }
 
 #[cfg(test)]

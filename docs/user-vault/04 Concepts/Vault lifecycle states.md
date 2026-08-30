@@ -25,6 +25,8 @@ Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes ra
 | **Git** | `disabled`, `pending`, `ready`, `unavailable` | Is Git sync (if configured) working? |
 | **Watcher** | `running`, `disabled`, `unavailable` | Is the file-change watcher keeping the index current? |
 
+**Git** survives a restart. A Vault that last synced cleanly comes back as `ready`, and one whose last sync failed comes back as `unavailable` with the same reason it showed before — `pending` means a Vault that has genuinely never completed a sync, not one Hatchdoor has simply forgotten about. Alongside these, `GET /api/v1/vaults` reports `last_synced_at` and `next_attempt_at` for any Vault with a remote.
+
 **Search** deserves the closest look, because its middle values are easy to misread:
 
 - `indexing` — actively building; nothing usable yet for this axis.

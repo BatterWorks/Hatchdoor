@@ -560,8 +560,10 @@ runtime shell and remains usable by the rootless image (ADR-12).
 `GitTurnRecord`, and `GitTurnOutcome`. The versioned
 `state/vault-runtime.json` format: one per-Vault record keyed by Vault ID,
 each holding a nested `git` section with the wall-clock `completed_at`
-(RFC 3339 UTC, seconds precision), the `outcome`, and a `code` present only
-for a failure. The nesting is what lets a later durable per-Vault fact join
+(RFC 3339 UTC, seconds precision), the `outcome`, and a `code` and already-
+redacted `message` present only for a failure — carried so a restarted
+instance republishes the same sentence the previous process showed rather
+than falling back to a generic one. The nesting is what lets a later durable per-Vault fact join
 this file rather than start a second one.
 
 **Consumers:** Git synchronization (`git::ManagedGitScheduler`, which reads a
@@ -1498,8 +1500,14 @@ forgetting it costs one extra turn after the next restart.
 by the collection lifecycle for a disconnect (never for a disable, which
 keeps its schedule). `polling_clock(vault_id)` returns the
 `GitPollingClock { last_completed_at, next_attempt_at }` a status read
-renders; both come from memory, so listing the collection never touches the
-file. `new` retains the store-less behavior — every Vault due immediately —
+renders, and `remembered_turn(vault_id)` returns the whole remembered record;
+both come from memory, so listing the collection never touches the file.
+The collection lifecycle uses `remembered_turn` at activation to republish
+the Git status the previous process reached — guarded on the `Pending` a
+fresh process publishes, so an in-process edit keeps the live status
+`reconcile` preserved through `prior_git`. Without it a restart would report
+nothing wrong about a failing Vault until its next scheduled turn, which is a
+whole poll interval now that a restart no longer forces one. `new` retains the store-less behavior — every Vault due immediately —
 for tests that do not exercise durability.
 
 `DEFAULT_TICK_INTERVAL` is a *sampling* interval, not a schedule: a deadline
