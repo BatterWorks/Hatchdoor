@@ -13,7 +13,11 @@ function renderSettingsPage() {
   );
 }
 
-vi.mock("../../api/api", () => ({ apiFetch: vi.fn() }));
+vi.mock("../../api/api", () => ({
+  apiFetch: vi.fn(),
+  // The Vault collection client opens the shared revision stream through this.
+  withAccessToken: (url: string) => url,
+}));
 const mockedApiFetch = vi.mocked(apiFetch);
 
 const settings = [

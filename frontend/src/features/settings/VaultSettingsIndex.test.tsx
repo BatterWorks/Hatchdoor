@@ -20,7 +20,11 @@ import {
   withIdentityFields,
 } from "./vaultGitBehavior";
 
-vi.mock("../../api/api", () => ({ apiFetch: vi.fn() }));
+vi.mock("../../api/api", () => ({
+  apiFetch: vi.fn(),
+  // The Vault collection client opens the shared revision stream through this.
+  withAccessToken: (url: string) => url,
+}));
 const mockedApiFetch = vi.mocked(apiFetch);
 
 const VAULT_ID = "00000000-0000-4000-8000-000000000001";
@@ -863,6 +867,71 @@ describe("VaultSettingsDetail — sync console", () => {
     );
     await screen.findByRole("heading", { name: "Field notes" });
     expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
+  });
+});
+
+describe("VaultSettingsDetail — following the collection (#198)", () => {
+  it("adopts another writer's change to the same Vault rather than describing a stale one", async () => {
+    let git = "ready";
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [
+            baseVault(
+              {
+                type: "managed_git",
+                repository_url: "https://example.test/notes.git",
+                branch: "main",
+                mode: "two_way",
+                poll_interval_secs: 3600,
+              },
+              {
+                git,
+                ...(git === "unavailable"
+                  ? {
+                      git_error: {
+                        code: "managed_git_auth",
+                        message: "The remote refused the stored sign-in.",
+                        retryable: true,
+                      },
+                    }
+                  : {}),
+              },
+            ),
+          ],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults/all/stats": () =>
+        json({ data: [{ vault_id: VAULT_ID, note_count: 12 }] }),
+      [`/api/v1/vaults/${VAULT_ID}/recent?limit=1`]: () =>
+        json({ data: [{ mtime_ns: 0 }] }),
+    });
+
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("button", { name: "Sync now" });
+
+    git = "unavailable";
+    for (const source of window.__hatchdoorEventSources) {
+      source.emit(
+        "vault-collection-revision",
+        JSON.stringify({ collection_revision: 9 }),
+      );
+    }
+
+    expect(
+      await screen.findByRole("button", { name: "Try again" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "Sync now" }),
+    ).not.toBeInTheDocument();
   });
 });
 

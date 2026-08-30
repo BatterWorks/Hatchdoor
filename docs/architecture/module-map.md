@@ -2092,9 +2092,9 @@ returning user has legitimately rebuilt since; six Vault-agnostic
 preferences (theme, sidebar width, drawer open state, Recent notes'
 collapsed state, the touch-edit hint, the stored bearer token) are untouched.
 `useVaultScope.ts` owns
-the selected Vault scope (state/storage, per #137), Vault discovery
-(`useVaultDiscovery`), and the Vault-less-action default
-(`resolvePrimaryVaultId`). `app/ExplorerPane.tsx`'s Scope zone (#138) calls
+the selected Vault scope (state/storage, per #137) and the Vault-less-action
+default (`resolvePrimaryVaultId`); the Vault collection itself belongs to the
+Vault collection client below (#198). `app/ExplorerPane.tsx`'s Scope zone (#138) calls
 `setScope` on the desktop; `app/AppTopbar.tsx`'s scope row and its bottom
 sheet (#145) call it below 920px, where the Scope zone itself does not
 render. The breakpoint keeps the two callers mutually exclusive — every other
@@ -2106,13 +2106,9 @@ from `VaultSummary`'s status fields alone — no new endpoint.
 `NotePage.tsx` (#141) to detect a write-blocking Git condition on the open
 note's own Vault; this is a deliberate cross-capability import of one pure
 function rather than a duplicated copy of the condition vocabulary.
-`useVaultScope.ts`'s
-`useVaultNoteCounts` is the one exception to "state/storage only": it fetches
-the lean collection-scope `GET /api/v1/vaults/all/stats` (always at `"all"`,
-independent of the browsing scope) to feed the slot's healthy-count reading,
-gated on more than one enabled Vault and refetched on the same
-`vaultRevision` `useVaultTree` already tracks rather than opening a second
-SSE subscription. The topbar's `Tree Stale` badge is deleted (#139) with
+Note counts reach the slot from the
+collection client, which reads them at `"all"` scope independently of the
+browsing scope and refreshes them on the collection revision. The topbar's `Tree Stale` badge is deleted (#139) with
 nothing replacing it; `Offline` is the only condition left there, because it
 is about the workspace and not about any one Vault.
 `app/vaultAccordion.ts` (#142) is `app/ExplorerPane.tsx`'s per-Vault
@@ -2137,12 +2133,12 @@ Vaults (a neutral `Add a Vault` empty state; the action itself is Settings'
 `VaultCreationDialog` (#153) — this route has no room for the flow, so
 `ZeroVaultState`'s `onAddVault` navigates to `/settings` with
 `{state: {openVaultCreation: true}}` instead, absent entirely in demo mode via
-the `demoMode` prop threaded down from this hook — a demo instance's own
+the collection client's `demoMode` — a demo instance's own
 description reads "This demo has no Vaults loaded." in that state (#152),
 never the ordinary "Add a Vault…" sentence with nothing left to act on it)
 versus a broken start:
-`useVaultScope.ts`'s `useVaultDiscovery`
-now also exposes `recovery` (the persisted registry file is unreadable) and
+The collection client
+also exposes `recovery` (the persisted registry file is unreadable) and
 `legacyMigrationRecovery` (the registry loaded fine but a failed safe
 legacy import needs recovery) — mutually exclusive, both rendering the same
 documented error block with a `Try again` action (a plain re-fetch), and
@@ -2197,9 +2193,74 @@ the shell.
 **Validation:** the applicable `App.*.test.tsx` (including
 `App.demo-mode.test.tsx`, #152), `app/ExplorerPane.test.tsx`,
 `app/AppTopbar.test.tsx`, `app/vaultSlot.test.tsx`, `useVaultScope.test.ts`,
-`useTheme.test.tsx`, storage tests, then full frontend checks. Layout changes to
+`vaults/vaultCollection.test.ts`, `useTheme.test.tsx`, storage tests, then full
+frontend checks. Layout changes to
 the explorer pane need a browser as well as the suite: its zone structure
 depends on real cascade behavior that jsdom does not reproduce.
+
+### Vault collection client
+
+**Kind:** feature/shared client.
+
+**Owned paths:**
+
+- `frontend/src/vaults/index.ts`
+- `frontend/src/vaults/vaultCollectionStore.ts`
+- `frontend/src/vaults/useVaultCollection.ts`
+- `frontend/src/vaults/vaultProjection.ts`
+
+**Public contract:** `frontend/src/vaults/index.ts` is the only import path.
+It exposes the collection snapshot (`vaults`, the enabled browsing list;
+`allVaults`, the registry list Vault management renders; `demoMode`,
+`loading`, `error`, `recovery`, `legacyMigrationRecovery`, `registryRevision`,
+`revision`, `noteCounts`), `refresh`, `fetchRegistryRevision`, and the
+demo-aware slot projection (`slotFor`, `describeScope`).
+
+**Contract and responsibility:** one module owns everything about the Vault
+collection that more than one surface reads (#198): the Vault list, the
+per-Vault note counts from `GET /api/v1/vaults/all/stats`, the demo-mode
+projection of `app/vaultSlotLogic.ts`'s slot vocabulary, and the
+`/api/v1/vaults/events` `vault-collection-revision` stream that invalidates
+all three. The store is a module-level singleton behind `useSyncExternalStore`,
+not a provider: the first subscriber starts the one collection read and opens
+the one SSE subscription the whole app shares, and the last to unmount tears
+both down, so no two surfaces can disagree about the same Vault and a Vault
+mutation refreshes every surface without any of them refetching. The two
+inputs each call site used to decide for itself — which count source applies,
+and whether demo mode applies — are decided here; a surface with its own count
+for a Vault (the graph's island node count) passes it to `slotFor` as an
+override. Per-surface presentation stays in the surfaces: the presentational
+slot components (`app/vaultSlot.tsx`, and the aggregate the accordion and note
+page render) still take `demoMode` and a note count as props. They apply a
+decision rather than making one — the client is where it is made, and the shell
+hands it down — so the slot vocabulary stays renderable in isolation and its
+own suites keep testing it that way.
+
+A refresh that finds nothing new keeps the previous value's identity, and a
+patch that changes nothing publishes nothing. Without that, a note write — which
+bumps the collection revision — would hand every consumer a fresh-but-identical
+Vault array and relayout the graph. `VaultSettingsDetail` seeds its editable
+drafts once per Vault but adopts every genuinely new record for display, so it
+cannot describe a Vault the Settings index disagrees with.
+
+**Consumers:** `App.tsx`, `hooks/useVaultTree.ts`,
+`components/graph/GraphPage.tsx`, `components/StatsPage.tsx`,
+`features/settings/VaultSettingsIndex.tsx`, and
+`features/settings/vaultGitBehavior.ts`.
+
+**Invariants:** disabled Vaults never appear in `vaults` and never participate
+in `"all"`; counts are always read at `"all"` scope regardless of the browsing
+scope; exactly one `/api/v1/vaults/events` subscription exists per app;
+nothing outside this directory fetches `GET /api/v1/vaults` or
+`GET /api/v1/vaults/all/stats`. `VaultSettingsDetail`'s
+`expected_registry_revision` is deliberately not one of these: it is a
+mutation-sequencing token advanced by each step's own response, seeded from
+the client and then owned locally.
+
+**Validation:** `vaults/vaultCollection.test.ts`, then the consumer suites
+(`App.*.test.tsx`, `components/graph/GraphPage.test.tsx`,
+`components/StatsPage.test.tsx`,
+`features/settings/VaultSettingsIndex.test.tsx`), then full frontend checks.
 
 ### Frontend API, authentication, and shared wire contracts
 

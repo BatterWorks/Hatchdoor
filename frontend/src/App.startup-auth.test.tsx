@@ -4,11 +4,15 @@ import { afterEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   acceptGemma: vi.fn(),
-  useVaultDiscovery: vi.fn(),
+  useVaultCollection: vi.fn(),
 }));
 
-vi.mock("./hooks/useVaultScope", () => ({
-  useVaultDiscovery: mocks.useVaultDiscovery,
+vi.mock("./vaults", () => ({
+  useVaultCollection: mocks.useVaultCollection,
+  useVaultProjection: () => ({
+    slotFor: () => ({ kind: "count", count: 0 }),
+    describeScope: () => null,
+  }),
 }));
 
 vi.mock("./startup/useStartupStatus", () => ({
@@ -30,18 +34,22 @@ afterEach(() => {
   clearToken();
   vi.restoreAllMocks();
   mocks.acceptGemma.mockReset();
-  mocks.useVaultDiscovery.mockReset();
+  mocks.useVaultCollection.mockReset();
 });
 
 it("prompts for the web token when first-run model setup is unauthorized", async () => {
-  mocks.useVaultDiscovery.mockReturnValue({
+  mocks.useVaultCollection.mockReturnValue({
     vaults: [{ enabled: true }],
     demoMode: false,
     loading: false,
     error: null,
     recovery: null,
     legacyMigrationRecovery: null,
-    loadVaults: vi.fn(),
+    allVaults: [{ enabled: true }],
+    registryRevision: 0,
+    revision: 0,
+    noteCounts: {},
+    refresh: vi.fn(),
   });
   mocks.acceptGemma.mockImplementation(() => notifyUnauthorized());
 

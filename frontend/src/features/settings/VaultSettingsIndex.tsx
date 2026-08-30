@@ -1,16 +1,11 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "../../api/api";
 import { VaultSlot } from "../../app/vaultSlot";
-import { deriveVaultSlot } from "../../app/vaultSlotLogic";
+import type { VaultSlotState } from "../../app/vaultSlotLogic";
 import { StateBlock } from "../../components/ui";
-import type {
-  VaultDiscoveryResponse,
-  VaultId,
-  VaultRegistryRecovery,
-  VaultSource,
-  VaultSummary,
-} from "../../types";
+import type { VaultId, VaultSource, VaultSummary } from "../../types";
+import { useVaultCollection, useVaultProjection } from "../../vaults";
 import { VaultCreationDialog } from "./VaultCreation";
 import {
   behaviorOf,
@@ -36,13 +31,7 @@ import {
   withIdentityFields,
 } from "./vaultGitBehavior";
 
-type Counts = Record<VaultId, number>;
-
-function conditionSentence(
-  vault: VaultSummary,
-  count: number | undefined,
-): string {
-  const slot = deriveVaultSlot(vault, count);
+function conditionSentence(slot: VaultSlotState): string {
   return slot.kind === "condition"
     ? slot.sentence
     : "This Vault is ready to use.";
@@ -61,7 +50,6 @@ export function VaultSettingsIndex({
   selectedVaultId,
   onSelectVault,
   autoOpenCreation,
-  onVaultCreated,
 }: {
   selectedVaultId: VaultId | null;
   onSelectVault: (vaultId: VaultId) => void;
@@ -70,68 +58,28 @@ export function VaultSettingsIndex({
    * `Add a Vault` button lands here rather than rendering its own copy of
    * the flow. */
   autoOpenCreation?: boolean;
-  /** Called after a successful create, in addition to this component's own
-   * list refresh, so the app-wide Vault discovery that drives the sidebar
-   * and scope zone also picks up the new Vault without a reload. */
-  onVaultCreated?: () => void;
 }) {
-  const [vaults, setVaults] = useState<VaultSummary[]>([]);
-  const [counts, setCounts] = useState<Counts>({});
   const [recovering, setRecovering] = useState<Record<VaultId, boolean>>({});
-  const [demoMode, setDemoMode] = useState(false);
   const [creationOpen, setCreationOpen] = useState(Boolean(autoOpenCreation));
-  // The persisted registry file itself is unreadable (#150) — distinct from
-  // a Vault-level `needs attention` recovery above, this replaces the whole
-  // group. `legacy_migration_recovery` is deliberately not surfaced here:
-  // the registry loads fine (empty) in that case, so the group renders its
+  // The whole Vault collection, disabled Vaults included, from the one client
+  // every surface reads (#198). `recovery` means the persisted registry file
+  // itself is unreadable (#150) — distinct from a Vault-level `needs
+  // attention` recovery below, it replaces the whole group.
+  // `legacy_migration_recovery` is deliberately not surfaced here: the
+  // registry loads fine (empty) in that case, so the group renders its
   // ordinary zero-Vault "Add a Vault" state.
-  const [registryRecovery, setRegistryRecovery] =
-    useState<VaultRegistryRecovery | null>(null);
-
-  const loadVaults = useCallback(async (signal?: { cancelled: boolean }) => {
-    const response = await apiFetch("/api/v1/vaults");
-    if (!response.ok || signal?.cancelled) return;
-    const discovery = (await response.json()) as VaultDiscoveryResponse;
-    if (!Array.isArray(discovery.vaults)) return;
-    setVaults(discovery.vaults);
-    setDemoMode(discovery.demo_mode);
-    setRegistryRecovery(discovery.recovery ?? null);
-    if (discovery.recovery) return;
-    const stats = await apiFetch("/api/v1/vaults/all/stats");
-    if (!stats.ok || signal?.cancelled) return;
-    const payload = (await stats.json()) as {
-      data?: Array<{ vault_id: VaultId; note_count: number }>;
-    };
-    if (!signal?.cancelled)
-      setCounts(
-        Object.fromEntries(
-          (payload.data ?? []).map(({ vault_id, note_count }) => [
-            vault_id,
-            note_count,
-          ]),
-        ),
-      );
-  }, []);
-
-  useEffect(() => {
-    const signal = { cancelled: false };
-    void loadVaults(signal).catch(() => undefined);
-    return () => {
-      signal.cancelled = true;
-    };
-  }, [loadVaults]);
+  const {
+    allVaults: vaults,
+    noteCounts: counts,
+    demoMode,
+    recovery: registryRecovery,
+    refresh: loadVaults,
+  } = useVaultCollection();
 
   const handleRecover = async (vaultId: VaultId) => {
     setRecovering((old) => ({ ...old, [vaultId]: true }));
     const result = await recoverPausedVault(vaultId);
-    if (result.ok)
-      setVaults((old) =>
-        old.map((item) =>
-          item.vault_id === vaultId
-            ? (result.vault ?? { ...item, enabled: true })
-            : item,
-        ),
-      );
+    if (result.ok) await loadVaults();
     setRecovering((old) => ({ ...old, [vaultId]: false }));
   };
 
@@ -211,8 +159,9 @@ export function VaultSettingsIndex({
           onClose={() => setCreationOpen(false)}
           onCreated={(vault) => {
             setCreationOpen(false);
-            setVaults((old) => [...old, vault]);
-            onVaultCreated?.();
+            // Every surface picks the new Vault up from the collection
+            // client's own refresh; nothing here hands it along.
+            void loadVaults();
             onSelectVault(vault.vault_id);
           }}
         />
@@ -255,9 +204,20 @@ export function VaultSettingsDetail({
   serverIdentity: { name: string; email: string };
   onDisconnect: () => void;
 }) {
+  const {
+    allVaults,
+    registryRevision,
+    noteCounts,
+    refresh: refreshCollection,
+  } = useVaultCollection();
+  const vaultProjection = useVaultProjection();
+  const summary = allVaults.find((item) => item.vault_id === vaultId);
+  const count = noteCounts[vaultId];
   const [vault, setVault] = useState<VaultSummary | null>(null);
+  // The mutation-sequencing token, not a projection of the collection: a
+  // pause/edit/un-pause round trip carries the revision each step returned,
+  // so it is seeded from the client and then advanced by the responses.
   const [revision, setRevision] = useState<number | null>(null);
-  const [count, setCount] = useState<number>();
   const [changed, setChanged] = useState<number>();
   const [name, setName] = useState("");
   const [exclude, setExclude] = useState("");
@@ -283,7 +243,7 @@ export function VaultSettingsDetail({
   const [syncing, setSyncing] = useState(false);
   const [recoveryPending, setRecoveryPending] = useState(false);
 
-  const applyVault = (next: VaultSummary) => {
+  const applyVault = useCallback((next: VaultSummary) => {
     setVault(next);
     setName(next.name);
     setExclude(next.exclude_patterns.join(", "));
@@ -303,38 +263,53 @@ export function VaultSettingsDetail({
       clearRecoveryPending(next.vault_id);
     }
     setRecoveryPending(!next.enabled && isRecoveryPending(next.vault_id));
-  };
+  }, []);
+
+  // The Vault record and its note count come from the collection client; only
+  // this Vault's own last-change time is read here, because nothing else in
+  // the app wants it. The editable drafts are seeded once per Vault: a later
+  // collection refresh must not overwrite fields somebody is part-way through
+  // editing.
+  const appliedVaultIdRef = useRef<VaultId | null>(null);
+  useEffect(() => {
+    if (!summary || appliedVaultIdRef.current === vaultId) {
+      return;
+    }
+    appliedVaultIdRef.current = vaultId;
+    applyVault(summary);
+    setRevision(registryRevision);
+  }, [applyVault, registryRevision, summary, vaultId]);
+
+  // The displayed record, though, follows the collection: another writer's
+  // change or an SSE revision must not leave this page describing a Vault the
+  // Settings index disagrees with. Only a genuinely new collection state is
+  // adopted (the client keeps a Vault's identity across a refresh that found
+  // nothing new), so a mutation's own fresher response is never overwritten by
+  // a collection read that has not caught up yet — and the identity round trip
+  // below, which shows its intermediate pause/edit/un-pause states on purpose,
+  // is left alone while it runs.
+  const adoptedSummaryRef = useRef<VaultSummary | undefined>(undefined);
+  useEffect(() => {
+    if (!summary || summary === adoptedSummaryRef.current) {
+      return;
+    }
+    adoptedSummaryRef.current = summary;
+    if (!busy) {
+      setVault(summary);
+    }
+  }, [busy, summary]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const discoveryResponse = await apiFetch("/api/v1/vaults");
-      if (!discoveryResponse.ok) return;
-      const discovery =
-        (await discoveryResponse.json()) as VaultDiscoveryResponse;
-      const next = discovery.vaults?.find((item) => item.vault_id === vaultId);
-      if (!next || cancelled) return;
-      applyVault(next);
-      setRevision(discovery.registry_revision ?? null);
-      const [statsResponse, recentResponse] = await Promise.all([
-        apiFetch("/api/v1/vaults/all/stats"),
-        apiFetch(`/api/v1/vaults/${vaultId}/recent?limit=1`),
-      ]);
-      if (cancelled) return;
-      if (statsResponse.ok) {
-        const stats = (await statsResponse.json()) as {
-          data?: Array<{ vault_id: VaultId; note_count: number }>;
-        };
-        setCount(
-          stats.data?.find((item) => item.vault_id === vaultId)?.note_count,
-        );
-      }
-      if (recentResponse.ok) {
-        const recent = (await recentResponse.json()) as {
-          data?: Array<{ mtime_ns: number }>;
-        };
-        setChanged(recent.data?.[0]?.mtime_ns);
-      }
+      const response = await apiFetch(
+        `/api/v1/vaults/${vaultId}/recent?limit=1`,
+      );
+      if (!response.ok || cancelled) return;
+      const recent = (await response.json()) as {
+        data?: Array<{ mtime_ns: number }>;
+      };
+      if (!cancelled) setChanged(recent.data?.[0]?.mtime_ns);
     })().catch(() => setMessage("This Vault could not be loaded."));
     return () => {
       cancelled = true;
@@ -584,13 +559,9 @@ export function VaultSettingsDetail({
         (payload as { message?: string }).message ??
           "Could not start a Git sync for this Vault.",
       );
-    const discovery = await requestJson("/api/v1/vaults");
-    if (discovery.ok) {
-      const refreshed = (
-        discovery.payload as VaultDiscoveryResponse
-      ).vaults?.find((item) => item.vault_id === vaultId);
-      if (refreshed) applyVault(refreshed);
-    }
+    // No re-read here: the refresh publishes the new record and the effect
+    // above adopts it, same as any other writer's change.
+    await refreshCollection();
     setSyncing(false);
   };
 
@@ -683,7 +654,7 @@ export function VaultSettingsDetail({
       <p className="settings-vault-condition">
         {paused
           ? "This Vault is paused. It is kept here so you can turn it back on."
-          : conditionSentence(vault, count)}
+          : conditionSentence(vaultProjection.slotFor(vault))}
       </p>
       {message ? (
         <div className="settings-notice" role="status">
