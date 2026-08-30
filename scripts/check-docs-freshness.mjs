@@ -168,7 +168,12 @@ const SURFACES = [
   {
     id: "startup",
     label: "Startup, readiness, and note reads",
-    paths: ["src/startup.rs", "src/vault_read.rs", "src/vault_work.rs"],
+    paths: [
+      "src/startup.rs",
+      "src/vault_read.rs",
+      "src/vault_work.rs",
+      "src/vault_executor.rs",
+    ],
     notes: [
       `${GUIDES}/How to troubleshoot common problems.md`,
       `${CONCEPTS}/Vault lifecycle states.md`,

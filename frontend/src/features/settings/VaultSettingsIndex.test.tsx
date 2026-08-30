@@ -933,6 +933,76 @@ describe("VaultSettingsDetail — following the collection (#198)", () => {
       screen.queryByRole("button", { name: "Sync now" }),
     ).not.toBeInTheDocument();
   });
+
+  it("still adopts a change that arrived while its own round trip was in flight", async () => {
+    markRecoveryPending(VAULT_ID);
+    let name = "Field notes";
+    let resolveEnable: ((value: Response) => void) | null = null;
+    mockRoutes({
+      "/api/v1/vaults": () =>
+        json({
+          registry_revision: 3,
+          collection_revision: 3,
+          vaults: [
+            baseVault(
+              { type: "local", path: "/notes" },
+              { enabled: false, name },
+            ),
+          ],
+          demo_mode: false,
+        }),
+      "/api/v1/vaults/all/stats": () =>
+        json({ data: [{ vault_id: VAULT_ID, note_count: 12 }] }),
+      [`/api/v1/vaults/${VAULT_ID}/recent?limit=1`]: () =>
+        json({ data: [{ mtime_ns: 0 }] }),
+      [`/api/v1/vaults/${VAULT_ID}/enable POST`]: () =>
+        new Promise<Response>((resolve) => {
+          resolveEnable = resolve;
+        }),
+    });
+
+    render(
+      <VaultSettingsDetail
+        vaultId={VAULT_ID}
+        serverIdentity={SERVER_IDENTITY}
+        onDisconnect={() => {}}
+      />,
+    );
+    await screen.findByRole("heading", { name: "Field notes" });
+
+    // The recovery round trip sets `busy`, and the page deliberately shows its
+    // own in-flight state while it runs.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Try to bring this Vault back" }),
+    );
+    await vi.waitFor(() => expect(resolveEnable).not.toBeNull());
+
+    // Someone else renames the Vault mid-round-trip. The record must not be
+    // silently consumed: the collection keeps a Vault's identity across a
+    // refresh that finds nothing new, so a record dropped here would never be
+    // offered again and this page would describe a Vault the index disagrees
+    // with for the rest of the visit.
+    name = "Renamed elsewhere";
+    for (const source of window.__hatchdoorEventSources) {
+      source.emit(
+        "vault-collection-revision",
+        JSON.stringify({ collection_revision: 9 }),
+      );
+    }
+    await vi.waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Field notes" }),
+      ).toBeVisible(),
+    );
+
+    // The round trip answers without a record of its own, so nothing competes
+    // with the collection for the last word.
+    resolveEnable!(json({ registry_revision: 4, collection_revision: 4 }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Renamed elsewhere" }),
+    ).toBeVisible();
+  });
 });
 
 describe("VaultSettingsIndex — the management entry's recovery state", () => {

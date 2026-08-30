@@ -10,14 +10,7 @@
 export { useVaultCollection, useVaultProjection } from "./useVaultCollection";
 export {
   fetchRegistryRevision,
-  getVaultCollectionSnapshot,
   refreshVaultCollection,
-  resetVaultCollection,
-  subscribeVaultCollection,
   type VaultCollectionState,
 } from "./vaultCollectionStore";
-export {
-  createVaultProjection,
-  type VaultProjection,
-  type VaultProjectionInputs,
-} from "./vaultProjection";
+export { type VaultProjection } from "./vaultProjection";

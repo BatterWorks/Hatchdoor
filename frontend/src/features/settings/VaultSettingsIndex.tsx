@@ -287,16 +287,17 @@ export function VaultSettingsDetail({
   // nothing new), so a mutation's own fresher response is never overwritten by
   // a collection read that has not caught up yet — and the identity round trip
   // below, which shows its intermediate pause/edit/un-pause states on purpose,
-  // is left alone while it runs.
+  // is left alone while it runs. A record that arrives mid-round-trip is left
+  // unconsumed rather than marked adopted and dropped: the collection keeps a
+  // Vault's identity across a refresh that found nothing new, so a record
+  // consumed without being applied would never be offered again.
   const adoptedSummaryRef = useRef<VaultSummary | undefined>(undefined);
   useEffect(() => {
-    if (!summary || summary === adoptedSummaryRef.current) {
+    if (!summary || summary === adoptedSummaryRef.current || busy) {
       return;
     }
     adoptedSummaryRef.current = summary;
-    if (!busy) {
-      setVault(summary);
-    }
+    setVault(summary);
   }, [busy, summary]);
 
   useEffect(() => {

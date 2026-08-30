@@ -222,7 +222,13 @@ function openRevisionStream(): void {
         // Ignore malformed event payloads; the next valid revision resyncs.
         return;
       }
-      if (revision <= state.revision) {
+      // `collection_revision` is in-memory and counts from 0 again when the
+      // backend restarts, so a revision going backwards means a new server
+      // generation, not a stale event. Discarding it would strand the whole app
+      // on the old high-water mark: this is the one invalidation path the
+      // collection has, so nothing else would ever refresh the list, the
+      // counts, or the explorer until the new server counted past it.
+      if (revision === state.revision) {
         return;
       }
       publish({ revision });

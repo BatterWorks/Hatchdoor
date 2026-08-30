@@ -353,7 +353,7 @@ describe("the Vault collection client's revision stream", () => {
     expect(result.current.revision).toBe(4);
   });
 
-  it("ignores a revision that does not move forward, and a malformed payload", async () => {
+  it("ignores a repeated revision, and a malformed payload", async () => {
     mockCollection([healthyVault("Alpha")]);
     const { result } = renderHook(() => useVaultCollection());
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -364,13 +364,47 @@ describe("the Vault collection client's revision stream", () => {
     await waitFor(() => expect(result.current.revision).toBe(3));
 
     await act(async () => {
-      emitRevision(2);
+      emitRevision(3);
       for (const source of window.__hatchdoorEventSources) {
         source.emit("vault-collection-revision", "not json");
       }
     });
 
     expect(result.current.revision).toBe(3);
+  });
+
+  it("follows a revision that counts from zero again, because the server restarted", async () => {
+    const vault = healthyVault("Alpha");
+    let vaults = [vault];
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/v1/vaults")) {
+          return Promise.resolve(
+            jsonResponse(discoveryResponse(vaults, false)),
+          );
+        }
+        return Promise.resolve(jsonResponse(statsFor(vaults, [1])));
+      },
+    );
+
+    const { result } = renderHook(() => useVaultCollection());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => {
+      emitRevision(20);
+    });
+    await waitFor(() => expect(result.current.revision).toBe(20));
+
+    // `collection_revision` lives in memory and counts from 0 again after a
+    // restart. Holding out for 21 would strand every surface on the old
+    // high-water mark, because this is the app's only invalidation path.
+    vaults = [{ ...vault, search: "stale" }];
+    await act(async () => {
+      emitRevision(1);
+    });
+
+    await waitFor(() => expect(result.current.revision).toBe(1));
+    await waitFor(() => expect(result.current.vaults[0].search).toBe("stale"));
   });
 });
 
