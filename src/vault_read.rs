@@ -1441,10 +1441,10 @@ impl FolderBuilder {
     /// The folder at a Vault-relative path, with the name the Vault spells it
     /// with rather than the one the caller typed.
     ///
-    /// Matched case-insensitively and tolerant of surrounding slashes, the same
-    /// way the search filters treat a path prefix. Segments are matched against
-    /// folder names assembled from Note paths, so `..` names no folder and a
-    /// traversal attempt refuses here instead of climbing anywhere.
+    /// Matched case-insensitively and tolerant of surrounding slashes. Segments
+    /// are matched against folder names assembled from Note paths, so `..` names
+    /// no folder and a traversal attempt refuses here instead of climbing
+    /// anywhere.
     fn descend(&self, path: &str) -> Option<(&str, &FolderBuilder)> {
         let mut name = TREE_ROOT_NAME;
         let mut folder = self;

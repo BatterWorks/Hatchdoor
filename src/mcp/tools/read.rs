@@ -19,7 +19,6 @@ use std::str::FromStr;
 
 use crate::app_state::AppState;
 use crate::mcp::results;
-use crate::search::NoteFilters;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::vault::allowed_attachment_extensions;
 use crate::vault_error::VaultOperationError;
@@ -214,8 +213,6 @@ pub(super) async fn search_notes_tool(
         mode: args.mode.unwrap_or_default(),
         limit: clamp_search_limit(args.limit),
         per_note_cap: clamp_search_per_note_cap(args.per_note_cap),
-        filters: NoteFilters::default(),
-        include_properties: Vec::new(),
         layers,
     };
     let cache = state.startup_sqlite.clone();

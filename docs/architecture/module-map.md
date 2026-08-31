@@ -1272,7 +1272,7 @@ commands when retrieval behavior may change.
 - `src/search/layer_selection.rs`
 - `src/search/vault_scoped.rs`
 
-**Public contract:** the shared search vocabulary `SearchMode`, `NoteFilters`,
+**Public contract:** the shared search vocabulary `SearchMode`,
 `LayerSelection`, `LayerInfo`, and `OutboundLink`. The Vault-qualified
 shared-core contract is `VaultSearchCore`, `VaultSearchRequest`,
 `VaultSearchResponse`, and `VaultSearchResult`; it uses the explicit
@@ -1296,12 +1296,15 @@ future Vault-scoped MCP adapters.
 
 - Runtime search defaults to pure semantic retrieval; hybrid and reranking stay
   offline (ADR-05).
-- Layer selection and metadata filters must never widen the eligible result
-  set.
-- Vault-qualified search filters before ranking, globally ranks every usable
-  Vault snapshot, caps by `(Vault ID, slug)`, and never deduplicates equal
-  content or note names across Vaults. Staleness is participant status, not a
-  relevance penalty.
+- Layer selection must never widen the eligible result set.
+- There is one retrieval path per mode. #210 removed the unreachable note
+  metadata filters, the property projection, and the second semantic path they
+  selected; a search result's metadata still serializes its `properties` as an
+  empty object. Property search is a new feature carrying its own eval
+  evidence, never a restoration of that code.
+- Vault-qualified search globally ranks every usable Vault snapshot, caps by
+  `(Vault ID, slug)`, and never deduplicates equal content or note names across
+  Vaults. Staleness is participant status, not a relevance penalty.
 - Semantic per-note-cap selection progressively enlarges its KNN candidate
   window only as needed, stopping at candidate exhaustion or the explicit
   200-candidate ceiling. If that bounded window is dominated by capped notes,

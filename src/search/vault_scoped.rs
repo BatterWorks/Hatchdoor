@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cache::{SqliteCache, vault_snapshots::VaultSnapshotRead};
 use crate::embed::Embedder;
-use crate::vault::NoteSummary;
+use crate::vault::{NoteMetadata, NoteSummary};
 use crate::vault_read::{
     BrowseSurface, VaultParticipant, VaultParticipantState, VaultReadError, VaultReadProjection,
     VaultScope, selected_vaults,
@@ -19,7 +19,7 @@ use crate::vault_read::{
 use crate::vault_registry::VaultId;
 use crate::vault_runtime::VaultCollectionRuntime;
 
-use super::{LayerSelection, NoteFilters, OutboundLink, SearchMode, tag_prefix_query};
+use super::{LayerSelection, OutboundLink, SearchMode, tag_prefix_query};
 
 /// First KNN candidate window per requested result. The per-note cap is
 /// applied after ranking, so a small cap must not shrink the first window to
@@ -41,8 +41,6 @@ pub struct VaultSearchRequest {
     pub mode: SearchMode,
     pub limit: usize,
     pub per_note_cap: usize,
-    pub filters: NoteFilters,
-    pub include_properties: Vec<String>,
     pub layers: LayerSelection,
 }
 
@@ -258,13 +256,6 @@ fn semantic_results(
         return Ok(Vec::new());
     }
 
-    // Filtered semantic search scans the participating snapshots directly, so
-    // it already has every eligible candidate and needs no KNN backfill loop.
-    if !request.filters.is_empty() {
-        let raw = semantic_hits(request, embedder, snapshots, MAX_SEMANTIC_CANDIDATES)?;
-        return Ok(apply_per_note_cap(raw, request.per_note_cap, request.limit));
-    }
-
     if snapshots.is_empty() {
         return Ok(Vec::new());
     }
@@ -317,7 +308,6 @@ fn semantic_hits_with_vector(
                     content: hit.content,
                     score: (1.0 - hit.distance).clamp(0.0, 1.0),
                 },
-                &request.include_properties,
             ))
         })
         .collect())
@@ -342,64 +332,6 @@ fn progressively_cap_semantic_results(
     }
 }
 
-fn semantic_hits(
-    request: &VaultSearchRequest,
-    embedder: &dyn Embedder,
-    snapshots: &BTreeMap<VaultId, VaultSnapshotRead>,
-    raw_k: usize,
-) -> Result<Vec<VaultSearchResult>, VaultReadError> {
-    if raw_k == 0 {
-        return Ok(Vec::new());
-    }
-    debug_assert!(!request.filters.is_empty());
-    let vector = embedder
-        .embed(&[format!("{}{}", embedder.query_prefix(), request.query)])
-        .map_err(|message| error(None, "search_unavailable", &message, true))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| {
-            error(
-                None,
-                "search_unavailable",
-                "embedder returned no vectors",
-                true,
-            )
-        })?;
-    let mut hits = Vec::new();
-    for (vault_id, snapshot) in snapshots {
-        for chunk in &snapshot.chunks {
-            if !layer_matches(&request.layers, chunk.layer.as_deref()) {
-                continue;
-            }
-            let Some(note) = note_for(snapshot, &chunk.note_slug) else {
-                continue;
-            };
-            if !request.filters.matches(&note) {
-                continue;
-            }
-            let Some(embedding) = &chunk.embedding else {
-                continue;
-            };
-            let distance = euclidean_distance(&vector, embedding)
-                .map_err(|message| error(Some(*vault_id), "search_unavailable", &message, true))?;
-            hits.push(result_for(
-                *vault_id,
-                snapshot,
-                note,
-                ResultDetails {
-                    chunk_id: chunk.chunk_id,
-                    heading_path: chunk.heading_path.clone(),
-                    content: chunk.content.clone(),
-                    score: (1.0 - distance).clamp(0.0, 1.0),
-                },
-                &request.include_properties,
-            ));
-        }
-    }
-    hits.sort_by(rank_order);
-    Ok(hits)
-}
-
 fn keyword_hits(
     request: &VaultSearchRequest,
     cache: &SqliteCache,
@@ -422,9 +354,6 @@ fn keyword_hits(
         let Some(note) = note_for(snapshot, &hit.note_slug) else {
             continue;
         };
-        if !request.filters.matches(&note) {
-            continue;
-        }
         let score = if max <= f32::EPSILON {
             1.0
         } else {
@@ -440,7 +369,6 @@ fn keyword_hits(
                 content: hit.content,
                 score,
             },
-            &request.include_properties,
         ));
     }
     hits.sort_by(rank_order);
@@ -456,9 +384,7 @@ fn tag_results(
     for (vault_id, snapshot) in snapshots {
         for note in &snapshot.notes {
             let summary = note_summary(note);
-            if !layer_matches(&request.layers, note.layer.as_deref())
-                || !request.filters.matches(&summary)
-            {
+            if !layer_matches(&request.layers, note.layer.as_deref()) {
                 continue;
             }
             if !note.metadata.tags.iter().any(|candidate| {
@@ -479,7 +405,6 @@ fn tag_results(
                     content: format!("Matched tag: #{tag}"),
                     score: 1.0,
                 },
-                &request.include_properties,
             ));
         }
     }
@@ -565,7 +490,6 @@ fn result_for(
     snapshot: &VaultSnapshotRead,
     note: NoteSummary,
     details: ResultDetails,
-    include_properties: &[String],
 ) -> VaultSearchResult {
     let outbound_links = snapshot
         .links
@@ -593,7 +517,13 @@ fn result_for(
         score: details.score,
         layer: note.layer,
         outbound_links,
-        metadata: super::project_metadata(&note.metadata, include_properties),
+        // The empty `properties` object is the established wire shape, not an
+        // omission; see the test that pins it.
+        metadata: NoteMetadata {
+            tags: note.metadata.tags,
+            aliases: note.metadata.aliases,
+            properties: serde_json::Value::Object(serde_json::Map::new()),
+        },
     }
 }
 
@@ -601,22 +531,6 @@ fn layer_matches(selection: &LayerSelection, layer: Option<&str>) -> bool {
     selection.is_all()
         || (layer.is_none() && selection.includes_default())
         || layer.is_some_and(|layer| selection.named_layers().iter().any(|name| name == layer))
-}
-
-fn euclidean_distance(query: &[f32], embedding: &[u8]) -> Result<f32, String> {
-    if embedding.len() != std::mem::size_of_val(query) {
-        return Err("cached embedding dimension mismatch".to_string());
-    }
-    Ok(embedding
-        .chunks_exact(4)
-        .zip(query)
-        .map(|(bytes, value)| {
-            let candidate = f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            let difference = candidate - value;
-            difference * difference
-        })
-        .sum::<f32>()
-        .sqrt())
 }
 
 fn apply_per_note_cap(
@@ -674,7 +588,7 @@ mod tests {
 
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
-    use crate::search::{LayerSelection, NoteFilters, SearchMode};
+    use crate::search::{LayerSelection, SearchMode};
     use crate::vault::{NoteMetadata, VaultIndex};
     use crate::vault_read::{VaultParticipantState, VaultScope};
     use crate::vault_registry::{NewVaultDefinition, VaultId, VaultRegistryStore, VaultSource};
@@ -805,8 +719,6 @@ mod tests {
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 1,
-            filters: NoteFilters::default(),
-            include_properties: Vec::new(),
             layers: LayerSelection::default_surface(),
         }
     }
@@ -1201,6 +1113,55 @@ mod tests {
                 .iter()
                 .any(|result| result.vault_id == workspace.vault_ids[1])
         );
+    }
+
+    /// Search results have never carried a note's frontmatter properties: the
+    /// projection was always handed an empty selection, so `properties` has
+    /// always serialized as an empty object. That empty object is part of the
+    /// wire shape, so it must survive the projection's removal rather than
+    /// becoming a missing field, a null, or the note's actual properties.
+    ///
+    /// Every mode is checked even though one function shapes them all: that
+    /// sharing is exactly what a later change could quietly undo.
+    #[test]
+    fn a_search_result_serializes_its_metadata_with_an_empty_properties_object() {
+        let workspace = workspace(&[(
+            "Only",
+            &[(
+                "Home.md",
+                "---\ntags: [topic/sub]\naliases: [Homepage]\nstatus: draft\n---\n# Home\n\nneedle body",
+            )],
+        )]);
+        let embedder = StubEmbedder::new(384);
+        let core = VaultSearchCore::new(&workspace.cache, &workspace.vaults, &embedder);
+        let expected = serde_json::json!({
+            "tags": ["topic/sub"],
+            "aliases": ["Homepage"],
+            "properties": {},
+        });
+
+        for (mode, query) in [
+            (SearchMode::Keyword, "needle"),
+            (SearchMode::Semantic, "needle"),
+            // A tag query answers from structural rows rather than chunks, so
+            // it reaches the shared result shaping by its own route.
+            (SearchMode::Semantic, "#topic"),
+        ] {
+            let response = core
+                .search(VaultSearchRequest {
+                    mode,
+                    ..request(VaultScope::All, query)
+                })
+                .unwrap_or_else(|error| panic!("search {query:?}: {error:?}"));
+
+            assert_eq!(response.data.results.len(), 1, "search {query:?}");
+            let serialized =
+                serde_json::to_value(&response.data.results[0]).expect("serialize result");
+            assert_eq!(
+                serialized["metadata"], expected,
+                "search {query:?} keeps its tags and aliases and an empty properties object"
+            );
+        }
     }
 
     #[test]
