@@ -1978,6 +1978,93 @@ mod tests {
         );
     }
 
+    /// Shortening a Vault's poll interval must bring its *already armed* next
+    /// turn forward, not merely apply to the turn after it. Found in
+    /// production: a Vault whose last turn armed a 24h deadline was edited
+    /// down to hourly, and then sat for the rest of that 24h without a single
+    /// poll, because `activate` updated the stored interval in place and left
+    /// the deadline alone. The operator's whole reason for shortening the
+    /// interval is the *next* check, so a change they can watch not happening
+    /// for a day reads as a broken scheduler.
+    ///
+    /// Observed through the same `list()` summary the settings page reads,
+    /// rather than the scheduler's test accessors, because the gap between
+    /// `last_checked_at` and `next_attempt_at` is exactly what an operator
+    /// checks after making this edit.
+    #[tokio::test]
+    async fn shortening_the_poll_interval_brings_the_armed_next_turn_forward() {
+        let (state, _worker, _directory) = test_state();
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Remote notes",
+                managed_git_source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+            ))
+            .await
+            .expect("create the Vault");
+        let vault_id = ready_snapshot(&state)
+            .vault_ids()
+            .next()
+            .expect("one Vault");
+        // One successful turn, arming the long interval the edit below
+        // shortens. Without it the Vault is due immediately anyway and the
+        // property under test cannot fail.
+        state
+            .managed_git
+            .record_outcome(vault_id, &Ok(crate::git::ManagedGitOutcome::UpToDate));
+
+        let shortened_secs = 3600;
+        assert!(
+            shortened_secs < DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+            "this test only means anything if the edit shortens the interval"
+        );
+        let current = ready_snapshot(&state);
+        VaultCollectionManagement::new(&state)
+            .edit(
+                vault_id,
+                EditVaultRequest {
+                    expected_registry_revision: current.revision(),
+                    name: "Remote notes".to_string(),
+                    source: managed_git_source(shortened_secs),
+                    exclude_patterns: Vec::new(),
+                    https_credentials: HttpsCredentialsPatch::Keep,
+                    confirm_identity_change: false,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .await
+            .expect("edit the Vault");
+
+        let listed = VaultCollectionManagement::new(&state)
+            .list()
+            .expect("list the collection");
+        let summary = listed
+            .vaults
+            .iter()
+            .find(|summary| summary.vault_id == vault_id)
+            .expect("the managed Vault");
+        let parse = |raw: &str| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .expect("an RFC 3339 timestamp")
+                .timestamp()
+        };
+        let last_checked_at = summary
+            .last_checked_at
+            .as_deref()
+            .expect("the completed turn must still be reported");
+        let next_attempt_at = summary
+            .next_attempt_at
+            .as_deref()
+            .expect("a tracked Vault must report its next turn");
+        let gap = parse(next_attempt_at) - parse(last_checked_at);
+        let shortened = i64::try_from(shortened_secs).expect("interval");
+        assert!(
+            (gap - shortened).abs() <= 2,
+            "the next turn must fall one *new* interval after the last one, \
+             not one old interval: {last_checked_at} -> {next_attempt_at}"
+        );
+    }
+
     /// A Vault that has never completed a turn is due *now*, not unscheduled:
     /// `next_attempt_at` is what tells an operator the Vault is waiting on a
     /// check rather than forgotten, so it must be present from the moment the

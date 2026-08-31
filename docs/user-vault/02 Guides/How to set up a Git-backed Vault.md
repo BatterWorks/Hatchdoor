@@ -50,6 +50,10 @@ These appear whenever the chosen behaviour talks to a remote (**Pull-only** or *
 
 The schedule is measured from the Vault's last completed check and survives a restart: Hatchdoor remembers when each Vault last checked, so restarting or redeploying resumes the countdown instead of starting a fresh one. A Vault that is already past its interval when Hatchdoor starts syncs straight away, and one still inside its interval waits out the remainder rather than checking again. This matters on a deployment that redeploys often — before, a Vault set to check once a day would sync on every restart and never actually reach a scheduled check.
 
+Changing the schedule applies to the check the Vault is already waiting on, not just the one after it: shorten a Vault from daily to hourly and its next check moves to an hour after its last one, which may be immediately. Lengthening the schedule leaves the pending check where it is and takes effect from there on, so a Vault never has a check it was about to make pushed further away.
+
+The exception is a Vault that is currently retrying a failure. After a check fails for a reason worth retrying — a remote that was briefly unreachable — Hatchdoor schedules the retry itself, in seconds rather than on your schedule, and shortening the interval deliberately leaves that retry alone rather than making a failing remote be hammered harder. So if you shorten the schedule of a Vault showing `unavailable` and its next check does not move, that is the retry in progress, not the edit being ignored; the new schedule takes over once a check succeeds.
+
 ## Editing an existing Vault's Git settings
 
 Open the Vault from **Settings** and its own page has a **Save Vault** button in the header, plus a **Sync** console (when Git applies) showing whether the last sync was healthy and a **Sync now** (or **Try again**, if something failed) button.

@@ -471,16 +471,21 @@ impl ManagedGitScheduler {
     /// Register a Vault so it participates in scheduled polling, due
     /// immediately, using `poll_interval` for its daily-equivalent re-arm
     /// (see [`Self::record_outcome`]). Idempotent for the schedule itself:
-    /// re-activating an already-tracked Vault leaves its current schedule
-    /// (including an in-progress backoff and any held checkout lease)
-    /// untouched, so a `reconcile()` that retains an unchanged Vault does not
-    /// reset it — but `poll_interval` is always applied, even to an
-    /// already-tracked Vault (issue #97's reopening finding 2): an edit that
-    /// changes only a Vault's configured interval must take effect on its
-    /// next re-arm without disturbing an in-progress backoff or lease, so the
+    /// re-activating an already-tracked Vault at its current interval leaves
+    /// that schedule (including an in-progress backoff and any held checkout
+    /// lease) untouched — but `poll_interval` is always applied, even to an
+    /// already-tracked Vault (issue #97's reopening finding 2), so the
     /// interval update and schedule-state preservation are handled as two
     /// independent concerns rather than both being gated by "already
     /// tracked."
+    ///
+    /// A *changed* interval also reaches the attempt already armed, but only
+    /// ever to bring it forward, and only when that attempt is the poll
+    /// interval's rather than a backoff's — see the comment on the shortening
+    /// itself below for why each of those halves is there. In practice only a
+    /// definition edit gets that far: `reconcile()` skips an unchanged Vault
+    /// before calling this at all, so the already-tracked path is the edit
+    /// path, not something every reconcile pass runs.
     pub fn activate(&self, vault_id: VaultId, poll_interval: Duration) {
         // Read and parse the state file before taking the lock. `tick` takes
         // the same lock on every pass, and activating a collection of N
@@ -492,7 +497,35 @@ impl ManagedGitScheduler {
         let mut entries = self.entries.lock().expect("managed Git scheduler poisoned");
         match entries.entry(vault_id) {
             std::collections::btree_map::Entry::Occupied(mut occupied) => {
-                occupied.get_mut().poll_interval = poll_interval;
+                let entry = occupied.get_mut();
+                entry.poll_interval = poll_interval;
+                // A shortened interval has to reach the attempt already
+                // armed, not just the one after it: an operator shortens the
+                // interval *for* the next check, and a Vault that had a long
+                // interval armed would otherwise serve the whole of it out
+                // before the edit had any visible effect. `min` is what keeps
+                // this to a shortening — a lengthened interval leaves the
+                // nearer deadline where it is rather than pushing the Vault
+                // out — and the backoff guard is what keeps an in-progress
+                // transient retry, which is not on the interval at all, from
+                // being re-armed as though it were.
+                if entry.schedule.backoff.is_none()
+                    && let Some(record) = &entry.last_completed
+                    && let Some(wait) = remaining_wait(record.completed_at, poll_interval)
+                    // An interval so large the deadline overflows leaves the
+                    // armed attempt alone: nothing about it is *nearer*, which
+                    // is the only reason this branch moves anything. Without
+                    // the check the addition panics under the `entries` lock
+                    // and poisons the scheduler for every Vault in the
+                    // process. `poll_interval_secs` has a minimum but no
+                    // maximum (`vault_registry`), and this only disarms the
+                    // addition here — `record_outcome` re-arms with the same
+                    // unbounded interval — so an upper bound at validation is
+                    // still the real fix.
+                    && let Some(deadline) = Instant::now().checked_add(wait)
+                {
+                    entry.schedule.next_attempt = entry.schedule.next_attempt.min(deadline);
+                }
             }
             std::collections::btree_map::Entry::Vacant(vacant) => {
                 let (next_attempt, last_completed) = restored;
@@ -531,12 +564,20 @@ impl ManagedGitScheduler {
         let Some(record) = state.last_git_turn(vault_id) else {
             return (now, None);
         };
-        // A stamp in the future means the host clock moved. Treat it as
-        // unknown rather than delaying this Vault's next turn by the skew.
-        let Ok(elapsed) = SystemTime::now().duration_since(record.completed_at) else {
+        // A record whose time cannot be reasoned from is no record: it is not
+        // one to publish a `last_checked_at` from either, so the Vault comes
+        // back as one that has never checked rather than one reporting a time
+        // from a clock nobody trusts.
+        let Some(wait) = remaining_wait(record.completed_at, poll_interval) else {
             return (now, None);
         };
-        (now + poll_interval.saturating_sub(elapsed), Some(record))
+        // An overflowing deadline is the opposite case and keeps its record:
+        // the turn happened and its time is sound, it is only the absurd
+        // interval that cannot be represented. Dropping the record here would
+        // also drop the Git status `vault_runtime` republishes from it, so a
+        // Vault that was failing would come back reporting a blank `pending`.
+        // Due now is the safe reading of an interval nobody can serve.
+        (now.checked_add(wait).unwrap_or(now), Some(record))
     }
 
     /// This Vault's last remembered interval-arming turn, if any. Activation
@@ -855,6 +896,26 @@ impl ManagedGitScheduler {
         }
         due
     }
+}
+
+/// How long a Vault that last completed a turn at `completed_at` still has to
+/// wait before its next one is due, under `poll_interval` — zero once the
+/// interval has already elapsed.
+///
+/// The wall clock is the only clock that survives a restart or describes a
+/// turn, so it is what the remembered record holds; a *deadline* held that way
+/// would move with the host clock, so callers add this remaining wait to an
+/// `Instant` instead. Returning the wait rather than the deadline is what lets
+/// each caller decide separately what to do when that addition overflows,
+/// which is not the same decision as this function's own failure.
+///
+/// `None` means `completed_at` is in the future, so the host clock moved and
+/// the record's time cannot be reasoned from at all. Neither caller delays the
+/// Vault by the skew: registration treats the record as unusable, and a
+/// shortened interval leaves the armed attempt alone.
+fn remaining_wait(completed_at: SystemTime, poll_interval: Duration) -> Option<Duration> {
+    let elapsed = SystemTime::now().duration_since(completed_at).ok()?;
+    Some(poll_interval.saturating_sub(elapsed))
 }
 
 /// One completed turn as it is remembered, in memory and on disk.
@@ -1282,6 +1343,108 @@ mod tests {
         };
         assert!(next_attempt >= before + new_interval - Duration::from_secs(1));
         assert!(next_attempt < before + new_interval + Duration::from_secs(5));
+    }
+
+    /// The companion to the test above, for the direction it does not cover:
+    /// *shortening* an interval does reach the armed attempt (that is the
+    /// whole point of the change), so the backoff is no longer protected by
+    /// `activate` leaving every deadline alone — it is protected by an
+    /// explicit guard, and this is the case that proves the guard is load
+    /// bearing.
+    ///
+    /// The Vault here has both a remembered success (so a deadline can be
+    /// computed from it at all) and a later transient failure's backoff,
+    /// which is the only combination that can go wrong: a backoff is
+    /// deliberately *not* on the poll interval, so re-deriving the attempt
+    /// from the last interval-arming turn would discard the throttle on a
+    /// remote that is currently failing — and the shorter the operator makes
+    /// the interval, the harder the retry storm.
+    #[test]
+    fn shortening_the_interval_does_not_re_arm_a_vault_that_is_mid_backoff() {
+        let (_coordinator, scheduler) = scheduler();
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
+        // A success first, so the Vault carries a remembered interval-arming
+        // turn; then a transient failure, which arms a backoff and leaves
+        // that remembered turn in place.
+        scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
+        scheduler.record_outcome(
+            vault,
+            &Err(VaultWorkError::new(
+                "managed_git_remote_unreachable",
+                "x",
+                true,
+            )),
+        );
+        let armed_backoff = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
+        };
+
+        // Far shorter than BACKOFF_BASE, so a deadline re-derived from the
+        // remembered success would land well before the armed backoff and
+        // visibly replace it.
+        let shortened = Duration::from_secs(1);
+        assert!(
+            shortened < BACKOFF_BASE,
+            "the shortened interval must be able to undercut the backoff for this test to discriminate"
+        );
+        scheduler.activate(vault, shortened);
+
+        let (after_reactivate, stored_interval) = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            (
+                entries[&vault].schedule.next_attempt,
+                entries[&vault].poll_interval,
+            )
+        };
+        assert_eq!(
+            armed_backoff, after_reactivate,
+            "shortening the interval must not cut an in-progress backoff short"
+        );
+        assert_eq!(
+            stored_interval, shortened,
+            "the shortened interval must still be stored, for the re-arm after the backoff resolves"
+        );
+    }
+
+    /// The other half of "only forward". A shortened interval reaches the
+    /// armed attempt; a *lengthened* one must not, or an operator moving a
+    /// Vault from hourly to daily fifty minutes into the hour would push the
+    /// check that was ten minutes away out by a further day — the same
+    /// surprise this whole change exists to remove, in the opposite
+    /// direction. `min` is what makes the re-arm one-directional, and this is
+    /// the only test that holds it: replacing it with a plain assignment
+    /// passes every other test in the suite.
+    #[test]
+    fn lengthening_the_interval_leaves_a_nearer_armed_attempt_alone() {
+        let (_coordinator, scheduler) = scheduler();
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        scheduler.activate(vault, TEST_POLL_INTERVAL);
+        scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
+        let armed_interval = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            entries[&vault].schedule.next_attempt
+        };
+
+        let lengthened = TEST_POLL_INTERVAL * 24;
+        scheduler.activate(vault, lengthened);
+
+        let (after_reactivate, stored_interval) = {
+            let entries = scheduler.entries.lock().expect("scheduler entries");
+            (
+                entries[&vault].schedule.next_attempt,
+                entries[&vault].poll_interval,
+            )
+        };
+        assert_eq!(
+            armed_interval, after_reactivate,
+            "lengthening the interval must not push an already-armed attempt further out"
+        );
+        assert_eq!(
+            stored_interval, lengthened,
+            "the lengthened interval must still be stored, for the re-arm after that attempt"
+        );
     }
 
     /// Closes issue #97's reopening finding 2: before this fix,
