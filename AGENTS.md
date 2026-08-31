@@ -142,6 +142,30 @@ It checks uniform lightness per theme, the chroma ceilings, and 4.5:1 contrast
 on the tinted and badge surfaces, and exits non-zero on a violation. No
 dependencies.
 
+## Branching
+
+All work happens on a branch off `development`. Never commit to `development`
+or `main` directly, whatever the size of the change.
+
+Before the first edit, check the current branch and cut one if you are sitting
+on a protected branch:
+
+```bash
+git branch --show-current
+git switch -c <prefix>/<short-slug> development
+```
+
+Use `feature/`, `fix/`, `docs/`, or `refactor/` as the prefix. Push that branch
+and open a pull request against `development`; `main` is the release branch and
+receives only merges from `development`.
+
+`development` refuses a direct push, so cutting the branch after the work is
+committed means moving commits off a branch you cannot push, not a quick fix.
+Check first.
+
+Every merge is a merge commit, including `development` into `main`. Do not
+squash, do not rebase-merge, and never force-push `development` or `main`.
+
 ## Documentation freshness before merging into `development`
 
 Merging work into `development` requires a documentation freshness review. Run:
