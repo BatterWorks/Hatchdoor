@@ -64,6 +64,15 @@ pub(crate) fn clamp_search_per_note_cap(per_note_cap: Option<usize>) -> usize {
     per_note_cap.unwrap_or(2).clamp(1, 10)
 }
 
+/// A tree read's `max_depth`, held to the minimum of 1 the tool schema
+/// advertises. Depth 0 would return the starting folder with nothing inside it,
+/// which is not a tree; a client that asks for it gets the shallowest real one
+/// instead, the way every other out-of-range numeric argument here clamps
+/// rather than refuses.
+pub(crate) fn clamp_tree_max_depth(max_depth: Option<u32>) -> Option<u32> {
+    max_depth.map(|depth| depth.max(1))
+}
+
 /// The `note_not_found` failure both adapters report when an exact read
 /// resolves its slug to nothing on the caller's browse surface. Shared so a
 /// Note withheld by the demo surface (#109) is indistinguishable from an absent
@@ -156,6 +165,7 @@ impl VaultReadError {
             | "invalid_scope"
             | "invalid_search_query"
             | "invalid_layer_selection"
+            | "folder_not_found"
             | "search_unavailable"
             // Exact reads of one Note's contents.
             | "note_not_found"
@@ -269,15 +279,67 @@ pub struct VaultTree {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultExplorerFolder {
     pub name: String,
+    /// The Notes held *directly* in this folder, not counting its subfolders.
+    /// Reported whether or not `notes` was populated, so the shape of a Vault
+    /// is legible from a tree read that omitted the Notes themselves.
+    ///
+    /// Direct rather than cumulative on purpose: a full-depth read returns
+    /// every folder, so any subtree total is a sum of these, and shipping both
+    /// numbers would be two ways to say one thing.
+    pub note_count: usize,
+    /// This folder sat at the `max_depth` limit and holds Notes or subfolders
+    /// that were therefore not returned. Without it a depth-limited answer
+    /// would be indistinguishable from a genuinely empty leaf.
+    ///
+    /// Omitted from the payload when false, which is the common case.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
     pub folders: Vec<VaultExplorerFolder>,
     pub notes: Vec<VaultExplorerNote>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// A Note inside a [`VaultTree`]. Deliberately *not* Vault-qualified: a tree is
+/// grouped per Vault and already states its own `vault_id`, so repeating it on
+/// every Note was a third of the payload. Flat results that mix Vaults in one
+/// list — `search_notes`, `recently_modified` — still carry it, because there
+/// is no enclosing group to read it from there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultExplorerNote {
-    pub vault_id: VaultId,
     pub title: String,
     pub slug: String,
+}
+
+/// How far one tree read is narrowed: where it starts, how deep it goes, and
+/// whether Notes appear at all.
+///
+/// Distinct from [`VaultScope`], which selects *Vaults*. A tree read carries
+/// both: the Vault scope picks the trees, this picks the part of each one that
+/// is returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TreeScope {
+    /// The Vault-relative folder to return as the root, or the whole Vault.
+    pub folder: Option<String>,
+    /// How far below the starting folder to descend, the starting folder being
+    /// depth 0. `None` descends the whole way.
+    pub max_depth: Option<u32>,
+    /// Whether Notes appear at all. Folders and their counts always do.
+    pub include_notes: bool,
+}
+
+impl Default for TreeScope {
+    /// The whole Vault, at every depth, with its Notes — what a tree read
+    /// returned before any narrowing existed.
+    fn default() -> Self {
+        Self {
+            folder: None,
+            max_depth: None,
+            include_notes: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
@@ -692,15 +754,45 @@ impl<'a> VaultReadCore<'a> {
             .is_some_and(|entry| self.surface.hides(entry.layer.as_deref()))
     }
 
+    /// The explorer trees for the selected Vaults, narrowed by `tree_scope`.
+    ///
+    /// `TreeScope::default()` is the whole Vault at every depth, which is what
+    /// this returned before narrowing existed. A `folder` naming nothing in a
+    /// Vault is that Vault's `folder_not_found` failure, never an empty tree:
+    /// a mistyped folder name and an empty folder are different facts, and an
+    /// agent must not read one as the other. Under `all` that failure lands on
+    /// the participant, as any other non-participation does, so one Vault
+    /// lacking the folder does not withhold the Vaults that have it; only when
+    /// none of them has it does the call itself refuse, and that refusal names
+    /// no Vault because none of them is the culprit.
     pub fn trees(
         &self,
         scope: VaultScope,
+        tree_scope: TreeScope,
     ) -> Result<VaultReadProjection<Vec<VaultTree>>, VaultReadError> {
-        self.collection(scope, |vault_id, vault_name, snapshot| VaultTree {
-            vault_id,
-            vault_name: vault_name.to_string(),
-            tree: tree_for(vault_id, snapshot),
-        })
+        let projection = self.try_collection(scope, |vault_id, vault_name, snapshot| {
+            Ok(VaultTree {
+                vault_id,
+                vault_name: vault_name.to_string(),
+                tree: tree_for(vault_id, snapshot, &tree_scope)?,
+            })
+        })?;
+
+        // When no Vault has the folder, the caller asked for one thing and
+        // would otherwise be handed an empty collection — the very blur the
+        // refusal exists to prevent, just moved up a level. Zero enabled
+        // Vaults is a different fact and stays the empty projection it is.
+        if let Some(requested) = tree_scope.folder.as_deref()
+            && projection.data.is_empty()
+            && projection
+                .participants
+                .iter()
+                .filter_map(|participant| participant.error.as_ref())
+                .any(|error| error.code == FOLDER_NOT_FOUND)
+        {
+            return Err(no_vault_has_folder(requested));
+        }
+        Ok(projection)
     }
 
     pub fn statistics(
@@ -1063,10 +1155,38 @@ impl<'a> VaultReadCore<'a> {
         self.control_and_index(vault_id).map(|(_, index)| index)
     }
 
+    /// The shared one-or-all read: select the Vaults, project each one that has
+    /// a readable snapshot, and report the rest as participants rather than as
+    /// silently missing data.
+    ///
+    /// A projection that reads whatever snapshot it is handed wants this one.
+    /// Only a projection that can refuse a readable Vault needs
+    /// [`Self::try_collection`], and keeping that the narrower door is what
+    /// stops one projection's refusal from becoming every projection's
+    /// concern.
     fn collection<T>(
         &self,
         scope: VaultScope,
         map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> T,
+    ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
+        self.try_collection(scope, |vault_id, vault_name, snapshot| {
+            Ok(map(vault_id, vault_name, snapshot))
+        })
+    }
+
+    /// [`Self::collection`] for the one projection whose `map` may refuse a
+    /// Vault it could otherwise read: a tree read narrowed to a folder that
+    /// Vault does not have.
+    ///
+    /// That refusal takes the same route as an unreadable snapshot — a
+    /// participant carrying the reason under `all`, and the failure itself
+    /// when exactly one Vault was asked for. Reach for this only when the
+    /// projection itself can say no; everything else reads better, and stays
+    /// out of the tree read's blast radius, through `collection`.
+    fn try_collection<T>(
+        &self,
+        scope: VaultScope,
+        map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> Result<T, VaultReadError>,
     ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
         let snapshot = self.vaults.snapshot();
         let selected = selected_vaults(&snapshot, scope)?;
@@ -1085,12 +1205,22 @@ impl<'a> VaultReadCore<'a> {
                         }
                     };
                     let read = self.surface.restrict(published.read);
-                    data.push(map(selected.vault_id, &selected.vault_name, &read));
-                    VaultParticipant {
-                        vault_id: selected.vault_id,
-                        vault_name: selected.vault_name,
-                        state,
-                        error: None,
+                    match map(selected.vault_id, &selected.vault_name, &read) {
+                        Ok(projected) => {
+                            data.push(projected);
+                            VaultParticipant {
+                                vault_id: selected.vault_id,
+                                vault_name: selected.vault_name,
+                                state,
+                                error: None,
+                            }
+                        }
+                        Err(error) => VaultParticipant {
+                            vault_id: selected.vault_id,
+                            vault_name: selected.vault_name,
+                            state: VaultParticipantState::Unavailable,
+                            error: Some(error),
+                        },
                     }
                 }
                 Ok(None) => unavailable_participant(
@@ -1222,20 +1352,76 @@ fn qualify_links(vault_id: VaultId, links: NoteLinks) -> VaultQualifiedLinks {
     }
 }
 
-fn tree_for(vault_id: VaultId, snapshot: &VaultSnapshotRead) -> VaultExplorerFolder {
+/// The name a whole-Vault tree's root carries, and the fallback name when a
+/// caller narrows to the Vault root by naming it with slashes alone.
+const TREE_ROOT_NAME: &str = "Vault";
+
+/// The refusal a tree read narrowed to an absent folder carries, named once so
+/// the projection can recognise its own refusal on the way back out.
+const FOLDER_NOT_FOUND: &str = "folder_not_found";
+
+/// One Vault's explorer tree, narrowed to `tree_scope`.
+///
+/// The whole tree is assembled first and narrowed afterwards. The cost being
+/// paid down here is the payload, not the walk: this snapshot is already in
+/// memory and grouping it is what the unnarrowed read has always done.
+fn tree_for(
+    vault_id: VaultId,
+    snapshot: &VaultSnapshotRead,
+    tree_scope: &TreeScope,
+) -> Result<VaultExplorerFolder, VaultReadError> {
     let mut root = FolderBuilder::default();
     for note in &snapshot.notes {
         let segments = note.relative_path.split('/').collect::<Vec<_>>();
         root.insert(
             &segments[..segments.len().saturating_sub(1)],
             VaultExplorerNote {
-                vault_id,
                 title: note.title.clone(),
                 slug: note.slug.clone(),
             },
         );
     }
-    root.build("Vault")
+
+    let (name, folder) = match tree_scope.folder.as_deref() {
+        None => (TREE_ROOT_NAME, &root),
+        Some(requested) => root
+            .descend(requested)
+            .ok_or_else(|| folder_not_found(vault_id, requested))?,
+    };
+    Ok(folder.project(name, tree_scope.max_depth, tree_scope.include_notes))
+}
+
+/// A tree read narrowed to a folder this Vault does not have.
+///
+/// Not the same answer as an empty folder, which is a successful read. Telling
+/// a caller that a mistyped folder is empty would be a plausible-looking lie,
+/// so the two stay distinguishable. Never retryable — no amount of reindexing
+/// creates the folder — and the message echoes only the Vault-relative path
+/// that was asked for, never a location on disk.
+fn folder_not_found(vault_id: VaultId, requested: &str) -> VaultReadError {
+    VaultReadError {
+        code: FOLDER_NOT_FOUND.to_string(),
+        message: format!("Vault has no folder '{requested}'"),
+        vault_id: Some(vault_id),
+        retryable: false,
+    }
+}
+
+/// The same refusal raised for the call as a whole, when `all` was asked for a
+/// folder and no participating Vault had it.
+///
+/// Deliberately built rather than re-raised from one participant: every Vault
+/// refused equally, so there is no culprit to name, and carrying an arbitrary
+/// participant's `vault_id` out of a collection-wide failure would point the
+/// caller at a Vault no more at fault than the rest. The per-Vault refusals
+/// stay on `participants`, where each one does name its own Vault.
+fn no_vault_has_folder(requested: &str) -> VaultReadError {
+    VaultReadError {
+        code: FOLDER_NOT_FOUND.to_string(),
+        message: format!("No participating Vault has folder '{requested}'"),
+        vault_id: None,
+        retryable: false,
+    }
 }
 
 fn graph_nodes(vault_id: VaultId, snapshot: &VaultSnapshotRead) -> Vec<VaultGraphNode> {
@@ -1286,17 +1472,73 @@ impl FolderBuilder {
             .insert(tail, note);
     }
 
-    fn build(mut self, name: &str) -> VaultExplorerFolder {
-        self.notes
-            .sort_by(|left, right| left.title.cmp(&right.title));
+    /// The folder at a Vault-relative path, with the name the Vault spells it
+    /// with rather than the one the caller typed.
+    ///
+    /// Matched case-insensitively and tolerant of surrounding slashes. Segments
+    /// are matched against folder names assembled from Note paths, so `..` names
+    /// no folder and a traversal attempt refuses here instead of climbing
+    /// anywhere.
+    fn descend(&self, path: &str) -> Option<(&str, &FolderBuilder)> {
+        let mut name = TREE_ROOT_NAME;
+        let mut folder = self;
+        for segment in path
+            .trim()
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+        {
+            let wanted = segment.to_lowercase();
+            let (child_name, child) = folder
+                .folders
+                .iter()
+                .find(|(candidate, _)| candidate.to_lowercase() == wanted)?;
+            name = child_name.as_str();
+            folder = child;
+        }
+        Some((name, folder))
+    }
+
+    /// This folder as one response node: expanded `max_depth` levels below
+    /// itself, carrying Notes only when they were asked for.
+    fn project(
+        &self,
+        name: &str,
+        max_depth: Option<u32>,
+        include_notes: bool,
+    ) -> VaultExplorerFolder {
+        let note_count = self.notes.len();
+        if max_depth == Some(0) {
+            // The depth limit lands here: listed, not expanded. `truncated`
+            // is what separates this from a leaf that is genuinely empty, so
+            // it marks only what the *depth* withheld. Notes a caller excluded
+            // everywhere are not a surprise waiting below, and `note_count`
+            // reports them anyway.
+            return VaultExplorerFolder {
+                name: name.to_string(),
+                note_count,
+                truncated: !self.folders.is_empty() || (include_notes && note_count > 0),
+                folders: Vec::new(),
+                notes: Vec::new(),
+            };
+        }
+        let mut notes = if include_notes {
+            self.notes.clone()
+        } else {
+            Vec::new()
+        };
+        notes.sort_by(|left, right| left.title.cmp(&right.title));
+        let child_depth = max_depth.map(|depth| depth - 1);
         VaultExplorerFolder {
             name: name.to_string(),
+            note_count,
+            truncated: false,
             folders: self
                 .folders
-                .into_iter()
-                .map(|(name, folder)| folder.build(&name))
+                .iter()
+                .map(|(child_name, child)| child.project(child_name, child_depth, include_notes))
                 .collect(),
-            notes: self.notes,
+            notes,
         }
     }
 }
@@ -1675,12 +1917,15 @@ mod parsing_tests {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     use tempfile::TempDir;
 
-    use super::{VaultParticipantState, VaultReadCore, VaultScope};
+    use super::{
+        TreeScope, VaultExplorerFolder, VaultParticipantState, VaultReadCore, VaultScope,
+        clamp_tree_max_depth,
+    };
     use crate::cache::SqliteCache;
     use crate::embed::StubEmbedder;
     use crate::vault::VaultIndex;
@@ -1796,13 +2041,28 @@ mod tests {
         ]);
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
 
-        let trees = reads.trees(VaultScope::All).expect("trees");
+        let trees = reads
+            .trees(VaultScope::All, TreeScope::default())
+            .expect("trees");
         assert_eq!(trees.data.len(), 2);
+        // Equal slugs stay in separate, Vault-qualified trees rather than
+        // colliding in one list. Since #192 the qualification lives on the
+        // tree, not repeated on every Note inside it.
+        assert_eq!(
+            trees
+                .data
+                .iter()
+                .map(|tree| tree.vault_id)
+                .collect::<BTreeSet<_>>(),
+            workspace.vault_ids.iter().copied().collect::<BTreeSet<_>>()
+        );
         assert!(trees.data.iter().all(|tree| {
             tree.tree
                 .notes
                 .iter()
-                .all(|note| note.vault_id == tree.vault_id)
+                .map(|note| note.slug.as_str())
+                .collect::<Vec<_>>()
+                == ["home", "shared"]
         }));
 
         let statistics = reads.statistics(VaultScope::All).expect("statistics");
@@ -1849,7 +2109,9 @@ mod tests {
         let workspace = workspace(&[]);
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
 
-        let projection = reads.trees(VaultScope::All).expect("zero Vault projection");
+        let projection = reads
+            .trees(VaultScope::All, TreeScope::default())
+            .expect("zero Vault projection");
         assert!(projection.data.is_empty());
         assert!(projection.participants.is_empty());
         assert!(!projection.partial);
@@ -1881,13 +2143,15 @@ mod tests {
 
         let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
         let stale = reads
-            .trees(VaultScope::One(first))
+            .trees(VaultScope::One(first), TreeScope::default())
             .expect("stale projection");
         assert!(stale.partial);
         assert_eq!(stale.participants[0].state, VaultParticipantState::Stale);
         assert_eq!(stale.data[0].tree.notes[0].slug, "home");
 
-        let aggregate = reads.trees(VaultScope::All).expect("partial aggregate");
+        let aggregate = reads
+            .trees(VaultScope::All, TreeScope::default())
+            .expect("partial aggregate");
         assert!(aggregate.partial);
         assert_eq!(aggregate.data.len(), 1);
         assert_eq!(aggregate.participants.len(), 2);
@@ -1900,7 +2164,7 @@ mod tests {
         );
 
         let unavailable = reads
-            .trees(VaultScope::One(second))
+            .trees(VaultScope::One(second), TreeScope::default())
             .expect_err("missing snapshot");
         assert_eq!(unavailable.code, "vault_unavailable");
         assert_eq!(unavailable.vault_id, Some(second));
@@ -2156,5 +2420,449 @@ mod tests {
             .expect_err("unregistered Vault errs");
         assert_eq!(error.code, "vault_not_found");
         assert!(!error.retryable);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tree scope (#192)
+    // -----------------------------------------------------------------------
+
+    /// One Vault shaped to exercise every tree-scope case at once: notes at the
+    /// root, a nested folder three levels deep, and `archive`, which holds no
+    /// Note of its own but is a real folder because something lives below it.
+    fn tree_workspace() -> Workspace {
+        workspace(&[(
+            "Reference",
+            &[
+                ("Home.md", "# Home"),
+                ("40-reference/Ref.md", "# Ref"),
+                ("40-reference/Parenting/Kid.md", "# Kid"),
+                ("40-reference/Parenting/Kid Two.md", "# Kid Two"),
+                ("archive/2024/Old.md", "# Old"),
+            ],
+        )])
+    }
+
+    fn read_tree(workspace: &Workspace, tree_scope: TreeScope) -> VaultExplorerFolder {
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        reads
+            .trees(VaultScope::One(workspace.vault_ids[0]), tree_scope)
+            .expect("tree")
+            .data
+            .remove(0)
+            .tree
+    }
+
+    fn child<'a>(parent: &'a VaultExplorerFolder, name: &str) -> &'a VaultExplorerFolder {
+        parent
+            .folders
+            .iter()
+            .find(|folder| folder.name == name)
+            .unwrap_or_else(|| panic!("{name} is a child of {}", parent.name))
+    }
+
+    fn folder_names(root: &VaultExplorerFolder) -> Vec<String> {
+        let mut names = vec![root.name.clone()];
+        for folder in &root.folders {
+            names.extend(folder_names(folder));
+        }
+        names
+    }
+
+    fn note_titles(root: &VaultExplorerFolder) -> Vec<String> {
+        let mut titles = root
+            .notes
+            .iter()
+            .map(|note| note.title.clone())
+            .collect::<Vec<_>>();
+        for folder in &root.folders {
+            titles.extend(note_titles(folder));
+        }
+        titles
+    }
+
+    #[test]
+    fn every_folder_counts_the_notes_directly_inside_it() {
+        let workspace = tree_workspace();
+        let tree = read_tree(&workspace, TreeScope::default());
+
+        assert_eq!(tree.name, "Vault");
+        assert_eq!(tree.note_count, 1);
+        assert!(!tree.truncated);
+        assert_eq!(child(&tree, "40-reference").note_count, 1);
+        assert_eq!(
+            child(child(&tree, "40-reference"), "Parenting").note_count,
+            2
+        );
+        // Direct, not cumulative: `archive` holds a Note somewhere below it,
+        // but none of its own.
+        assert_eq!(child(&tree, "archive").note_count, 0);
+        assert_eq!(child(child(&tree, "archive"), "2024").note_count, 1);
+    }
+
+    #[test]
+    fn folder_returns_that_subtree_case_insensitively_with_slashes_tolerated() {
+        let workspace = tree_workspace();
+
+        for requested in [
+            "40-reference/Parenting",
+            "/40-REFERENCE/parenting/",
+            "  40-Reference/Parenting  ",
+        ] {
+            let tree = read_tree(
+                &workspace,
+                TreeScope {
+                    folder: Some(requested.to_string()),
+                    ..TreeScope::default()
+                },
+            );
+            // Named the way the Vault spells it, not the way it was asked for.
+            assert_eq!(tree.name, "Parenting", "requested {requested:?}");
+            assert_eq!(tree.note_count, 2, "requested {requested:?}");
+            assert_eq!(
+                note_titles(&tree),
+                ["Kid", "Kid Two"],
+                "requested {requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_folder_refuses_while_a_real_folder_without_notes_reads_empty() {
+        let workspace = tree_workspace();
+        let vault_id = workspace.vault_ids[0];
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        // A real folder that holds no Note of its own is a successful read.
+        let archive = read_tree(
+            &workspace,
+            TreeScope {
+                folder: Some("archive".to_string()),
+                ..TreeScope::default()
+            },
+        );
+        assert_eq!(archive.name, "archive");
+        assert_eq!(archive.note_count, 0);
+        assert!(archive.notes.is_empty());
+        assert_eq!(archive.folders.len(), 1);
+
+        // A folder that does not exist is not that. Traversal attempts land
+        // here too: `..` names no folder, so nothing climbs anywhere.
+        for requested in [
+            "40-refrence",
+            "archive/2023",
+            "40-reference/../archive",
+            "..",
+            "../../etc",
+        ] {
+            let error = reads
+                .trees(
+                    VaultScope::One(vault_id),
+                    TreeScope {
+                        folder: Some(requested.to_string()),
+                        ..TreeScope::default()
+                    },
+                )
+                .expect_err("missing folder refuses");
+            assert_eq!(error.code, "folder_not_found", "requested {requested:?}");
+            assert_eq!(error.public_code(), "folder_not_found");
+            assert!(!error.retryable, "requested {requested:?}");
+            assert_eq!(error.vault_id, Some(vault_id));
+            assert!(
+                !error
+                    .message
+                    .contains(workspace.vault_paths[0].to_str().expect("fixture path")),
+                "the refusal must not name a location on disk: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn max_depth_lists_the_boundary_folder_without_expanding_it() {
+        let workspace = tree_workspace();
+
+        let shallow = read_tree(
+            &workspace,
+            TreeScope {
+                max_depth: Some(1),
+                ..TreeScope::default()
+            },
+        );
+        // The starting folder is depth 0, so it is expanded.
+        assert_eq!(note_titles(&shallow), ["Home"]);
+        let reference = child(&shallow, "40-reference");
+        assert_eq!(reference.note_count, 1);
+        assert!(reference.truncated);
+        assert!(reference.notes.is_empty());
+        assert!(reference.folders.is_empty());
+        // A folder with no Notes of its own still says it was cut short, or a
+        // caller would read it as an empty leaf.
+        let archive = child(&shallow, "archive");
+        assert_eq!(archive.note_count, 0);
+        assert!(archive.truncated);
+
+        let deeper = read_tree(
+            &workspace,
+            TreeScope {
+                max_depth: Some(2),
+                ..TreeScope::default()
+            },
+        );
+        let reference = child(&deeper, "40-reference");
+        assert!(!reference.truncated);
+        assert_eq!(note_titles(reference), ["Ref"]);
+        let parenting = child(reference, "Parenting");
+        assert_eq!(parenting.note_count, 2);
+        assert!(parenting.truncated);
+        assert!(parenting.notes.is_empty());
+    }
+
+    #[test]
+    fn folder_and_max_depth_measure_depth_from_the_starting_folder() {
+        let workspace = tree_workspace();
+        let tree = read_tree(
+            &workspace,
+            TreeScope {
+                folder: Some("40-reference".to_string()),
+                max_depth: Some(1),
+                ..TreeScope::default()
+            },
+        );
+
+        assert_eq!(tree.name, "40-reference");
+        assert_eq!(note_titles(&tree), ["Ref"]);
+        assert!(child(&tree, "Parenting").truncated);
+    }
+
+    #[test]
+    fn include_notes_false_keeps_every_folder_and_its_count() {
+        let workspace = tree_workspace();
+        let full = read_tree(&workspace, TreeScope::default());
+        let shape = read_tree(
+            &workspace,
+            TreeScope {
+                include_notes: false,
+                ..TreeScope::default()
+            },
+        );
+
+        assert_eq!(folder_names(&shape), folder_names(&full));
+        assert!(note_titles(&shape).is_empty());
+        assert_eq!(shape.note_count, 1);
+        assert_eq!(child(&shape, "40-reference").note_count, 1);
+        assert_eq!(
+            child(child(&shape, "40-reference"), "Parenting").note_count,
+            2
+        );
+        // Every folder is still there, at every level — this is the cheap
+        // orientation read, not a shallow one.
+        assert_eq!(folder_names(&shape).len(), 5);
+        // Withholding Notes is not truncation: nothing about the folder
+        // structure was cut short, and the counts still report the Notes.
+        assert!(!child(child(&shape, "40-reference"), "Parenting").truncated);
+    }
+
+    #[test]
+    fn the_shape_of_a_vault_costs_an_order_of_magnitude_less_than_its_notes() {
+        // Roughly the reference vault from #192: a few hundred Notes spread
+        // over two dozen folders.
+        let notes = (0..24)
+            .flat_map(|folder| {
+                (0..20).map(move |note| {
+                    (
+                        format!("{folder:02}-folder/Note {note:02}.md"),
+                        format!("# Note {folder:02} {note:02}\n"),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let files = notes
+            .iter()
+            .map(|(path, body)| (path.as_str(), body.as_str()))
+            .collect::<Vec<_>>();
+        let workspace = workspace(&[("Big", &files)]);
+
+        let full = read_tree(&workspace, TreeScope::default());
+        let shape = read_tree(
+            &workspace,
+            TreeScope {
+                include_notes: false,
+                ..TreeScope::default()
+            },
+        );
+
+        assert_eq!(note_titles(&full).len(), 480);
+        assert!(note_titles(&shape).is_empty());
+        assert_eq!(folder_names(&shape).len(), 25);
+        assert_eq!(
+            shape
+                .folders
+                .iter()
+                .map(|folder| folder.note_count)
+                .sum::<usize>(),
+            480
+        );
+
+        let full_bytes = serde_json::to_vec(&full).expect("serialize full").len();
+        let shape_bytes = serde_json::to_vec(&shape).expect("serialize shape").len();
+        assert!(
+            shape_bytes * 10 < full_bytes,
+            "the shape-only read must cost an order of magnitude less: {shape_bytes} against {full_bytes}"
+        );
+    }
+
+    #[test]
+    fn a_vault_without_the_folder_does_not_withhold_the_vaults_that_have_it() {
+        let workspace = workspace(&[
+            ("First", &[("archive/2024/Old.md", "# Old")]),
+            ("Second", &[("Home.md", "# Home")]),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let second = workspace.vault_ids[1];
+
+        let projection = reads
+            .trees(
+                VaultScope::All,
+                TreeScope {
+                    folder: Some("archive".to_string()),
+                    ..TreeScope::default()
+                },
+            )
+            .expect("the Vault that has the folder still answers");
+
+        assert_eq!(projection.data.len(), 1);
+        assert_eq!(projection.data[0].vault_id, workspace.vault_ids[0]);
+        assert!(projection.partial);
+        let missing = projection
+            .participants
+            .iter()
+            .find(|participant| participant.vault_id == second)
+            .expect("the Vault without the folder is still a participant");
+        assert_eq!(missing.state, VaultParticipantState::Unavailable);
+        assert_eq!(
+            missing.error.as_ref().map(|error| error.code.as_str()),
+            Some("folder_not_found")
+        );
+    }
+
+    #[test]
+    fn no_vault_having_the_folder_refuses_rather_than_answering_an_empty_collection() {
+        let workspace = workspace(&[
+            ("First", &[("Home.md", "# Home")]),
+            ("Second", &[("Home.md", "# Home")]),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let error = reads
+            .trees(
+                VaultScope::All,
+                TreeScope {
+                    folder: Some("archive".to_string()),
+                    ..TreeScope::default()
+                },
+            )
+            .expect_err("no Vault has the folder");
+
+        assert_eq!(error.code, "folder_not_found");
+        assert!(!error.retryable);
+        // Every Vault refused equally, so the collection-wide refusal names
+        // none of them. Re-raising one participant's error would have carried
+        // an arbitrary `vault_id` out and pointed the caller at a Vault no
+        // more at fault than the other.
+        assert_eq!(error.vault_id, None);
+        assert!(
+            !error.message.contains("First") && !error.message.contains("Second"),
+            "the whole-call refusal must not single out a Vault: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn zero_enabled_vaults_stays_an_empty_projection_even_when_a_folder_was_named() {
+        // Nothing refused the folder here — there was nothing to ask. That is
+        // a different fact from every Vault lacking it, and reads differently.
+        let workspace = workspace(&[]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let projection = reads
+            .trees(
+                VaultScope::All,
+                TreeScope {
+                    folder: Some("archive".to_string()),
+                    ..TreeScope::default()
+                },
+            )
+            .expect("zero Vault projection");
+
+        assert!(projection.data.is_empty());
+        assert!(projection.participants.is_empty());
+        assert!(!projection.partial);
+    }
+
+    #[test]
+    fn withholding_notes_everywhere_does_not_read_as_depth_truncation() {
+        let workspace = tree_workspace();
+        let shape = read_tree(
+            &workspace,
+            TreeScope {
+                max_depth: Some(1),
+                include_notes: false,
+                ..TreeScope::default()
+            },
+        );
+
+        // `40-reference` holds a Note and a subfolder. Only the subfolder is a
+        // surprise: the Notes were excluded everywhere and counted anyway.
+        let reference = child(&shape, "40-reference");
+        assert_eq!(reference.note_count, 1);
+        assert!(reference.truncated);
+
+        // Nothing below `2024` but Notes, and those were never coming.
+        let deeper = read_tree(
+            &workspace,
+            TreeScope {
+                folder: Some("archive".to_string()),
+                max_depth: Some(1),
+                include_notes: false,
+            },
+        );
+        let year = child(&deeper, "2024");
+        assert_eq!(year.note_count, 1);
+        assert!(
+            !year.truncated,
+            "a folder holding only excluded Notes withheld nothing the caller did not ask to withhold"
+        );
+
+        // With Notes included, that same folder is genuinely cut short.
+        let with_notes = read_tree(
+            &workspace,
+            TreeScope {
+                folder: Some("archive".to_string()),
+                max_depth: Some(1),
+                ..TreeScope::default()
+            },
+        );
+        assert!(child(&with_notes, "2024").truncated);
+    }
+
+    #[test]
+    fn max_depth_below_the_advertised_minimum_clamps_to_the_shallowest_real_tree() {
+        assert_eq!(clamp_tree_max_depth(None), None);
+        assert_eq!(clamp_tree_max_depth(Some(0)), Some(1));
+        assert_eq!(clamp_tree_max_depth(Some(3)), Some(3));
+
+        let workspace = tree_workspace();
+        let clamped = read_tree(
+            &workspace,
+            TreeScope {
+                max_depth: clamp_tree_max_depth(Some(0)),
+                ..TreeScope::default()
+            },
+        );
+
+        // Depth 0 would have named the root and stopped. The clamp gives the
+        // root expanded and its children listed instead.
+        assert_eq!(note_titles(&clamped), ["Home"]);
+        assert!(child(&clamped, "40-reference").truncated);
     }
 }

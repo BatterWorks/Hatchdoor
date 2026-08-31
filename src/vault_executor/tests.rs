@@ -10,7 +10,7 @@ use crate::cache::vault_snapshots::{VaultSnapshotFreshness, VaultSnapshotStatus}
 use crate::embed::{Embedder, StubEmbedder};
 use crate::runtime_config::RuntimeConfig;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
-use crate::search::{LayerSelection, NoteFilters, SearchMode};
+use crate::search::{LayerSelection, SearchMode};
 use crate::vault_read::VaultScope;
 use crate::vault_registry::{
     DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS, NewVaultDefinition, VaultRegistrySnapshot,
@@ -406,8 +406,6 @@ async fn index_turn_with_embed_layers_disabled_keeps_demoted_notes_keyword_only(
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 1,
-            filters: NoteFilters::default(),
-            include_properties: Vec::new(),
             layers: layers.clone(),
         })
         .expect("keyword search");
@@ -426,8 +424,6 @@ async fn index_turn_with_embed_layers_disabled_keeps_demoted_notes_keyword_only(
             mode: SearchMode::Semantic,
             limit: 10,
             per_note_cap: 1,
-            filters: NoteFilters::default(),
-            include_properties: Vec::new(),
             layers,
         })
         .expect("semantic search");
@@ -671,7 +667,10 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
         );
 
         let projection = crate::vault_read::VaultReadCore::new(&cache, &collection)
-            .trees(crate::vault_read::VaultScope::One(vault_id))
+            .trees(
+                crate::vault_read::VaultScope::One(vault_id),
+                crate::vault_read::TreeScope::default(),
+            )
             .expect("tree read during active rebuild");
         assert!(
             projection.partial,
@@ -1666,8 +1665,6 @@ async fn each_index_turn_binds_the_settings_snapshot_at_its_own_start() {
                 mode: SearchMode::Semantic,
                 limit: 10,
                 per_note_cap: 1,
-                filters: NoteFilters::default(),
-                include_properties: Vec::new(),
                 layers,
             })
             .expect("semantic search")
@@ -1681,8 +1678,6 @@ async fn each_index_turn_binds_the_settings_snapshot_at_its_own_start() {
             mode: SearchMode::Keyword,
             limit: 10,
             per_note_cap: 1,
-            filters: NoteFilters::default(),
-            include_properties: Vec::new(),
             layers: layers.clone(),
         })
         .expect("keyword search");

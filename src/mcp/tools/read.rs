@@ -19,7 +19,6 @@ use std::str::FromStr;
 
 use crate::app_state::AppState;
 use crate::mcp::results;
-use crate::search::NoteFilters;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::vault::allowed_attachment_extensions;
 use crate::vault_error::VaultOperationError;
@@ -27,9 +26,9 @@ use crate::vault_management::{
     CreateVaultRequest, EditVaultRequest, HttpsCredentialsPatch, VaultCollectionManagement,
 };
 use crate::vault_read::{
-    AssetPathError, AssetReadError, OffloadedReadError, ResolvedAsset, VaultReadError, VaultReads,
-    VaultResolveResponse, VaultScope, asset_download_path, clamp_recent_limit, clamp_search_limit,
-    clamp_search_per_note_cap, note_not_found,
+    AssetPathError, AssetReadError, OffloadedReadError, ResolvedAsset, TreeScope, VaultReadError,
+    VaultReads, VaultResolveResponse, VaultScope, asset_download_path, clamp_recent_limit,
+    clamp_search_limit, clamp_search_per_note_cap, clamp_tree_max_depth, note_not_found,
 };
 use crate::vault_registry::VaultId;
 
@@ -125,6 +124,25 @@ struct RecentArgs {
     limit: Option<usize>,
 }
 
+/// `get_tree`'s arguments. The three narrowing ones are optional and default to
+/// the whole Vault, so a caller that passes only `scope` reads the tree it
+/// always did.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TreeArgs {
+    scope: String,
+    #[serde(default)]
+    folder: Option<String>,
+    #[serde(default)]
+    max_depth: Option<u32>,
+    #[serde(default = "notes_included_by_default")]
+    include_notes: bool,
+}
+
+fn notes_included_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExactSlugArgs {
@@ -195,8 +213,6 @@ pub(super) async fn search_notes_tool(
         mode: args.mode.unwrap_or_default(),
         limit: clamp_search_limit(args.limit),
         per_note_cap: clamp_search_per_note_cap(args.per_note_cap),
-        filters: NoteFilters::default(),
-        include_properties: Vec::new(),
         layers,
     };
     let cache = state.startup_sqlite.clone();
@@ -286,10 +302,23 @@ pub(super) async fn get_tree_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    collection_read(state, "get_tree", arguments, |core, scope| {
-        core.trees(scope)
-    })
-    .await
+    let args: TreeArgs = parse("get_tree", arguments)?;
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    let tree_scope = TreeScope {
+        folder: args.folder,
+        max_depth: clamp_tree_max_depth(args.max_depth),
+        include_notes: args.include_notes,
+    };
+    match VaultReads::new(&state)
+        .read(move |core| core.trees(scope, tree_scope))
+        .await
+    {
+        Ok(projection) => Ok(tool_result::<results::GetTreeResult>(&projection)),
+        Err(error) => read_failure(error),
+    }
 }
 
 pub(super) async fn get_stats_tool(
@@ -940,10 +969,7 @@ pub(super) fn read_tools_list() -> Vec<Value> {
         json!({"name":"get_note", "description":"Read one exact Note from its authoritative Vault Markdown directory.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"get_note_links", "description":"Read outgoing links and backlinks for one exact Vault Note.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"slug":{"type":"string","minLength":1}},"required":["vault_id","slug"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
         json!({"name":"resolve_wikilink", "description":"Resolve a wikilink target within exactly one Vault.", "inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema(),"target":{"type":"string","minLength":1}},"required":["vault_id","target"],"additionalProperties":false},"annotations":read_only_tool_annotations()}),
-        collection_tool(
-            "get_tree",
-            "Return grouped explorer trees for one Vault or all enabled Vaults.",
-        ),
+        tree_tool(),
         collection_tool(
             "get_stats",
             "Return grouped statistics for one Vault or all enabled Vaults.",
@@ -1036,6 +1062,44 @@ fn collection_tool(name: &str, description: &str) -> Value {
     json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":{"scope":scope_schema()},"required":["scope"],"additionalProperties":false},"annotations":read_only_tool_annotations()})
 }
 
+/// `get_tree` no longer shares [`collection_tool`]'s scope-only schema: it takes
+/// three optional narrowing arguments (#192) that `get_stats` and `get_graph`
+/// deliberately do not.
+///
+/// The description carries its own weight here. An agent choosing between a
+/// whole-Vault dump and a one-kilobyte orientation call has nothing else to go
+/// on, so the cheap call is named in it rather than left to be discovered.
+fn tree_tool() -> Value {
+    json!({
+        "name": "get_tree",
+        "description": "Return grouped explorer trees for one Vault or all enabled Vaults. With no folder, max_depth or include_notes the entire Vault is returned, which is large. To see a Vault's shape cheaply, call with include_notes false: that returns every folder at every level with its note count and no notes. Use folder to read one subtree, and max_depth to stop descending. Every folder reports note_count, the notes directly inside it; a folder held back by max_depth is marked truncated.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "scope": scope_schema(),
+                "folder": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Vault-relative folder to return as the tree root, such as \"40-reference/Parenting\". Matched case-insensitively. A folder that does not exist is an error, not an empty tree. Defaults to the whole Vault."
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "How far below the starting folder to descend, the starting folder being depth 0. A folder at this depth is listed with its note count but not expanded. Defaults to unlimited."
+                },
+                "include_notes": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether notes appear at all. Folders and their note counts are returned either way."
+                }
+            },
+            "required": ["scope"],
+            "additionalProperties": false
+        },
+        "annotations": read_only_tool_annotations()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,6 +1145,52 @@ mod tests {
         }
         for retired in ["refresh_index", "layer_diagnostics", "get_git_sync_status"] {
             assert!(!tools.iter().any(|tool| tool["name"] == retired));
+        }
+    }
+
+    #[test]
+    fn only_get_tree_advertises_the_tree_narrowing_arguments() {
+        let tools = read_tools_list();
+        let named = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is advertised"))
+        };
+
+        let tree = named("get_tree");
+        let properties = &tree["inputSchema"]["properties"];
+        for argument in ["folder", "max_depth", "include_notes"] {
+            assert!(
+                properties[argument].is_object(),
+                "get_tree advertises {argument}"
+            );
+        }
+        // Optional, so a caller passing only `scope` still reads the whole
+        // tree, exactly as it did before #192.
+        assert_eq!(
+            tree["inputSchema"]["required"],
+            json!(["scope"]),
+            "the narrowing arguments must stay optional"
+        );
+        assert_eq!(properties["include_notes"]["default"], json!(true));
+        assert_eq!(properties["max_depth"]["minimum"], json!(1));
+        // The cheap orientation call has only the description to announce it.
+        let description = tree["description"].as_str().expect("get_tree description");
+        assert!(description.contains("include_notes"));
+
+        // `get_stats` and `get_graph` shared `get_tree`'s schema builder until
+        // this split. They take scope and nothing else, and still do.
+        for name in ["get_stats", "get_graph"] {
+            assert_eq!(
+                named(name)["inputSchema"]["properties"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{name} has properties"))
+                    .keys()
+                    .collect::<Vec<_>>(),
+                vec!["scope"],
+                "{name} takes scope alone"
+            );
         }
     }
 

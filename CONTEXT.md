@@ -30,6 +30,14 @@ scope may identify one vault or all available vaults. Agent operations declare
 their scope explicitly; mutations always identify exactly one vault.
 _Avoid_: Active vault
 
+**Vault tree**:
+One vault's folders and notes as a nested structure, grouped per vault and never merged across vaults. Each folder reports the notes held directly inside it, excluding its subfolders. The tree states its vault once; the notes inside it are not separately vault-qualified, unlike the flat results of a search or a recently-modified read.
+_Avoid_: Folder tree, file tree, explorer tree (when meant as the returned structure)
+
+**Tree scope**:
+The part of a vault tree a read returns: the folder it starts from, how far below that it descends, and whether notes appear at all. Distinct from vault scope, which selects vaults rather than content; a tree read declares both. A tree scope naming a folder the vault does not have is refused, never answered with an empty folder.
+_Avoid_: Vault scope, path filter, subtree filter
+
 **Aggregated view**:
 A combined view of results from multiple vaults that preserves each result's
 vault-qualified identity. It does not merge vaults or create cross-vault links.
