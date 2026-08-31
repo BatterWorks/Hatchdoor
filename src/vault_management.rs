@@ -45,6 +45,7 @@ use crate::vault_runtime::{
     VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus, VaultRuntimeError,
     VaultSearchStatus, VaultWatcherStatus,
 };
+use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{ScheduleResult, VaultWorkKind};
 
 // ---------------------------------------------------------------------------
@@ -72,12 +73,19 @@ pub struct VaultSummary {
     pub local_content: LocalContentStatus,
     pub search: VaultSearchStatus,
     pub git: VaultGitStatus,
-    /// When this Vault's last interval-arming Git turn completed, RFC 3339
-    /// UTC. Absent for a Vault with no remote to poll, one that has not
-    /// completed a turn yet, or a read that withholds operator detail.
+    /// When this Vault's last interval-arming Git turn finished, RFC 3339
+    /// UTC — whether it succeeded or failed. A failed check is still a check,
+    /// and `git`/`git_error` already say which it was; naming this "synced"
+    /// would report a successful sync for a Vault that has only ever failed
+    /// to authenticate. Absent for a Vault with no remote to poll, one that
+    /// has not completed a turn yet, or a read that withholds operator
+    /// detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_synced_at: Option<String>,
+    pub last_checked_at: Option<String>,
     /// When this Vault's next scheduled Git turn is due, RFC 3339 UTC.
+    /// Present for every Vault with a remote to poll — one that has never
+    /// completed a turn is due immediately, not unscheduled — and absent only
+    /// for a Vault with no remote, or a read that withholds operator detail.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_attempt_at: Option<String>,
     pub watcher: VaultWatcherStatus,
@@ -451,8 +459,8 @@ fn vault_summary(
         local_content: snapshot.local_content,
         search: snapshot.search,
         git: snapshot.git,
-        last_synced_at: clock
-            .and_then(|clock| clock.last_completed_at)
+        last_checked_at: clock
+            .and_then(|clock| clock.last_checked_at)
             .map(format_timestamp),
         next_attempt_at: clock.map(|clock| format_timestamp(clock.next_attempt_at)),
         watcher: snapshot.watcher,
@@ -462,12 +470,6 @@ fn vault_summary(
         git_error: snapshot.git_error.clone(),
         watcher_error: snapshot.watcher_error.clone(),
     }
-}
-
-/// The same RFC 3339 UTC shape the durable record uses, so a timestamp reads
-/// identically whether it came from the file or from the live countdown.
-fn format_timestamp(at: std::time::SystemTime) -> String {
-    chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 /// The public-safe projection of one enabled Vault for a read-only demo (#109).
@@ -501,7 +503,7 @@ fn public_vault_summary(
         local_content: snapshot.local_content,
         search: snapshot.search,
         git: snapshot.git,
-        last_synced_at: None,
+        last_checked_at: None,
         next_attempt_at: None,
         watcher: snapshot.watcher,
         capabilities: snapshot.capabilities,
@@ -1955,8 +1957,8 @@ mod tests {
             .find(|summary| summary.vault_id == vault_id)
             .expect("the managed Vault");
 
-        let last_synced_at = summary
-            .last_synced_at
+        let last_checked_at = summary
+            .last_checked_at
             .as_deref()
             .expect("a completed turn must be reported");
         let next_attempt_at = summary
@@ -1968,11 +1970,47 @@ mod tests {
                 .expect("an RFC 3339 timestamp")
                 .timestamp()
         };
-        let gap = parse(next_attempt_at) - parse(last_synced_at);
+        let gap = parse(next_attempt_at) - parse(last_checked_at);
         let configured = i64::try_from(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS).expect("interval");
         assert!(
             (gap - configured).abs() <= 2,
-            "the next turn must fall one poll interval after the last one: {last_synced_at} -> {next_attempt_at}"
+            "the next turn must fall one poll interval after the last one: {last_checked_at} -> {next_attempt_at}"
+        );
+    }
+
+    /// A Vault that has never completed a turn is due *now*, not unscheduled:
+    /// `next_attempt_at` is what tells an operator the Vault is waiting on a
+    /// check rather than forgotten, so it must be present from the moment the
+    /// Vault is tracked. `last_checked_at` is the only one of the pair that
+    /// waits for a completed turn.
+    #[tokio::test]
+    async fn a_managed_git_vault_reports_its_next_turn_before_its_first_one_completes() {
+        let (state, _worker, _directory) = test_state();
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Remote notes",
+                VaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+            ))
+            .await
+            .expect("create the Vault");
+
+        let listed = VaultCollectionManagement::new(&state)
+            .list()
+            .expect("list the collection");
+        let summary = listed.vaults.first().expect("the managed Vault");
+        assert_eq!(
+            summary.last_checked_at, None,
+            "no turn has completed, so there is nothing to report as checked"
+        );
+        assert!(
+            summary.next_attempt_at.is_some(),
+            "a tracked Vault always has a next turn, even before its first one"
         );
     }
 
@@ -1996,7 +2034,7 @@ mod tests {
             .list()
             .expect("list the collection");
         let summary = listed.vaults.first().expect("the Local Vault");
-        assert_eq!(summary.last_synced_at, None);
+        assert_eq!(summary.last_checked_at, None);
         assert_eq!(summary.next_attempt_at, None);
     }
 }

@@ -321,7 +321,9 @@ mod tests {
         let sqlite = Arc::new(crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let managed_git = Arc::new(crate::git::ManagedGitScheduler::without_durable_state(
+            vault_work.clone(),
+        ));
         AppState {
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 tmp.path().join("state/vaults.json"),

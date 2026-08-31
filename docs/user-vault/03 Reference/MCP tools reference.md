@@ -37,9 +37,11 @@ Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — thes
 
 `list_vaults` is always available. The other six require `HATCHDOOR_MCP_WRITE_ENABLED`; without it they return the same "MCP write tools are disabled" error as content write tools.
 
+A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps describing its Git schedule: `last_checked_at`, when Hatchdoor last tried to check the remote — whether that check succeeded or failed, so read it alongside the Vault's Git status rather than as a successful sync — and `next_attempt_at`, when the next scheduled check is due. `last_checked_at` is absent until the first check completes; both are absent for a Vault with no remote and in demo mode. They are described in full under **Git schedule fields on a listed Vault** in [[HTTP API reference]], whose Vault shape `list_vaults` returns verbatim.
+
 | Tool | Gating | Purpose |
 | --- | --- | --- |
-| `list_vaults` | Always | Every Vault's ID, name, status, redacted source, and capabilities, plus the registry's `registry_revision`. Call this first — every write below needs a fresh `expected_registry_revision`. |
+| `list_vaults` | Always | Every Vault's ID, name, status, redacted source, capabilities, and Git schedule, plus the registry's `registry_revision`. Call this first — every write below needs a fresh `expected_registry_revision`. |
 | `create_vault` | Write mode | Create a Vault definition. The registry assigns the Vault ID; read it back from `list_vaults`. |
 | `edit_vault` | Write mode | Replace one Vault definition wholesale (not a patch — send back every field you want to keep). |
 | `enable_vault` | Write mode | Enable a disabled Vault definition. |

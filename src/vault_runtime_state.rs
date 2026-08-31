@@ -6,8 +6,7 @@
 //! Git turn completed, and how it went — which is what lets
 //! `git::ManagedGitScheduler` keep a Vault's configured poll interval across
 //! a restart instead of restarting the countdown every time the process
-//! does. The record is nested under a per-Vault section so a later durable
-//! fact joins it without a second file or a format migration.
+//! does.
 //!
 //! This file is deliberately *not* the Vault registry. Losing it costs one
 //! extra Git turn per Vault; losing the registry costs the collection. That
@@ -30,15 +29,25 @@ pub const RUNTIME_STATE_SCHEMA_VERSION: u32 = 1;
 /// The file name, resolved beside the Vault registry.
 pub const RUNTIME_STATE_FILE_NAME: &str = "vault-runtime.json";
 
-/// How one completed Git turn ended, as persisted. Mirrors
-/// `git::ManagedGitOutcome` plus the failure case, which the in-memory
-/// outcome type does not carry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// The error code republished for a remembered failure whose own code did not
+/// survive the file — a record hand-edited into shape, or one written by a
+/// build that did not carry the detail.
+const UNKNOWN_FAILURE_CODE: &str = "managed_git_turn_failed";
+
+/// The sentence republished for a remembered failure whose own message did
+/// not survive the file.
+const UNKNOWN_FAILURE_MESSAGE: &str = "The last Git turn before this restart did not succeed.";
+
+/// How one completed Git turn ended. A failure carries its own already-
+/// redacted code and message, so a restarted instance republishes the same
+/// sentence the previous process showed rather than a generic one — and so
+/// no caller has to know that those two details are meaningful for exactly
+/// one of the three cases.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitTurnOutcome {
     UpToDate,
     Synchronized,
-    Failed,
+    Failed { code: String, message: String },
 }
 
 /// One Vault's last interval-arming Git turn.
@@ -46,13 +55,6 @@ pub enum GitTurnOutcome {
 pub struct GitTurnRecord {
     pub completed_at: SystemTime,
     pub outcome: GitTurnOutcome,
-    /// The failure's error code, present only for [`GitTurnOutcome::Failed`].
-    pub code: Option<String>,
-    /// The failure's already-redacted message, present only for
-    /// [`GitTurnOutcome::Failed`]. Carried so a restarted instance can
-    /// republish the same sentence the previous process showed, rather than
-    /// falling back to a generic one.
-    pub message: Option<String>,
 }
 
 /// Reader/writer for the durable per-Vault runtime state file.
@@ -73,22 +75,16 @@ impl VaultRuntimeStateStore {
         Self::new(parent.join(RUNTIME_STATE_FILE_NAME))
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// The Vault's last interval-arming Git turn, or `None` when there is no
     /// usable record.
     pub fn last_git_turn(&self, vault_id: VaultId) -> Option<GitTurnRecord> {
         let LoadedState::Usable(stored) = self.load() else {
             return None;
         };
-        let turn = stored.vaults.get(&vault_id)?.git.as_ref()?;
+        let turn = stored.vaults.get(&vault_id)?;
         Some(GitTurnRecord {
             completed_at: parse_timestamp(&turn.completed_at)?,
-            outcome: turn.outcome,
-            code: turn.code.clone(),
-            message: turn.message.clone(),
+            outcome: turn.outcome(),
         })
     }
 
@@ -114,12 +110,7 @@ impl VaultRuntimeStateStore {
                 vaults: BTreeMap::new(),
             },
         };
-        stored.vaults.entry(vault_id).or_default().git = Some(StoredGitTurn {
-            completed_at: format_timestamp(record.completed_at),
-            outcome: record.outcome,
-            code: record.code,
-            message: record.message,
-        });
+        stored.vaults.insert(vault_id, StoredGitTurn::from(record));
         self.persist(&stored)
     }
 
@@ -174,7 +165,11 @@ impl VaultRuntimeStateStore {
 /// Seconds precision, matching `model_setup`'s own persisted receipt: a poll
 /// clock has no use for sub-second resolution, and the coarser stamp stays
 /// readable to whoever opens the file.
-fn format_timestamp(at: SystemTime) -> String {
+///
+/// Shared with `vault_management`, which renders the same shape for the live
+/// countdown, so a timestamp reads identically whether it came from this file
+/// or from the schedule still running in memory.
+pub fn format_timestamp(at: SystemTime) -> String {
     chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
@@ -198,23 +193,74 @@ struct SchemaProbe {
 #[derive(Serialize, Deserialize)]
 struct StoredRuntimeState {
     schema_version: u64,
-    vaults: BTreeMap<VaultId, StoredVaultRecord>,
+    vaults: BTreeMap<VaultId, StoredGitTurn>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct StoredVaultRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    git: Option<StoredGitTurn>,
-}
-
+/// The on-disk projection of [`GitTurnRecord`], and the only place that knows
+/// `code` and `message` are meaningful for a failure alone. A record missing
+/// either still loads, so that tolerance lives here, at the file boundary,
+/// leaving [`GitTurnOutcome`] total for every caller above it.
 #[derive(Serialize, Deserialize)]
 struct StoredGitTurn {
     completed_at: String,
-    outcome: GitTurnOutcome,
+    outcome: StoredOutcome,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredOutcome {
+    UpToDate,
+    Synchronized,
+    Failed,
+}
+
+impl StoredGitTurn {
+    fn outcome(&self) -> GitTurnOutcome {
+        match self.outcome {
+            StoredOutcome::UpToDate => GitTurnOutcome::UpToDate,
+            StoredOutcome::Synchronized => GitTurnOutcome::Synchronized,
+            StoredOutcome::Failed => GitTurnOutcome::Failed {
+                code: self
+                    .code
+                    .clone()
+                    .unwrap_or_else(|| UNKNOWN_FAILURE_CODE.to_string()),
+                message: self
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| UNKNOWN_FAILURE_MESSAGE.to_string()),
+            },
+        }
+    }
+}
+
+impl From<GitTurnRecord> for StoredGitTurn {
+    fn from(record: GitTurnRecord) -> Self {
+        let completed_at = format_timestamp(record.completed_at);
+        match record.outcome {
+            GitTurnOutcome::UpToDate => Self {
+                completed_at,
+                outcome: StoredOutcome::UpToDate,
+                code: None,
+                message: None,
+            },
+            GitTurnOutcome::Synchronized => Self {
+                completed_at,
+                outcome: StoredOutcome::Synchronized,
+                code: None,
+                message: None,
+            },
+            GitTurnOutcome::Failed { code, message } => Self {
+                completed_at,
+                outcome: StoredOutcome::Failed,
+                code: Some(code),
+                message: Some(message),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

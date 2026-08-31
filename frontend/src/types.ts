@@ -113,12 +113,15 @@ export type VaultSummary = {
   local_content: "read_write" | "read_only" | "unavailable";
   search: "unavailable" | "indexing" | "browsable" | "ready" | "stale";
   git: "disabled" | "pending" | "ready" | "unavailable";
-  /** When this Vault's last scheduled or manual Git turn completed, RFC 3339
-   * UTC. Absent for a Vault with no remote to poll, one that has not
-   * completed a turn yet, and on the read-only demo. */
-  last_synced_at?: string;
-  /** When this Vault's next scheduled Git turn is due, RFC 3339 UTC. Absent
-   * under the same conditions as `last_synced_at`. */
+  /** When this Vault's last scheduled or manual Git turn finished, RFC 3339
+   * UTC — whether it succeeded or failed, so read it with `git` rather than
+   * as a successful sync. Absent for a Vault with no remote to poll, one
+   * that has not completed a turn yet, and on the read-only demo. */
+  last_checked_at?: string;
+  /** When this Vault's next scheduled Git turn is due, RFC 3339 UTC. Present
+   * for every Vault with a remote to poll, including one that has never
+   * completed a turn — it is due immediately, not unscheduled. Absent for a
+   * Vault with no remote, and on the read-only demo. */
   next_attempt_at?: string;
   watcher: "running" | "disabled" | "unavailable";
   capabilities: VaultCapabilities;

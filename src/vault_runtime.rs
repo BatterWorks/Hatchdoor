@@ -1206,8 +1206,6 @@ impl VaultCollectionRuntime {
         // still in the collection and resumes its schedule when re-enabled.
         for vault_id in previously_present.difference(&currently_present) {
             managed_git.forget_persisted_state(*vault_id);
-        }
-        for vault_id in previously_present.difference(&currently_present) {
             if active_retired.contains(vault_id) {
                 continue;
             }
@@ -1472,32 +1470,6 @@ fn collection_snapshots(
 /// kind of forced immediate retry). `None` means "no prior control block to
 /// carry over" — a genuinely new Vault or one transitioning from disabled
 /// to enabled — where `Pending` (an immediate first sync) is correct.
-/// The Git status a restarted instance should publish for a Vault whose last
-/// interval-arming turn is remembered. Only non-retryable failures are ever
-/// remembered as failures, so a remembered failure is never retryable.
-fn remembered_git_status(
-    remembered: &crate::vault_runtime_state::GitTurnRecord,
-) -> (VaultGitStatus, Option<VaultRuntimeError>) {
-    match remembered.outcome {
-        crate::vault_runtime_state::GitTurnOutcome::Failed => (
-            VaultGitStatus::Unavailable,
-            Some(VaultRuntimeError {
-                code: remembered
-                    .code
-                    .clone()
-                    .unwrap_or_else(|| "managed_git_turn_failed".to_string()),
-                message: remembered.message.clone().unwrap_or_else(|| {
-                    "The last Git turn before this restart did not succeed.".to_string()
-                }),
-                retryable: false,
-                detail: None,
-            }),
-        ),
-        crate::vault_runtime_state::GitTurnOutcome::UpToDate
-        | crate::vault_runtime_state::GitTurnOutcome::Synchronized => (VaultGitStatus::Ready, None),
-    }
-}
-
 fn activation_snapshot(
     definition: &VaultDefinition,
     vault_path: &Path,
@@ -1534,6 +1506,27 @@ fn activation_snapshot(
     };
     snapshot.capabilities = collection_capabilities(definition, &snapshot);
     snapshot
+}
+
+/// The Git status a restarted instance should publish for a Vault whose last
+/// interval-arming turn is remembered. Only non-retryable failures are ever
+/// remembered as failures, so a remembered failure is never retryable.
+fn remembered_git_status(
+    remembered: &crate::vault_runtime_state::GitTurnRecord,
+) -> (VaultGitStatus, Option<VaultRuntimeError>) {
+    match &remembered.outcome {
+        crate::vault_runtime_state::GitTurnOutcome::Failed { code, message } => (
+            VaultGitStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: code.clone(),
+                message: message.clone(),
+                retryable: false,
+                detail: None,
+            }),
+        ),
+        crate::vault_runtime_state::GitTurnOutcome::UpToDate
+        | crate::vault_runtime_state::GitTurnOutcome::Synchronized => (VaultGitStatus::Ready, None),
+    }
 }
 
 /// A retained participating snapshot is immediately searchable after process

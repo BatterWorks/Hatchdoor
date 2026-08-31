@@ -1653,8 +1653,9 @@ mod tests {
         let sqlite = Arc::new(SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let managed_git = std::sync::Arc::new(
+            crate::git::ManagedGitScheduler::without_durable_state(vault_work.clone()),
+        );
         let state = AppState {
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
@@ -1733,8 +1734,9 @@ mod tests {
                 .expect("save MCP token");
         }
         let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let managed_git = std::sync::Arc::new(
+            crate::git::ManagedGitScheduler::without_durable_state(vault_work.clone()),
+        );
         let state = AppState {
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),

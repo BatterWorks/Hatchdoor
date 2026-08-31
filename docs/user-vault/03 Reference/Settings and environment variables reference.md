@@ -14,7 +14,7 @@ Read by Compose on the host, not by the Hatchdoor binary — these decide what g
 | --- | --- | --- | --- |
 | `HOST_VAULT_PATH` | `./vault` | `/data/vault` | Markdown notes and attachments |
 | `HOST_CACHE_PATH` | `./data/cache` | `/data/cache` | SQLite search cache and `settings.json` |
-| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`) and any stored Git credentials |
+| `HOST_STATE_PATH` | `./data/state` | `/data/state` | The Vault registry (`vaults.json`), any stored Git credentials, and each Vault's Git poll schedule (`vault-runtime.json`) |
 | `HOST_MODELS_PATH` | `./models` | `/models` | Downloaded embedding model and the Gemma-terms acceptance record |
 
 See [[Understand where your data lives]] for what to back up.
@@ -30,7 +30,7 @@ Read once at process startup via `AppConfig::from_env`. Docker Compose fixes mos
 | `HOST` | `127.0.0.1` | The interface the process binds to. The standard Compose file fixes this at `0.0.0.0` inside the container so Docker's port publishing can reach it — see [[The security model]] for why that makes a web token mandatory. |
 | `PORT` | `42824` | The port the process listens on. |
 | `HATCHDOOR_SETTINGS_FILE` | next to `HATCHDOOR_CACHE_DB`, named `settings.json` | Relocates the live-settings file outside the default cache directory. |
-| `HATCHDOOR_VAULT_REGISTRY_PATH` | `/data/state/vaults.json` | Relocates the Vault registry. `just dev-start` points this at `.dev/state/vaults.json` automatically for local development. |
+| `HATCHDOOR_VAULT_REGISTRY_PATH` | `/data/state/vaults.json` | Relocates the Vault registry. `just dev-start` points this at `.dev/state/vaults.json` automatically for local development. `vault-runtime.json`, which remembers when each Git-backed Vault last checked its remote, is written beside it. That file is bookkeeping, not configuration: deleting it costs one extra check per Vault at the next start and nothing else. |
 
 ## Web access (environment-only)
 

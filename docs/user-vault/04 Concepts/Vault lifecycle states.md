@@ -25,7 +25,7 @@ Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes ra
 | **Git** | `disabled`, `pending`, `ready`, `unavailable` | Is Git sync (if configured) working? |
 | **Watcher** | `running`, `disabled`, `unavailable` | Is the file-change watcher keeping the index current? |
 
-**Git** survives a restart. A Vault that last synced cleanly comes back as `ready`, and one whose last sync failed comes back as `unavailable` with the same reason it showed before — `pending` means a Vault that has genuinely never completed a sync, not one Hatchdoor has simply forgotten about. Alongside these, `GET /api/v1/vaults` reports `last_synced_at` and `next_attempt_at` for any Vault with a remote.
+**Git** survives a restart for a Vault Hatchdoor polls on a schedule — one with a remote to check. A Vault that last checked cleanly comes back as `ready`, and one whose last check failed comes back as `unavailable` with the same reason it showed before, so `pending` means a Vault that has genuinely never completed a check rather than one Hatchdoor has simply forgotten about. A Vault with no remote to poll — an `existing_git` Vault in `local_history` mode, which only records your own edits — has no schedule to resume, so it starts as `pending` and settles on its first turn after startup. Alongside these, `GET /api/v1/vaults` reports `last_checked_at` and `next_attempt_at` for any Vault with a remote.
 
 **Search** deserves the closest look, because its middle values are easy to misread:
 

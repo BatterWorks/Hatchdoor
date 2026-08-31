@@ -73,7 +73,7 @@ Check the Vault's Sync console for the specific failure rather than assuming —
 
 ## "Is this Vault still syncing on schedule?"
 
-`GET /api/v1/vaults` reports `last_synced_at` and `next_attempt_at` for every Vault with a remote — answer the question from those rather than from the repository's Git history. A check that finds nothing new leaves no trace in `git log` or `git reflog`, so an unchanged remote-tracking branch is not evidence that Hatchdoor stopped checking; it usually means there was nothing to fetch.
+`GET /api/v1/vaults` reports `last_checked_at` and `next_attempt_at` for every Vault with a remote — answer the question from those rather than from the repository's Git history. `last_checked_at` is when Hatchdoor last *tried*, not when it last succeeded, so read it next to the Vault's Git status: a Vault that is checking on schedule but failing every time shows a recent `last_checked_at` and an `unavailable` status with the reason. A check that finds nothing new leaves no trace in `git log` or `git reflog`, so an unchanged remote-tracking branch is not evidence that Hatchdoor stopped checking; it usually means there was nothing to fetch.
 
 If `next_attempt_at` is in the past by more than a minute or so, something is genuinely wrong. If it's in the future, the Vault is simply waiting out its interval — **Sync now** on the Vault's page overrides it. Note that restarting Hatchdoor no longer forces a sync: a Vault inside its interval resumes the countdown across a restart, so restarting is no longer a way to prod a Vault into checking.
 
