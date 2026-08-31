@@ -17,6 +17,9 @@ historical records.
   — implemented collaboration-boundary plan.
 - [`architecture/collaboration-pilot-assessment.md`](architecture/collaboration-pilot-assessment.md)
   — evidence and limitations from the initial boundary pilots.
+- [`architecture/frontend-assessment.md`](architecture/frontend-assessment.md)
+  — 2026-08-30 review of the frontend stack, size, the bespoke block editor,
+  and the three oversized components with their split seams.
 
 ## Product direction
 
