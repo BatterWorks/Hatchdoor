@@ -1475,10 +1475,15 @@ deadline forward, re-arms the pending attempt to it: an operator shortens an
 interval *for* the next check, so a Vault sitting on a long armed deadline
 must not serve the whole of it out before the edit is visible. Only forward
 — a lengthened interval leaves the nearer deadline where it is — and never
-over a live backoff or a held checkout lease, both untouched: a transient
-failure's backoff is not on the poll interval at all, so re-deriving it from
-the last interval-arming turn would discard the throttle on a remote that is
-currently failing. `sync_now`/`retry_now` take the same `poll_interval`
+over a live backoff: a transient failure's backoff is not on the poll
+interval at all, so re-deriving it from the last interval-arming turn would
+discard the throttle on a remote that is currently failing. A held checkout
+lease is untouched either way; it is not a condition on the re-arm. The
+interval is clamped to `MAX_POLL_INTERVAL` on the way in, so no deadline this
+module arms can overflow — `poll_interval_secs` has a registry minimum but no
+maximum, and `record_outcome` arms under the `entries` lock, where a panic
+would poison the scheduler for every Vault in the process.
+`sync_now`/`retry_now` take the same `poll_interval`
 so a manual control before a Vault's first turn still registers it correctly.
 `tick()` skips a Vault whose Git turn is already active or already has a
 pending rerun queued (via `VaultWorkCoordinator::has_work`) rather than

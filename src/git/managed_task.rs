@@ -40,6 +40,30 @@ use super::managed_sync::{
 /// this same 24h value for the registry's own serde default).
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// The longest interval this scheduler will actually arm.
+///
+/// `poll_interval_secs` has a minimum but no maximum (`vault_registry`), and
+/// every deadline this module arms is `Instant::now() + interval`, which
+/// panics rather than saturating. [`ManagedGitScheduler::record_outcome`] does
+/// that addition *while holding the `entries` lock*, so a single absurd value
+/// would not just kill one Vault: it would poison the mutex and stop polling
+/// for every Vault in the process, and the value survives a restart to do it
+/// again. [`ManagedGitScheduler::polling_clock`] then renders the armed
+/// deadline as a timestamp, which panics past chrono's year ceiling.
+///
+/// Clamping at the one boundary every interval enters this module through
+/// ([`ManagedGitScheduler::activate`], the only writer of
+/// `VaultScheduleEntry::poll_interval`) is what lets all of those stay plain
+/// additions. It is deliberately *not* validation: nothing is rejected, and
+/// nothing persisted changes, so a registry already holding such a value still
+/// loads and still reads back unchanged. Bounding the value at the registry —
+/// which would reject that registry at load, a wire-contract change — remains
+/// a separate decision.
+///
+/// Ten years is "never" for a poll schedule, while staying far inside what an
+/// `Instant`, a `SystemTime`, and chrono can all represent.
+const MAX_POLL_INTERVAL: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
+
 /// Backoff bounds for re-attempting a turn that failed for a retryable
 /// (transient) reason, loosely mirroring the retired single-Vault task's
 /// bounds (30s base, 60s ceiling; deleted in #185) but capped by
@@ -377,11 +401,16 @@ struct VaultScheduleEntry {
     schedule: ScheduleState,
     /// This Vault's own poll interval (issue #97's reopening finding 2),
     /// read from `VaultSource::ManagedGit::poll_interval_secs` at
-    /// [`ManagedGitScheduler::activate`] time. Independent of `schedule`:
-    /// [`ManagedGitScheduler::activate`] updates this in place on a
-    /// definition change without touching `schedule.next_attempt` or
-    /// `schedule.backoff`, so an interval change never resets an
-    /// in-progress backoff.
+    /// [`ManagedGitScheduler::activate`] time and clamped there to
+    /// [`MAX_POLL_INTERVAL`] — that call is the only writer, which is what
+    /// lets every `Instant::now() + poll_interval` in this module be a plain
+    /// addition rather than a checked one.
+    ///
+    /// Mostly independent of `schedule`: an interval change never resets an
+    /// in-progress backoff or a held checkout lease. It does reach
+    /// `schedule.next_attempt`, but in one direction only — see
+    /// [`ManagedGitScheduler::activate`] for why a shortened interval has to
+    /// move the attempt already armed and a lengthened one must not.
     poll_interval: Duration,
     lease: Option<ManagedCheckoutLease>,
     /// This Vault's last interval-arming turn, restored from durable state at
@@ -470,23 +499,37 @@ impl ManagedGitScheduler {
 
     /// Register a Vault so it participates in scheduled polling, due
     /// immediately, using `poll_interval` for its daily-equivalent re-arm
-    /// (see [`Self::record_outcome`]). Idempotent for the schedule itself:
-    /// re-activating an already-tracked Vault at its current interval leaves
-    /// that schedule (including an in-progress backoff and any held checkout
-    /// lease) untouched — but `poll_interval` is always applied, even to an
-    /// already-tracked Vault (issue #97's reopening finding 2), so the
-    /// interval update and schedule-state preservation are handled as two
-    /// independent concerns rather than both being gated by "already
-    /// tracked."
+    /// (see [`Self::record_outcome`]). Re-activating an already-tracked Vault
+    /// preserves its schedule state — an in-progress backoff and any held
+    /// checkout lease are never disturbed — but `poll_interval` is always
+    /// applied, even to an already-tracked Vault (issue #97's reopening
+    /// finding 2), so the interval update and schedule-state preservation are
+    /// handled as two independent concerns rather than both being gated by
+    /// "already tracked."
     ///
-    /// A *changed* interval also reaches the attempt already armed, but only
-    /// ever to bring it forward, and only when that attempt is the poll
-    /// interval's rather than a backoff's — see the comment on the shortening
-    /// itself below for why each of those halves is there. In practice only a
-    /// definition edit gets that far: `reconcile()` skips an unchanged Vault
-    /// before calling this at all, so the already-tracked path is the edit
-    /// path, not something every reconcile pass runs.
+    /// The interval also reaches the attempt already armed, but only ever to
+    /// bring it forward, and only when that attempt is the poll interval's
+    /// rather than a backoff's — see the comment on the re-arm itself below
+    /// for why each of those halves is there. In practice only a definition
+    /// edit gets that far: `reconcile()` skips an unchanged Vault before
+    /// calling this at all, so the already-tracked path is the edit path, not
+    /// something every reconcile pass runs.
+    ///
+    /// Not *quite* idempotent on the armed attempt, and deliberately not
+    /// claimed to be: `record_outcome` stamps `completed_at` before taking the
+    /// lock and arms `next_attempt` after it, so re-activating at an unchanged
+    /// interval re-derives a deadline earlier by that gap and `min` adopts it.
+    /// The shift is the width of a lock acquisition, and `sync_now`/`retry_now`
+    /// take this path on every call; nothing downstream can resolve it, since
+    /// the tick samples at [`DEFAULT_TICK_INTERVAL`].
     pub fn activate(&self, vault_id: VaultId, poll_interval: Duration) {
+        // Bound the interval once, here, rather than checking every addition
+        // it later feeds. See [`MAX_POLL_INTERVAL`]: this call is the only
+        // writer of `VaultScheduleEntry::poll_interval`, so clamping on the
+        // way in is what makes the rest of the module's `Instant + interval`
+        // arithmetic safe — including `record_outcome`'s, which runs under the
+        // `entries` lock and would poison it for every Vault on overflow.
+        let poll_interval = poll_interval.min(MAX_POLL_INTERVAL);
         // Read and parse the state file before taking the lock. `tick` takes
         // the same lock on every pass, and activating a collection of N
         // Vaults would otherwise hold it across N whole-file parses at
@@ -512,19 +555,9 @@ impl ManagedGitScheduler {
                 if entry.schedule.backoff.is_none()
                     && let Some(record) = &entry.last_completed
                     && let Some(wait) = remaining_wait(record.completed_at, poll_interval)
-                    // An interval so large the deadline overflows leaves the
-                    // armed attempt alone: nothing about it is *nearer*, which
-                    // is the only reason this branch moves anything. Without
-                    // the check the addition panics under the `entries` lock
-                    // and poisons the scheduler for every Vault in the
-                    // process. `poll_interval_secs` has a minimum but no
-                    // maximum (`vault_registry`), and this only disarms the
-                    // addition here — `record_outcome` re-arms with the same
-                    // unbounded interval — so an upper bound at validation is
-                    // still the real fix.
-                    && let Some(deadline) = Instant::now().checked_add(wait)
                 {
-                    entry.schedule.next_attempt = entry.schedule.next_attempt.min(deadline);
+                    entry.schedule.next_attempt =
+                        entry.schedule.next_attempt.min(Instant::now() + wait);
                 }
             }
             std::collections::btree_map::Entry::Vacant(vacant) => {
@@ -567,17 +600,13 @@ impl ManagedGitScheduler {
         // A record whose time cannot be reasoned from is no record: it is not
         // one to publish a `last_checked_at` from either, so the Vault comes
         // back as one that has never checked rather than one reporting a time
-        // from a clock nobody trusts.
+        // from a clock nobody trusts. (A stamp in the future means the host
+        // clock moved; treating it as unknown is what keeps this Vault's next
+        // turn from being delayed by the skew.)
         let Some(wait) = remaining_wait(record.completed_at, poll_interval) else {
             return (now, None);
         };
-        // An overflowing deadline is the opposite case and keeps its record:
-        // the turn happened and its time is sound, it is only the absurd
-        // interval that cannot be represented. Dropping the record here would
-        // also drop the Git status `vault_runtime` republishes from it, so a
-        // Vault that was failing would come back reporting a blank `pending`.
-        // Due now is the safe reading of an interval nobody can serve.
-        (now.checked_add(wait).unwrap_or(now), Some(record))
+        (now + wait, Some(record))
     }
 
     /// This Vault's last remembered interval-arming turn, if any. Activation
@@ -906,8 +935,12 @@ impl ManagedGitScheduler {
 /// turn, so it is what the remembered record holds; a *deadline* held that way
 /// would move with the host clock, so callers add this remaining wait to an
 /// `Instant` instead. Returning the wait rather than the deadline is what lets
-/// each caller decide separately what to do when that addition overflows,
-/// which is not the same decision as this function's own failure.
+/// this bridge stay one function across both callers, which arm from different
+/// `Instant`s: registration from the one it captured, the re-arm from `now`.
+///
+/// The addition itself is safe to leave unchecked because `poll_interval` is
+/// clamped to [`MAX_POLL_INTERVAL`] on the way into the scheduler, and the
+/// returned wait is never longer than the interval it came from.
 ///
 /// `None` means `completed_at` is in the future, so the host clock moved and
 /// the record's time cannot be reasoned from at all. Neither caller delays the
@@ -1444,6 +1477,78 @@ mod tests {
         assert_eq!(
             stored_interval, lengthened,
             "the lengthened interval must still be stored, for the re-arm after that attempt"
+        );
+    }
+
+    /// `poll_interval_secs` has a minimum but no maximum, so a registry can
+    /// hand the scheduler an interval whose deadline is not representable.
+    /// Every `Instant + interval` in this module panics rather than saturating
+    /// on that, and `record_outcome` does it *under the `entries` lock*, so
+    /// one such Vault would poison the mutex and stop polling for every other
+    /// Vault in the process — then do it again after a restart, because the
+    /// value is durable.
+    ///
+    /// `activate` clamping to `MAX_POLL_INTERVAL` is what disarms all of it at
+    /// once. This drives the whole lifecycle at `Duration::MAX` — register,
+    /// re-activate, succeed, fail transiently, fail permanently — because the
+    /// point is not any single addition but that no path can reach an
+    /// unclamped one.
+    #[test]
+    fn an_interval_too_large_to_arm_is_clamped_rather_than_panicking() {
+        let (_coordinator, scheduler) = scheduler();
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+
+        scheduler.activate(vault, Duration::MAX);
+        // Re-activation takes the Occupied arm, which re-derives a deadline
+        // from the remembered turn — a second, distinct addition.
+        scheduler.activate(vault, Duration::MAX);
+        // Each of these arms `next_attempt` while holding the lock.
+        scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
+        scheduler.activate(vault, Duration::MAX);
+        scheduler.record_outcome(
+            vault,
+            &Err(VaultWorkError::new(
+                "managed_git_remote_unreachable",
+                "x",
+                true,
+            )),
+        );
+        scheduler.record_outcome(
+            vault,
+            &Err(VaultWorkError::new("managed_git_auth_failed", "x", false)),
+        );
+
+        let stored_interval = {
+            let entries = scheduler
+                .entries
+                .lock()
+                .expect("the entries lock must not have been poisoned by an overflowing deadline");
+            entries[&vault].poll_interval
+        };
+        assert_eq!(
+            stored_interval, MAX_POLL_INTERVAL,
+            "an interval past the ceiling must be stored clamped, not as given"
+        );
+    }
+
+    /// The clamp has to leave the *reported* clock representable too, not just
+    /// the internal arithmetic. `polling_clock` converts the armed `Instant`
+    /// back to a `SystemTime`, and `vault_management` renders that through
+    /// `format_timestamp`, whose chrono conversion panics past year 262143 —
+    /// so an unclamped interval would move the panic from the scheduler into
+    /// `GET /api/v1/vaults` instead of removing it.
+    #[test]
+    fn a_clamped_interval_still_reports_a_renderable_next_attempt() {
+        let (_coordinator, scheduler) = scheduler();
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        scheduler.activate(vault, Duration::MAX);
+        scheduler.record_outcome(vault, &Ok(ManagedGitOutcome::UpToDate));
+
+        let clock = scheduler.polling_clock(vault).expect("a tracked Vault");
+        let rendered = crate::vault_runtime_state::format_timestamp(clock.next_attempt_at);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&rendered).is_ok(),
+            "the clamped next attempt must render as a parseable timestamp, got {rendered}"
         );
     }
 
