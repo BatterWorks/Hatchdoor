@@ -62,10 +62,14 @@ impl HatchdoorMcpHandler {
 
 impl ServerHandler for HatchdoorMcpHandler {
     fn get_info(&self) -> ServerInfo {
-        let instructions = if self.state.startup.is_ready() {
-            SERVER_INSTRUCTIONS.to_string()
-        } else {
+        // `model_setup_pending`, not the collection's index readiness: a client
+        // that happens to connect while a Vault is reindexing has a fully
+        // set-up instance and needs the real instructions, not the first-run
+        // ones (#191).
+        let instructions = if self.state.startup.model_setup_pending() {
             SETUP_INSTRUCTIONS.to_string()
+        } else {
+            SERVER_INSTRUCTIONS.to_string()
         };
         // The modern wire shape advertises `tools.listChanged: true` and
         // delivers on it via `subscriptions/listen` (#170). The legacy

@@ -31,6 +31,12 @@ impl IndexingProgressSnapshot {
     }
 }
 
+/// The code [`StartupTracker::set_model_setup_failed`] publishes. It is what
+/// tells a failed model setup apart from every other reason this tracker can
+/// be `Unavailable`, which is the distinction
+/// [`StartupTracker::model_setup_pending`] turns on.
+const MODEL_SETUP_FAILED: &str = "model_setup_failed";
+
 #[derive(Clone, Debug)]
 pub struct StartupTracker(VaultRuntime);
 
@@ -93,13 +99,52 @@ impl StartupTracker {
 
     pub fn set_model_setup_failed(&self) {
         self.0.set_unavailable(
-            "model_setup_failed",
+            MODEL_SETUP_FAILED,
             "The search model could not be downloaded or loaded. Check the Hatchdoor logs, then retry setup.",
         );
     }
 
-    pub fn is_ready(&self) -> bool {
+    /// Whether every active Vault's Index turn has settled `Ready`, which is
+    /// the condition `VaultWorkExecutor::publish_outcome` latches here through
+    /// `collection_indexes_ready`. It falls back to false for the duration of
+    /// each subsequent rebuild.
+    ///
+    /// Named for what it measures rather than for `Ready`, because the shorter
+    /// `is_ready` invited a question it cannot answer: three callers read it as
+    /// "has first-run setup finished", and so reported a routine post-write
+    /// reindex as incomplete setup (#191). Ask
+    /// [`Self::model_setup_pending`] for that.
+    pub fn collection_indexes_ready(&self) -> bool {
         self.0.is_ready()
+    }
+
+    /// Whether first-run model setup is genuinely what stands between a caller
+    /// and the Vault collection.
+    ///
+    /// Deliberately not the negation of [`Self::collection_indexes_ready`].
+    /// This tracker's phase does double duty: it carries the first-run setup
+    /// lifecycle, and it is also the channel `VaultWorkExecutor` reports live
+    /// indexing progress on, for whichever Vault currently has an Index turn.
+    /// So a routine post-write reindex leaves `Ready` for `Indexing` on an
+    /// instance whose setup finished long ago, and reading that as a setup
+    /// answer is what #191 was.
+    ///
+    /// Only a pending terms choice, a download in flight, and a failed setup
+    /// are conditions the setup tools can act on. Validating, scanning and
+    /// indexing are not: each Vault reports those itself, per Vault and
+    /// accurately, through its own `VaultSearchStatus`.
+    pub fn model_setup_pending(&self) -> bool {
+        let snapshot = self.0.snapshot();
+        match snapshot.phase {
+            VaultPhase::TermsRequired | VaultPhase::Downloading => true,
+            VaultPhase::Unavailable => snapshot
+                .error
+                .is_some_and(|error| error.code == MODEL_SETUP_FAILED),
+            VaultPhase::Validating
+            | VaultPhase::Scanning
+            | VaultPhase::Indexing
+            | VaultPhase::Ready => false,
+        }
     }
 
     pub fn runtime(&self) -> &VaultRuntime {
@@ -217,7 +262,7 @@ mod tests {
     #[test]
     fn terms_required_is_not_ready_and_is_exposed_to_the_ui() {
         let tracker = StartupTracker::terms_required();
-        assert!(!tracker.is_ready());
+        assert!(!tracker.collection_indexes_ready());
         let status = tracker.status();
         assert_eq!(status.state, "terms_required");
         assert!(status.percent.is_none());
@@ -240,5 +285,56 @@ mod tests {
         let tracker = StartupTracker::terms_required();
         tracker.set_downloading("Nomic Embed Text v1.5", None, None);
         assert_eq!(tracker.status().percent, None);
+    }
+
+    /// Setup is pending only while the setup tools can still change something:
+    /// a terms choice is outstanding, a download is in flight, or a setup
+    /// failed and can be retried.
+    #[test]
+    fn only_the_setup_phases_report_setup_as_pending() {
+        let tracker = StartupTracker::terms_required();
+        assert!(tracker.model_setup_pending());
+
+        tracker.set_downloading("EmbeddingGemma 300M Q4", Some(1), Some(2));
+        assert!(tracker.model_setup_pending());
+
+        tracker.set_model_setup_failed();
+        assert!(tracker.model_setup_pending());
+    }
+
+    /// A collection that is rebuilding has finished setup, so the setup tools
+    /// have nothing to offer it. This is #191: a post-write Index turn reports
+    /// its progress on this very tracker, and treating that as `!is_ready()`
+    /// sent every MCP caller to the model-setup tools for the duration.
+    #[test]
+    fn rebuilding_is_not_pending_setup() {
+        let tracker = StartupTracker::ready();
+        assert!(!tracker.model_setup_pending());
+
+        tracker.set_scanning();
+        assert!(!tracker.model_setup_pending());
+        assert!(
+            !tracker.collection_indexes_ready(),
+            "still not Ready, just not a setup problem"
+        );
+
+        tracker.set_indexing(IndexingProgressSnapshot::default());
+        assert!(!tracker.model_setup_pending());
+    }
+
+    /// `Unavailable` is not one condition: a failed index and a registry
+    /// awaiting operator recovery both land here, and neither is answered by
+    /// accepting a model licence. Only the error code tells them apart.
+    #[test]
+    fn unavailable_for_a_non_setup_reason_is_not_pending_setup() {
+        let tracker = StartupTracker::ready();
+        tracker.set_failed();
+        assert!(!tracker.model_setup_pending());
+
+        tracker.runtime().set_unavailable(
+            "startup_recovery_required",
+            "Startup recovery is required before Vaults can be activated",
+        );
+        assert!(!tracker.model_setup_pending());
     }
 }

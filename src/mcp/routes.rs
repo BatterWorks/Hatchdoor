@@ -1684,6 +1684,78 @@ mod tests {
         );
     }
 
+    /// #191. A post-write Index turn reports its progress through the *same*
+    /// tracker that carries the first-run setup lifecycle, so the collection
+    /// leaves `Ready` for `Indexing` several times a minute in a write-heavy
+    /// session. Every read and write tool used to answer that window with the
+    /// first-run setup error, which is both wrong and unactionable: setup
+    /// completed long ago, and the terms tool it names can change nothing.
+    #[tokio::test]
+    async fn a_reindex_is_not_reported_as_incomplete_model_setup() {
+        let (state, _tmp) = write_state();
+        state
+            .startup
+            .set_indexing(crate::startup::IndexingProgressSnapshot::default());
+
+        for (tool, arguments) in [
+            ("get_note", json!({"slug":"home"})),
+            ("search_notes", json!({"query":"alpha"})),
+            ("resolve_wikilink", json!({"target":"Plan"})),
+            ("get_tree", json!({})),
+        ] {
+            let body = call_tool(&state, tool, arguments).await;
+            assert_eq!(
+                body["result"]["isError"], false,
+                "{tool} during a reindex: {}",
+                body["result"]["content"][0]["text"]
+            );
+        }
+
+        // A write too: the window this opens is a *consequence* of writing, so
+        // the next write in a run of edits is the call most likely to land in
+        // it.
+        let read = call_tool(&state, "get_note", json!({"slug":"home"})).await;
+        let hash = read["result"]["structuredContent"]["note"]["content_hash"]
+            .as_str()
+            .expect("content hash");
+        let edited = call_tool(
+            &state,
+            "edit_note",
+            json!({
+                "slug": "home",
+                "old_string": "alpha token",
+                "new_string": "beta token",
+                "expected_content_hash": hash,
+            }),
+        )
+        .await;
+        assert_eq!(
+            edited["result"]["isError"], false,
+            "edit_note during a reindex: {}",
+            edited["result"]["content"][0]["text"]
+        );
+    }
+
+    /// The other half of #191: following the error's own advice produced a
+    /// second, differently wrong answer ("a setup is already active"), so a
+    /// client had to fail twice to discover the Vault was merely reindexing.
+    /// Once setup is complete the terms tools stay unreachable, reindex or not,
+    /// which is the invariant `READ_OPS`' doc comment already claimed.
+    #[tokio::test]
+    async fn a_reindex_does_not_reopen_the_model_terms_tools() {
+        let (state, _tmp) = test_state();
+        state
+            .startup
+            .set_indexing(crate::startup::IndexingProgressSnapshot::default());
+
+        let declined = call_tool_unscoped(&state, "decline_gemma_terms", json!({})).await;
+        assert_eq!(declined["result"]["isError"], true);
+        assert_eq!(
+            declined["result"]["content"][0]["text"],
+            "A search model is already set up. Changing models after setup is not supported."
+        );
+    }
+
     #[tokio::test]
     async fn readiness_gate_exempts_vault_collection_discovery() {
         let (state, _tmp) = test_state();

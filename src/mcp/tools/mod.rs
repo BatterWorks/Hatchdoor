@@ -46,16 +46,24 @@ pub async fn handle_tools_call(
         )));
     }
 
-    // Before the first index exists, only the explicit model-setup calls and
-    // Vault collection discovery/management may run. `state.startup` tracks
-    // the legacy single-Vault embedding-model setup, which has no bearing on
-    // the Vault registry: zero Vaults or a registry in Recovery are normal,
-    // expected states, and an agent must be able to see and repair the
+    // While model setup is still pending, only the explicit model-setup calls
+    // and Vault collection discovery/management may run. `state.startup`
+    // tracks the legacy single-Vault embedding-model setup, which has no
+    // bearing on the Vault registry: zero Vaults or a registry in Recovery are
+    // normal, expected states, and an agent must be able to see and repair the
     // collection precisely then. This mirrors `handlers/vaults.rs`, whose
     // whole HTTP surface is deliberately not gated by this legacy readiness
     // signal. The full tool catalogue is still advertised so MCP clients that
     // cache tools at connection time need no restart once setup completes.
-    if !state.startup.is_ready() && !is_collection_management_tool(name) {
+    //
+    // The question is `model_setup_pending`, not whether the collection's
+    // indexes are settled: the same tracker doubles as the live
+    // indexing-progress channel, so asking the latter also caught every
+    // routine post-write reindex and told the caller to go accept a licence it
+    // had accepted months earlier (#191). Scanning and indexing fall through
+    // to the Vault-scoped cores, which report a rebuilding Vault themselves
+    // and accurately.
+    if state.startup.model_setup_pending() && !is_collection_management_tool(name) {
         return match name {
             "accept_gemma_terms" => select_model_tool(
                 state,
@@ -73,9 +81,19 @@ pub async fn handle_tools_call(
                     model: crate::model_setup::NOMIC_MODEL_ID,
                 },
             ),
-            _ => Ok(tool_error(
-                "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
-            )),
+            // Logged because the client is the only party that used to learn
+            // of this rejection: it produced no server-side record at all, so
+            // a session full of them was invisible in the logs (#191).
+            _ => {
+                tracing::info!(
+                    tool = name,
+                    setup_state = state.startup.status().state,
+                    "MCP tool call rejected: first-run model setup is not complete"
+                );
+                Ok(tool_error(
+                    "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first.".to_string(),
+                ))
+            }
         };
     }
 
