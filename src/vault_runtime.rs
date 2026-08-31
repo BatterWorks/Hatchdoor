@@ -1634,20 +1634,7 @@ fn directory_is_writable(
     if result == 0 {
         return Ok(true);
     }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
-        Ok(false)
-    } else {
-        Err(VaultRuntimeError {
-            code: "vault_path_unavailable".to_string(),
-            message: format!(
-                "Vault path '{}' availability check failed: {error}",
-                vault_path.display()
-            ),
-            retryable: true,
-            detail: None,
-        })
-    }
+    classify_write_probe_failure(vault_path, &std::io::Error::last_os_error())
 }
 
 #[cfg(not(unix))]
@@ -1656,6 +1643,36 @@ fn directory_is_writable(
     metadata: &std::fs::Metadata,
 ) -> Result<bool, VaultRuntimeError> {
     Ok(!metadata.permissions().readonly())
+}
+
+/// Did the `W_OK` probe fail because the Vault is present but refuses writes,
+/// or because it is unreachable? The former is `Ok(false)`, which
+/// `directory_content_status` turns into `LocalContentStatus::ReadOnly`; the
+/// latter keeps surfacing as an unavailable path.
+///
+/// Issue #178: a Docker `:ro` bind mount answers the probe with `EROFS`, not
+/// `EACCES`. Both mean the same thing to us - browse and index the Vault,
+/// refuse mutations - so both must classify as read-only.
+#[cfg(unix)]
+fn classify_write_probe_failure(
+    vault_path: &Path,
+    error: &std::io::Error,
+) -> Result<bool, VaultRuntimeError> {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    ) {
+        return Ok(false);
+    }
+    Err(VaultRuntimeError {
+        code: "vault_path_unavailable".to_string(),
+        message: format!(
+            "Vault path '{}' availability check failed: {error}",
+            vault_path.display()
+        ),
+        retryable: true,
+        detail: None,
+    })
 }
 
 fn disabled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapshot {

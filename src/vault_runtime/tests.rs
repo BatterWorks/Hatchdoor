@@ -2744,3 +2744,45 @@ async fn an_in_process_edit_keeps_a_backoff_status_instead_of_the_remembered_tur
          remembered non-retryable one"
     );
 }
+
+/// Issue #178: a Docker `:ro` bind mount answers the `W_OK` probe with `EROFS`,
+/// not `EACCES`. Treating only `EACCES` as read-only made such a Vault fail
+/// activation with `vault_path_unavailable`. Both errnos mean "present but not
+/// writable"; anything else stays a genuine failure.
+///
+/// This drives the probe's own failure branch, so it covers the leg no other
+/// test can reach: `read_only_and_stale_statuses_keep_usable_local_markdown_honest`
+/// builds its fixture with `chmod 0555`, which only ever produces `EACCES`, and
+/// a genuine `EROFS` needs a real read-only mount. That test carries the rest of
+/// the chain - `Ok(false)` becoming a browsable `ReadOnly` Vault.
+#[cfg(unix)]
+#[test]
+fn read_only_filesystem_is_a_read_only_vault_not_an_unavailable_one() {
+    let vault_path = std::path::Path::new("/mnt/vault");
+
+    for not_writable in [libc::EROFS, libc::EACCES] {
+        let writable = classify_write_probe_failure(
+            vault_path,
+            &std::io::Error::from_raw_os_error(not_writable),
+        )
+        .unwrap_or_else(|error| {
+            panic!("errno {not_writable} is browsable, not unavailable: {error:?}")
+        });
+        assert!(
+            !writable,
+            "errno {not_writable} must report a Vault that refuses writes"
+        );
+    }
+
+    for genuinely_unavailable in [libc::ENOENT, libc::ENOTDIR, libc::EIO] {
+        let error = classify_write_probe_failure(
+            vault_path,
+            &std::io::Error::from_raw_os_error(genuinely_unavailable),
+        )
+        .expect_err("an unreachable Vault path must not pass as merely read-only");
+        assert_eq!(
+            error.code, "vault_path_unavailable",
+            "errno {genuinely_unavailable} must keep surfacing as an unavailable Vault"
+        );
+    }
+}

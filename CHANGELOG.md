@@ -133,6 +133,14 @@
   layer; only the MCP surface guarded against it, and both surfaces now share
   one implementation. Editing a marker file you already have on disk is
   unaffected — this is about creating one through the API.
+- **A Vault on a read-only mount now activates instead of failing.** A Docker
+  bind mount made read-only with `:ro` answers the write-access probe with
+  `EROFS`, which Hatchdoor reported as `vault_path_unavailable` rather than
+  recognising as read-only; only a permission-denied answer was treated that
+  way. Such a Vault now comes up `active` with read-only content, browsable and
+  indexable, with mutations refused as they already were for any other
+  non-writable Vault. A path that is genuinely unreachable still surfaces as
+  unavailable.
 
 ## v2.5.0 - 2026-08-17
 
