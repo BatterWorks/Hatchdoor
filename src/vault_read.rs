@@ -762,14 +762,15 @@ impl<'a> VaultReadCore<'a> {
     /// a mistyped folder name and an empty folder are different facts, and an
     /// agent must not read one as the other. Under `all` that failure lands on
     /// the participant, as any other non-participation does, so one Vault
-    /// lacking the folder does not withhold the Vaults that have it.
+    /// lacking the folder does not withhold the Vaults that have it; only when
+    /// none of them has it does the call itself refuse, and that refusal names
+    /// no Vault because none of them is the culprit.
     pub fn trees(
         &self,
         scope: VaultScope,
         tree_scope: TreeScope,
     ) -> Result<VaultReadProjection<Vec<VaultTree>>, VaultReadError> {
-        let narrowed_to_a_folder = tree_scope.folder.is_some();
-        let projection = self.collection(scope, |vault_id, vault_name, snapshot| {
+        let projection = self.try_collection(scope, |vault_id, vault_name, snapshot| {
             Ok(VaultTree {
                 vault_id,
                 vault_name: vault_name.to_string(),
@@ -781,15 +782,15 @@ impl<'a> VaultReadCore<'a> {
         // would otherwise be handed an empty collection — the very blur the
         // refusal exists to prevent, just moved up a level. Zero enabled
         // Vaults is a different fact and stays the empty projection it is.
-        if narrowed_to_a_folder
+        if let Some(requested) = tree_scope.folder.as_deref()
             && projection.data.is_empty()
-            && let Some(refusal) = projection
+            && projection
                 .participants
                 .iter()
                 .filter_map(|participant| participant.error.as_ref())
-                .find(|error| error.code == FOLDER_NOT_FOUND)
+                .any(|error| error.code == FOLDER_NOT_FOUND)
         {
-            return Err(refusal.clone());
+            return Err(no_vault_has_folder(requested));
         }
         Ok(projection)
     }
@@ -798,20 +799,18 @@ impl<'a> VaultReadCore<'a> {
         &self,
         scope: VaultScope,
     ) -> Result<VaultReadProjection<Vec<VaultStatistics>>, VaultReadError> {
-        self.collection(scope, |vault_id, vault_name, snapshot| {
-            Ok(VaultStatistics {
-                vault_id,
-                vault_name: vault_name.to_string(),
-                note_count: snapshot.notes.len(),
-                tag_count: snapshot
-                    .tags_by_note
-                    .values()
-                    .flatten()
-                    .collect::<BTreeSet<_>>()
-                    .len(),
-                link_count: snapshot.links.len(),
-                vault_size_bytes: snapshot.notes.iter().map(|note| note.size_bytes).sum(),
-            })
+        self.collection(scope, |vault_id, vault_name, snapshot| VaultStatistics {
+            vault_id,
+            vault_name: vault_name.to_string(),
+            note_count: snapshot.notes.len(),
+            tag_count: snapshot
+                .tags_by_note
+                .values()
+                .flatten()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            link_count: snapshot.links.len(),
+            vault_size_bytes: snapshot.notes.iter().map(|note| note.size_bytes).sum(),
         })
     }
 
@@ -819,21 +818,19 @@ impl<'a> VaultReadCore<'a> {
         &self,
         scope: VaultScope,
     ) -> Result<VaultReadProjection<Vec<VaultGraph>>, VaultReadError> {
-        self.collection(scope, |vault_id, vault_name, snapshot| {
-            Ok(VaultGraph {
-                vault_id,
-                vault_name: vault_name.to_string(),
-                nodes: graph_nodes(vault_id, snapshot),
-                edges: snapshot
-                    .links
-                    .iter()
-                    .map(|link| VaultGraphEdge {
-                        vault_id,
-                        source_slug: link.source_slug.clone(),
-                        target_slug: link.target_slug.clone(),
-                    })
-                    .collect(),
-            })
+        self.collection(scope, |vault_id, vault_name, snapshot| VaultGraph {
+            vault_id,
+            vault_name: vault_name.to_string(),
+            nodes: graph_nodes(vault_id, snapshot),
+            edges: snapshot
+                .links
+                .iter()
+                .map(|link| VaultGraphEdge {
+                    vault_id,
+                    source_slug: link.source_slug.clone(),
+                    target_slug: link.target_slug.clone(),
+                })
+                .collect(),
         })
     }
 
@@ -843,7 +840,7 @@ impl<'a> VaultReadCore<'a> {
         limit: usize,
     ) -> Result<VaultReadProjection<Vec<VaultRecentNote>>, VaultReadError> {
         let projection = self.collection(scope, |vault_id, _vault_name, snapshot| {
-            Ok(snapshot
+            snapshot
                 .notes
                 .iter()
                 .map(|note| VaultRecentNote {
@@ -853,7 +850,7 @@ impl<'a> VaultReadCore<'a> {
                     relative_path: note.relative_path.clone(),
                     mtime_ns: note.mtime_ns,
                 })
-                .collect::<Vec<_>>())
+                .collect::<Vec<_>>()
         })?;
         let mut notes = projection.data.into_iter().flatten().collect::<Vec<_>>();
         notes.sort_by(|left, right| {
@@ -888,7 +885,7 @@ impl<'a> VaultReadCore<'a> {
     ) -> Result<VaultQualifiedStats, VaultReadError> {
         let projection = self.collection(
             VaultScope::One(vault_id),
-            |_vault_id, _vault_name, snapshot| Ok(detailed_stats_for(snapshot)),
+            |_vault_id, _vault_name, snapshot| detailed_stats_for(snapshot),
         )?;
         let stats = projection
             .data
@@ -1162,11 +1159,31 @@ impl<'a> VaultReadCore<'a> {
     /// a readable snapshot, and report the rest as participants rather than as
     /// silently missing data.
     ///
-    /// `map` may refuse a Vault it could otherwise read — a tree read narrowed
-    /// to a folder that Vault does not have. That refusal takes the same route
-    /// as an unreadable snapshot: a participant carrying the reason under
-    /// `all`, and the failure itself when exactly one Vault was asked for.
+    /// A projection that reads whatever snapshot it is handed wants this one.
+    /// Only a projection that can refuse a readable Vault needs
+    /// [`Self::try_collection`], and keeping that the narrower door is what
+    /// stops one projection's refusal from becoming every projection's
+    /// concern.
     fn collection<T>(
+        &self,
+        scope: VaultScope,
+        map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> T,
+    ) -> Result<VaultReadProjection<Vec<T>>, VaultReadError> {
+        self.try_collection(scope, |vault_id, vault_name, snapshot| {
+            Ok(map(vault_id, vault_name, snapshot))
+        })
+    }
+
+    /// [`Self::collection`] for the one projection whose `map` may refuse a
+    /// Vault it could otherwise read: a tree read narrowed to a folder that
+    /// Vault does not have.
+    ///
+    /// That refusal takes the same route as an unreadable snapshot — a
+    /// participant carrying the reason under `all`, and the failure itself
+    /// when exactly one Vault was asked for. Reach for this only when the
+    /// projection itself can say no; everything else reads better, and stays
+    /// out of the tree read's blast radius, through `collection`.
+    fn try_collection<T>(
         &self,
         scope: VaultScope,
         map: impl Fn(VaultId, &str, &VaultSnapshotRead) -> Result<T, VaultReadError>,
@@ -1386,6 +1403,23 @@ fn folder_not_found(vault_id: VaultId, requested: &str) -> VaultReadError {
         code: FOLDER_NOT_FOUND.to_string(),
         message: format!("Vault has no folder '{requested}'"),
         vault_id: Some(vault_id),
+        retryable: false,
+    }
+}
+
+/// The same refusal raised for the call as a whole, when `all` was asked for a
+/// folder and no participating Vault had it.
+///
+/// Deliberately built rather than re-raised from one participant: every Vault
+/// refused equally, so there is no culprit to name, and carrying an arbitrary
+/// participant's `vault_id` out of a collection-wide failure would point the
+/// caller at a Vault no more at fault than the rest. The per-Vault refusals
+/// stay on `participants`, where each one does name its own Vault.
+fn no_vault_has_folder(requested: &str) -> VaultReadError {
+    VaultReadError {
+        code: FOLDER_NOT_FOUND.to_string(),
+        message: format!("No participating Vault has folder '{requested}'"),
+        vault_id: None,
         retryable: false,
     }
 }
@@ -2731,6 +2765,16 @@ mod tests {
 
         assert_eq!(error.code, "folder_not_found");
         assert!(!error.retryable);
+        // Every Vault refused equally, so the collection-wide refusal names
+        // none of them. Re-raising one participant's error would have carried
+        // an arbitrary `vault_id` out and pointed the caller at a Vault no
+        // more at fault than the other.
+        assert_eq!(error.vault_id, None);
+        assert!(
+            !error.message.contains("First") && !error.message.contains("Second"),
+            "the whole-call refusal must not single out a Vault: {}",
+            error.message
+        );
     }
 
     #[test]
