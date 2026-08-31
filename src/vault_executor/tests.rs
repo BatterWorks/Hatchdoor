@@ -142,7 +142,7 @@ async fn index_turn_publishes_one_vault_and_a_failure_keeps_its_snapshot_stale()
     let second = vault_id_named(&both, "Second");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
         .await;
@@ -298,7 +298,7 @@ async fn index_turn_defers_while_the_embedding_model_is_still_being_set_up() {
     let vault_id = vault_id_named(&snapshot, "Only");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
         .await;
@@ -370,7 +370,7 @@ async fn index_turn_with_embed_layers_disabled_keeps_demoted_notes_keyword_only(
     let vault_id = vault_id_named(&snapshot, "Only");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
         .await;
@@ -460,7 +460,7 @@ async fn index_turn_waits_for_a_multifile_foreground_mutation_before_publishing(
     let vault_id = vault_id_named(&snapshot, "Only");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
         .await;
@@ -579,7 +579,7 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
 
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
         .await;
@@ -770,7 +770,7 @@ async fn publish_managed_git_turn_outcome_makes_a_successful_vault_ready_and_bro
     // in production; this test fabricates that outcome directly.
     std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     managed_git.activate(
         vault_id,
         std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
@@ -812,7 +812,7 @@ fn publish_managed_git_turn_outcome_isolates_a_failure_from_already_acquired_loc
         managed_git_control_block(directory.path());
     std::fs::create_dir_all(control_block.vault_path()).expect("acquired checkout root");
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     managed_git.activate(
         vault_id,
         std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
@@ -877,7 +877,7 @@ async fn dispatch_git_turn_with_publishes_a_real_failure_through_the_full_async_
         managed_git_control_block(directory.path());
     std::fs::create_dir_all(control_block.vault_path()).expect("already-acquired checkout");
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     managed_git.activate(
         vault_id,
         std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
@@ -1001,7 +1001,7 @@ async fn a_managed_git_turn_waits_for_a_concurrent_foreground_mutation_to_releas
     let (collection, registry, control_block, vault_id) =
         managed_git_control_block(directory.path());
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     managed_git.activate(
         vault_id,
         std::time::Duration::from_secs(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
@@ -1061,7 +1061,7 @@ async fn dispatch_git_turn_is_a_no_op_for_a_non_managed_git_vault() {
     let collection = VaultCollectionRuntime::new();
     collection.reconcile(&registry, &one);
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     // A Local Vault's Git status is `Disabled`, never `Pending`, so
     // nothing would request Git work for it in production; requesting it
     // directly here exercises `dispatch_git_turn`'s defensive
@@ -1170,7 +1170,7 @@ async fn dispatch_git_turn_commits_existing_git_local_history_drift_through_the_
         .expect("write outside file");
 
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     coordinator.request(vault_id, VaultWorkKind::Git);
 
     let outcome = worker
@@ -1394,7 +1394,7 @@ async fn dispatch_git_turn_synchronizes_existing_git_pull_only_through_the_full_
     );
 
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     coordinator.request(vault_id, VaultWorkKind::Git);
 
     let outcome = worker
@@ -1478,7 +1478,7 @@ async fn an_existing_git_pull_only_turn_waits_for_a_concurrent_foreground_mutati
     );
 
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     coordinator.request(vault_id, VaultWorkKind::Git);
 
     // Simulate a foreground Markdown write already in flight, holding
@@ -1627,7 +1627,7 @@ async fn each_index_turn_binds_the_settings_snapshot_at_its_own_start() {
     let vault_id = vault_id_named(&snapshot, "Only");
     let vaults = VaultCollectionRuntime::new();
     let (work, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = Arc::new(ManagedGitScheduler::new(work.clone()));
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(work.clone()));
     vaults
         .reconcile_and_reconstruct(&registry, &snapshot, &work, &managed_git)
         .await;
@@ -1745,7 +1745,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
 
     let vaults = VaultCollectionRuntime::new();
     let (work, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = Arc::new(ManagedGitScheduler::new(work.clone()));
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(work.clone()));
     vaults
         .reconcile_and_reconstruct(&registry, &committed, &work, &managed_git)
         .await;
@@ -1868,4 +1868,81 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         executor.startup.is_ready(),
         "readiness is an Index-turn conclusion only"
     );
+}
+
+/// Regression: a managed-Git Vault must keep polling on its own schedule,
+/// turn after turn. The seams were each covered in isolation — the
+/// scheduler's re-arm, the dispatch path's outcome publication — but not the
+/// cycle they form, which is the only thing that makes a Vault poll twice.
+/// So this drives one full production cycle: the scheduler's tick requests
+/// the turn, the dispatch path runs and publishes it, and the recorded
+/// outcome re-arms the next attempt one poll interval out — through the same
+/// seams `spawn_scheduler_tick` and the coordinator's worker loop use.
+#[tokio::test]
+async fn a_managed_git_vault_keeps_polling_on_its_configured_interval() {
+    let directory = tempdir().expect("temporary state directory");
+    let (collection, registry, control_block, vault_id) =
+        managed_git_control_block(directory.path());
+    std::fs::create_dir_all(control_block.vault_path()).expect("already-acquired checkout");
+    let (coordinator, mut worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    let poll_interval = std::time::Duration::from_secs(3600);
+    managed_git.activate(vault_id, poll_interval);
+
+    // The first tick after activation must find the Vault due immediately.
+    let started = std::time::Instant::now();
+    managed_git.tick(started);
+    let first = worker
+        .run_next(|request| {
+            dispatch_git_turn_with(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+            )
+        })
+        .await
+        .expect("the tick queued an initial Git turn");
+    assert_eq!(first.request.kind(), VaultWorkKind::Git);
+    first.result.expect("initial sync succeeds");
+    // Drain the Index turn the successful Git turn queued.
+    worker
+        .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+        .await
+        .expect("Index turn queued by the successful Git turn");
+
+    // Nothing is due before the interval elapses.
+    managed_git.tick(std::time::Instant::now());
+    assert_eq!(
+        coordinator.request(vault_id, VaultWorkKind::Git),
+        ScheduleResult::Queued,
+        "a Vault must not be re-requested before its interval elapses"
+    );
+    coordinator.drain_vault(vault_id);
+    coordinator.activate_vault(vault_id);
+
+    // Once the interval has elapsed, the tick must request the next turn.
+    managed_git.tick(started + poll_interval + std::time::Duration::from_secs(1));
+    let second = worker
+        .run_next(|request| {
+            dispatch_git_turn_with(
+                &collection,
+                &registry,
+                &coordinator,
+                &managed_git,
+                "Hatchdoor",
+                "hatchdoor@example.test",
+                request,
+                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+            )
+        })
+        .await
+        .expect("the interval tick queued the next Git turn");
+    assert_eq!(second.request.kind(), VaultWorkKind::Git);
+    assert_eq!(second.request.vault_id(), vault_id);
+    second.result.expect("scheduled re-sync succeeds");
 }

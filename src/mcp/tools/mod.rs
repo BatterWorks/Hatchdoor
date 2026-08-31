@@ -361,7 +361,9 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let managed_git = Arc::new(crate::git::ManagedGitScheduler::without_durable_state(
+            vault_work.clone(),
+        ));
         let state = AppState {
             vault_registry: crate::vault_registry::VaultRegistryStore::new(
                 tmp.path().join("state/vaults.json"),

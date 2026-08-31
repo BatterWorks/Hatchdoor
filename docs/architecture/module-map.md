@@ -545,6 +545,54 @@ runtime shell and remains usable by the rootless image (ADR-12).
 **Validation:** `cargo test vault_registry`,
 `node scripts/check-module-map.mjs`, followed by the full backend checks.
 
+### Vault durable runtime state
+
+**Kind:** infrastructure/persistent operational state.
+
+**Owned paths:**
+
+- `src/vault_runtime_state.rs`
+- `src/vault_runtime_state/tests.rs`
+
+**Public contract:** `RUNTIME_STATE_SCHEMA_VERSION`,
+`RUNTIME_STATE_FILE_NAME`, `VaultRuntimeStateStore` (`new`,
+`beside_registry`, `last_git_turn`, `record_git_turn`, `forget`),
+`GitTurnRecord`, `GitTurnOutcome`, and `format_timestamp` — the RFC 3339 UTC
+seconds-precision shape shared with `vault_management`, so a timestamp reads
+identically whether it came from this file or from the live countdown. The
+versioned `state/vault-runtime.json` format: one Git-turn record per Vault,
+keyed by Vault ID, each holding the wall-clock `completed_at`, the `outcome`,
+and a `code` and already-redacted `message` written for a failure — carried so
+a restarted instance republishes the same sentence the previous process showed
+rather than falling back to a generic one. `GitTurnOutcome::Failed` owns those
+two details, so no caller above the file boundary can hold a failure without
+them; a stored record missing either still loads, with the fallback applied
+once, where the file is read.
+
+**Consumers:** Git synchronization (`git::ManagedGitScheduler`, which reads a
+Vault's record once per activation and writes one after every
+interval-arming turn), the runtime composition root, which resolves the store
+beside the registry, and Vault collection management, for `format_timestamp`
+alone. No HTTP, MCP, or frontend consumer reads this file directly — a status
+read renders the scheduler's in-memory clock instead.
+
+**Invariants:** this file records disposable operational state, never
+configuration or credentials, and carries no revision or concurrency contract
+of its own — a poll can rewrite it without disturbing the Vault collection or
+a client's `expected_registry_revision`. Losing it costs one extra Git turn
+per Vault, so a missing, unreadable, or unparseable file reads as "no record"
+and never blocks startup; a file whose `schema_version` exceeds this build's
+is read as "no record" and, unlike a corrupt one, is never overwritten, so a
+downgrade cannot destroy a newer build's state. Records are written whole
+through the parent directory's creation, hold owner-only content by way of the
+same state directory, and only interval-arming outcomes are stored — a
+transient failure's backoff stays process-local by design. Vault contents
+remain authoritative Markdown and SQLite remains disposable (ADR-01); the
+store adds no service, framework, or speculative trait (ADR-02/13).
+
+**Validation:** `cargo test vault_runtime_state`,
+`node scripts/check-module-map.mjs`, followed by the full backend checks.
+
 ### Legacy single-Vault import
 
 **Kind:** infrastructure/migration boundary.
@@ -1020,7 +1068,19 @@ snapshot so the reported `collection_revision` and the returned Vault's status
 can never disagree — plus `list` (with its authenticated and demo
 projections), `create`, `edit`, `set_enabled`, `disconnect`, the manual
 `sync`/`retry`/`refresh` controls, and the confirmed `start_with_no_vaults`
-recovery. Failures leave as the transport-neutral `VaultOperationError`
+recovery. `VaultSummary` carries two optional RFC 3339 UTC timestamps
+alongside the status fields — `last_checked_at` and `next_attempt_at`, read
+from `git::ManagedGitScheduler::polling_clock` — so a caller can tell a Vault
+that polled and found nothing from one that is not polling at all, which the
+status fields alone cannot express. `last_checked_at` reports when the last
+interval-arming turn *finished*, whether it succeeded or failed: a failed
+check is still a check, and `git`/`git_error` already say which it was, so
+naming it after a sync would report one for a Vault that has only ever failed
+to authenticate. Both are absent for a source with no remote to poll and in
+the demo projection, which withholds operator deployment detail;
+`last_checked_at` is additionally absent until a turn completes, while
+`next_attempt_at` is always present for a tracked Vault, because one that has
+never completed a turn is due immediately rather than unscheduled. Failures leave as the transport-neutral `VaultOperationError`
 (ADR-19). Creating a Vault on a `Local` source whose directory holds no
 Markdown seeds the starter Vault (`vault::seed_new_vault`) between the
 registry commit and reconciliation, so both surfaces seed identically and the
@@ -1052,10 +1112,12 @@ extractors and decoding the HTTP response body. No wire shape changed.
 **Consumed dependencies:** `VaultRegistryStore::{load, add, edit, enable,
 disable, disconnect}`, `VaultCollectionRuntime::{snapshot,
 reconcile_and_reconstruct_and_wait_for_mutation_boundary, runtime,
-notify_definition_changed, subscribe_revisions}`, `ManagedGitScheduler::{sync_now, retry_now}`,
-`VaultWorkCoordinator::request`, `vault_migration::start_with_no_vaults`,
-`vault::seed_new_vault`, and `AppState`'s composed handles including
-`demo_mode` and the pending `legacy_migration_recovery` flag.
+notify_definition_changed, subscribe_revisions}`,
+`ManagedGitScheduler::{sync_now, retry_now, polling_clock}`,
+`vault_runtime_state::format_timestamp`, `VaultWorkCoordinator::request`,
+`vault_migration::start_with_no_vaults`, `vault::seed_new_vault`, and
+`AppState`'s composed handles including `demo_mode` and the pending
+`legacy_migration_recovery` flag.
 
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
 `mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
@@ -1382,8 +1444,8 @@ input only and remain redacted. This boundary does not acquire, delete,
 schedule, poll, persist status, or repair checkouts.
 
 `ManagedGitTurnConfig`, `ManagedGitOutcome`, `run_managed_git_turn`,
-`ManagedGitScheduler`, `spawn_scheduler_tick`, `DEFAULT_POLL_INTERVAL`, and
-`DEFAULT_TICK_INTERVAL` form the per-Vault managed-Git scheduling boundary —
+`ManagedGitScheduler`, `GitPollingClock`, `spawn_scheduler_tick`,
+`DEFAULT_POLL_INTERVAL`, and `DEFAULT_TICK_INTERVAL` form the per-Vault managed-Git scheduling boundary —
 the "later consumer" the two paragraphs above anticipated. `run_managed_git_turn`
 is the concrete `acquire_or_reuse`-then-`synchronize_managed_checkout` operation
 `VaultWorkKind::Git` executes; it classifies every `ManagedCheckoutError`/
@@ -1405,7 +1467,9 @@ any non-retryable failure (including authentication, which never backs off —
 it waits for a configuration change, a manual `sync_now`/`retry_now`, a
 restart, or the normal schedule), or bounded exponential backoff after a
 retryable (transient) failure. `activate(vault_id, poll_interval)` registers a
-newly tracked Vault due immediately, or — for an already-tracked Vault — only
+newly tracked Vault one poll interval after its last remembered
+interval-arming turn — immediately when nothing is remembered, or when that
+deadline has already passed — or, for an already-tracked Vault, only
 updates its stored interval in place, leaving an in-progress backoff or held
 checkout lease untouched; `sync_now`/`retry_now` take the same `poll_interval`
 so a manual control before a Vault's first turn still registers it correctly.
@@ -1428,6 +1492,45 @@ held (and its OS-level lock stays exclusive to this process) across turns
 instead of being released at the end of each one. `deactivate` drops any held
 lease, releasing the lock immediately for retirement, disable, disconnect, or
 restart-reuse by a later process.
+
+`with_state_store` is the production constructor: it gives the scheduler a
+`vault_runtime_state::VaultRuntimeStateStore`, which is what makes a poll
+interval survive a restart. Each Vault's record is read once at `activate`
+time and refreshed by `record_outcome` after every interval-arming outcome —
+a success or a non-retryable failure, never a transient failure, whose
+backoff stays process-local because a restart cannot verify the condition it
+was throttling and should retry at once. What is remembered is the *last
+turn*, never a computed deadline, so an interval edited while Hatchdoor is
+down takes effect on the next start rather than serving out the interval that
+was in force when the record was written. The wall clock is consulted only to
+derive that first deadline; the countdown itself is held as an `Instant`, so a
+host clock moving mid-process cannot disturb it, and a stored stamp in the
+future is treated as unknown rather than delaying a Vault by the skew. A
+store failure is logged and dropped — the turn already happened, and
+forgetting it costs one extra turn after the next restart.
+`forget_persisted_state` prunes a Vault that has left the collection, called
+by the collection lifecycle for a disconnect (never for a disable, which
+keeps its schedule). `polling_clock(vault_id)` returns the
+`GitPollingClock { last_checked_at, next_attempt_at }` a status read
+renders, and `remembered_turn(vault_id)` returns the whole remembered record;
+both come from memory, so listing the collection never touches the file.
+The collection lifecycle uses `remembered_turn` at activation to republish
+the Git status the previous process reached — guarded on the `Pending` a
+fresh process publishes, so an in-process edit keeps the live status
+`reconcile` preserved through `prior_git`. Without it a restart would report
+nothing wrong about a failing Vault until its next scheduled turn, which is a
+whole poll interval now that a restart no longer forces one.
+`without_durable_state` is the store-less constructor — every Vault due
+immediately, every schedule lost with the process — named so that a call site
+cannot opt out of remembering without saying so; it exists for tests and for
+composition roots with nowhere durable to write.
+
+`DEFAULT_TICK_INTERVAL` is a *sampling* interval, not a schedule: a deadline
+can only be observed at its resolution, so a compile-time assertion holds it
+to at most half of `BACKOFF_BASE`. At one sample per backoff base every
+"30 second" retry would land at 60, collapsing `BACKOFF_BASE` into
+`BACKOFF_MAX`; the assertion turns lowering either constant without the other
+into a build failure rather than a silently degraded retry.
 
 `run_local_history_git_turn` is an `ExistingGit` + `VaultGitMode::LocalHistory`
 Vault's counterpart to `run_managed_git_turn`: given the Vault's already-resolved
@@ -1511,7 +1614,11 @@ position is not blocked ahead of its Git turn.
 
 **Coordination paths:** `src/app_state.rs`, `src/server.rs`,
 `src/vault_executor.rs`, `src/vault_runtime.rs`, `src/vault_registry.rs` (crate-private
-`https_credentials` accessor), `src/handlers/settings.rs`, HTTP/MCP write
+`https_credentials` accessor), `src/vault_runtime_state.rs` (the durable
+per-Vault Git-turn record `ManagedGitScheduler` reads at activation and
+writes after each interval-arming turn), `src/vault_management.rs` (which
+renders `polling_clock` as a Vault summary's `last_checked_at`/
+`next_attempt_at`), `src/handlers/settings.rs`, HTTP/MCP write
 adapters, configuration, frontend settings UI, and vault watcher Git
 exclusions.
 
@@ -1540,7 +1647,8 @@ reopening defect 3), mirroring `sync.rs`'s `commit_working_tree`.
 **Validation:** `cargo test git`, `cargo test managed_checkout`, and affected
 adapter/server tests. Managed graph changes additionally run `cargo test
 managed_sync` against local bare-repository fixtures; scheduling changes run
-`cargo test managed_task` and `cargo test vault_runtime`.
+`cargo test managed_task`, `cargo test vault_runtime_state`, and `cargo test
+vault_runtime`.
 
 ### HTTP adapters
 

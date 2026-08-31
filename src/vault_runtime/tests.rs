@@ -865,7 +865,7 @@ async fn lifecycle_retirement_updates_only_the_target_published_snapshot() {
         cache.clone(),
     );
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &two, &coordinator, &managed_git)
         .await;
@@ -962,7 +962,7 @@ async fn disabling_a_vault_waits_for_an_active_foreground_mutation_safe_boundary
     let vault_id = vault_id_named(&enabled, "Vault");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, _) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
         .await;
@@ -1044,7 +1044,7 @@ async fn an_older_reconciliation_cannot_readmit_work_after_a_newer_snapshot_appl
     let vault_id = vault_id_named(&enabled, "Vault");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, _) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
         .await;
@@ -1118,7 +1118,7 @@ async fn restart_reconstructs_index_work_for_each_enabled_vault_from_the_collect
     expected.sort();
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
 
     collection
         .reconcile_and_reconstruct(&registry, &two, &coordinator, &managed_git)
@@ -1185,7 +1185,7 @@ async fn restart_reports_retained_cache_freshness_while_reconstructing_index_wor
         cache,
     );
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &three, &coordinator, &managed_git)
         .await;
@@ -1251,7 +1251,7 @@ async fn restart_reconstructs_a_structure_only_snapshot_as_browsable_not_ready()
         cache,
     );
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &added, &coordinator, &managed_git)
         .await;
@@ -1309,7 +1309,7 @@ async fn a_vectorless_generation_never_advertises_search_even_when_stale() {
         cache,
     );
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &added, &coordinator, &managed_git)
         .await;
@@ -1345,7 +1345,7 @@ async fn disabling_a_vault_waits_for_its_active_work_safe_boundary() {
     let vault_id = vault_id_named(&enabled, "Vault");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
         .await;
@@ -1434,7 +1434,9 @@ async fn disabling_after_an_admitted_index_retires_its_late_publication() {
         cache.clone(),
     );
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = Arc::new(ManagedGitScheduler::new(coordinator.clone()));
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
         .await;
@@ -1593,7 +1595,9 @@ async fn reenable_waits_until_disable_finishes_cache_retirement() {
         cache.clone(),
     );
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = Arc::new(ManagedGitScheduler::new(coordinator.clone()));
+    let managed_git = Arc::new(ManagedGitScheduler::without_durable_state(
+        coordinator.clone(),
+    ));
     collection
         .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
         .await;
@@ -1718,7 +1722,7 @@ async fn disconnecting_after_an_admitted_index_deletes_its_late_publication() {
         cache.clone(),
     );
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
         .await;
@@ -1816,7 +1820,7 @@ async fn disconnecting_a_disabled_vault_deletes_its_retained_snapshot() {
         cache.clone(),
     );
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
         .await;
@@ -1882,7 +1886,7 @@ async fn restart_retries_a_failed_disconnect_retirement() {
         cache.clone(),
     );
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed = ManagedGitScheduler::new(coordinator.clone());
+    let managed = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed)
         .await;
@@ -1911,7 +1915,7 @@ async fn restart_retries_a_failed_disconnect_retirement() {
         cache.clone(),
     );
     let (restart_work, _worker) = VaultWorkCoordinator::new();
-    let restart_managed = ManagedGitScheduler::new(restart_work.clone());
+    let restart_managed = ManagedGitScheduler::without_durable_state(restart_work.clone());
     restarted
         .reconcile_and_reconstruct(&registry, &disconnected, &restart_work, &restart_managed)
         .await;
@@ -1960,7 +1964,7 @@ async fn disable_reports_a_target_scoped_snapshot_retirement_failure() {
         cache.clone(),
     );
     let (coordinator, _worker) = VaultWorkCoordinator::new();
-    let managed = ManagedGitScheduler::new(coordinator.clone());
+    let managed = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed)
         .await;
@@ -2044,7 +2048,7 @@ async fn replacing_an_enabled_vault_waits_for_old_work_then_reconstructs_new_wor
     let vault_id = vault_id_named(&enabled, "Vault");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &enabled, &coordinator, &managed_git)
         .await;
@@ -2136,7 +2140,7 @@ async fn disconnecting_a_vault_discards_its_work_without_delaying_another_vault(
     let healthy_id = vault_id_named(&both, "Healthy");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &both, &coordinator, &managed_git)
         .await;
@@ -2179,7 +2183,7 @@ async fn graceful_shutdown_revokes_vaults_and_discards_reconstructible_work() {
     let vault_id = vault_id_named(&snapshot, "Vault");
     let collection = VaultCollectionRuntime::new();
     let (coordinator, mut worker) = VaultWorkCoordinator::new();
-    let managed_git = ManagedGitScheduler::new(coordinator.clone());
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
     collection
         .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
         .await;
@@ -2242,5 +2246,501 @@ async fn graceful_shutdown_revokes_vaults_and_discards_reconstructible_work() {
             .await
             .is_none(),
         "queued work is reconstructed after restart instead of delaying shutdown"
+    );
+}
+
+/// Restart reconstruction must arm managed-Git polling, not just Vault
+/// activation: a Vault reconstructed from an existing on-disk registry is
+/// registered with `ManagedGitScheduler` and due immediately, so
+/// `spawn_scheduler_tick`'s first tick runs an initial sync and every later
+/// re-arm keeps it on its configured interval. Nothing covered this before:
+/// the scheduler's own tests activate it by hand, and
+/// `vault_management.rs`'s cover only the *create* path, so a restart —
+/// the one path every deployment takes on every deploy — reached the
+/// scheduler through an untested branch of the activation loop.
+///
+/// A `Local` Vault in the same collection proves the other half: a source
+/// with no remote is never tracked, so reconstruction cannot start polling
+/// something that has nothing to poll.
+#[tokio::test]
+async fn restart_reconstruction_arms_managed_git_polling_and_leaves_local_vaults_alone() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let local_path = directory.path().join("local");
+    std::fs::create_dir_all(&local_path).expect("local Vault directory");
+    let one = add_local_vault(&registry, &empty, "Local notes", local_path);
+    let committed = registry
+        .add(
+            one.revision(),
+            NewVaultDefinition {
+                name: "Managed".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let managed_vault = vault_id_named(&committed, "Managed");
+    let local_vault = vault_id_named(&committed, "Local notes");
+    // The checkout this Vault already had before the restart.
+    let vault_path = registry.vault_path(
+        &committed
+            .definitions()
+            .find(|definition| definition.vault_id() == managed_vault)
+            .expect("managed Vault definition"),
+    );
+    std::fs::create_dir_all(&vault_path).expect("existing checkout");
+    std::fs::write(vault_path.join("Home.md"), "# Home").expect("note");
+
+    // A fresh process: new collection runtime, coordinator, and scheduler,
+    // reconstructing from the registry exactly as `server::run_server` does.
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+    let reloaded = match registry.load().expect("reload registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    collection
+        .reconcile_and_reconstruct(&registry, &reloaded, &coordinator, &managed_git)
+        .await;
+
+    assert_eq!(
+        managed_git.poll_interval_for_test(managed_vault),
+        Some(std::time::Duration::from_secs(
+            DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS
+        )),
+        "restart reconstruction must register a managed-Git Vault with the scheduler"
+    );
+    assert!(
+        managed_git
+            .next_attempt_for_test(managed_vault)
+            .expect("armed schedule")
+            <= std::time::Instant::now(),
+        "a reconstructed managed-Git Vault must be due immediately, not one interval out"
+    );
+    assert_eq!(
+        managed_git.poll_interval_for_test(local_vault),
+        None,
+        "a Local Vault has no remote and must never be scheduled"
+    );
+}
+
+/// Disconnecting a Vault removes it from the collection entirely, so the
+/// durable record of its Git turns must go with it — otherwise reconnecting
+/// the same Vault ID later would inherit a stale countdown from a Vault that
+/// is, as far as the operator is concerned, gone. Disabling deliberately does
+/// *not* forget: a Vault that comes back tomorrow should resume its schedule
+/// rather than re-sync for having been paused.
+#[tokio::test]
+async fn disconnecting_a_vault_forgets_its_remembered_git_turn() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Managed".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Managed");
+    let store = Arc::new(
+        crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(registry.path()),
+    );
+    store
+        .record_git_turn(
+            vault_id,
+            crate::vault_runtime_state::GitTurnRecord {
+                completed_at: std::time::SystemTime::now(),
+                outcome: crate::vault_runtime_state::GitTurnOutcome::UpToDate,
+            },
+        )
+        .expect("remember a turn");
+
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::with_state_store(coordinator.clone(), store.clone());
+    collection
+        .reconcile_and_reconstruct(&registry, &committed, &coordinator, &managed_git)
+        .await;
+
+    let disconnected = registry
+        .disconnect(committed.revision(), vault_id)
+        .expect("disconnect the Vault");
+    collection
+        .reconcile_and_reconstruct(&registry, &disconnected, &coordinator, &managed_git)
+        .await;
+
+    assert_eq!(
+        store.last_git_turn(vault_id),
+        None,
+        "a disconnected Vault must leave no remembered Git turn behind"
+    );
+}
+
+/// The behavior the durable schedule exists to deliver, and the one the
+/// scheduler alone cannot: reconstruction must not force a Git turn for a
+/// Vault that is not due. Activation publishes a `Pending` Git status on
+/// every fresh process, and requesting a turn on that alone is what made
+/// every restart re-sync — which in turn re-armed the interval from the
+/// restart, so a deployment redeployed more often than its poll interval
+/// never reached a scheduled turn at all.
+#[tokio::test]
+async fn restart_reconstruction_does_not_re_sync_a_managed_git_vault_that_is_not_due() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Managed".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Managed");
+    let vault_path = registry.vault_path(
+        &committed
+            .definitions()
+            .find(|definition| definition.vault_id() == vault_id)
+            .expect("managed Vault definition"),
+    );
+    std::fs::create_dir_all(&vault_path).expect("the checkout it already had");
+    let store = Arc::new(
+        crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(registry.path()),
+    );
+    store
+        .record_git_turn(
+            vault_id,
+            crate::vault_runtime_state::GitTurnRecord {
+                // An hour ago, against a 24h interval: nowhere near due.
+                completed_at: std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+                outcome: crate::vault_runtime_state::GitTurnOutcome::UpToDate,
+            },
+        )
+        .expect("remember the previous process's turn");
+
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::with_state_store(coordinator.clone(), store);
+    collection
+        .reconcile_and_reconstruct(&registry, &committed, &coordinator, &managed_git)
+        .await;
+
+    assert!(
+        !coordinator.has_work(vault_id, VaultWorkKind::Git),
+        "a Vault an hour into a daily interval must not be re-synced just because Hatchdoor restarted"
+    );
+}
+
+/// A restart must not make a failing Vault look merely `pending`. Activation
+/// publishes `pending` on every fresh process, and now that a restart no
+/// longer forces an immediate turn, nothing would re-publish the failure
+/// until the Vault's next scheduled turn — up to a full poll interval of a
+/// broken Vault reporting nothing wrong. The remembered outcome fills that
+/// gap: it is the same failure the previous process published, carried
+/// across the restart that would otherwise have erased it.
+#[tokio::test]
+async fn restart_reconstruction_republishes_a_remembered_git_failure() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Managed".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Managed");
+    let vault_path = registry.vault_path(
+        &committed
+            .definitions()
+            .find(|definition| definition.vault_id() == vault_id)
+            .expect("managed Vault definition"),
+    );
+    std::fs::create_dir_all(&vault_path).expect("the checkout it already had");
+    let store = Arc::new(
+        crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(registry.path()),
+    );
+    store
+        .record_git_turn(
+            vault_id,
+            crate::vault_runtime_state::GitTurnRecord {
+                completed_at: std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+                outcome: crate::vault_runtime_state::GitTurnOutcome::Failed {
+                    code: "managed_git_authentication_failed".to_string(),
+                    message: "the remote rejected the stored token".to_string(),
+                },
+            },
+        )
+        .expect("remember the failure the previous process published");
+
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::with_state_store(coordinator.clone(), store);
+    collection
+        .reconcile_and_reconstruct(&registry, &committed, &coordinator, &managed_git)
+        .await;
+
+    let snapshot = collection.snapshot();
+    let vault = &snapshot.vaults[&vault_id];
+    assert_eq!(
+        vault.git,
+        VaultGitStatus::Unavailable,
+        "a Vault whose last turn failed must not report `pending` after a restart"
+    );
+    let error = vault.git_error.as_ref().expect("the remembered failure");
+    assert_eq!(error.code, "managed_git_authentication_failed");
+    assert_eq!(error.message, "the remote rejected the stored token");
+    assert!(
+        !error.retryable,
+        "only non-retryable outcomes are remembered"
+    );
+}
+
+/// The same carry-across applies to a healthy Vault: one whose last turn
+/// succeeded reports `ready` after a restart rather than `pending`, so a
+/// Vault that is simply waiting out its interval does not look like one
+/// still working through its first sync.
+#[tokio::test]
+async fn restart_reconstruction_republishes_a_remembered_git_success() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Managed".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Managed");
+    let vault_path = registry.vault_path(
+        &committed
+            .definitions()
+            .find(|definition| definition.vault_id() == vault_id)
+            .expect("managed Vault definition"),
+    );
+    std::fs::create_dir_all(&vault_path).expect("the checkout it already had");
+    let store = Arc::new(
+        crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(registry.path()),
+    );
+    store
+        .record_git_turn(
+            vault_id,
+            crate::vault_runtime_state::GitTurnRecord {
+                completed_at: std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+                outcome: crate::vault_runtime_state::GitTurnOutcome::Synchronized,
+            },
+        )
+        .expect("remember a healthy turn");
+
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::with_state_store(coordinator.clone(), store);
+    collection
+        .reconcile_and_reconstruct(&registry, &committed, &coordinator, &managed_git)
+        .await;
+
+    let snapshot = collection.snapshot();
+    let vault = &snapshot.vaults[&vault_id];
+    assert_eq!(vault.git, VaultGitStatus::Ready);
+    assert!(vault.git_error.is_none());
+}
+
+/// The republish is guarded on the `Pending` only a fresh process publishes,
+/// so it must not fire for an in-process definition edit. The remembered
+/// record holds the last *interval-arming* turn, which is by definition older
+/// than a transient failure's backoff: republishing it over a Vault that is
+/// mid-backoff would report a healthy Vault that is in fact retrying, and
+/// hand the active loop a status it treats as settled.
+///
+/// `editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status`
+/// covers the same preservation through `reconcile` alone; this covers it
+/// through the reconstruction path, where the remembered record is in play.
+#[tokio::test]
+async fn an_in_process_edit_keeps_a_backoff_status_instead_of_the_remembered_turn() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let source = |poll_interval_secs| RegistryVaultSource::ManagedGit {
+        repository_url: "https://example.test/vault.git".to_string(),
+        branch: Some("main".to_string()),
+        vault_subdirectory: None,
+        mode: VaultGitMode::PullOnly,
+        poll_interval_secs,
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Managed".to_string(),
+                enabled: true,
+                source: source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS),
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Managed");
+    let vault_path = registry.vault_path(
+        &committed
+            .definitions()
+            .find(|definition| definition.vault_id() == vault_id)
+            .expect("managed Vault definition"),
+    );
+    std::fs::create_dir_all(&vault_path).expect("the checkout it already had");
+
+    // The remembered turn is a success: if the guard were missing, the edit
+    // below would republish `ready` over the backoff.
+    let store = Arc::new(
+        crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(registry.path()),
+    );
+    store
+        .record_git_turn(
+            vault_id,
+            crate::vault_runtime_state::GitTurnRecord {
+                completed_at: std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+                outcome: crate::vault_runtime_state::GitTurnOutcome::Synchronized,
+            },
+        )
+        .expect("remember a healthy turn");
+
+    let collection = VaultCollectionRuntime::new();
+    let (coordinator, _worker) = VaultWorkCoordinator::new();
+    let managed_git = ManagedGitScheduler::with_state_store(coordinator.clone(), store);
+    collection
+        .reconcile_and_reconstruct(&registry, &committed, &coordinator, &managed_git)
+        .await;
+
+    // A transient failure lands in this process, arming a backoff the
+    // remembered record knows nothing about.
+    let transient_error = VaultRuntimeError {
+        code: "managed_git_remote_unreachable".to_string(),
+        message: "temporary DNS failure".to_string(),
+        retryable: true,
+        detail: None,
+    };
+    collection
+        .runtime(vault_id)
+        .expect("active runtime")
+        .set_git_status(VaultGitStatus::Unavailable, Some(transient_error))
+        .expect("publish a real transient Git failure");
+
+    let edited = registry
+        .edit(
+            committed.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Managed".to_string(),
+                source: source(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS * 2),
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("edit only the poll interval");
+    collection
+        .reconcile_and_reconstruct(&registry, &edited, &coordinator, &managed_git)
+        .await;
+
+    let snapshot = collection.snapshot();
+    let vault = &snapshot.vaults[&vault_id];
+    assert_eq!(
+        vault.git,
+        VaultGitStatus::Unavailable,
+        "an edit must not republish the older remembered turn over a live backoff"
+    );
+    let error = vault.git_error.as_ref().expect("the transient failure");
+    assert_eq!(error.code, "managed_git_remote_unreachable");
+    assert!(
+        error.retryable,
+        "the live transient failure must survive the edit, not be replaced by a \
+         remembered non-retryable one"
     );
 }

@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::app_state::AppState;
+use crate::git::GitPollingClock;
 use crate::vault_error::VaultOperationError;
 use crate::vault_registry::{
     HttpsCredentials, NewVaultDefinition, VaultCommitIdentity, VaultDefinition,
@@ -44,6 +45,7 @@ use crate::vault_runtime::{
     VaultCollectionRevisionEvent, VaultCollectionSnapshot, VaultGitStatus, VaultRuntimeError,
     VaultSearchStatus, VaultWatcherStatus,
 };
+use crate::vault_runtime_state::format_timestamp;
 use crate::vault_work::{ScheduleResult, VaultWorkKind};
 
 // ---------------------------------------------------------------------------
@@ -71,6 +73,21 @@ pub struct VaultSummary {
     pub local_content: LocalContentStatus,
     pub search: VaultSearchStatus,
     pub git: VaultGitStatus,
+    /// When this Vault's last interval-arming Git turn finished, RFC 3339
+    /// UTC — whether it succeeded or failed. A failed check is still a check,
+    /// and `git`/`git_error` already say which it was; naming this "synced"
+    /// would report a successful sync for a Vault that has only ever failed
+    /// to authenticate. Absent for a Vault with no remote to poll, one that
+    /// has not completed a turn yet, or a read that withholds operator
+    /// detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checked_at: Option<String>,
+    /// When this Vault's next scheduled Git turn is due, RFC 3339 UTC.
+    /// Present for every Vault with a remote to poll — one that has never
+    /// completed a turn is due immediately, not unscheduled — and absent only
+    /// for a Vault with no remote, or a read that withholds operator detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_attempt_at: Option<String>,
     pub watcher: VaultWatcherStatus,
     pub capabilities: VaultCapabilities,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,7 +441,11 @@ fn unreconciled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapsho
     }
 }
 
-fn vault_summary(definition: &VaultDefinition, snapshot: &CollectionVaultSnapshot) -> VaultSummary {
+fn vault_summary(
+    definition: &VaultDefinition,
+    snapshot: &CollectionVaultSnapshot,
+    clock: Option<GitPollingClock>,
+) -> VaultSummary {
     VaultSummary {
         vault_id: snapshot.vault_id,
         name: snapshot.name.clone(),
@@ -438,6 +459,10 @@ fn vault_summary(definition: &VaultDefinition, snapshot: &CollectionVaultSnapsho
         local_content: snapshot.local_content,
         search: snapshot.search,
         git: snapshot.git,
+        last_checked_at: clock
+            .and_then(|clock| clock.last_checked_at)
+            .map(format_timestamp),
+        next_attempt_at: clock.map(|clock| format_timestamp(clock.next_attempt_at)),
         watcher: snapshot.watcher,
         capabilities: snapshot.capabilities,
         activation_error: snapshot.activation_error.clone(),
@@ -478,6 +503,8 @@ fn public_vault_summary(
         local_content: snapshot.local_content,
         search: snapshot.search,
         git: snapshot.git,
+        last_checked_at: None,
+        next_attempt_at: None,
         watcher: snapshot.watcher,
         capabilities: snapshot.capabilities,
         activation_error: None,
@@ -491,6 +518,7 @@ fn vault_summary_for(
     collection_snapshot: &VaultCollectionSnapshot,
     registry_snapshot: &VaultRegistrySnapshot,
     vault_id: VaultId,
+    clock: Option<GitPollingClock>,
 ) -> Option<VaultSummary> {
     let definition = registry_snapshot.definition(vault_id)?;
     let runtime_snapshot = collection_snapshot
@@ -498,7 +526,7 @@ fn vault_summary_for(
         .get(&vault_id)
         .cloned()
         .unwrap_or_else(|| unreconciled_snapshot(&definition));
-    Some(vault_summary(&definition, &runtime_snapshot))
+    Some(vault_summary(&definition, &runtime_snapshot, clock))
 }
 
 // ---------------------------------------------------------------------------
@@ -558,7 +586,11 @@ impl<'a> VaultCollectionManagement<'a> {
                             if demo_mode {
                                 public_vault_summary(&definition, &runtime_snapshot)
                             } else {
-                                vault_summary(&definition, &runtime_snapshot)
+                                vault_summary(
+                                    &definition,
+                                    &runtime_snapshot,
+                                    self.state.managed_git.polling_clock(definition.vault_id()),
+                                )
                             }
                         })
                         .collect()
@@ -923,8 +955,14 @@ impl<'a> VaultCollectionManagement<'a> {
         // returned Vault's status, so the two can never disagree about which
         // collection state they describe.
         let collection_snapshot = self.state.vaults.snapshot();
-        let vault = vault_id
-            .and_then(|vault_id| vault_summary_for(&collection_snapshot, snapshot, vault_id));
+        let vault = vault_id.and_then(|vault_id| {
+            vault_summary_for(
+                &collection_snapshot,
+                snapshot,
+                vault_id,
+                self.state.managed_git.polling_clock(vault_id),
+            )
+        });
         VaultMutationResponse {
             vault,
             registry_revision: snapshot.revision(),
@@ -1038,12 +1076,15 @@ pub(crate) mod test_support {
         let directory = tempfile::tempdir().expect("temp dir");
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let (vault_work, worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
-        let state = AppState {
-            vault_registry: crate::vault_registry::VaultRegistryStore::new(
-                directory.path().join("state/vaults.json"),
+        let registry_path = directory.path().join("state/vaults.json");
+        let managed_git = std::sync::Arc::new(crate::git::ManagedGitScheduler::with_state_store(
+            vault_work.clone(),
+            std::sync::Arc::new(
+                crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(&registry_path),
             ),
+        ));
+        let state = AppState {
+            vault_registry: crate::vault_registry::VaultRegistryStore::new(registry_path),
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
@@ -1877,5 +1918,123 @@ mod tests {
             !path.join("README.md").exists(),
             "an intentionally emptied Vault must never be re-seeded"
         );
+    }
+    /// Closes the observability half of the durable-schedule change: a
+    /// managed-Git Vault's summary must say when it last completed a Git turn
+    /// and when its next one is due. Without these, the only way to answer
+    /// "is this Vault still polling?" is to read the server's logs or stat
+    /// the checkout's `FETCH_HEAD` — which is how the gap was found.
+    #[tokio::test]
+    async fn a_managed_git_vaults_summary_reports_its_last_and_next_git_turn() {
+        let (state, _worker, _directory) = test_state();
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Remote notes",
+                VaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+            ))
+            .await
+            .expect("create the Vault");
+        let vault_id = ready_snapshot(&state)
+            .vault_ids()
+            .next()
+            .expect("one Vault");
+        state
+            .managed_git
+            .record_outcome(vault_id, &Ok(crate::git::ManagedGitOutcome::UpToDate));
+
+        let listed = VaultCollectionManagement::new(&state)
+            .list()
+            .expect("list the collection");
+        let summary = listed
+            .vaults
+            .iter()
+            .find(|summary| summary.vault_id == vault_id)
+            .expect("the managed Vault");
+
+        let last_checked_at = summary
+            .last_checked_at
+            .as_deref()
+            .expect("a completed turn must be reported");
+        let next_attempt_at = summary
+            .next_attempt_at
+            .as_deref()
+            .expect("a tracked Vault must report its next turn");
+        let parse = |raw: &str| {
+            chrono::DateTime::parse_from_rfc3339(raw)
+                .expect("an RFC 3339 timestamp")
+                .timestamp()
+        };
+        let gap = parse(next_attempt_at) - parse(last_checked_at);
+        let configured = i64::try_from(DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS).expect("interval");
+        assert!(
+            (gap - configured).abs() <= 2,
+            "the next turn must fall one poll interval after the last one: {last_checked_at} -> {next_attempt_at}"
+        );
+    }
+
+    /// A Vault that has never completed a turn is due *now*, not unscheduled:
+    /// `next_attempt_at` is what tells an operator the Vault is waiting on a
+    /// check rather than forgotten, so it must be present from the moment the
+    /// Vault is tracked. `last_checked_at` is the only one of the pair that
+    /// waits for a completed turn.
+    #[tokio::test]
+    async fn a_managed_git_vault_reports_its_next_turn_before_its_first_one_completes() {
+        let (state, _worker, _directory) = test_state();
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Remote notes",
+                VaultSource::ManagedGit {
+                    repository_url: "https://example.test/vault.git".to_string(),
+                    branch: Some("main".to_string()),
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::PullOnly,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+            ))
+            .await
+            .expect("create the Vault");
+
+        let listed = VaultCollectionManagement::new(&state)
+            .list()
+            .expect("list the collection");
+        let summary = listed.vaults.first().expect("the managed Vault");
+        assert_eq!(
+            summary.last_checked_at, None,
+            "no turn has completed, so there is nothing to report as checked"
+        );
+        assert!(
+            summary.next_attempt_at.is_some(),
+            "a tracked Vault always has a next turn, even before its first one"
+        );
+    }
+
+    /// A `Local` Vault has no remote to poll, so it carries no schedule to
+    /// report — the fields stay absent rather than inventing a turn that
+    /// never happens.
+    #[tokio::test]
+    async fn a_local_vaults_summary_reports_no_git_schedule() {
+        let (state, _worker, directory) = test_state();
+        let vault_path = directory.path().join("local-notes");
+        std::fs::create_dir_all(&vault_path).expect("create the Vault directory");
+        VaultCollectionManagement::new(&state)
+            .create(create_request(
+                "Local notes",
+                VaultSource::Local { path: vault_path },
+            ))
+            .await
+            .expect("create the Vault");
+
+        let listed = VaultCollectionManagement::new(&state)
+            .list()
+            .expect("list the collection");
+        let summary = listed.vaults.first().expect("the Local Vault");
+        assert_eq!(summary.last_checked_at, None);
+        assert_eq!(summary.next_attempt_at, None);
     }
 }
