@@ -1,0 +1,29 @@
+name: Triage inbox
+
+# Every issue carries one state label saying where it sits in triage. A freshly
+# opened report sits in the inbox, so it gets `needs-triage` here rather than
+# relying on someone remembering.
+#
+# Only issues opened with no labels at all are touched. Tickets published by
+# tooling already arrive with their own state label (`ready-for-agent`), and a
+# second state label would contradict the first.
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  needs-triage:
+    name: needs-triage
+    if: ${{ github.event.issue.labels[0] == null }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label the new issue as needs-triage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.issue.number }}
+        run: gh issue edit "$NUMBER" --repo "$REPO" --add-label needs-triage
