@@ -163,7 +163,7 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/vaults/{scope}/tree` | Folder/note tree, grouped per Vault. |
+| GET | `/api/v1/vaults/{scope}/tree` | Folder/note tree, grouped per Vault. Always the whole tree — `get_tree`'s `folder`, `max_depth` and `include_notes` narrowing is on the MCP surface only. Each folder carries `note_count`, the notes held directly inside it; the notes themselves carry `title` and `slug` but no `vault_id`, because the tree around them already names its Vault. |
 | GET | `/api/v1/vaults/{scope}/recent?limit=` | Recently modified notes, flattened across Vaults. `limit` clamped 1–25, default 5. |
 | GET | `/api/v1/vaults/{scope}/stats` | Lean per-Vault statistics projection (for the exact/rich version, see `stats/detail` above). |
 | GET | `/api/v1/vaults/{scope}/graph` | Note-link graph, grouped per Vault; edges never cross a Vault boundary. |

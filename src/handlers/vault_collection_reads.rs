@@ -36,7 +36,7 @@ use crate::handlers::vaults::query_rejection_response;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
 use crate::search::{NoteFilters, SearchMode};
 use crate::vault_read::{
-    BrowseSurface, OffloadedReadError, VaultReads, VaultScope, clamp_recent_limit,
+    BrowseSurface, OffloadedReadError, TreeScope, VaultReads, VaultScope, clamp_recent_limit,
     clamp_search_limit, clamp_search_per_note_cap,
 };
 
@@ -80,6 +80,11 @@ fn read_error_response(error: OffloadedReadError) -> Response {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/vaults/{scope}/tree` — grouped per Vault.
+///
+/// Always the whole tree. `get_tree`'s folder, depth and note narrowing (#192)
+/// lives in the read core and is exposed on the agent surface only, the way the
+/// search filters already are: the web explorer draws the entire tree and has
+/// nothing to pass. Wiring the route to them later is small.
 pub async fn vault_scope_tree_handler(
     State(state): State<AppState>,
     Path(raw_scope): Path<String>,
@@ -89,7 +94,7 @@ pub async fn vault_scope_tree_handler(
         Err(error) => return vault_read_error_response(error),
     };
     match VaultReads::new(&state)
-        .read(move |core| core.trees(scope))
+        .read(move |core| core.trees(scope, TreeScope::default()))
         .await
     {
         Ok(projection) => (StatusCode::OK, Json(projection)).into_response(),

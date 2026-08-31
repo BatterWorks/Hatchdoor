@@ -920,6 +920,22 @@ into running index builds and filesystem reads straight on a tokio worker.
 `VaultReadError::public_code`/`into_operation_error` give one translation from
 the core's internal spellings to the stable `{code, message, vault_id?,
 retryable}` object both surfaces report.
+`trees` takes a `TreeScope` alongside the Vault scope (#192): the folder it
+starts from, how far below it descends, and whether Notes appear at all, with
+`TreeScope::default()` the whole Vault every caller read before. The narrowing
+lives here rather than in an adapter, so the HTTP route — which passes the
+default and always will, since the explorer draws the entire tree — and
+`get_tree` share one implementation. A folder the Vault does not have is the
+non-retryable `folder_not_found`, never an empty tree, so a mistyped name and
+an empty folder stay distinguishable; under `all` it lands on the participant,
+the same route any other non-participation takes, which is why `collection`'s
+per-Vault projection is fallible — and `trees` raises it back to a refusal when
+no Vault produced a tree, so the blur does not simply move up to the collection.
+Zero enabled Vaults stays the empty projection it has always been. `VaultExplorerFolder` reports `note_count`
+(the Notes directly inside it) and marks `truncated` when `max_depth` held it
+back; `VaultExplorerNote` carries no `vault_id`, because the `VaultTree` around
+it already does. Flat projections that mix Vaults in one list —
+`VaultRecentNote`, search hits — keep theirs.
 `exact_note_for_download` returns a Note together with its containing
 directory from one Vault control-block fetch — required whenever a caller
 needs both, since a concurrent Vault edit reconciles a *replacement* control
@@ -961,6 +977,8 @@ Vault-qualified snapshot rows, `src/cache/mod.rs` for the crate-private seam,
   than merely unembedded.
 - Trees, statistics, and graphs remain grouped by Vault; graph edges never
   cross a Vault boundary.
+- A narrowed tree read never blurs "no such folder" into "empty folder", and a
+  folder the depth limit held back says so rather than reading as a leaf.
 
 **Validation:** `cargo test vault_read`, focused cache snapshot tests, and the
 full backend checks.
@@ -2000,7 +2018,12 @@ with its authorization/body-limit middleware) remain the boundary's public
 surface; `adapter.rs` implements rmcp's `ServerHandler` seam over the
 dispatcher, and `routes.rs` mounts it.
 `list_vaults` exposes the shared redacted
-Vault discovery/status/capability and revision shape. Every collection read
+Vault discovery/status/capability and revision shape. `get_tree` is the one
+collection read that names more: since #192 it also takes optional `folder`,
+`max_depth` and `include_notes`, so it no longer shares the scope-only schema
+builder with `get_stats` and `get_graph`, whose schemas are unchanged. It maps
+those three onto the read core's `TreeScope` and nothing else; the narrowing
+itself, and the `folder_not_found` refusal, belong to the core. Every collection read
 names `scope` (one Vault ID or `all`); every exact read, Markdown mutation, and
 existing-Vault control names `vault_id`. Revisioned registry management calls the
 Vault collection management core directly (#187) rather than proxying an HTTP
@@ -2462,10 +2485,16 @@ types, and shell-wide styles.
 - `frontend/src/lib/folderPaths.ts`
 - `frontend/src/lib/noteCandidates.ts`
 - `frontend/src/lib/notePath.ts`
+- `frontend/src/lib/vaultTrees.ts`
 - `frontend/src/styles/layout-explorer.css`
 
 **Public contract:** `useVaultTree`, explorer tree/list components, derived
-folder paths, and flattened note candidates. The sidebar is three zones — a
+folder paths, and flattened note candidates. Since #192 the tree route sends
+notes without a `vault_id` — the tree they hang from carries it — so
+`lib/vaultTrees.ts` stamps each note with its Vault as the response is parsed,
+before `useVaultTree` merges or flattens the trees and the grouping is gone.
+`WireVaultTree` is the payload shape and `VaultTree` the attributed one every
+component below the hook consumes. The sidebar is three zones — a
 fixed rail, a scrolling nav, a fixed footer — and `.explorer-nav` is the scroll
 container the shell restores scroll position against, not the pane itself. On
 desktop with more than one enabled Vault, the shell-owned Scope zone (#138,

@@ -7,6 +7,7 @@ import { collectFolderPaths } from "../lib/folderPaths";
 import { flattenNoteCandidates } from "../lib/noteCandidates";
 import { isExplorerTreeEqual } from "../lib/stateCompare";
 import { missingVaultNames } from "../lib/vaultParticipants";
+import { attributeVaultTree } from "../lib/vaultTrees";
 import type {
   ExplorerFolder,
   ModifiedNote,
@@ -14,6 +15,7 @@ import type {
   VaultId,
   VaultScope,
   VaultTree,
+  WireVaultTree,
 } from "../types";
 
 /** Merges every participating Vault's tree into the one `ExplorerFolder`
@@ -66,12 +68,18 @@ export function useVaultTree(scope: VaultScope) {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, "Failed loading tree"));
       }
-      const projection = (await res.json()) as VaultReadProjection<VaultTree[]>;
-      const nextTree = mergeVaultTrees(projection.data);
+      const projection = (await res.json()) as VaultReadProjection<
+        WireVaultTree[]
+      >;
+      // Notes arrive without a vault ID; the tree they hang from carries it
+      // (#192). Stamping them here is the last point at which the grouping is
+      // still intact — everything below merges or flattens the trees.
+      const trees = projection.data.map(attributeVaultTree);
+      const nextTree = mergeVaultTrees(trees);
       setTree((prev) =>
         isExplorerTreeEqual(prev, nextTree) ? prev : nextTree,
       );
-      setVaultTrees(projection.data);
+      setVaultTrees(trees);
       setTreePartial(projection.partial);
     } catch (err) {
       setTreeError(

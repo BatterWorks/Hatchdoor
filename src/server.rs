@@ -6908,9 +6908,17 @@ mod tests {
             2
         );
         for vault_tree in tree_body["data"].as_array().unwrap() {
-            let vault_id = vault_tree["vault_id"].as_str().expect("vault_id");
-            for note in vault_tree["tree"]["notes"].as_array().unwrap() {
-                assert_eq!(note["vault_id"], vault_id);
+            // The tree names its Vault; its Notes do not repeat it (#192).
+            vault_tree["vault_id"].as_str().expect("vault_id");
+            let root = &vault_tree["tree"];
+            let notes = root["notes"].as_array().expect("notes");
+            assert_eq!(root["note_count"], notes.len());
+            // The route passes the default tree scope and always returns the
+            // whole tree, so nothing is ever held back.
+            assert!(root.get("truncated").is_none());
+            for note in notes {
+                assert!(note.get("vault_id").is_none());
+                note["slug"].as_str().expect("slug");
             }
         }
 

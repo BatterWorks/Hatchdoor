@@ -139,7 +139,7 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_note` | `vault_id`, `slug` | Read one exact note's authoritative Markdown. |
 | `get_note_links` | `vault_id`, `slug` | Outgoing links and backlinks for one exact note. |
 | `resolve_wikilink` | `vault_id`, `target` | Resolve a wikilink target within one Vault. |
-| `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. |
+| `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. Optional: `folder` (a Vault-relative folder to return as the root), `max_depth` (how far below it to descend, minimum 1), `include_notes` (default `true`). |
 | `get_stats` | `scope` | Grouped statistics for one Vault or all enabled Vaults. |
 | `get_graph` | `scope` | Grouped link graph for one Vault or all enabled Vaults. |
 | `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter metadata — `tags`, `aliases`, and every remaining top-level key under `properties` — without returning the Markdown body. A note with no frontmatter block answers `has_frontmatter: false` with empty collections rather than an error. It returns no `content_hash`: to write the metadata back, take the hash from `get_note`. |
@@ -149,6 +149,10 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_attachment_import_config` | `vault_id` | Report whether uploads are currently possible for this Vault, the available methods, their byte limits, and the allowed file extensions. Call this before uploading. |
 
 Collection-scoped results (`search_notes`, `get_tree`, `get_stats`, `get_graph`, `recently_modified` with `scope: "all"`) carry `scope`, `collection_revision`, `partial`, and `participants` — an agent should branch on the structured error `code`, never on message text, and should treat `partial: true` as "some enabled Vaults did not answer in time," not as an error.
+
+`get_tree` with nothing but `scope` returns the whole Vault, which on a few hundred notes is large enough to overflow a client's per-result budget. Three optional arguments narrow it. `include_notes: false` is the cheap one to open with: it returns every folder at every level with its note count and no notes at all, so a several-hundred-note Vault's shape costs on the order of a kilobyte instead of seventy. `folder` returns one subtree — `"40-reference/Parenting"`, matched case-insensitively, surrounding slashes ignored. `max_depth` stops the descent: the starting folder is depth 0, a folder at the limit is listed with its count but not opened, and one that had something inside it is marked `truncated` so it cannot be mistaken for an empty leaf. Every folder reports `note_count`, the notes held directly inside it, not counting its subfolders; a subtree total is the sum of those. A `folder` naming something the Vault does not have answers the structured error `folder_not_found` rather than an empty tree, so a typo never reads as an empty folder. With `scope: "all"` that refusal is per-Vault: the Vaults that do have the folder still answer, each Vault that does not appears in `participants` carrying `folder_not_found`, and the result is marked `partial`. Only when no Vault has it does the whole call refuse.
+
+Notes inside a tree carry `title` and `slug` but no `vault_id`: the tree they sit in already names its Vault, once. Flat results that mix Vaults in a single list — `search_notes`, `recently_modified` — still qualify every hit.
 
 > [!note]
 > `get_attachment_import_config`'s `enabled` field is the AND of two independent gates: `HATCHDOOR_MCP_WRITE_ENABLED` (instance-wide) and the target Vault's own `capabilities.mutate` (source mode and lifecycle phase). The response explains which one is currently false when `enabled` is `false`.

@@ -671,7 +671,10 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
         );
 
         let projection = crate::vault_read::VaultReadCore::new(&cache, &collection)
-            .trees(crate::vault_read::VaultScope::One(vault_id))
+            .trees(
+                crate::vault_read::VaultScope::One(vault_id),
+                crate::vault_read::TreeScope::default(),
+            )
             .expect("tree read during active rebuild");
         assert!(
             projection.partial,

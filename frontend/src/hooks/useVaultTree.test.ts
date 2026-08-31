@@ -92,13 +92,59 @@ describe("useVaultTree — per-Vault trees (#142)", () => {
     const treeData = THREE_VAULTS.map((vault) => ({
       vault_id: vault.vault_id,
       vault_name: vault.name,
-      tree: { name: vault.name, folders: [], notes: [] },
+      tree: { name: vault.name, note_count: 0, folders: [], notes: [] },
     }));
     mockFetch(collectionEnvelope("all", [], []), treeData);
 
     const { result } = renderHook(() => useVaultTree("all"));
 
     await waitFor(() => expect(result.current.loadingTree).toBe(false));
-    expect(result.current.vaultTrees).toEqual(treeData);
+    expect(result.current.vaultTrees).toEqual(
+      THREE_VAULTS.map((vault) => ({
+        vault_id: vault.vault_id,
+        vault_name: vault.name,
+        tree: { name: vault.name, folders: [], notes: [] },
+      })),
+    );
+  });
+
+  it("stamps each Vault's ID onto the notes its tree sends without one (#192)", async () => {
+    const treeData = THREE_VAULTS.map((vault, index) => ({
+      vault_id: vault.vault_id,
+      vault_name: vault.name,
+      tree: {
+        name: vault.name,
+        note_count: 1,
+        folders: [
+          {
+            name: "Nested",
+            note_count: 1,
+            folders: [],
+            notes: [
+              { title: `${vault.name} nested`, slug: `nested-${index}` },
+            ],
+          },
+        ],
+        notes: [{ title: `${vault.name} home`, slug: `home-${index}` }],
+      },
+    }));
+    mockFetch(collectionEnvelope("all", [], []), treeData);
+
+    const { result } = renderHook(() => useVaultTree("all"));
+
+    await waitFor(() => expect(result.current.loadingTree).toBe(false));
+    for (const [index, vault] of THREE_VAULTS.entries()) {
+      const tree = result.current.vaultTrees[index].tree;
+      expect(tree.notes[0].vault_id).toBe(vault.vault_id);
+      expect(tree.folders[0].notes[0].vault_id).toBe(vault.vault_id);
+    }
+    // The autocomplete pool is flattened across Vaults, losing the grouping,
+    // so every candidate must already know which Vault it came from.
+    expect(
+      [
+        ...new Set(result.current.noteCandidates.map((note) => note.vault_id)),
+      ].sort(),
+    ).toEqual(THREE_VAULTS.map((vault) => vault.vault_id).sort());
+    expect(result.current.noteCandidates).toHaveLength(6);
   });
 });
