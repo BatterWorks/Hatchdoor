@@ -2744,3 +2744,37 @@ async fn an_in_process_edit_keeps_a_backoff_status_instead_of_the_remembered_tur
          remembered non-retryable one"
     );
 }
+
+/// Issue #178: a Docker `:ro` bind mount answers the `W_OK` probe with `EROFS`,
+/// not `EACCES`. Treating only `EACCES` as read-only made such a Vault fail
+/// activation with `vault_path_unavailable`. Both errnos mean "present but not
+/// writable"; anything else stays a genuine failure.
+///
+/// This pins the errno classification directly - the `chmod 0555` coverage in
+/// `read_only_and_stale_statuses_keep_usable_local_markdown_honest` only ever
+/// produces `EACCES`, so it cannot catch this.
+#[cfg(unix)]
+#[test]
+fn read_only_filesystem_is_a_read_only_vault_not_an_unavailable_one() {
+    let read_only_filesystem = std::io::Error::from_raw_os_error(libc::EROFS);
+    assert_eq!(
+        read_only_filesystem.kind(),
+        std::io::ErrorKind::ReadOnlyFilesystem,
+        "EROFS must map to ReadOnlyFilesystem for the classification to hold"
+    );
+    assert!(
+        refuses_writes(&read_only_filesystem),
+        "a read-only mount is browsable, not unavailable"
+    );
+
+    assert!(refuses_writes(&std::io::Error::from_raw_os_error(
+        libc::EACCES
+    )));
+
+    for genuinely_unavailable in [libc::ENOENT, libc::ENOTDIR, libc::EIO] {
+        assert!(
+            !refuses_writes(&std::io::Error::from_raw_os_error(genuinely_unavailable)),
+            "errno {genuinely_unavailable} must keep surfacing as an unavailable Vault"
+        );
+    }
+}

@@ -1635,7 +1635,7 @@ fn directory_is_writable(
         return Ok(true);
     }
     let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
+    if refuses_writes(&error) {
         Ok(false)
     } else {
         Err(VaultRuntimeError {
@@ -1648,6 +1648,21 @@ fn directory_is_writable(
             detail: None,
         })
     }
+}
+
+/// Does this `faccessat` failure mean "the Vault is present but refuses
+/// writes", rather than "the Vault is unreachable"?
+///
+/// Issue #178: a Docker `:ro` bind mount answers the `W_OK` probe with `EROFS`,
+/// not `EACCES`. Both mean the same thing to us - browse and index the Vault,
+/// refuse mutations - so both must classify as read-only. Every other errno is
+/// a genuinely unavailable path and keeps propagating.
+#[cfg(unix)]
+fn refuses_writes(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    )
 }
 
 #[cfg(not(unix))]
