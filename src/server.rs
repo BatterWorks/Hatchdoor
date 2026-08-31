@@ -646,7 +646,7 @@ async fn startup_status_handler(State(state): State<AppState>) -> Response {
 }
 
 async fn readiness_handler(State(state): State<AppState>) -> Response {
-    if state.startup.is_ready() {
+    if state.startup.collection_indexes_ready() {
         (StatusCode::OK, "ready").into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()

@@ -1788,7 +1788,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         VaultSearchStatus::Ready
     );
     assert!(
-        !executor.startup.is_ready(),
+        !executor.startup.collection_indexes_ready(),
         "one indexed Vault out of two must not make the collection ready"
     );
     assert!(
@@ -1804,7 +1804,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
     );
     second_turn.result.expect("second Index turn succeeds");
     assert!(
-        executor.startup.is_ready(),
+        executor.startup.collection_indexes_ready(),
         "startup becomes ready once every active Vault's Index turn settled Ready"
     );
     assert!(
@@ -1823,7 +1823,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         )),
     });
     assert!(
-        executor.startup.is_ready(),
+        executor.startup.collection_indexes_ready(),
         "an embedder_not_ready deferral is not an indexing failure"
     );
 
@@ -1838,7 +1838,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         )),
     });
     assert!(
-        !executor.startup.is_ready(),
+        !executor.startup.collection_indexes_ready(),
         "a real Index failure fails startup"
     );
     assert!(!model_setup_started.load(Ordering::Acquire));
@@ -1865,7 +1865,7 @@ async fn publish_outcome_moves_startup_readiness_with_the_collections_index_turn
         )),
     });
     assert!(
-        executor.startup.is_ready(),
+        executor.startup.collection_indexes_ready(),
         "readiness is an Index-turn conclusion only"
     );
 }
