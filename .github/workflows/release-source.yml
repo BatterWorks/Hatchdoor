@@ -1,0 +1,26 @@
+name: Release source
+
+# `main` is the release branch: it receives merges from `development` and
+# nothing else. Branch protection matches on the base branch only and cannot
+# constrain which branch a pull request comes from, so this check does it.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  from-development:
+    name: from-development
+    runs-on: ubuntu-latest
+    steps:
+      - name: Head branch must be development
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "development" ]; then
+            echo "::error::Pull requests into main must come from development. This one comes from '$HEAD_REF'. Merge the work into development first, then release development into main."
+            exit 1
+          fi
+          echo "Head branch is development."
