@@ -1292,8 +1292,13 @@ impl VaultCollectionRuntime {
             // newly (re)activated managed-Git definition, independent of
             // Git status: an edit that only changes `poll_interval_secs`
             // still produces a non-retained control block here (its
-            // `VaultDefinition` compares unequal), but must not itself
-            // request a Git turn.
+            // `VaultDefinition` compares unequal). Such an edit does not
+            // request a turn *of its own* — the due-check below is still the
+            // only thing that starts one — but it can leave the Vault due,
+            // and then that check starts a turn: `activate` brings an armed
+            // attempt forward when the new interval is shorter, and an
+            // interval shortened past the time already elapsed is due at
+            // once. That is the point of shortening it, not a reset.
             let scheduled = runtime.definition().source().managed_git_poll_interval();
             if let Some(poll_interval) = scheduled {
                 managed_git.activate(*vault_id, poll_interval);
