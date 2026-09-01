@@ -15,13 +15,17 @@ const temporaryRepositories = [];
 const MCP_NOTE = "docs/user-vault/03 Reference/MCP tools reference.md";
 const UI_NOTE =
   "docs/user-vault/01 Get started/Browse and review through the Web UI.md";
+const ATTACHMENTS_NOTE =
+  "docs/user-vault/02 Guides/How to import and work with attachments.md";
 
-// Every note the mcp-tools and web-ui surfaces name. The script refuses to
-// print a reading list containing a file it cannot open, so a fixture that
-// triggers a surface must carry that surface's whole note set.
+// Every note the mcp-tools, web-ui, attachments, and write-mutations surfaces
+// name. The script refuses to print a reading list containing a file it cannot
+// open, so a fixture that triggers a surface must carry that surface's whole
+// note set.
 const FIXTURE_NOTES = [
   MCP_NOTE,
   UI_NOTE,
+  ATTACHMENTS_NOTE,
   "docs/user-vault/01 Get started/Connect your agent.md",
   "docs/user-vault/01 Get started/Search and change notes with your agent.md",
   "docs/user-vault/02 Guides/How to edit notes with the live editor.md",
@@ -167,6 +171,21 @@ test("one change can require several surfaces' notes", async () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /MCP tools reference\.md/);
   assert.match(result.stderr, /Browse and review through the Web UI\.md/);
+});
+
+// Attachment mutation lives under src/vault/write/, so it already triggered
+// the note-mutation surface. What it did not do was summon the guide that
+// actually documents move_attachment, rename_attachment, and delete_attachment
+// (#220), which left that guide free to drift.
+test("an attachment mutation change names the attachments guide too", async () => {
+  const root = await fixture();
+  await write(root, "src/vault/write/attachments.rs", "// move an asset\n");
+  await commit(root, "attachment mutation");
+
+  const result = run(root);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /How to import and work with attachments\.md/);
+  assert.match(result.stderr, /MCP tools reference\.md/);
 });
 
 // The regression that motivated `-z`: `git status --porcelain` c-quotes any

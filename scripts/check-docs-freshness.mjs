@@ -122,8 +122,16 @@ const SURFACES = [
   },
   {
     id: "attachments",
-    label: "Attachment import and serving",
-    paths: ["src/vault_read/assets.rs", "src/handlers/assets.rs"],
+    label: "Attachment import, serving, and mutation",
+    // The mutation half matters as much as import and serving: the guide
+    // documents move_attachment, rename_attachment, and delete_attachment,
+    // and without this path a change to them summoned only the note-mutation
+    // reading list (#220).
+    paths: [
+      "src/vault_read/assets.rs",
+      "src/handlers/assets.rs",
+      "src/vault/write/attachments.rs",
+    ],
     notes: [`${GUIDES}/How to import and work with attachments.md`],
   },
   {
