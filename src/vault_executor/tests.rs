@@ -69,6 +69,40 @@ impl Embedder for BlockingEmbedder {
     }
 }
 
+/// Parks a build inside its *read* phase. `token_count` is what the chunker
+/// calls while note content is still being read and chunked, before any vector
+/// work, so blocking the first call holds the turn exactly where its foreground
+/// mutation guard must still be held. Only the first call parks; the rest of
+/// the build runs normally.
+struct ReadPhaseBlockingEmbedder {
+    inner: StubEmbedder,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+    parked: std::sync::atomic::AtomicBool,
+}
+
+impl Embedder for ReadPhaseBlockingEmbedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        self.inner.embed(texts)
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.inner.embedding_dim()
+    }
+
+    fn identity(&self) -> String {
+        self.inner.identity()
+    }
+
+    fn token_count(&self, text: &str, add_special_tokens: bool) -> Result<usize, String> {
+        if !self.parked.swap(true, Ordering::SeqCst) {
+            self.entered.wait();
+            self.release.wait();
+        }
+        self.inner.token_count(text, add_special_tokens)
+    }
+}
+
 struct PanicEmbedder;
 
 impl Embedder for PanicEmbedder {
@@ -707,6 +741,352 @@ async fn active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_rea
         "a successful rebuild republishes fresh"
     );
 }
+
+/// One local Vault, activated and already indexed once, with a second Index
+/// turn armed and something for it to embed.
+///
+/// The three tests below all need the same thing: a turn held open inside its
+/// embedding pass, which is where a real Vault spends minutes and where issue
+/// #223's write starvation lived.
+struct EmbeddingTurnFixture {
+    directory: tempfile::TempDir,
+    vault_id: VaultId,
+    collection: VaultCollectionRuntime,
+    worker: Option<crate::vault_work::VaultWorkWorker>,
+    cache: Arc<SqliteCache>,
+}
+
+impl EmbeddingTurnFixture {
+    async fn new() -> Self {
+        let directory = tempdir().expect("temporary state directory");
+        let vault_path = directory.path().join("vault");
+        std::fs::create_dir_all(&vault_path).expect("create Vault directory");
+        std::fs::write(vault_path.join("Home.md"), "# Home\n\nmelatonin original")
+            .expect("write note");
+
+        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+        let empty = match registry.load().expect("load empty registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+        };
+        let snapshot = add_local_vault(&registry, &empty, "Only", vault_path.clone());
+        let vault_id = vault_id_named(&snapshot, "Only");
+
+        let collection = VaultCollectionRuntime::new();
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        let managed_git = ManagedGitScheduler::without_durable_state(coordinator.clone());
+        collection
+            .reconcile_and_reconstruct(&registry, &snapshot, &coordinator, &managed_git)
+            .await;
+        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
+        let working: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+
+        let published = worker
+            .run_next({
+                let collection = collection.clone();
+                let cache = cache.clone();
+                move |request| async move {
+                    dispatch_vault_index_turn(&collection, cache, working, request).await
+                }
+            })
+            .await
+            .expect("initial Index turn");
+        published.result.expect("initial publication succeeds");
+
+        // A write burst lands, which is what arms the next Index turn in
+        // production: the watcher forwards the change intent to this
+        // coordinator.
+        std::fs::write(vault_path.join("Home.md"), "# Home\n\nmelatonin updated")
+            .expect("update note");
+        coordinator.request(vault_id, VaultWorkKind::Index);
+
+        Self {
+            directory,
+            vault_id,
+            collection,
+            worker: Some(worker),
+            cache,
+        }
+    }
+
+    fn vault_path(&self) -> PathBuf {
+        self.directory.path().join("vault")
+    }
+
+    fn control(&self) -> VaultControlBlock {
+        self.collection
+            .runtime(self.vault_id)
+            .expect("active runtime")
+    }
+
+    fn snapshot_status(&self) -> Option<VaultSnapshotStatus> {
+        self.cache
+            .snapshot_status(self.vault_id)
+            .expect("read snapshot status")
+    }
+
+    /// Run the armed Index turn with an embedder that parks inside `embed`,
+    /// where a real Vault spends minutes and where the guard is now released.
+    /// Returns the barrier reporting it has parked, the barrier that lets it
+    /// go, and the turn itself.
+    fn hold_open_mid_embedding(
+        &mut self,
+    ) -> (
+        Arc<std::sync::Barrier>,
+        Arc<std::sync::Barrier>,
+        tokio::task::JoinHandle<Option<VaultWorkOutcome>>,
+    ) {
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let embedder: Arc<dyn Embedder> = Arc::new(BlockingEmbedder {
+            inner: StubEmbedder::new(384),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        (entered, release, self.run_armed_turn(embedder))
+    }
+
+    /// The same, parked one phase earlier: inside the read loop that chunks
+    /// note content, where the guard must still be held.
+    fn hold_open_mid_read_phase(
+        &mut self,
+    ) -> (
+        Arc<std::sync::Barrier>,
+        Arc<std::sync::Barrier>,
+        tokio::task::JoinHandle<Option<VaultWorkOutcome>>,
+    ) {
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let embedder: Arc<dyn Embedder> = Arc::new(ReadPhaseBlockingEmbedder {
+            inner: StubEmbedder::new(384),
+            entered: entered.clone(),
+            release: release.clone(),
+            parked: std::sync::atomic::AtomicBool::new(false),
+        });
+        (entered, release, self.run_armed_turn(embedder))
+    }
+
+    fn run_armed_turn(
+        &mut self,
+        embedder: Arc<dyn Embedder>,
+    ) -> tokio::task::JoinHandle<Option<VaultWorkOutcome>> {
+        let mut worker = self.worker.take().expect("the fixture runs one held turn");
+        let collection = self.collection.clone();
+        let cache = self.cache.clone();
+        tokio::spawn(async move {
+            worker
+                .run_next(move |request| {
+                    let collection = collection.clone();
+                    let cache = cache.clone();
+                    async move {
+                        dispatch_vault_index_turn(&collection, cache, embedder, request).await
+                    }
+                })
+                .await
+        })
+    }
+}
+
+/// Meet one of the embedding pass's barriers from a blocking-pool thread. The
+/// pass runs under `spawn_blocking`, so meeting its barrier from the test's
+/// async context would park the runtime instead of the thread.
+async fn meet_barrier(barrier: &Arc<std::sync::Barrier>) {
+    let barrier = barrier.clone();
+    tokio::task::spawn_blocking(move || barrier.wait())
+        .await
+        .expect("meet the embedding barrier");
+}
+
+/// Finish a held-open turn: release the parked blocking-pool thread, then take
+/// its result. Always release before asserting — a panic with the barrier
+/// still unmet hangs the runtime on drop instead of reporting the failure
+/// (see `active_index_turn_reports_the_retained_snapshot_stale_to_concurrent_reads`).
+async fn finish_held_turn(
+    release: &Arc<std::sync::Barrier>,
+    turn: tokio::task::JoinHandle<Option<VaultWorkOutcome>>,
+) {
+    meet_barrier(release).await;
+    turn.await
+        .expect("Index turn task")
+        .expect("Index turn ran")
+        .result
+        .expect("Index turn publishes successfully");
+}
+
+/// The narrowing stops at the read phase. A foreground mutation arriving while
+/// the turn is still reading and chunking note content waits, exactly as
+/// before, which is what keeps a turn from ever observing half of a multi-file
+/// write. The control afterwards proves the guard was merely held: the same
+/// acquisition succeeds the moment the read phase ends.
+#[tokio::test]
+async fn a_foreground_mutation_waits_while_an_index_turn_is_still_reading() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let control = fixture.control();
+    let (entered, release, turn) = fixture.hold_open_mid_read_phase();
+    meet_barrier(&entered).await;
+
+    let blocked = tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        control.acquire_mutation(),
+    )
+    .await
+    .is_err();
+
+    finish_held_turn(&release, turn).await;
+
+    assert!(
+        blocked,
+        "a foreground mutation must not start while an Index turn is still reading the Vault"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        control.acquire_mutation(),
+    )
+    .await
+    .expect("the guard is free once the turn is over")
+    .expect("mutation acquisition succeeds");
+}
+
+/// Issue #223, inverted. An Index turn used to hold this Vault's foreground
+/// mutation lock for the whole turn, embedding included, and every HTTP and
+/// MCP Markdown write takes that same lock first — `vault_mutation`'s
+/// primitives, `mcp::tools::write::acquire_mutation`, and the `batch` tool,
+/// which takes it once for a whole batch. `acquire_mutation` is an unbounded
+/// await with no timeout and no backpressure, so on a CPU-only host a write
+/// arriving during a seven-minute embedding pass did not degrade, it parked:
+/// the caller's transport gave up on a write that then landed anyway, which
+/// is an at-least-once hazard the moment the caller retries.
+///
+/// The guard now spans the read phase only, so the write starts while the turn
+/// is still embedding.
+#[tokio::test]
+async fn a_foreground_mutation_acquires_the_lock_while_an_index_turn_embeds() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let control = fixture.control();
+    let (entered, release, turn) = fixture.hold_open_mid_embedding();
+    meet_barrier(&entered).await;
+
+    // Parked inside `Embedder::embed`, exactly where a real Vault spends
+    // minutes. This is the call every write makes first.
+    let acquired = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        control.acquire_mutation(),
+    )
+    .await
+    .is_ok();
+
+    finish_held_turn(&release, turn).await;
+
+    assert!(
+        acquired,
+        "a foreground mutation must start while an Index turn embeds, not wait out the pass"
+    );
+}
+
+/// The other half of the decision: a write that lands mid-embedding makes the
+/// generation about to be published already behind the Markdown, so it
+/// publishes stale rather than claiming to be current. It keeps participating
+/// and keeps answering search — the label is what changes, and the watcher has
+/// already armed the catch-up turn.
+#[tokio::test]
+async fn a_mutation_during_the_embedding_pass_publishes_the_generation_stale() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let control = fixture.control();
+    let (entered, release, turn) = fixture.hold_open_mid_embedding();
+    meet_barrier(&entered).await;
+
+    // One complete foreground mutation, taken and released exactly as an HTTP
+    // or MCP Markdown write does.
+    let guard = control
+        .acquire_mutation()
+        .await
+        .expect("foreground mutation acquires its Vault lock");
+    std::fs::write(
+        fixture.vault_path().join("Later.md"),
+        "# Later\n\nmelatonin arrived after the scan",
+    )
+    .expect("write the mid-pass mutation");
+    drop(guard);
+
+    finish_held_turn(&release, turn).await;
+
+    assert_eq!(
+        fixture.snapshot_status(),
+        Some(VaultSnapshotStatus {
+            participating: true,
+            freshness: VaultSnapshotFreshness::Stale,
+            searchable: true,
+        }),
+        "a generation built across a foreground mutation must not publish itself fresh"
+    );
+    assert_eq!(
+        fixture.control().snapshot().search,
+        VaultSearchStatus::Stale,
+        "and the runtime says the same thing `retained_snapshot_search_status` would \
+         derive from that row after a restart, rather than claiming Ready"
+    );
+    assert!(
+        fixture.control().snapshot().capabilities.search,
+        "a stale generation keeps the search capability; it is labelled, not withheld"
+    );
+
+    let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
+    let response = VaultSearchCore::new(&fixture.cache, &fixture.collection, embedder.as_ref())
+        .search(VaultSearchRequest {
+            scope: VaultScope::One(fixture.vault_id),
+            query: "melatonin".to_string(),
+            mode: SearchMode::Keyword,
+            limit: 10,
+            per_note_cap: 1,
+            layers: LayerSelection::default_surface(),
+        })
+        .expect("keyword search against the stale generation");
+    assert!(
+        response
+            .data
+            .results
+            .iter()
+            .any(|hit| hit.note_slug == "home"),
+        "a stale generation still answers search"
+    );
+    assert!(
+        response.partial,
+        "and reports itself a non-fresh participant while doing so"
+    );
+}
+
+/// The control for the test above: the same released-and-retaken guard, with
+/// nothing intervening. A turn that nothing wrote under still publishes fresh.
+#[tokio::test]
+async fn an_index_turn_with_no_concurrent_mutation_publishes_fresh() {
+    let mut fixture = EmbeddingTurnFixture::new().await;
+    let (entered, release, turn) = fixture.hold_open_mid_embedding();
+    meet_barrier(&entered).await;
+
+    assert_eq!(
+        fixture.snapshot_status().map(|status| status.freshness),
+        Some(VaultSnapshotFreshness::Stale),
+        "precondition: the retained generation reads stale for the length of the rebuild"
+    );
+
+    finish_held_turn(&release, turn).await;
+
+    assert_eq!(
+        fixture.snapshot_status(),
+        Some(VaultSnapshotStatus {
+            participating: true,
+            freshness: VaultSnapshotFreshness::Fresh,
+            searchable: true,
+        }),
+        "releasing the guard across the embedding pass must not make every turn publish stale"
+    );
+    assert_eq!(
+        fixture.control().snapshot().search,
+        VaultSearchStatus::Ready,
+        "and the runtime still settles Ready, which is what startup readiness latches on"
+    );
+}
+
 /// A managed-Git Vault's control block, activated through the real
 /// registry and collection runtime exactly like production. Uses a
 /// syntactically valid but unreachable `https://` URL — like

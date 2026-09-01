@@ -174,7 +174,15 @@ that production inventory are still checked for stale paths and duplicates.
   acceptance, publishes its cancellation signal, and stops its watcher,
   including through already-held handles; retirement waits for both its active
   coordinator turn and any already-admitted foreground mutation to reach their
-  safe boundaries. Unchanged Vaults retain their control blocks when another
+  safe boundaries. The mutation lock also carries a per-Vault count of the
+  foreground mutations that have taken it. `acquire_mutation` advances it under
+  the lock; `acquire_mutation_for_index_reads` gives a background Index turn the
+  same exclusion without advancing it, and returns the generation it observed;
+  `blocking_retake_mutation_for_index` retakes the lock from a blocking thread
+  and answers whether a mutation intervened, under that one acquisition, so the
+  caller decides and acts without a window in between (issue #223, following the
+  `request_if_idle` rule of issue #127). The count is never readable outside a
+  holder of that lock, which is the only place its value means anything. Unchanged Vaults retain their control blocks when another
   definition changes; disabled definitions remain visible with no capabilities
   and no active runtime.
 - `ModelSetup` owns local model selection, terms acceptance, download integrity,
@@ -329,7 +337,25 @@ small public surface — no trait, no framework, no second execution lane.
   for semantic search, atomically publishes only that Vault's complete shared
   snapshot, and publishes Ready, Stale, or Unavailable search state without
   changing another Vault's snapshot or status. A retained snapshot is marked
-  stale for the duration of the rebuild, not only after a failure. A turn
+  stale for the duration of the rebuild, not only after a failure.
+  The foreground mutation guard spans the read phase only — the authoritative
+  scan, the structure pass, and every per-note content read — so a turn can
+  never observe half of a multi-file foreground mutation, and is released at
+  the read/embed boundary inside the candidate build. Holding it across the
+  embedding pass parked every HTTP and MCP Markdown write behind a turn that
+  was no longer reading anything, long enough for the caller's transport to
+  give up on a write that had already landed (issue #223). The turn retakes
+  the guard to publish and, when a foreground mutation completed while it was
+  released, publishes that generation `VaultSnapshotFreshness::Stale` rather
+  than `Fresh` and settles the runtime at `VaultSearchStatus::Stale` rather than
+  `Ready` — the same pair `retained_snapshot_search_status` derives from that
+  row after a restart. It still participates, still holds the search
+  capability, and still answers search; the watcher's change intent has already
+  armed the catch-up turn that makes it `Ready`. Retaking the guard happens
+  while the cache's process-wide model epoch is held, so that acquisition is
+  the one place the epoch waits on a per-Vault lock; the wait is bounded by one
+  in-flight foreground mutation, and no mutation path takes the epoch, so the
+  order cannot cycle. A turn
   requested before first-run model setup has installed the embedder defers
   with `embedder_not_ready` rather than wiping a valid cache.
 - `dispatch_git_turn` executes a `VaultWorkKind::Git` turn. One shared
@@ -395,7 +421,9 @@ the loop that calls it.
 
 **Invariants:** one turn observes one settings snapshot; every Git turn exit
 publishes through one path; the mutation lock is never acquired before the
-checkout lease; a returned failure is the turn's result, not a panic; no turn
+checkout lease; an Index turn holds the foreground mutation guard across every
+read it makes of the Vault and publishes a generation built across a foreground
+mutation as stale; a returned failure is the turn's result, not a panic; no turn
 starts a second execution lane or its own scheduler.
 
 **Validation:** `cargo test vault_executor`, `cargo test vault_work`,
@@ -1197,7 +1225,12 @@ the scope-less stats, explorer-tree, recently-modified, read-by-path,
 demoted-layer, note-summary, health-check, graph, and layered/filtered
 search variants are retired. The crate-private
 `vault_snapshots` seam owns Vault-ID-qualified candidate publication,
-stale/participation state, attempt ordering, and Vault-local disposal in the shared cache. `parse` is currently public and
+stale/participation state, attempt ordering, and Vault-local disposal in the
+shared cache. Publication carries the caller's freshness verdict rather than
+assuming `Fresh`, and `MutationGuardHandoff` is how an Index turn hands its
+Vault read lock through a build: released at the read/embed boundary, retaken
+to answer that verdict under one acquisition with the publication it labels
+(issue #223). `parse` is currently public and
 also supplies parsing/hash behavior to vault indexing, and its
 `frontmatter_span`/`parse_frontmatter_metadata` parsing to the shared write
 layer's frontmatter merge. The crate-private

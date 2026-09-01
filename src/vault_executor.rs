@@ -24,6 +24,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::app_state::AppState;
 use crate::cache::SqliteCache;
+use crate::cache::vault_snapshots::{MutationGuardHandoff, VaultSnapshotFreshness};
 use crate::embed::Embedder;
 use crate::git::{
     ManagedCheckoutLease, ManagedGitOutcome, ManagedGitScheduler, ManagedGitTurnConfig,
@@ -325,15 +326,24 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
     };
 
     // HTTP and MCP Markdown mutations hold this exact per-Vault guard across
-    // their filesystem transaction. Hold it through the authoritative scan
-    // and atomic disposable-cache publication too, so an Index turn cannot
-    // observe or publish a mixed multi-file foreground mutation.
+    // their filesystem transaction. Hold it through the authoritative scan and
+    // every per-note content read, so an Index turn cannot observe a mixed
+    // multi-file foreground mutation — and release it there. The embedding
+    // pass that follows opens no Vault path, and on a CPU-only host it runs
+    // for minutes: holding the guard across it parked every write behind the
+    // turn until the caller's transport gave up on a write that had already
+    // landed (issue #223). The turn retakes the guard to publish, and reports
+    // the generation stale if a mutation landed while it was released.
     #[cfg(test)]
     notify_index_mutation_lock_attempt(vault_id);
-    let _mutation = control_block
-        .acquire_mutation()
+    let (read_guard, read_phase_generation) = control_block
+        .acquire_mutation_for_index_reads()
         .await
         .map_err(vault_index_error)?;
+    // Set inside the publication below, read back here only to report what was
+    // published. The verdict itself is decided under the guard that publishes
+    // it, never from this flag.
+    let published_stale = Arc::new(AtomicBool::new(false));
     control_block
         .set_search_status(VaultSearchStatus::Indexing, None)
         .map_err(vault_index_error)?;
@@ -351,6 +361,7 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
         }
         let indexing_control = control_block.clone();
         let indexing_cache = cache.clone();
+        let publication_stale = published_stale.clone();
         match tokio::task::spawn_blocking(move || {
             let index = indexing_control
                 .authoritative_index()
@@ -378,6 +389,7 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                     "could not publish the structure-only Vault snapshot; browsing waits for the full index"
                 ),
             }
+            let publication_control = indexing_control.clone();
             indexing_cache
                 .replace_vault_snapshot_with_embed_layers_and_progress(
                     vault_id,
@@ -385,6 +397,26 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
                     embedder.as_ref(),
                     embed_layers,
                     on_progress,
+                    Some(MutationGuardHandoff {
+                        read_phase: read_guard,
+                        freshness_at_publication: Box::new(move || {
+                            let (mutated, guard) = publication_control
+                                .blocking_retake_mutation_for_index(read_phase_generation);
+                            publication_stale.store(mutated, Ordering::Release);
+                            let freshness = if mutated {
+                                // A write landed while this turn was
+                                // embedding, so what is about to be published
+                                // is already behind the Markdown. Search keeps
+                                // answering from it; the label is what stops it
+                                // claiming to be current. The watcher has
+                                // already armed the catch-up turn.
+                                VaultSnapshotFreshness::Stale
+                            } else {
+                                VaultSnapshotFreshness::Fresh
+                            };
+                            (freshness, guard)
+                        }),
+                    }),
                 )
                 .map_err(|message| {
                     (
@@ -410,7 +442,17 @@ pub(crate) async fn dispatch_vault_index_turn_with_progress(
 
     match &result {
         Ok(()) => {
-            let _ = control_block.set_search_status(VaultSearchStatus::Ready, None);
+            // A generation published stale reports itself stale here too, which
+            // is exactly what `retained_snapshot_search_status` would derive
+            // from the same row after a restart. `Stale` still grants the
+            // search capability, so the Vault keeps answering; the watcher's
+            // change intent has already armed the turn that makes it `Ready`.
+            let status = if published_stale.load(Ordering::Acquire) {
+                VaultSearchStatus::Stale
+            } else {
+                VaultSearchStatus::Ready
+            };
+            let _ = control_block.set_search_status(status, None);
         }
         Err(error) => {
             let stale_mark_error = stale_mark_required
