@@ -1,7 +1,9 @@
+/* The live width comes down as an inline --sidebar-width on `.app-shell`, so
+   the default belongs in the var() fallback here, not in a local declaration
+   that would shadow it and freeze the pane while the resizer moved on. */
 .app-layout {
-  --sidebar-width: 280px;
   display: grid;
-  grid-template-columns: var(--sidebar-width) 8px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 280px) 8px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   min-width: 0;
