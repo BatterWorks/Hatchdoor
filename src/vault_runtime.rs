@@ -4,7 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
 use serde::{Deserialize, Serialize};
@@ -414,6 +414,12 @@ pub struct VaultControlBlock {
     vault_path: Arc<PathBuf>,
     snapshot: Arc<RwLock<CollectionVaultSnapshot>>,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// How many foreground mutations have taken `mutation_lock`. Written once
+    /// per acquisition, by the acquirer, while it holds that lock — and read
+    /// only by the two accessors below, each of which also holds it. A holder
+    /// therefore reads a value that cannot move until it releases, which is
+    /// the only way to read it honestly.
+    mutations_taken: Arc<AtomicU64>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     accepting_operations: Arc<AtomicBool>,
     cancellation: tokio::sync::watch::Sender<bool>,
@@ -480,6 +486,7 @@ impl VaultControlBlock {
             vault_path: Arc::new(vault_path),
             snapshot: Arc::new(RwLock::new(snapshot)),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            mutations_taken: Arc::new(AtomicU64::new(0)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             accepting_operations: Arc::new(AtomicBool::new(true)),
             cancellation,
@@ -564,10 +571,71 @@ impl VaultControlBlock {
     pub async fn acquire_mutation(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
+        let guard = self.acquire_mutation_exclusion().await?;
+        // Under the lock, and only once admission is confirmed, so the count
+        // moves exactly once per mutation that actually gets to run and only
+        // while one holder can see it move. Counted on acquisition rather than
+        // release: by the time any other holder can read it, this mutation's
+        // filesystem work has finished and its guard is gone.
+        self.mutations_taken.fetch_add(1, Ordering::Relaxed);
+        Ok(guard)
+    }
+
+    /// Take this Vault's foreground mutation guard for a background Index
+    /// turn's read phase, and report the mutation generation observed under
+    /// it. The same exclusion a Markdown write gets, so a turn can never
+    /// observe half of a multi-file foreground mutation, minus the generation
+    /// advance: an Index turn reads the Vault rather than mutating it, and
+    /// counting itself would make every turn conclude a mutation had
+    /// intervened and report its own publication stale (issue #223).
+    ///
+    /// The generation is read here rather than exposed, because it is only
+    /// meaningful under this lock: pass it back to
+    /// [`Self::blocking_retake_mutation_for_index`], which decides and hands
+    /// back the guard to act under.
+    pub(crate) async fn acquire_mutation_for_index_reads(
+        &self,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, u64), VaultRuntimeError> {
+        let guard = self.acquire_mutation_exclusion().await?;
+        let generation = self.mutations_taken.load(Ordering::Relaxed);
+        Ok((guard, generation))
+    }
+
+    /// The exclusion itself: everything both acquisitions above have in common,
+    /// minus what makes one a mutation and the other a read.
+    async fn acquire_mutation_exclusion(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
         let guard = self.mutation_lock.clone().lock_owned().await;
         self.ensure_accepting_operations()?;
         Ok(guard)
+    }
+
+    /// Retake the foreground mutation guard from a blocking thread and answer,
+    /// under that one acquisition, whether a foreground mutation completed
+    /// since `since` (a generation from
+    /// [`Self::acquire_mutation_for_index_reads`]).
+    ///
+    /// An Index turn releases the guard before its embedding pass and calls
+    /// this to publish afterwards: the verdict and the publication it labels
+    /// share the returned guard, so no mutation can land between deciding and
+    /// acting (the rule
+    /// [`crate::vault_work::VaultWorkCoordinator::request_if_idle`] records for
+    /// issue #127).
+    ///
+    /// Blocking by construction — call it only from a thread that is not
+    /// driving the async runtime, such as inside `spawn_blocking`; Tokio panics
+    /// otherwise. The wait is bounded by one in-flight foreground mutation, not
+    /// by a turn, which matters because the Index turn holds the cache's
+    /// process-wide model epoch across this call.
+    pub(crate) fn blocking_retake_mutation_for_index(
+        &self,
+        since: u64,
+    ) -> (bool, tokio::sync::OwnedMutexGuard<()>) {
+        let guard = self.mutation_lock.clone().blocking_lock_owned();
+        let mutated = self.mutations_taken.load(Ordering::Relaxed) != since;
+        (mutated, guard)
     }
 
     /// Wait until a mutation that was admitted before this control block was

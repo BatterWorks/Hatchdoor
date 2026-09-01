@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::cache::{BuildOptions, SqliteCache};
+use crate::cache::{BuildHandles, BuildOptions, SqliteCache};
 use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, VaultIndex};
 use crate::vault_registry::VaultId;
@@ -32,6 +32,31 @@ pub(crate) struct VaultSnapshotStatus {
     /// rebuilds it, so folding the two into one enum would produce states no
     /// caller could represent.
     pub(crate) searchable: bool,
+}
+
+/// How an Index turn hands its Vault's foreground mutation guard through a
+/// candidate build (issue #223).
+///
+/// The build reads the Vault from disk, then embeds, then publishes. Only the
+/// first of those three touches a filesystem path, and only the first needs
+/// the guard every HTTP and MCP Markdown write takes first. Holding it across
+/// the embedding pass — minutes on a CPU-only host — parks every write behind
+/// a turn that is no longer reading anything.
+///
+/// Supplied only by the Vault-work executor. Every other caller builds with no
+/// guard to manage and publishes [`VaultSnapshotFreshness::Fresh`].
+pub(crate) struct MutationGuardHandoff {
+    /// Released the moment the last note's content is in memory. Until then
+    /// the build holds it, so it cannot observe half of a multi-file
+    /// foreground mutation; after it, a write no longer waits on embedding.
+    pub(crate) read_phase: tokio::sync::OwnedMutexGuard<()>,
+    /// Called immediately before publication. Retakes the guard and answers
+    /// whether a foreground mutation completed while it was released,
+    /// returning the still-held guard so the verdict and the publication it
+    /// labels share one acquisition — the answer cannot change in between.
+    /// Runs on the build's blocking thread, so it may block.
+    pub(crate) freshness_at_publication:
+        Box<dyn FnOnce() -> (VaultSnapshotFreshness, tokio::sync::OwnedMutexGuard<()>) + Send>,
 }
 
 /// One Vault's complete published read snapshot. This is intentionally a
@@ -135,9 +160,14 @@ impl SqliteCache {
             embedder,
             embed_layers,
             None,
+            None,
         )
     }
 
+    /// `mutation_guard` is the Index turn's hold on this Vault's foreground
+    /// mutation lock, released at the read/embed boundary inside the build and
+    /// retaken to publish. See [`MutationGuardHandoff`]; `None` builds exactly
+    /// as before and publishes fresh.
     pub(crate) fn replace_vault_snapshot_with_embed_layers_and_progress(
         &self,
         vault_id: VaultId,
@@ -145,6 +175,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         embed_layers: bool,
         on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
+        mutation_guard: Option<MutationGuardHandoff>,
     ) -> Result<(), String> {
         let _epoch = self
             .snapshot_model_epoch
@@ -157,6 +188,13 @@ impl SqliteCache {
         // vector spaces.
         self.reset_if_embedder_changed(embedder)?;
         let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
+        let (vault_read_guard, freshness_at_publication) = match mutation_guard {
+            Some(handoff) => (
+                Some(handoff.read_phase),
+                Some(handoff.freshness_at_publication),
+            ),
+            None => (None, None),
+        };
         let result = (|| {
             let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
             // Seed the empty candidate with this Vault's published rows so the
@@ -175,11 +213,30 @@ impl SqliteCache {
             candidate.replace_with_options(
                 index,
                 embedder,
-                on_progress,
+                BuildHandles {
+                    on_progress,
+                    vault_read_guard,
+                },
                 embed_layers,
                 &BuildOptions::default(),
             )?;
-            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity(), true)
+            // The verdict comes back with the guard that makes it true, and
+            // that guard outlives the publication below.
+            let (freshness, _published_under_guard) = match freshness_at_publication {
+                Some(verdict) => {
+                    let (freshness, guard) = verdict();
+                    (freshness, Some(guard))
+                }
+                None => (VaultSnapshotFreshness::Fresh, None),
+            };
+            self.publish_vault_candidate(
+                vault_id,
+                attempt,
+                &candidate,
+                &embedder.identity(),
+                true,
+                freshness,
+            )
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -224,14 +281,24 @@ impl SqliteCache {
             candidate.replace_with_options(
                 index,
                 embedder,
-                None,
+                // No read guard to hand over: the Index turn still holds its
+                // own across this pass — which reads every note's content —
+                // and releases it inside the embedding build that follows.
+                BuildHandles::default(),
                 embed_layers,
                 &BuildOptions {
                     embed: false,
                     ..BuildOptions::default()
                 },
             )?;
-            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity(), false)
+            self.publish_vault_candidate(
+                vault_id,
+                attempt,
+                &candidate,
+                &embedder.identity(),
+                false,
+                VaultSnapshotFreshness::Fresh,
+            )
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -699,6 +766,14 @@ impl SqliteCache {
     /// `searchable` records whether this generation carries vectors. A
     /// structure-only generation publishes with `false`; the embedding pass
     /// that follows republishes the same Vault with `true`.
+    ///
+    /// `freshness` is the caller's verdict on whether this generation still
+    /// describes the authoritative Markdown. A build that held the Vault's
+    /// foreground mutation guard from its first read to here publishes
+    /// `Fresh`; one that released the guard across its embedding pass
+    /// publishes `Stale` when a foreground mutation landed while it was
+    /// released (issue #223). A stale generation still participates and still
+    /// answers search — it is labelled, not withheld.
     fn publish_vault_candidate(
         &self,
         vault_id: VaultId,
@@ -706,6 +781,7 @@ impl SqliteCache {
         candidate: &SqliteCache,
         embedder_identity: &str,
         searchable: bool,
+        freshness: VaultSnapshotFreshness,
     ) -> Result<(), String> {
         let source = candidate.read()?;
         let attempts = self
@@ -722,10 +798,14 @@ impl SqliteCache {
             .map_err(|error| format!("start Vault snapshot publication: {error}"))?;
 
         delete_vault_snapshot(&tx, &vault_id)?;
+        let freshness = match freshness {
+            VaultSnapshotFreshness::Fresh => "fresh",
+            VaultSnapshotFreshness::Stale => "stale",
+        };
         tx.execute(
             "INSERT INTO vault_snapshots(vault_id, participating, freshness, searchable) \
-             VALUES (?1, 1, 'fresh', ?2)",
-            params![vault_id, i64::from(searchable)],
+             VALUES (?1, 1, ?2, ?3)",
+            params![vault_id, freshness, i64::from(searchable)],
         )
         .map_err(|error| format!("create Vault snapshot: {error}"))?;
 

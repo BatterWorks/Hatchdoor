@@ -56,6 +56,20 @@ impl Default for BuildOptions {
     }
 }
 
+/// What one *running* build's caller hands it beyond the index and options:
+/// where to report progress, and the Vault lock it holds only while the build
+/// is still reading Markdown from disk.
+#[derive(Default)]
+pub(crate) struct BuildHandles {
+    pub(crate) on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+    /// The Index turn's foreground mutation guard, dropped the moment the last
+    /// note's content is in memory, so a foreground writer does not wait out
+    /// the embedding pass that follows (issue #223). Everything past that point
+    /// is in-memory work and SQLite writes to this cache; nothing downstream
+    /// opens a Vault path. `None` for a caller holding no such lock.
+    pub(crate) vault_read_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 pub enum UpsertOutcome {
     /// The note row was written; `content` is the file text already read (and
     /// hashed) during the upsert, threaded on so chunking reuses it instead of
@@ -104,7 +118,10 @@ impl SqliteCache {
         self.replace_with_options(
             index,
             embedder,
-            on_progress,
+            BuildHandles {
+                on_progress,
+                ..BuildHandles::default()
+            },
             embed_layers,
             &BuildOptions::default(),
         )
@@ -118,7 +135,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         opts: &BuildOptions,
     ) -> Result<(), String> {
-        self.replace_with_options(index, embedder, None, true, opts)
+        self.replace_with_options(index, embedder, BuildHandles::default(), true, opts)
     }
 
     /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
@@ -130,7 +147,7 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        handles: BuildHandles,
         embed_layers: bool,
         opts: &BuildOptions,
     ) -> Result<(), String> {
@@ -138,7 +155,7 @@ impl SqliteCache {
             .snapshot_model_epoch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.replace_with_options_unlocked(index, embedder, on_progress, embed_layers, opts, None)
+        self.replace_with_options_unlocked(index, embedder, handles, embed_layers, opts, None)
     }
 
     /// Callers hold `snapshot_model_epoch`. `build_stamp` carries the metadata a
@@ -148,11 +165,15 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        handles: BuildHandles,
         embed_layers: bool,
         opts: &BuildOptions,
         build_stamp: Option<BuildStamp>,
     ) -> Result<(), String> {
+        let BuildHandles {
+            on_progress,
+            vault_read_guard,
+        } = handles;
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
@@ -316,6 +337,13 @@ impl SqliteCache {
                 }
             }
         }
+
+        // Every note's content is in memory and nothing below opens a Vault
+        // path again, so the Index turn's foreground mutation guard has done
+        // its job: it kept this loop from reading half of a multi-file
+        // mutation. Holding it any longer would only park the next write
+        // behind the embedding pass (issue #223).
+        drop(vault_read_guard);
 
         // Tolerating individual unreadable files must not extend to a Vault
         // that has become unreadable as a whole — an unmounted volume or a
@@ -502,7 +530,7 @@ impl SqliteCache {
         self.replace_with_options_unlocked(
             index,
             embedder,
-            None,
+            BuildHandles::default(),
             true,
             opts,
             Some(BuildStamp {
@@ -1941,7 +1969,7 @@ mod tests {
             .replace_with_options(
                 &index,
                 &embedder,
-                None,
+                BuildHandles::default(),
                 embed_layers,
                 &BuildOptions::default(),
             )
@@ -2072,7 +2100,13 @@ mod tests {
         // Reindex the SAME vault (no content change) with the flag now true.
         let index = VaultIndex::build(dir.path()).expect("reindex");
         cache
-            .replace_with_options(&index, &embedder, None, true, &BuildOptions::default())
+            .replace_with_options(
+                &index,
+                &embedder,
+                BuildHandles::default(),
+                true,
+                &BuildOptions::default(),
+            )
             .expect("re-embed");
 
         assert!(
