@@ -975,6 +975,187 @@ fn delete_note_does_not_move_already_trashed_attachment_again() {
     assert!(root.join(".hatchdoor-trash/Notes/Target.md").exists());
 }
 
+/// A short JPEG header followed by bytes that are not valid UTF-8, standing in
+/// for a real image the way the ASCII `"png"` fixtures never did (#220). Shared
+/// with the `fs_ops` tests so both levels exercise the same bytes.
+pub(super) const BINARY_ASSET: &[u8] = &[
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0xFE, 0xFF, 0x80,
+];
+
+#[test]
+fn move_attachment_carries_bytes_that_are_not_valid_utf8() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("note");
+    let index = build(root);
+
+    move_attachment(root, &index, "Media/photo.jpg", "Archive/photo.jpg").expect("move attachment");
+
+    assert!(!root.join("Media/photo.jpg").exists());
+    assert_eq!(
+        fs::read(root.join("Archive/photo.jpg")).expect("moved asset"),
+        BINARY_ASSET
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("note"),
+        "![](Archive/photo.jpg)"
+    );
+}
+
+#[test]
+fn rename_attachment_keeps_bytes_that_are_not_valid_utf8() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("note");
+    let index = build(root);
+
+    rename_attachment(root, &index, "Media/photo.jpg", "cover.jpg").expect("rename attachment");
+
+    assert!(!root.join("Media/photo.jpg").exists());
+    assert_eq!(
+        fs::read(root.join("Media/cover.jpg")).expect("renamed asset"),
+        BINARY_ASSET
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Note.md")).expect("note"),
+        "![](Media/cover.jpg)"
+    );
+}
+
+#[test]
+fn delete_attachment_trashes_bytes_that_are_not_valid_utf8() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Media")).expect("media");
+    fs::write(root.join("Media/photo.jpg"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Note.md"), "![](Media/photo.jpg)").expect("note");
+    let index = build(root);
+
+    let outcome = delete_attachment(root, &index, "Media/photo.jpg").expect("delete attachment");
+
+    let trashed = outcome.trashed_path.expect("trash path");
+    assert!(!root.join("Media/photo.jpg").exists());
+    assert_eq!(
+        fs::read(root.join(&trashed)).expect("trashed asset"),
+        BINARY_ASSET
+    );
+}
+
+#[test]
+fn move_note_carries_a_sibling_asset_whose_bytes_are_not_valid_utf8() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), "body\n![](photo.jpg)").expect("target");
+    fs::write(root.join("Notes/photo.jpg"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("Backlink.md"), "![](Notes/photo.jpg) [[Target]]").expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed.md",
+        &content_hash("body\n![](photo.jpg)"),
+    )
+    .expect("move a note holding a binary attachment");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(root.join("Archive/Renamed.md").exists());
+    assert_eq!(
+        fs::read(root.join("Archive/photo.jpg")).expect("moved asset"),
+        BINARY_ASSET
+    );
+    let backlink = fs::read_to_string(root.join("Backlink.md")).expect("backlink");
+    assert!(backlink.contains("![](Archive/photo.jpg)"));
+    assert!(backlink.contains("[[Archive/Renamed]]"));
+}
+
+/// A note in `Notes/` holding one attachment whose bytes are not valid UTF-8.
+fn note_with_a_binary_asset(root: &Path) {
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), BINARY_ASSET_NOTE).expect("target");
+    fs::write(root.join("Notes/photo.jpg"), BINARY_ASSET).expect("asset");
+}
+
+const BINARY_ASSET_NOTE: &str = "body ![](photo.jpg)";
+
+#[test]
+fn archive_note_carries_an_asset_whose_bytes_are_not_valid_utf8() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    note_with_a_binary_asset(root);
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    archive_note(
+        root,
+        &index,
+        entry,
+        "90-archive/",
+        &content_hash(BINARY_ASSET_NOTE),
+    )
+    .expect("archive a note holding a binary attachment");
+
+    assert!(!root.join("Notes/photo.jpg").exists());
+    assert_eq!(
+        fs::read(root.join("90-archive/photo.jpg")).expect("archived asset"),
+        BINARY_ASSET
+    );
+}
+
+#[test]
+fn delete_note_trashes_an_asset_whose_bytes_are_not_valid_utf8() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    note_with_a_binary_asset(root);
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    delete_note(root, &index, entry, &content_hash(BINARY_ASSET_NOTE))
+        .expect("delete a note holding a binary attachment");
+
+    assert!(!root.join("Notes/photo.jpg").exists());
+    assert_eq!(
+        fs::read(root.join(".hatchdoor-trash/photo.jpg")).expect("trashed asset"),
+        BINARY_ASSET
+    );
+}
+
+#[test]
+fn move_note_reports_a_stale_hash_as_a_changed_note_not_an_unsafe_source() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let error = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Target.md",
+        &content_hash("something else"),
+    )
+    .expect_err("a stale hash must refuse the move");
+
+    let WriteError::Conflict(message) = error else {
+        panic!("expected a conflict");
+    };
+    assert!(
+        message.contains("note changed since it was read"),
+        "the optimistic-concurrency failure must stay distinct from an unsafe source: {message}"
+    );
+    assert!(root.join("Notes/Target.md").exists());
+    assert!(!root.join("Archive/Target.md").exists());
+}
+
 #[test]
 fn note_move_compensates_failures_after_every_completed_phase() {
     use super::types::MutationPhase;
