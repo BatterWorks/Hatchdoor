@@ -191,10 +191,14 @@ that production inventory are still checked for stale paths and duplicates.
   second legacy single-Vault cache build. Startup becomes Ready after every
   active collection Vault's Index turn settles Ready.
 - `spawn_vault_change_watcher` reports Vault-ID-qualified change intent through
-  an independently cancellable handle. `run_server()` coalesces those intents
-  through the shared `VaultWorkCoordinator` as Index requests. It is the only
-  watcher: the transitional single-Vault adapter is gone with the rest of the
-  legacy lane (#185).
+  an independently cancellable handle. A qualifying filesystem event opens a
+  quiet window that later events restart, bounded by a fixed ceiling
+  (`WATCH_MAX_DEBOUNCE`): a sustained write burst reports intent no later than
+  that ceiling after its window opened, instead of deferring it until the burst
+  stops (#229). `run_server()`
+  coalesces those intents through the shared `VaultWorkCoordinator` as Index
+  requests. It is the only watcher: the transitional single-Vault adapter is
+  gone with the rest of the legacy lane (#185).
 - The one worker loop in `run_server()` takes the next coordinator position
   and hands it to `vault_executor::VaultWorkExecutor` — see the Vault work
   execution boundary below. The loop itself holds no readiness policy, no turn

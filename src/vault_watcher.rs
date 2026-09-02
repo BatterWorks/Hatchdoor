@@ -140,6 +140,12 @@ async fn run_vault_change_watcher(
     info!(%vault_id, "Vault watcher stopped");
 }
 
+/// Wait for the burst that just started to go quiet before the caller reports
+/// the change. Each qualifying event restarts the `WATCH_DEBOUNCE` window, so a
+/// single save is reported once; `WATCH_MAX_DEBOUNCE` caps how long that
+/// restarting may defer the report. A burst that keeps writing is therefore
+/// reported no later than the ceiling after its window opened, and the next
+/// event after that opens the next window.
 async fn debounce_events(
     event_rx: &mut mpsc::UnboundedReceiver<notify::Result<Event>>,
     cache_db_path: &Path,
@@ -148,10 +154,13 @@ async fn debounce_events(
 ) {
     let timer = tokio::time::sleep(WATCH_DEBOUNCE);
     tokio::pin!(timer);
+    let ceiling = tokio::time::sleep(WATCH_MAX_DEBOUNCE);
+    tokio::pin!(ceiling);
 
     loop {
         tokio::select! {
             _ = &mut timer => break,
+            _ = &mut ceiling => break,
             Some(result) = event_rx.recv() => {
                 match result {
                     Ok(event) if should_refresh_for_event(&event, cache_db_path, vault_path, exclude) => {
@@ -478,16 +487,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn per_vault_watcher_reports_identity_and_can_be_cancelled() {
+    /// One watcher over an empty Vault directory, holding the temporary
+    /// directory alive for as long as the test keeps the watcher.
+    struct TestWatcher {
+        _dir: tempfile::TempDir,
+        vault_path: PathBuf,
+        vault_id: VaultId,
+        handle: VaultWatcherHandle,
+        changes: broadcast::Receiver<VaultId>,
+    }
+
+    fn spawn_test_watcher() -> TestWatcher {
         let dir = tempdir().expect("temp dir");
         let vault_path = dir.path().join("vault");
         std::fs::create_dir_all(&vault_path).expect("Vault directory");
         let cache = dir.path().join("cache.sqlite3");
-        let vault_id =
-            crate::vault_registry::VaultId::from_str("12345678-1234-4567-89ab-1234567890ab")
-                .expect("Vault ID");
-        let (changes, mut receiver) = tokio::sync::broadcast::channel(8);
+        let vault_id = VaultId::from_str("12345678-1234-4567-89ab-1234567890ab").expect("Vault ID");
+        let (changes, receiver) = broadcast::channel(64);
         let handle = spawn_vault_change_watcher(
             vault_id,
             vault_path.clone(),
@@ -497,14 +513,65 @@ mod tests {
         )
         .expect("start per-Vault watcher");
 
-        std::fs::write(vault_path.join("Changed.md"), "# Changed\n").expect("write changed note");
-        let changed = tokio::time::timeout(Duration::from_secs(3), receiver.recv())
+        TestWatcher {
+            _dir: dir,
+            vault_path,
+            vault_id,
+            handle,
+            changes: receiver,
+        }
+    }
+
+    #[tokio::test]
+    async fn per_vault_watcher_reports_identity_and_can_be_cancelled() {
+        let mut watcher = spawn_test_watcher();
+
+        std::fs::write(watcher.vault_path.join("Changed.md"), "# Changed\n")
+            .expect("write changed note");
+        let changed = tokio::time::timeout(Duration::from_secs(3), watcher.changes.recv())
             .await
             .expect("watcher change timeout")
             .expect("watcher change");
-        assert_eq!(changed, vault_id);
+        assert_eq!(changed, watcher.vault_id);
 
-        handle.cancel();
-        assert!(handle.is_cancelled());
+        watcher.handle.cancel();
+        assert!(watcher.handle.is_cancelled());
+    }
+
+    /// A sustained write burst must not defer the change intent until the burst
+    /// stops. `WATCH_MAX_DEBOUNCE` caps the quiet `WATCH_DEBOUNCE` window that
+    /// every event restarts, so a writer saving faster than that window is
+    /// exactly the case the ceiling exists for. The burst outlasts the deadline
+    /// deliberately: a change reported before it ends can only have come from
+    /// the ceiling, never from the burst going quiet.
+    #[tokio::test]
+    async fn a_sustained_write_burst_still_reports_a_change_within_the_debounce_ceiling() {
+        let mut watcher = spawn_test_watcher();
+
+        let burst_path = watcher.vault_path.clone();
+        let burst = tokio::spawn(async move {
+            let interval = WATCH_DEBOUNCE / 2;
+            let stop_writing = tokio::time::Instant::now() + WATCH_MAX_DEBOUNCE * 3;
+            let mut written = 0;
+            while tokio::time::Instant::now() < stop_writing {
+                std::fs::write(
+                    burst_path.join(format!("Note-{written}.md")),
+                    format!("# Note {written}\n"),
+                )
+                .expect("write burst note");
+                written += 1;
+                tokio::time::sleep(interval).await;
+            }
+        });
+
+        let deadline = WATCH_MAX_DEBOUNCE + WATCH_DEBOUNCE + Duration::from_secs(3);
+        let changed = tokio::time::timeout(deadline, watcher.changes.recv()).await;
+        burst.abort();
+        watcher.handle.cancel();
+
+        let changed = changed
+            .expect("a sustained burst must report a change within the debounce ceiling")
+            .expect("watcher change");
+        assert_eq!(changed, watcher.vault_id);
     }
 }
