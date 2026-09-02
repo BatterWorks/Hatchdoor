@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -6,7 +6,8 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
     create_parent_dir_inside_root, ensure_existing_path_inside_root, is_trashed_path,
-    relative_link_target, same_existing_path, unique_trash_attachment_relative_path,
+    relative_link_target, resolve_reference_inside_root, same_existing_path,
+    unique_trash_attachment_relative_path, vault_relative_dir,
 };
 use super::rewrites::{parse_fence_marker, rewrite_content_or_read};
 use super::types::{AssetMove, TextRewrite, WriteError};
@@ -27,14 +28,48 @@ pub(super) fn asset_move_plan(
     })?;
     let source_dir = moved_entry.path.parent().unwrap_or(vault_root);
     let destination_dir = destination_note.parent().unwrap_or(vault_root);
-    let mut moves = Vec::new();
-    let mut rewrites = Vec::new();
+    // The note's own folder, as a prefix an asset's vault-relative path must
+    // carry to count as living inside it. Empty for a note at the vault root,
+    // whose folder is the whole Vault.
+    let own_folder_prefix = match vault_relative_dir(vault_root, source_dir) {
+        Some(relative) if relative.is_empty() => String::new(),
+        Some(relative) => format!("{relative}/"),
+        None => {
+            return Err(WriteError::InvalidInput(
+                "path cannot escape the vault".to_string(),
+            ));
+        }
+    };
+    // Every reference is resolved before anything is planned from any of them.
+    // Collapsing `.` and `..` up front matters twice over: an unresolved `..`
+    // both misplaces the destination (it lands relative to an unrelated
+    // directory) and reaches the move primitives, which walk a path one plain
+    // name at a time and refuse anything else (#225). Resolving the whole set
+    // first also keeps a refusal side-effect-free, since an earlier reference
+    // would otherwise have had its destination folder created by the time a
+    // later one is found to point out of the Vault.
+    let mut resolved = Vec::new();
     let mut seen = HashSet::new();
     for relative_asset in referenced_assets(&content) {
         if !seen.insert(relative_asset.clone()) {
             continue;
         }
-        let source_asset = source_dir.join(&relative_asset);
+        let Some(source_relative) =
+            resolve_reference_inside_root(vault_root, source_dir, &relative_asset)
+        else {
+            return Err(WriteError::InvalidInput(format!(
+                "asset reference '{}' resolves outside the vault",
+                relative_asset.display()
+            )));
+        };
+        resolved.push((relative_asset, source_relative));
+    }
+
+    let mut moves = Vec::new();
+    let mut rewrites = Vec::new();
+    let mut stationary: HashMap<PathBuf, String> = HashMap::new();
+    for (relative_asset, source_relative) in resolved {
+        let source_asset = vault_root.join(&source_relative);
         if !source_asset.exists() || !source_asset.is_file() {
             continue;
         }
@@ -42,17 +77,29 @@ pub(super) fn asset_move_plan(
         if is_trashed_path(vault_root, &source_asset)? {
             continue;
         }
+        // An asset travels with the note only when it already lives inside the
+        // note's own folder. One kept elsewhere - the shared attachments folder
+        // of the usual Obsidian layout - stays put, and the moving note's own
+        // reference is repointed at it from the destination instead. Scattering
+        // such a folder across the Vault on an ordinary note move was the
+        // decided-against behaviour in #225.
+        let Some(own_folder_relative) = source_relative.strip_prefix(&own_folder_prefix) else {
+            if let Some(target) = relative_link_target(vault_root, destination_note, &source_asset)
+            {
+                stationary.insert(relative_asset, target);
+            }
+            continue;
+        };
         let destination_asset = if allow_trash_collision {
             // Trashing a note: the destination lives under .hatchdoor-trash and
             // may already hold an asset of the same relative path from an earlier
             // delete. Relocate to a unique name rather than failing the delete.
-            let relative_str = relative_asset.to_string_lossy();
             vault_root.join(unique_trash_attachment_relative_path(
                 vault_root,
-                &relative_str,
+                own_folder_relative,
             )?)
         } else {
-            destination_dir.join(&relative_asset)
+            destination_dir.join(own_folder_relative)
         };
         create_parent_dir_inside_root(vault_root, &destination_asset, "asset")?;
         if !allow_trash_collision && destination_asset.exists() {
@@ -75,6 +122,26 @@ pub(super) fn asset_move_plan(
             &destination_asset,
             &baseline,
         )?);
+    }
+    // The moving note is excluded from `asset_reference_rewrite_plan` because a
+    // reference to an asset travelling with it stays valid. A reference to an
+    // asset left behind does not, so the exclusion is narrowed to exactly the
+    // travelling ones and the rest are repointed here. The rewrite is keyed to
+    // the note's destination path: by the time rewrites are applied, the note
+    // itself has already moved there.
+    if !stationary.is_empty() {
+        let rewritten = transform_asset_references(&content, |target| {
+            stationary
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| target.to_string_lossy().into_owned())
+        });
+        if rewritten != content {
+            rewrites.push(TextRewrite {
+                path: destination_note.to_path_buf(),
+                content: rewritten,
+            });
+        }
     }
     Ok((moves, rewrites))
 }
@@ -416,6 +483,68 @@ fn asset_path_from_target(target: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// #225: `..` in a reference is the planner's problem, not the filesystem's.
+    /// The move primitives walk a path one plain name at a time and reject any
+    /// other component, so a plan carrying `..` is a plan that cannot execute.
+    #[test]
+    fn planned_asset_moves_never_carry_a_parent_component() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("_system")).unwrap();
+        fs::write(root.join("_system/shared.png"), "img").unwrap();
+        fs::create_dir_all(root.join("folder-x/media")).unwrap();
+        fs::write(root.join("folder-x/media/own.png"), "img").unwrap();
+        fs::write(
+            root.join("folder-x/Note.md"),
+            "![](../_system/shared.png)\n![](./media/own.png)\n",
+        )
+        .unwrap();
+
+        let index = VaultIndex::build(root).expect("index");
+        let entry = index
+            .ordered_entries()
+            .into_iter()
+            .find(|e| e.slug == "note")
+            .expect("note entry");
+
+        let (moves, rewrites) = asset_move_plan(
+            root,
+            &index,
+            &entry,
+            // A different depth, so the reference to the asset left behind
+            // genuinely has to change: a same-depth move would recompute the
+            // identical `../_system/shared.png` and prove nothing.
+            &root.join("deeper/nest/Note.md"),
+            false,
+            &[],
+        )
+        .expect("plan must succeed");
+
+        assert_eq!(
+            moves.len(),
+            1,
+            "only the asset inside the note's own folder travels"
+        );
+        for asset_move in &moves {
+            for path in [&asset_move.source, &asset_move.destination] {
+                assert!(
+                    !path
+                        .components()
+                        .any(|component| component == Component::ParentDir),
+                    "planned path must be free of '..': {}",
+                    path.display()
+                );
+            }
+        }
+        assert!(
+            rewrites
+                .iter()
+                .any(|rewrite| rewrite.path == root.join("deeper/nest/Note.md")),
+            "the moving note's own reference to the asset left behind must be rewritten"
+        );
+    }
 
     #[test]
     fn trashing_an_asset_whose_name_already_exists_in_trash_picks_a_unique_name() {

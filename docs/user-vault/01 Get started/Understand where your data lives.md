@@ -19,7 +19,7 @@ from them, so your notes stay usable with other Markdown tools.
 
 Hatchdoor keeps destructive operations recoverable:
 
-- [x] Deleting a note moves it and referenced assets to `.hatchdoor-trash`.
+- [x] Deleting a note moves it, and the assets kept inside its own folder, to `.hatchdoor-trash`.
 - [x] The trash folder is excluded from indexing.
 - [x] Archiving moves notes under `90-archive/` by default.
 

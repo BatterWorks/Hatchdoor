@@ -174,15 +174,20 @@ Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id
 | `edit_note` | `slug`, `old_string`, `new_string`, `expected_content_hash` | Surgical string replacement. `old_string` must match exactly and be unique unless `replace_all: true`; otherwise the edit is rejected without writing. Prefer this over `update_note` for small changes. |
 | `replace_section` | `slug`, `heading`, `mode`, `content`, `expected_content_hash` | Replace or insert around a Markdown section identified by its heading. `mode` is `replace` (overwrite the section — `content` should include the heading), `before`, or `after`. The section spans the heading through the next same-or-higher heading; headings inside fenced code blocks are ignored, and the heading must match exactly and be unique. |
 | `update_frontmatter` | `slug`, `frontmatter`, `expected_content_hash` | Shallow top-level merge into the note's YAML frontmatter, leaving the body untouched. Keys you don't mention survive; an explicit `null` deletes a key; a nested mapping is replaced wholesale rather than merged into. A note with no frontmatter block gets one created, and deleting its last key removes the block rather than leaving an empty one. Rejects an empty `frontmatter` object, and a creation whose values are all `null`. |
-| `rename_note` | `slug`, `new_title`, `expected_content_hash` | Rename within the current folder; rewrites wikilink backlinks and moves/rewrites referenced assets. |
+| `rename_note` | `slug`, `new_title`, `expected_content_hash` | Rename within the current folder; rewrites wikilink backlinks, and carries along the assets kept inside the note's own folder. |
 | `move_note` | `slug`, `target_folder`, `expected_content_hash` | Move to a target folder; same backlink/asset handling as rename. |
 | `move_rename_note` | `slug`, `target_relative_path`, `expected_content_hash` | Move and rename in one operation. |
 | `archive_note` | `slug`, `expected_content_hash` | Move to the configured archive folder (the Vault's own `archive_folder`, set via `create_vault`/`edit_vault` above, or the instance default). |
-| `delete_note` | `slug`, `expected_content_hash` | Trash a note under `.hatchdoor-trash`; removes backlinks to it and moves/rewrites its assets. |
+| `delete_note` | `slug`, `expected_content_hash` | Trash a note under `.hatchdoor-trash`; removes backlinks to it and trashes the assets kept inside its own folder. |
 | `import_attachment` | `content` (base64), `target_relative_path` | Upload an attachment by sending its bytes base64-encoded. This is the **fallback** for clients that cannot make an out-of-band HTTP request — size-limited (`HATCHDOOR_MCP_MAX_BASE64_BYTES`, default 5 MiB decoded). Prefer `POST /api/v1/vaults/{vault_id}/attachments` when possible; call `get_attachment_import_config` first to see current limits. |
 | `move_attachment` | `source_relative_path`, `target_relative_path` | Move an attachment and rewrite every note reference to it. |
 | `rename_attachment` | `source_relative_path`, `new_filename` | Rename an attachment in place and rewrite every note reference to it. |
 | `delete_attachment` | `source_relative_path` | Trash an attachment under `.hatchdoor-trash` and rewrite every note reference to it. |
+
+An asset travels with a note only when it already lives inside that note's own folder, or a subfolder of it. An asset the note merely points at from somewhere else, such as a shared `_system/` or `Attachments/` folder sitting beside the note's folder, stays exactly where it is: `rename_note`, `move_note`, `move_rename_note`, `archive_note` and `delete_note` leave it alone and rewrite the moved note's own link so it still resolves from the note's new home. Other notes pointing at it are left untouched too, since nothing about it changed. `moved_assets` in the response counts only the assets that actually moved.
+
+> [!note]
+> A note sitting in the Vault root has the whole Vault as its own folder, so every asset it references counts as living inside it and does travel with the note. Keep notes that share an attachments folder in a folder of their own if you want that folder left alone.
 
 Every write tool accepts an optional `commit_summary` (a one-line string) used in the Git commit body for Vaults with versioning enabled.
 

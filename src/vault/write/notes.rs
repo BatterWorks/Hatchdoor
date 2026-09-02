@@ -569,8 +569,6 @@ fn move_or_rename_note_with_hook(
             normalize_note_relative_path(target_relative_path)?
         )));
     }
-    create_parent_dir_inside_root(vault_root, &target_path, "destination")?;
-
     let target_without_ext =
         strip_md_extension(&normalize_note_relative_path(target_relative_path)?).to_string();
     let slug = slug_for_relative_path(index, &target_without_ext, &target_path, Some(&entry.slug));
@@ -583,6 +581,11 @@ fn move_or_rename_note_with_hook(
         false,
         &backlink_rewrites,
     )?;
+    // Created after planning, so a plan the planner refuses outright leaves no
+    // empty destination folder behind. A plan that carries assets still creates
+    // folders while planning them; the pre-existing empty-folder-after-rollback
+    // case is unchanged and tracked separately.
+    create_parent_dir_inside_root(vault_root, &target_path, "destination")?;
     let mutation = execute_note_mutation(
         vault_root,
         entry,
@@ -685,7 +688,6 @@ fn delete_note_with_hook(
     ensure_content_hash(entry, expected_content_hash)?;
     let trash_relative = unique_trash_relative_path(vault_root, &entry.relative_path)?;
     let trash_path = vault_root.join(format!("{trash_relative}.md"));
-    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
 
     let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, None)?;
     let (asset_moves, asset_rewrites) = asset_move_plan(
@@ -696,6 +698,7 @@ fn delete_note_with_hook(
         true,
         &backlink_rewrites,
     )?;
+    create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
     let mutation = execute_note_mutation(
         vault_root,
         entry,
