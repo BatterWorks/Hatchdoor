@@ -853,6 +853,10 @@ write API/types, and configuration for archive or upload limits.
 - All HTTP and MCP mutations use this shared layer (ADR-03).
 - Optimistic concurrency uses the expected content hash.
 - Delete is recoverable trash; archive is move-based (ADR-11).
+- A rewritten backlink keeps the form its author wrote, and a link that
+  resolved before a move still resolves after it: the bare-title form is used
+  only while the new title names exactly one note, and falls back to the full
+  path otherwise (#235).
 - Paths remain within the canonical vault root.
 - Layer marker and excluded/noise writes remain protected at adapter and domain
   boundaries as applicable.
