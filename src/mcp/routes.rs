@@ -369,6 +369,53 @@ mod tests {
         (state, tmp)
     }
 
+    /// `write_state`, but keeping the work worker `base_state` otherwise drops
+    /// on the floor, so a test can run the Index turn `refresh_vault` admits.
+    /// The coordinator is swapped wholesale rather than threaded through
+    /// `base_state`: `refresh` reaches the queue through `state.vault_work`
+    /// alone, and nothing here drives managed Git.
+    fn write_state_with_worker() -> (AppState, crate::vault_work::VaultWorkWorker, TempDir) {
+        let (mut state, tmp) = write_state();
+        let (vault_work, worker) = crate::vault_work::VaultWorkCoordinator::new();
+        state.vault_work = vault_work;
+        (state, worker, tmp)
+    }
+
+    /// A write-enabled state whose single registered Vault has lost its
+    /// directory since it was registered, so it reconciles with no usable
+    /// local Markdown and `capabilities.browse` false. The registry refuses an
+    /// unreadable path outright, which is why the directory exists for the
+    /// `add` and is removed before the reconcile that matters.
+    fn unusable_local_content_write_state() -> (AppState, TempDir) {
+        use crate::vault_registry::{NewVaultDefinition, VaultSource};
+
+        let tmp = TempDir::new().expect("temp dir");
+        let vault_root = tmp.path().join("vault-gone");
+        std::fs::create_dir_all(&vault_root).expect("create vault");
+        let mut state = base_state(&tmp);
+        state.runtime_config = mcp_runtime_config(true);
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                NewVaultDefinition {
+                    name: "Vault with no local content".to_string(),
+                    enabled: true,
+                    source: VaultSource::Local {
+                        path: vault_root.clone(),
+                    },
+                    exclude_patterns: Vec::new(),
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("register test Vault");
+        std::fs::remove_dir_all(&vault_root).expect("remove the Vault directory");
+        state.vaults.reconcile(&state.vault_registry, &snapshot);
+        (state, tmp)
+    }
+
     /// A zero-Vault registry, for discovery/repair reachability tests (#103).
     fn empty_test_state() -> (AppState, TempDir) {
         let tmp = TempDir::new().expect("temp dir");
@@ -1583,6 +1630,7 @@ mod tests {
             "edit_vault",
             "disable_vault",
             "sync_vault",
+            "refresh_vault",
         ] {
             assert!(
                 names.contains(&expected),
@@ -1615,6 +1663,199 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("write tools are disabled")
+        );
+    }
+
+    /// `refresh_vault` (#228) is the only MCP path to a Vault's next Index
+    /// turn, which is what republishes the snapshot every collection read
+    /// projects from. It admits the turn and returns; a second request while
+    /// one is pending joins it rather than piling a second turn onto the
+    /// Vault.
+    #[tokio::test]
+    async fn refresh_vault_admits_one_index_turn_and_coalesces_the_next() {
+        let (state, _tmp) = write_state();
+        let vault_id = vault_id_of(&state);
+
+        let queued = call_tool(&state, "refresh_vault", json!({})).await;
+        assert_eq!(
+            queued["result"]["structuredContent"]["schedule"], "queued",
+            "{queued:#}"
+        );
+        assert_eq!(
+            queued["result"]["structuredContent"]["vault_id"],
+            json!(vault_id),
+            "{queued:#}"
+        );
+
+        let coalesced = call_tool(&state, "refresh_vault", json!({})).await;
+        assert_eq!(
+            coalesced["result"]["structuredContent"]["schedule"], "coalesced",
+            "{coalesced:#}"
+        );
+    }
+
+    /// The annotations and the one-property schema an agent chooses on. They
+    /// match `sync_vault`/`retry_vault`: not read-only, not destructive,
+    /// idempotent, not open-world.
+    #[tokio::test]
+    async fn refresh_vault_is_advertised_as_an_idempotent_non_destructive_vault_control() {
+        let (state, _tmp) = write_state();
+        let tool = tool_named(&tools_list_result(&state).await, "refresh_vault").clone();
+
+        assert_eq!(tool["annotations"]["readOnlyHint"], false, "{tool:#}");
+        assert_eq!(tool["annotations"]["destructiveHint"], false, "{tool:#}");
+        assert_eq!(tool["annotations"]["idempotentHint"], true, "{tool:#}");
+        assert_eq!(tool["annotations"]["openWorldHint"], false, "{tool:#}");
+        assert_eq!(tool["inputSchema"]["required"], json!(["vault_id"]));
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        assert_eq!(
+            tool["inputSchema"]["properties"]
+                .as_object()
+                .expect("properties")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["vault_id"],
+            "refresh_vault takes vault_id and nothing else"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_vault_is_hidden_and_rejected_without_mcp_write_permission() {
+        let (state, _tmp) = test_state();
+        let body = tools_list_result(&state).await;
+        assert!(
+            !body["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|tool| tool["name"] == "refresh_vault")
+        );
+
+        let rejected = call_tool(&state, "refresh_vault", json!({})).await;
+        assert_eq!(rejected["error"]["code"], -32602);
+        assert!(
+            rejected["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("write tools are disabled")
+        );
+    }
+
+    /// Every way of naming the wrong Vault, refused exactly as the other
+    /// single-Vault management tools refuse it: `all` and a malformed ID are
+    /// the core's structured `invalid_vault_id`, an unregistered ID is
+    /// `vault_not_found`, and an unexpected property is a protocol-level
+    /// rejection from `deny_unknown_fields`.
+    #[tokio::test]
+    async fn refresh_vault_rejects_all_a_malformed_id_an_unknown_id_and_extra_properties() {
+        let (state, _tmp) = write_state();
+
+        for raw in ["all", "not-a-uuid"] {
+            let body = call_tool_unscoped(&state, "refresh_vault", json!({"vault_id": raw})).await;
+            assert_eq!(body["result"]["isError"], true, "{raw}: {body:#}");
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], "invalid_vault_id",
+                "{raw}: {body:#}"
+            );
+        }
+
+        let unknown = call_tool_unscoped(
+            &state,
+            "refresh_vault",
+            json!({"vault_id": "018f47a0-7768-4d0c-8da3-5aa28d1c31c7"}),
+        )
+        .await;
+        assert_eq!(unknown["result"]["isError"], true, "{unknown:#}");
+        assert_eq!(
+            unknown["result"]["structuredContent"]["code"], "vault_not_found",
+            "{unknown:#}"
+        );
+
+        let extra = call_tool(
+            &state,
+            "refresh_vault",
+            json!({"expected_registry_revision": 0}),
+        )
+        .await;
+        assert_eq!(extra["error"]["code"], -32602, "{extra:#}");
+    }
+
+    /// A Vault with no currently usable local Markdown has nothing to scan, so
+    /// the core refuses with `capability_unavailable` marked retryable — the
+    /// Vault may become browsable again — rather than a generic failure.
+    #[tokio::test]
+    async fn refresh_vault_on_a_vault_without_usable_local_markdown_is_retryable() {
+        let (state, _tmp) = unusable_local_content_write_state();
+
+        let body = call_tool(&state, "refresh_vault", json!({})).await;
+        assert_eq!(body["result"]["isError"], true, "{body:#}");
+        assert_eq!(
+            body["result"]["structuredContent"]["code"], "capability_unavailable",
+            "{body:#}"
+        );
+        assert_eq!(
+            body["result"]["structuredContent"]["retryable"], true,
+            "{body:#}"
+        );
+    }
+
+    /// The point of the tool (#228): the freshness flags a collection read
+    /// publishes are only actionable if an MCP client can act on them. A stale
+    /// snapshot reads `partial: true`; one `refresh_vault` and the Index turn
+    /// it admits clears it.
+    #[tokio::test]
+    async fn refresh_vault_clears_a_partial_collection_read_once_its_turn_completes() {
+        let (state, mut worker, _tmp) = write_state_with_worker();
+        let vault_id = vault_id_of(&state);
+        let vault_root = registered_vault_path(&state);
+
+        state
+            .startup_sqlite
+            .mark_vault_snapshot_stale(vault_id)
+            .expect("stale the published snapshot");
+
+        let before = call_tool(&state, "get_tree", json!({})).await;
+        assert_eq!(
+            before["result"]["structuredContent"]["partial"], true,
+            "{before:#}"
+        );
+        assert_eq!(
+            before["result"]["structuredContent"]["participants"][0]["state"], "stale",
+            "{before:#}"
+        );
+
+        let queued = call_tool(&state, "refresh_vault", json!({})).await;
+        assert_eq!(
+            queued["result"]["structuredContent"]["schedule"], "queued",
+            "{queued:#}"
+        );
+
+        // Stands in for the runtime worker's Index turn: the authoritative
+        // Markdown scan and atomic snapshot publication that `refresh_vault`
+        // only admits, never performs itself.
+        let cache = Arc::clone(&state.startup_sqlite);
+        let embedder = Arc::clone(&state.embedder);
+        let outcome = worker
+            .run_next(|request| async move {
+                assert_eq!(request.kind(), crate::vault_work::VaultWorkKind::Index);
+                let index = crate::vault::VaultIndex::build(&vault_root).expect("rebuild index");
+                cache
+                    .replace_vault_snapshot(request.vault_id(), &index, embedder.as_ref())
+                    .expect("republish snapshot");
+                Ok::<(), crate::vault_work::VaultWorkError>(())
+            })
+            .await
+            .expect("the admitted turn ran");
+        assert_eq!(outcome.request.vault_id(), vault_id);
+
+        let after = call_tool(&state, "get_tree", json!({})).await;
+        assert_eq!(
+            after["result"]["structuredContent"]["partial"], false,
+            "{after:#}"
+        );
+        assert_eq!(
+            after["result"]["structuredContent"]["participants"][0]["state"], "fresh",
+            "{after:#}"
         );
     }
 
@@ -1681,6 +1922,42 @@ mod tests {
         assert_eq!(
             blocked["result"]["content"][0]["text"],
             "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first."
+        );
+    }
+
+    /// `refresh_vault` is deliberately outside the collection-management
+    /// exemption that keeps discovery and Vault control reachable while model
+    /// setup is pending (#228). That exemption is for tools which stay
+    /// meaningful at zero enabled Vaults or on a registry needing recovery;
+    /// the Index turn `refresh_vault` asks for cannot run without a configured
+    /// search model, so a caller gets the setup signal instead of a queued
+    /// turn that would go nowhere.
+    #[tokio::test]
+    async fn refresh_vault_is_not_exempt_from_the_pending_model_setup_gate() {
+        let (state, _tmp) = write_state();
+        state.startup.set_terms_required();
+
+        let blocked = call_tool(&state, "refresh_vault", json!({})).await;
+        assert_eq!(blocked["result"]["isError"], true, "{blocked:#}");
+        assert_eq!(
+            blocked["result"]["content"][0]["text"],
+            "Hatchdoor is still being set up. Use get_model_setup_status, accept_gemma_terms, or decline_gemma_terms first."
+        );
+
+        let listed = call_tool(&state, "list_vaults", json!({})).await;
+        assert!(
+            listed["result"]["structuredContent"]["vaults"].is_array(),
+            "collection discovery stays reachable during pending setup: {listed:#}"
+        );
+
+        // `sync_vault` is the neighbouring Vault control that *is* exempt, so
+        // the difference is pinned rather than assumed. It still fails here —
+        // the test Vault is Local, with no remote to poll — but it fails with
+        // the core's own refusal, which is only reachable past the setup gate.
+        let synced = call_tool(&state, "sync_vault", json!({})).await;
+        assert_eq!(
+            synced["result"]["structuredContent"]["code"], "capability_unavailable",
+            "sync_vault reaches the core during pending setup: {synced:#}"
         );
     }
 
@@ -3099,29 +3376,40 @@ mod tests {
         let (state, _tmp) = write_state();
         let vault_id = vault_id_of(&state);
 
-        let body = call_tool(
-            &state,
-            "batch",
-            json!({"operations": [
-                {"op": "disable_vault", "arguments": {"vault_id": vault_id, "expected_registry_revision": 0}},
-                {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": "Should/NotExist.md", "content": "x"}}
-            ]}),
-        )
-        .await;
+        for (index, management) in [
+            json!({"op": "disable_vault", "arguments": {"vault_id": vault_id, "expected_registry_revision": 0}}),
+            json!({"op": "refresh_vault", "arguments": {"vault_id": vault_id}}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let op = management["op"].clone();
+            // A distinct path per case, so a note left behind by one case
+            // cannot be mistaken for the other's.
+            let relative_path = format!("Should/NotExist{index}.md");
+            let body = call_tool(
+                &state,
+                "batch",
+                json!({"operations": [
+                    management,
+                    {"op": "create_note", "arguments": {"vault_id": vault_id, "relative_path": relative_path, "content": "x"}}
+                ]}),
+            )
+            .await;
 
-        assert_eq!(body["error"]["code"], -32602);
-        assert!(
-            body["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("not a valid batch operation")
-        );
-        assert!(
-            !registered_vault_path(&state)
-                .join("Should/NotExist.md")
-                .exists(),
-            "nothing in the batch may execute once any op is rejected up front"
-        );
+            assert_eq!(body["error"]["code"], -32602, "{op}: {body:#}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("not a valid batch operation"),
+                "{op}: {body:#}"
+            );
+            assert!(
+                !registered_vault_path(&state).join(&relative_path).exists(),
+                "{op}: nothing in the batch may execute once any op is rejected up front"
+            );
+        }
     }
 
     #[tokio::test]

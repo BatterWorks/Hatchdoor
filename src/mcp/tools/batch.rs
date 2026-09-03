@@ -292,7 +292,7 @@ fn failure_to_error_value(failure: JsonRpcFailure) -> Value {
 pub(super) fn batch_tool_schema() -> Value {
     json!({
         "name": "batch",
-        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items.",
+        "description": "Execute an ordered list of note and attachment operations in one call — the same tools available standalone (create_note through delete_attachment, and every read tool except list_vaults). Vault-management tools (create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, refresh_vault, list_vaults) are not allowed inside a batch; those and any unrecognized op are rejected before anything executes. Execution is in order and best-effort: each item reports its own ok/result/error, one item failing does not stop the rest, and there is no rollback or mid-batch visibility between items. All resulting Vault changes are committed together on the Vault's next Git sync turn, the same as any other burst of writes. expected_content_hash checks are skipped between items that share a vault_id and slug: create or edit a note earlier in this batch, then reference it again later in the same call without knowing the intermediate hash; a note not otherwise touched in this batch still validates its expected_content_hash normally. A batch may contain at most 50 read-shaped items and 20 write-shaped items.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -346,6 +346,7 @@ mod tests {
             "disconnect_vault",
             "sync_vault",
             "retry_vault",
+            "refresh_vault",
             "get_model_setup_status",
             "accept_gemma_terms",
             "decline_gemma_terms",

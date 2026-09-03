@@ -775,6 +775,22 @@ pub(super) async fn retry_vault_tool(
     )
 }
 
+/// Unlike `sync_vault`/`retry_vault` above, this one talks to no Git remote:
+/// it admits the Vault's next Index turn, which is what republishes the
+/// snapshot every collection read projects from. It is the only MCP path to
+/// that turn, and the reason a client can now act on a collection read that
+/// reports itself stale rather than only observe it (#228).
+pub(super) async fn refresh_vault_tool(
+    state: AppState,
+    arguments: Value,
+) -> Result<Value, JsonRpcFailure> {
+    let args: VaultIdArgs = parse("refresh_vault", arguments)?;
+    let core = VaultCollectionManagement::new(&state);
+    management_result::<results::RefreshVaultResult>(
+        management_vault_id(&args.vault_id).and_then(|vault_id| core.refresh(vault_id)),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyArgs {}
@@ -1056,6 +1072,7 @@ pub(super) fn management_tools_list() -> Vec<Value> {
         ),
         json!({"name":"sync_vault","description":"Request immediate managed-Git synchronization for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
         json!({"name":"retry_vault","description":"Retry an admitted managed-Git operation for exactly one eligible Vault.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
+        json!({"name":"refresh_vault","description":"Request one Vault's next index turn: Hatchdoor re-scans that Vault's Markdown and republishes the snapshot get_tree, get_graph, get_stats, recently_modified and search_notes project from. Call this when one of those reads comes back with partial: true and a stale participant for the Vault. This is not sync_vault: it contacts no Git remote and works on any enabled Vault with usable local Markdown. It returns as soon as the turn is admitted, not when the turn finishes — schedule is queued, or coalesced when a turn for that Vault is already pending — so observe the outcome by re-reading a collection read's freshness fields rather than by this response.","inputSchema":{"type":"object","properties":{"vault_id":vault_id_schema()},"required":["vault_id"],"additionalProperties":false},"annotations":super::write_tool_annotations(false, true)}),
     ]
 }
 
@@ -1205,6 +1222,7 @@ mod tests {
             "disconnect_vault",
             "sync_vault",
             "retry_vault",
+            "refresh_vault",
         ] {
             let tool = tools
                 .iter()

@@ -54,6 +54,7 @@ pub type DisableVaultResult = VaultMutationResponse;
 pub type DisconnectVaultResult = VaultMutationResponse;
 pub type SyncVaultResult = VaultScheduleResponse;
 pub type RetryVaultResult = VaultScheduleResponse;
+pub type RefreshVaultResult = VaultScheduleResponse;
 
 // ---------------------------------------------------------------------------
 // Setup-tool results (always advertised, answered before any Vault exists)
@@ -311,6 +312,7 @@ output_schemas! {
     "disconnect_vault" => DisconnectVaultResult,
     "sync_vault" => SyncVaultResult,
     "retry_vault" => RetryVaultResult,
+    "refresh_vault" => RefreshVaultResult,
     // Note/attachment write tools
     "create_note" => NoteWriteResult,
     "update_note" => NoteWriteResult,
@@ -376,12 +378,12 @@ mod schema_tests {
             .collect();
         let total = names.len();
         assert_eq!(
-            total, 39,
-            "3 setup + 13 read + 1 batch + 7 management + 15 write tools"
+            total, 40,
+            "3 setup + 13 read + 1 batch + 8 management + 15 write tools"
         );
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 39, "tool names are unique across catalogues");
+        assert_eq!(names.len(), 40, "tool names are unique across catalogues");
 
         for name in &names {
             assert!(
