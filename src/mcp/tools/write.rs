@@ -677,7 +677,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_note",
-            "description": "Rename a note within its current folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Rename a note within its current folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -693,7 +693,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_note",
-            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Move a note to a target vault-relative folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -709,7 +709,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_rename_note",
-            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Move and rename a note to a target vault-relative Markdown path in one operation, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -725,7 +725,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "archive_note",
-            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, move referenced assets with the note, and rewrite other asset references. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Archive a note by moving it to Hatchdoor's configured archive folder, rewrite wikilink backlinks, carry along the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only this note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references travels with it. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -740,7 +740,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_note",
-            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, move referenced assets with it, and rewrite other asset references. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Trash a note by moving it to .hatchdoor-trash, remove wikilink backlinks to the deleted note, trash the assets that live inside the note's own folder, or a subfolder of it, and rewrite other notes' references to them. An asset kept elsewhere, such as a shared attachments folder, stays where it is and only the trashed note's own link to it is repointed. A note sitting at the vault root has the whole Vault as its own folder, so every asset it references is trashed with it. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -143,9 +143,9 @@ Copy this for a new record:
 
 - **Status:** Accepted
 - **Context:** Agents and the UI can delete or archive notes. Destructive deletes on user data are unacceptable.
-- **Decision:** Delete moves notes and their referenced assets into `.hatchdoor-trash` (excluded from indexing). Archive moves notes under `HATCHDOOR_ARCHIVE_PREFIX` (default `90-archive/`), which also drives archived-link styling.
+- **Decision:** Delete moves notes, and the referenced assets that live inside the note's own folder, into `.hatchdoor-trash` (excluded from indexing). A referenced asset kept elsewhere stays where it is. Archive moves notes under `HATCHDOOR_ARCHIVE_PREFIX` (default `90-archive/`), which also drives archived-link styling.
 - **Consequences:** Deletes are recoverable; nothing is unlinked from disk by Hatchdoor. The trash folder is skipped when deciding whether a vault is empty.
-- **Evidence:** README "Data and Safety Model"; `vault/write/`; `config.rs` (`archive_prefix`); CHANGELOG F-12.
+- **Evidence:** README "Data and Safety Model"; `vault/write/`; `config.rs` (`archive_prefix`); CHANGELOG F-12. Asset travel was narrowed to the note's own folder in #225 (`vault/write/assets.rs`, `asset_move_plan`).
 
 ## ADR-12 — Distroless, rootless, multi-stage container
 
