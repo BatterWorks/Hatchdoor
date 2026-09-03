@@ -28,6 +28,7 @@ The MCP release. Agents get five new tools, a modern protocol revision, and a `g
 - **MCP now has rate limits.** 120 calls a minute per token, 8 concurrent calls and 2 concurrent searches, refused with `429` and a `Retry-After`. Set `HATCHDOOR_MCP_RATE_LIMITS_ENABLED=false` to switch them off. [#171]
 - **The Vault asset route accepts an MCP bearer token**, so an agent can fetch the URL `get_attachment` hands it without also holding the web token. It spends the same quota and size limits as any MCP call. [#174]
 - **The public documentation Vault gained Guides, Concepts and a settings reference**, and the README links into it rather than duplicating it.
+- **The public demo and the documentation site link to each other now.** Each demo Vault points at the documentation page behind its layout, and the documentation's layout table links to the live Vault demonstrating each method.
 
 ### Fixed
 - A Vault on a `:ro` Docker bind mount refused to come up at all, which is an awkward position for a product that supports read-only browsing. Read-only mounts answer the write probe with `EROFS`, and only "permission denied" counted as present but not writable. Such a Vault now activates read-only. [#178]
