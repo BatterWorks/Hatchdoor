@@ -1380,3 +1380,302 @@ fn compensation_failure_surfaces_bounded_recovery_details_and_continues_rollback
         "compensation must not overwrite a concurrent manual edit"
     );
 }
+
+/// A vault laid out the way Obsidian's default "keep attachments in one place"
+/// setting produces: a shared `_system/` folder holding the image, and a note
+/// elsewhere embedding it through a parent-relative reference (#225).
+fn vault_with_a_shared_attachments_folder(root: &Path) -> String {
+    let body = "# B\n![](../_system/image.png)\n";
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::write(root.join("_system/image.png"), BINARY_ASSET).expect("asset");
+    fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+    fs::write(root.join("folder-x/B.md"), body).expect("note");
+    body.to_string()
+}
+
+/// Resolve a note's asset reference the way a Markdown renderer would, so a
+/// test asserts the link still points at a real file rather than just matching
+/// the string a particular implementation happens to emit.
+fn embedded_asset_resolves_to(root: &Path, note_relative_path: &str, asset_relative_path: &str) {
+    let note = root.join(note_relative_path);
+    let content = fs::read_to_string(&note).expect("read note for reference check");
+    let target = content
+        .split_once("![](")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(target, _)| target.to_string())
+        .unwrap_or_else(|| panic!("note '{note_relative_path}' has no markdown embed: {content}"));
+    let resolved = note
+        .parent()
+        .expect("note parent")
+        .join(&target)
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("embed '{target}' does not resolve: {error}"));
+    assert_eq!(
+        resolved,
+        root.join(asset_relative_path)
+            .canonicalize()
+            .expect("expected asset"),
+        "embed '{target}' in '{note_relative_path}' must resolve to '{asset_relative_path}'"
+    );
+}
+
+#[test]
+fn move_note_leaves_an_asset_outside_its_folder_in_place_and_repoints_its_own_reference() {
+    // #225: an asset the note merely references must not be dragged along by
+    // an ordinary move, and the move must not fail either. Every destination
+    // depth is covered because each computes a different relative reference.
+    for target in [
+        "folder-z/B.md",
+        "folder-x/deeper/B.md",
+        "B.md",
+        "_system/B.md",
+    ] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = vault_with_a_shared_attachments_folder(root);
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = move_or_rename_note(root, &index, entry, target, &content_hash(&body))
+            .unwrap_or_else(|error| panic!("move to '{target}' must succeed: {error:?}"));
+
+        assert_eq!(
+            outcome.moved_assets, 0,
+            "an asset outside the note's folder must not travel to '{target}'"
+        );
+        assert_eq!(
+            fs::read(root.join("_system/image.png")).expect("asset stays put"),
+            BINARY_ASSET
+        );
+        embedded_asset_resolves_to(root, target, "_system/image.png");
+    }
+}
+
+#[test]
+fn archive_note_leaves_an_asset_outside_its_folder_in_place() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = vault_with_a_shared_attachments_folder(root);
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = archive_note(root, &index, entry, "90-archive/", &content_hash(&body))
+        .expect("archive must succeed");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert!(root.join("_system/image.png").exists());
+    embedded_asset_resolves_to(root, "90-archive/B.md", "_system/image.png");
+}
+
+#[test]
+fn delete_note_leaves_an_asset_outside_its_folder_in_place_and_repoints_the_trashed_copy() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = vault_with_a_shared_attachments_folder(root);
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = delete_note(root, &index, entry, &content_hash(&body)).expect("delete");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert!(root.join("_system/image.png").exists());
+    let trashed = format!("{}.md", outcome.trashed_path.expect("trash path"));
+    embedded_asset_resolves_to(root, &trashed, "_system/image.png");
+}
+
+#[test]
+fn a_note_whose_reference_an_earlier_move_rewrote_can_still_be_moved_archived_and_deleted() {
+    // The reporter's chain from #225: A and B share a sibling asset, A moves
+    // away and takes the asset with it, and B is left pointing over the folder
+    // boundary. B must stay fully mutable from there.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let a_body = "# A\n![](image.png)\n";
+    let b_body = "# B\n![](image.png)\n";
+    fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+    fs::write(root.join("folder-x/A.md"), a_body).expect("a");
+    fs::write(root.join("folder-x/B.md"), b_body).expect("b");
+    fs::write(root.join("folder-x/image.png"), BINARY_ASSET).expect("asset");
+
+    let index = build(root);
+    let a = index.find_by_slug("a").expect("a").clone();
+    let moved_a = move_or_rename_note(root, &index, &a, "folder-y/A.md", &content_hash(a_body))
+        .expect("moving A must still carry its sibling asset");
+    assert_eq!(moved_a.moved_assets, 1);
+    let rewritten_b = fs::read_to_string(root.join("folder-x/B.md")).expect("b");
+    assert!(
+        rewritten_b.contains("![](../folder-y/image.png)"),
+        "B's reference must be repointed at the moved asset: {rewritten_b}"
+    );
+
+    let index = build(root);
+    let b = index.find_by_slug("b").expect("b").clone();
+    move_or_rename_note(
+        root,
+        &index,
+        &b,
+        "folder-z/B.md",
+        &content_hash(&rewritten_b),
+    )
+    .expect("B must be movable after the rewrite");
+    embedded_asset_resolves_to(root, "folder-z/B.md", "folder-y/image.png");
+
+    let moved_b = fs::read_to_string(root.join("folder-z/B.md")).expect("b");
+    let index = build(root);
+    let b = index.find_by_slug("b").expect("b").clone();
+    archive_note(root, &index, &b, "90-archive/", &content_hash(&moved_b))
+        .expect("B must be archivable");
+    embedded_asset_resolves_to(root, "90-archive/B.md", "folder-y/image.png");
+
+    let archived_b = fs::read_to_string(root.join("90-archive/B.md")).expect("b");
+    let index = build(root);
+    let b = index.find_by_slug("b").expect("b").clone();
+    let deleted =
+        delete_note(root, &index, &b, &content_hash(&archived_b)).expect("B must be deletable");
+    assert!(
+        root.join("folder-y/image.png").exists(),
+        "deleting B must not trash an asset it only references"
+    );
+    let trashed = format!("{}.md", deleted.trashed_path.expect("trash path"));
+    embedded_asset_resolves_to(root, &trashed, "folder-y/image.png");
+}
+
+#[test]
+fn move_note_carries_an_asset_held_in_a_subfolder_of_its_own_folder() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "# Target\n![](media/image.png)\n";
+    fs::create_dir_all(root.join("Notes/media")).expect("media dir");
+    fs::write(root.join("Notes/Target.md"), body).expect("target");
+    fs::write(root.join("Notes/media/image.png"), BINARY_ASSET).expect("asset");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Target.md",
+        &content_hash(body),
+    )
+    .expect("move");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(!root.join("Notes/media/image.png").exists());
+    assert_eq!(
+        fs::read(root.join("Archive/media/image.png")).expect("asset travelled"),
+        BINARY_ASSET
+    );
+    embedded_asset_resolves_to(root, "Archive/Target.md", "Archive/media/image.png");
+}
+
+#[test]
+fn move_note_refuses_an_asset_reference_that_escapes_the_vault() {
+    let tmp = TempDir::new().expect("tempdir");
+    let outside = tmp.path().join("outside");
+    let root = tmp.path().join("vault");
+    fs::create_dir_all(&outside).expect("outside dir");
+    fs::create_dir_all(root.join("folder-x/media")).expect("folder-x");
+    fs::write(outside.join("image.png"), BINARY_ASSET).expect("outside asset");
+    fs::write(root.join("folder-x/media/own.png"), BINARY_ASSET).expect("own asset");
+    // The travelling reference comes first, so the refusal has to be reached
+    // before its destination folder would otherwise have been created.
+    let body = "# B\n![](media/own.png)\n![](../../outside/image.png)\n";
+    fs::write(root.join("folder-x/B.md"), body).expect("note");
+    let index = build(&root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let error = move_or_rename_note(&root, &index, entry, "folder-z/B.md", &content_hash(body))
+        .expect_err("a reference pointing out of the vault must be refused");
+
+    assert!(
+        matches!(&error, WriteError::InvalidInput(message) if message.contains("outside the vault")),
+        "expected an invalid-input refusal, got {error:?}"
+    );
+    assert!(
+        root.join("folder-x/B.md").exists(),
+        "the note must not move"
+    );
+    assert!(
+        !root.join("folder-z").exists(),
+        "a refused plan must not create any part of the destination"
+    );
+    assert!(
+        root.join("folder-x/media/own.png").exists(),
+        "the note's own asset must not move either"
+    );
+    assert_eq!(
+        fs::read(outside.join("image.png")).expect("outside asset untouched"),
+        BINARY_ASSET
+    );
+}
+
+#[test]
+fn move_note_from_the_vault_root_carries_the_assets_it_references() {
+    // A note in the Vault root has the whole Vault as its own folder, so by the
+    // #225 rule every asset it references is inside that folder and travels.
+    // Pinned deliberately: it is the one place where the rule and the "leave a
+    // shared attachments folder alone" intent point in different directions,
+    // and #225 put changing which assets travel from inside the note's own
+    // folder out of scope.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "# B\n![](_system/image.png)\n";
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::write(root.join("_system/image.png"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("B.md"), body).expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(body))
+        .expect("move");
+
+    assert_eq!(outcome.moved_assets, 1);
+    assert_eq!(
+        fs::read(root.join("folder-z/_system/image.png")).expect("asset travelled"),
+        BINARY_ASSET
+    );
+    embedded_asset_resolves_to(root, "folder-z/B.md", "folder-z/_system/image.png");
+}
+
+#[test]
+fn every_path_a_planned_asset_move_hands_the_filesystem_is_accepted_by_the_move_primitive() {
+    // #225's failure was a planned path the filesystem layer refuses: the
+    // primitives walk a path one plain name at a time, so a `..` anywhere in a
+    // plan makes it unexecutable. Asserting the plan's own paths are free of
+    // `..` proves that structurally; driving each of them through the primitive
+    // proves it against the thing that actually rejects them.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::write(root.join("_system/shared.png"), BINARY_ASSET).expect("shared asset");
+    fs::create_dir_all(root.join("folder-x/media")).expect("media dir");
+    fs::write(root.join("folder-x/media/own.png"), BINARY_ASSET).expect("own asset");
+    fs::write(
+        root.join("folder-x/B.md"),
+        "![](../_system/shared.png)\n![](./media/own.png)\n",
+    )
+    .expect("note");
+
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b").clone();
+    let destination = root.join("deeper/nest/B.md");
+    let (moves, _rewrites) =
+        super::assets::asset_move_plan(root, &index, &entry, &destination, false, &[])
+            .expect("plan");
+
+    assert_eq!(moves.len(), 1, "only the note's own asset travels");
+    for asset_move in &moves {
+        for path in [&asset_move.source, &asset_move.destination] {
+            assert!(
+                !path
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir),
+                "a planned path must be free of '..': {}",
+                path.display()
+            );
+        }
+        super::fs_ops::move_file_no_follow(&asset_move.source, &asset_move.destination)
+            .expect("the move primitive must accept every path the planner produced");
+    }
+}

@@ -246,7 +246,7 @@ truth.
 - The SQLite cache should live outside the vault.
 - Hatchdoor scans `.md` files under the vault while excluding built-in and
   configured noise paths (including `.hatchdoor-trash`).
-- Delete actions move notes and referenced assets into `.hatchdoor-trash`.
+- Delete actions move notes, and the assets kept inside their own folder, into `.hatchdoor-trash`.
 - Archive actions move notes under `HATCHDOOR_ARCHIVE_PREFIX`.
 - Browser write actions are available only when the vault is writable.
 - MCP is disabled by default.

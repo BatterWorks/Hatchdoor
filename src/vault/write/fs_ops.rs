@@ -965,6 +965,33 @@ mod tests {
     }
 
     #[test]
+    fn move_file_no_follow_rejects_a_path_carrying_a_parent_component() {
+        // #225: the planner must normalise `..` away before it gets here. This
+        // pins the syscall-level rejection that catches it if it ever does not:
+        // the parent walk opens one plain name at a time, so `..` is refused
+        // rather than followed. Nothing above may relax this.
+        let dir = tempdir().expect("tempdir");
+        let nested = dir.path().join("folder-x");
+        fs::create_dir_all(&nested).expect("nested dir");
+        let source = dir.path().join("asset.png");
+        fs::write(&source, BINARY_ASSET).expect("source");
+        let destination = nested.join("../moved.png");
+
+        let error = move_file_no_follow(&source, &destination)
+            .expect_err("a destination carrying '..' must not reach the filesystem");
+
+        let WriteError::Io(message) = error else {
+            panic!("expected an I/O error naming the unsupported component");
+        };
+        assert!(
+            message.contains("write path has unsupported component"),
+            "unexpected message: {message}"
+        );
+        assert!(source.exists(), "the source must be left alone");
+        assert!(!dir.path().join("moved.png").exists());
+    }
+
+    #[test]
     fn move_file_no_follow_moves_bytes_that_are_not_valid_utf8() {
         // issue #220: an attachment is arbitrary bytes. The post-move guard
         // exists to prove the moved thing is a regular file, not that it
