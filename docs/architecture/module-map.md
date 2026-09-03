@@ -1179,12 +1179,15 @@ notify_definition_changed, subscribe_revisions}`,
 **Consumers:** `handlers/vaults.rs` (every `/api/v1/vaults` route) and
 `mcp/tools/read.rs` (`list_vaults`, `create_vault`, `edit_vault`,
 `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`,
-`retry_vault`). Each is a wire-shaping adapter: it parses transport input,
-calls this core once, and maps the typed response or the structured error onto
-a status code or a structured tool error. No MCP tool calls a handler function
-or decodes an HTTP response for Vault management. `mcp/results.rs` aliases the
-collection wire types as its management tool result types, so the advertised
-`outputSchema` is generated from the same structures the core returns.
+`retry_vault`, `refresh_vault`). `POST /api/v1/vaults/{vault_id}/refresh` and
+the `refresh_vault` MCP tool (#228) are the same single call onto `refresh`,
+the way sync and retry pair across the two surfaces. Each is a wire-shaping
+adapter: it parses transport input, calls this core once, and maps the typed
+response or the structured error onto a status code or a structured tool
+error. No MCP tool calls a handler function or decodes an HTTP response for
+Vault management. `mcp/results.rs` aliases the collection wire types as its
+management tool result types, so the advertised `outputSchema` is generated
+from the same structures the core returns.
 
 **Coordination paths:** `src/lib.rs` (module export).
 
@@ -2019,7 +2022,18 @@ turn (`commit_vault_drift`, `src/git/managed_sync.rs`) already commits
 whatever is dirty at that turn in one commit — a batch's writes therefore
 land in one commit the same way any burst of individual write calls would,
 without changing ADR-10's debounced background-sync semantics. Catalogue
-grows 38 → 39, purely additive.
+grows 38 → 39, purely additive. #228 adds `refresh_vault`, the eighth Vault
+management tool: a write-gated mapping onto the collection management core's
+`refresh`, which admits one Vault's next Index turn and returns its
+`VaultScheduleResponse` (`queued`, or `coalesced` when a turn for that Vault is
+already pending). It exists so a client reading a collection read's `partial:
+true` with a `stale` participant can act on it — `sync_vault` and `retry_vault`
+cannot, because both resolve a managed-Git poll interval first and refuse
+`capability_unavailable` on any Vault with no remote. It is rejected inside
+`batch` like every other management tool, and is deliberately *not* in
+`is_collection_management_tool`: that exemption keeps discovery and Vault
+control reachable while model setup is pending, and an Index turn cannot run
+without a configured search model. Catalogue grows 39 → 40, purely additive.
 
 **Kind:** adapter/security surface.
 
@@ -2062,7 +2076,7 @@ requests with HTTP 429 + `Retry-After`, and is explicitly disableable by
 configuration (`HATCHDOOR_MCP_RATE_LIMITS_ENABLED`; `limits.rs` owns the quota
 window, the concurrency pools, and the POST classification). Every tool response is a typed Rust result structure whose type
 generates the `outputSchema` advertised in `tools/list` (#167), for the full
-39-tool catalogue.
+40-tool catalogue.
 Internal JSON-RPC failures expose the stable `Internal server error` message
 while the adapter logs diagnostics. `McpConfig`, server instructions, tool
 names/schemas/results, and `HatchdoorMcpTransport` (the rmcp-backed transport

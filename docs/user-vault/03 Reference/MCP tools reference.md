@@ -16,7 +16,7 @@ Two independent gates decide what a call can do:
 A third, per-Vault gate sits underneath write mode: a Vault's own `capabilities.mutate` (from its source type and lifecycle phase — a `pull_only` Git Vault, or one not yet `ready`, refuses writes even with `HATCHDOOR_MCP_WRITE_ENABLED=true`). Check `list_vaults` for a Vault's current capabilities before writing to it.
 
 > [!note]
-> The full tool catalogue is always advertised, even before the model-setup completes and even at zero Vaults, so a client that caches tools at connection time never needs to reconnect. Before setup finishes, only `get_model_setup_status`, `accept_gemma_terms`, `decline_gemma_terms`, and the Vault collection discovery/management tools (`list_vaults` and friends) actually run; every other tool returns "Hatchdoor is still being set up." until a model is selected.
+> The full tool catalogue is always advertised, even before the model-setup completes and even at zero Vaults, so a client that caches tools at connection time never needs to reconnect. Before setup finishes, only `get_model_setup_status`, `accept_gemma_terms`, `decline_gemma_terms`, and the Vault collection discovery/management tools (`list_vaults` and friends) actually run; every other tool returns "Hatchdoor is still being set up." until a model is selected. `refresh_vault` is the one management tool outside that exception: the index turn it asks for cannot run without a search model, so before setup finishes it answers like any other content tool.
 
 There is no selected, sole, or default Vault. Every tool below that touches content takes an explicit `vault_id`; every collection-level tool takes an explicit `scope` (a Vault ID or the literal `all`).
 
@@ -35,7 +35,7 @@ Always available, regardless of `HATCHDOOR_MCP_ENABLED`'s write posture — thes
 
 ## Vault collection: discovery and management
 
-`list_vaults` is always available. The other six require `HATCHDOOR_MCP_WRITE_ENABLED`; without it they return the same "MCP write tools are disabled" error as content write tools.
+`list_vaults` is always available. The other eight require `HATCHDOOR_MCP_WRITE_ENABLED`; without it they return the same "MCP write tools are disabled" error as content write tools.
 
 A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps describing its Git schedule: `last_checked_at`, when Hatchdoor last tried to check the remote — whether that check succeeded or failed, so read it alongside the Vault's Git status rather than as a successful sync — and `next_attempt_at`, when the next scheduled check is due. `last_checked_at` is absent until the first check completes; both are absent for a Vault with no remote and in demo mode. They are described in full under **Git schedule fields on a listed Vault** in [[HTTP API reference]], whose Vault shape `list_vaults` returns verbatim.
 
@@ -49,6 +49,7 @@ A listed Vault with a remote to poll also carries two RFC 3339 UTC timestamps de
 | `disconnect_vault` | Write mode | Remove a Vault from the registry without deleting local files, checkouts, Git history, or credentials outside the registry record. |
 | `sync_vault` | Write mode | Request immediate managed-Git synchronization for one eligible Vault. |
 | `retry_vault` | Write mode | Retry an admitted managed-Git operation for one eligible Vault. |
+| `refresh_vault` | Write mode | Request one Vault's next index turn, so the snapshot the collection reads project from is rebuilt from its Markdown. |
 
 ### `create_vault`
 
@@ -85,6 +86,28 @@ All three take just `vault_id` and `expected_registry_revision`.
 ### `sync_vault` / `retry_vault`
 
 Both take just `vault_id`. `sync_vault` requests an immediate poll for a managed-Git Vault instead of waiting for `poll_interval_secs`. `retry_vault` retries an operation the scheduler admitted but that failed (e.g. a transient network error), rather than waiting for its own backoff.
+
+Neither works on a Vault with no configured remote: both resolve the Vault's Git poll interval first and refuse with `capability_unavailable` when there is none. For rebuilding the search index of any Vault, remote or not, use `refresh_vault`.
+
+### `refresh_vault`
+
+Takes just `vault_id`. It asks Hatchdoor to re-scan that Vault's Markdown and republish the snapshot the collection reads — `get_tree`, `get_graph`, `get_stats`, `recently_modified` and `search_notes` — project from. It contacts no Git remote, so unlike `sync_vault` it works on a plain local Vault.
+
+**Call it when a collection read reports itself stale.** Those reads carry `partial` and a `participants` list (see [[#Read-only content tools]] below). A Vault whose entry reads `stale` is answering from a snapshot known to be behind its files; `refresh_vault` is how an agent asks for that to be fixed instead of waiting and hoping.
+
+It returns as soon as the turn is admitted, not when the turn finishes:
+
+| `schedule` | Meaning |
+| --- | --- |
+| `queued` | The Vault's next index turn was admitted. |
+| `coalesced` | An index turn for this Vault was already pending; this request joined it rather than queueing a second one. |
+
+So the response tells you the request landed, not that the index is rebuilt. To see the outcome, re-read a collection read and check its freshness fields again.
+
+A Vault that is not currently browsable — its `capabilities.browse` is false, which covers a missing or unreadable directory and a Vault whose runtime has not come up — is refused with `capability_unavailable`, marked retryable because the Vault may become browsable again.
+
+> [!note]
+> `refresh_vault` rebuilds the read model from the Markdown that is on disk. It does not repair a Vault whose index turn is failing for its own reasons: a turn that fails deterministically will fail the same way again.
 
 ## Vault source shapes
 
@@ -148,7 +171,7 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_attachment` | `vault_id`, `relative_path` | Fetch one attachment's bytes, addressed by the same `relative_path` `list_note_attachments` reports. Optional `encoding`: `url` (the default) returns a `download_url`, `base64` returns the bytes inline. |
 | `get_attachment_import_config` | `vault_id` | Report whether uploads are currently possible for this Vault, the available methods, their byte limits, and the allowed file extensions. Call this before uploading. |
 
-Collection-scoped results (`search_notes`, `get_tree`, `get_stats`, `get_graph`, `recently_modified` with `scope: "all"`) carry `scope`, `collection_revision`, `partial`, and `participants` — an agent should branch on the structured error `code`, never on message text, and should treat `partial: true` as "not every enabled Vault contributed to this result," not as an error. A Vault can sit out for more than one reason — its snapshot was not readable, or, on `get_tree`, it simply does not have the folder that was asked for — so read the reason off that Vault's entry in `participants` rather than inferring it from `partial` alone.
+Collection-scoped results (`search_notes`, `get_tree`, `get_stats`, `get_graph`, `recently_modified` with `scope: "all"`) carry `scope`, `collection_revision`, `partial`, and `participants` — an agent should branch on the structured error `code`, never on message text, and should treat `partial: true` as "not every enabled Vault contributed to this result," not as an error. A Vault can sit out for more than one reason — its snapshot was not readable, or, on `get_tree`, it simply does not have the folder that was asked for — so read the reason off that Vault's entry in `participants` rather than inferring it from `partial` alone. A Vault whose entry reads `stale` is a case an agent can act on rather than only report: its snapshot is known to be behind its Markdown, and `refresh_vault`, under [[#Vault collection: discovery and management]], asks for the index turn that republishes it.
 
 `get_tree` with nothing but `scope` returns the whole Vault, which on a few hundred notes is large enough to overflow a client's per-result budget. Three optional arguments narrow it. `include_notes: false` is the cheap one to open with: it returns every folder at every level with its note count and no notes at all, so a several-hundred-note Vault's shape costs on the order of a kilobyte instead of seventy. `folder` returns one subtree — `"40-reference/Parenting"`, matched case-insensitively, surrounding slashes ignored. `max_depth` stops the descent: the starting folder is depth 0, a folder at the limit is listed with its count but not opened, and one that had something inside it is marked `truncated` so it cannot be mistaken for an empty leaf. Every folder reports `note_count`, the notes held directly inside it, not counting its subfolders; a subtree total is the sum of those. A `folder` naming something the Vault does not have answers the structured error `folder_not_found` rather than an empty tree, so a typo never reads as an empty folder. With `scope: "all"` that refusal is per-Vault: the Vaults that do have the folder still answer, each Vault that does not appears in `participants` carrying `folder_not_found`, and the result is marked `partial`. Only when no Vault has it does the whole call refuse, and that refusal names no Vault, because none of them is more at fault than the others; the per-Vault refusals stay on `participants`, where each one does name its own Vault.
 
@@ -209,7 +232,7 @@ A write conflict (stale `expected_content_hash`, or a registry revision that mov
 }
 ```
 
-**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
+**What may go in.** Every read tool except `list_vaults`, and every note and attachment write tool — `create_note` through `delete_attachment`, deletes included. Vault-management tools (`create_vault`, `edit_vault`, `enable_vault`, `disable_vault`, `disconnect_vault`, `sync_vault`, `retry_vault`, `refresh_vault`) and the model-setup tools are not batchable, and neither is `batch` itself. An unknown or disallowed `op`, an empty `operations` array, more than **50** read-shaped items, or more than **20** write-shaped items rejects the whole call up front, before any item executes.
 
 **Best-effort, in order, no rollback.** Items run one after another; an item that fails never stops the ones after it, and nothing already written is undone. There is no mid-batch visibility either — an item sees the Vault, not the batch's own bookkeeping, apart from the hash chaining below.
 

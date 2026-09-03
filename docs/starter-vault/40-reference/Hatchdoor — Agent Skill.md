@@ -48,6 +48,12 @@ Use `get_note_links` when backlinks or outgoing links matter.
 
 Use `get_tree` only when the task is specifically about folder structure or broad navigation. Collection responses may be partial; branch on structured error `code`, not message text.
 
+## Stale collection reads
+
+`search_notes`, `get_tree`, `get_graph`, `get_stats`, and `recently_modified` answer from a published snapshot and report its freshness. When a result comes back with `partial: true` and the Vault's entry in `participants` reads `stale`, that snapshot is behind the Vault's Markdown.
+
+Call `refresh_vault` with that `vault_id` to request the index turn that republishes it, then re-read. It returns as soon as the turn is admitted (`queued`, or `coalesced` when one is already pending), not when the turn finishes, so check the freshness fields again rather than trusting the response. This is not `sync_vault`: it contacts no Git remote and works on any Vault. Do not fall back to editing files directly because a read looked stale.
+
 ## Writing
 
 For existing notes:

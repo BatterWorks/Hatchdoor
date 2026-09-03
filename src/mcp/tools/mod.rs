@@ -125,6 +125,7 @@ pub async fn handle_tools_call(
         }
         "sync_vault" if config.write_enabled => read::sync_vault_tool(state, arguments).await,
         "retry_vault" if config.write_enabled => read::retry_vault_tool(state, arguments).await,
+        "refresh_vault" if config.write_enabled => read::refresh_vault_tool(state, arguments).await,
         write_op if write::WRITE_OPS.contains(&write_op) && config.write_enabled => {
             let vault = write::scoped_vault(&state, &arguments)?;
             // This is the same per-Vault mutation lock used by the V1 HTTP
@@ -137,7 +138,7 @@ pub async fn handle_tools_call(
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
         }
         "create_vault" | "edit_vault" | "enable_vault" | "disable_vault" | "disconnect_vault"
-        | "sync_vault" | "retry_vault" => {
+        | "sync_vault" | "retry_vault" | "refresh_vault" => {
             Err(JsonRpcFailure::invalid_params(WRITE_DISABLED_MESSAGE))
         }
         other => Err(JsonRpcFailure::invalid_params(format!(
@@ -320,6 +321,14 @@ pub fn setup_tools_list() -> Vec<Value> {
 /// registry needing recovery. `config.write_enabled` still gates the
 /// mutating ones exactly as it does when the legacy readiness gate is not the
 /// blocker in play.
+///
+/// `refresh_vault` is deliberately absent (#228), and its absence is the
+/// decision rather than an oversight: this exemption is for tools that stay
+/// meaningful at zero enabled Vaults or on a registry needing recovery, and
+/// `refresh_vault` targets one enabled, browsable Vault whose Index turn
+/// cannot run without a configured search model. A caller reaching for it
+/// during pending setup should get the model-setup signal like any other
+/// content tool.
 fn is_collection_management_tool(name: &str) -> bool {
     matches!(
         name,
