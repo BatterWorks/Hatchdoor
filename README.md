@@ -208,7 +208,7 @@ setup finishes.
 The image is published on [Docker Hub](https://hub.docker.com/r/battermanz/hatchdoor):
 
 ```text
-battermanz/hatchdoor:latest          # also version tags, e.g. 2.5.0
+battermanz/hatchdoor:latest          # also version tags, e.g. 2.6.0
 battermanz/hatchdoor:podman-latest   # for Podman users (podman-<version> too)
 ```
 
@@ -444,8 +444,8 @@ Build and publish the Docker image:
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
-docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.5.0
-docker push battermanz/hatchdoor:2.5.0
+docker tag battermanz/hatchdoor:latest battermanz/hatchdoor:2.6.0
+docker push battermanz/hatchdoor:2.6.0
 docker push battermanz/hatchdoor:latest
 ```
 
