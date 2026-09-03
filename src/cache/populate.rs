@@ -257,21 +257,41 @@ impl SqliteCache {
         let layer_catalog_json = serde_json::to_string(&layer_catalog)
             .map_err(|e| format!("failed serializing layer catalog: {e}"))?;
 
-        let current_paths = entries
+        let slug_by_path = entries
             .iter()
-            .map(|entry| entry.relative_path.clone())
-            .collect::<HashSet<_>>();
+            .map(|entry| (entry.relative_path.as_str(), entry.slug.as_str()))
+            .collect::<HashMap<_, _>>();
         let now = current_unix_timestamp();
         let mut conn = self.connection()?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("failed to start SQLite cache refresh: {e}"))?;
 
-        let cached_paths = cached_relative_paths(&tx)?;
-        let is_incremental_refresh = !cached_paths.is_empty();
-        for cached_path in cached_paths {
-            if !current_paths.contains(&cached_path) {
-                delete_note_by_relative_path(&tx, &cached_path)?;
+        // Drop every cached row that will not still be holding its slug when
+        // this pass ends: the notes that left the Vault, and the notes whose
+        // slug moved to another path. Both have to go before the first insert
+        // below, because `notes` constrains `slug` as well as `relative_path`
+        // and the note upsert can only resolve a `relative_path` conflict.
+        //
+        // A slug moves for an ordinary reason: it is derived from a filename
+        // alone, so adding `Archive/Overview.md` beside an indexed
+        // `Projects/Overview.md` hands `overview` to the new note and
+        // `overview-2` to the old one. Insert the new note while the old row
+        // still holds `overview` and the turn dies on the slug constraint -
+        // and it dies there on every following turn too, because each one
+        // seeds its candidate from the same published snapshot (issue #226).
+        //
+        // This runs before any note is read, so a slug-mover that happens to be
+        // unreadable on this pass loses its row and drops out of the generation
+        // this pass publishes, rather than being retained the way the per-note
+        // loop below retains an unreadable note. Retaining it is not available:
+        // its row is precisely the one holding a slug another note is about to
+        // claim. It returns on the first turn that can read it again.
+        let cached_slugs = cached_note_paths_and_slugs(&tx)?;
+        let is_incremental_refresh = !cached_slugs.is_empty();
+        for (cached_path, cached_slug) in &cached_slugs {
+            if slug_by_path.get(cached_path.as_str()) != Some(&cached_slug.as_str()) {
+                delete_note_by_relative_path(&tx, cached_path)?;
             }
         }
 
@@ -994,12 +1014,17 @@ struct CachedNoteState {
     snapshot: FileSnapshot,
 }
 
-fn cached_relative_paths(tx: &Transaction<'_>) -> Result<Vec<String>, String> {
+/// Every cached note as `(relative_path, slug)`. The pass needs both: the path
+/// says whether the note still exists, and the slug says whether this row is
+/// still the one entitled to hold it.
+fn cached_note_paths_and_slugs(tx: &Transaction<'_>) -> Result<Vec<(String, String)>, String> {
     let mut stmt = tx
-        .prepare("SELECT relative_path FROM notes")
+        .prepare("SELECT relative_path, slug FROM notes")
         .map_err(|error| format!("failed to prepare cached path query: {error}"))?;
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| format!("failed to query cached note paths: {error}"))?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1155,6 +1180,11 @@ fn retain_vanished_classifications(
         .collect()
 }
 
+/// Requires that the caller has already dropped every cached row not entitled
+/// to the slug it holds. Under that precondition a surviving row at
+/// `entry.relative_path` always carries `entry.slug`, and `entry.slug` is held
+/// by no other row, so the upsert below can settle everything through its
+/// `relative_path` conflict target.
 fn upsert_note_if_changed(
     tx: &Transaction<'_>,
     entry: &NoteEntry,
@@ -1196,12 +1226,6 @@ fn upsert_note_if_changed(
             update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
             return Ok(UpsertOutcome::Unchanged);
         }
-    }
-
-    if let Some(cached) = cached.as_ref()
-        && cached.slug != entry.slug
-    {
-        delete_note_by_relative_path(tx, &entry.relative_path)?;
     }
 
     upsert_note_content(tx, entry, &content, &hash, snapshot, indexed_at)?;
@@ -2217,6 +2241,147 @@ mod tests {
         assert!(
             dur.parse::<f64>().is_ok(),
             "duration should parse as f64, got {dur}"
+        );
+    }
+
+    /// Reads the `slug` a note path holds in the notes table, or `None` when
+    /// no row carries that path.
+    #[cfg(test)]
+    fn cached_slug_for_path(cache: &SqliteCache, relative_path: &str) -> Option<String> {
+        let conn = cache.connection().expect("connection");
+        conn.query_row(
+            "SELECT slug FROM notes WHERE relative_path = ?1",
+            params![relative_path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .expect("query slug")
+    }
+
+    /// A slug comes from a note's filename alone, so `Archive/Overview.md` and
+    /// `Projects/Overview.md` both want `overview`, and the index build hands it
+    /// to whichever path sorts first. The loser's cached row still holds that
+    /// slug when the winner is inserted, and `notes.slug` is unique, so the
+    /// rebuild used to die on the constraint - permanently, because the next
+    /// turn seeds from the same rows and reproduces it (issue #226).
+    #[test]
+    fn a_slug_moving_to_another_path_does_not_break_an_incremental_rebuild() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("Projects")).expect("dirs");
+        std::fs::write(
+            dir.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview").as_deref(),
+            Some("overview"),
+            "the only Overview note holds the undecorated slug"
+        );
+
+        std::fs::create_dir_all(dir.path().join("Archive")).expect("dirs");
+        std::fs::write(
+            dir.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("note");
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("a duplicate filename stem must not fail the rebuild");
+
+        assert_eq!(
+            cached_slug_for_path(&cache, "Archive/Overview").as_deref(),
+            Some("overview"),
+            "the earlier-sorting path takes the slug the build assigned it"
+        );
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview").as_deref(),
+            Some("overview-2"),
+            "the note that lost the slug keeps its row under the new one"
+        );
+    }
+
+    /// The pre-pass releases a moving slug before any note is read, so a note
+    /// that is mid-write on the very pass its slug moves away loses its row.
+    /// The alternative is not "keep the note": its row is the one holding the
+    /// slug the arriving note needs, so keeping it fails the whole turn. Pin
+    /// the tradeoff - the pass still publishes everything readable, and the
+    /// note returns on the first pass that can read it.
+    #[test]
+    fn an_unreadable_slug_mover_drops_out_of_the_pass_instead_of_failing_it() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("Projects")).expect("dirs");
+        std::fs::write(dir.path().join("Home.md"), "# Home\n\nhome body").expect("note");
+        std::fs::write(
+            dir.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+
+        std::fs::create_dir_all(dir.path().join("Archive")).expect("dirs");
+        std::fs::write(
+            dir.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("note");
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        std::fs::remove_file(dir.path().join("Projects/Overview.md"))
+            .expect("make the slug mover unreadable after the scan listed it");
+
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("one unreadable note must not fail the pass");
+
+        assert_eq!(
+            cached_slug_for_path(&cache, "Archive/Overview").as_deref(),
+            Some("overview"),
+            "the arriving note still takes the slug it was assigned"
+        );
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview"),
+            None,
+            "the unreadable slug mover drops out of this generation"
+        );
+        assert_eq!(
+            cached_slug_for_path(&cache, "Home").as_deref(),
+            Some("home"),
+            "every other note is untouched"
+        );
+
+        std::fs::write(
+            dir.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("restore the note");
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("reindex"),
+                &embedder,
+            )
+            .expect("second populate");
+
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview").as_deref(),
+            Some("overview-2"),
+            "and returns on the first pass that can read it, under its new slug"
         );
     }
 

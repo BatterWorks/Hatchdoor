@@ -1744,6 +1744,171 @@ mod tests {
         );
     }
 
+    /// A slug is derived from a note's filename alone, so two notes with the
+    /// same stem in different folders compete for it and the index build hands
+    /// it to whichever path sorts first. The Index turn seeds its candidate
+    /// from the published snapshot, where the old holder still owns the slug,
+    /// so the new note's insert used to hit `notes.slug` and fail the turn -
+    /// forever, since the next turn seeds from the same unchanged snapshot
+    /// (issue #226).
+    #[test]
+    fn a_duplicate_filename_stem_in_another_folder_publishes_a_fresh_generation() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, first_index) = index(&[
+            ("Home.md", "# Home\n\nhome body"),
+            ("Projects/Overview.md", "# Overview\n\nprojects body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &first_index, &embedder)
+            .expect("publish the first snapshot");
+
+        std::fs::create_dir_all(directory.path().join("Archive")).expect("archive dir");
+        std::fs::write(
+            directory.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("add the colliding note");
+        let collided = VaultIndex::build(directory.path()).expect("rebuild index");
+        embedder.reset();
+
+        cache
+            .replace_vault_snapshot(id, &collided, &embedder)
+            .expect("a duplicate filename stem must not fail the Index turn");
+
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
+            }),
+            "the turn succeeded, so collection reads must stop reporting a stale \
+             participant - a collection read's `partial` is exactly \
+             `any(state != Fresh)` over these participants"
+        );
+        let read = cache
+            .read_vault_snapshot(id)
+            .expect("read snapshot")
+            .expect("snapshot participates")
+            .read;
+        assert_eq!(read.notes.len(), 3, "every visible note is published");
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "overview")
+                .expect("content")
+                .as_deref(),
+            Some("# Overview\n\narchive body"),
+            "the earlier-sorting path holds the undecorated slug"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "overview-2")
+                .expect("content")
+                .as_deref(),
+            Some("# Overview\n\nprojects body"),
+            "the note that lost the slug stays reachable under its new one"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "home")
+                .expect("content")
+                .as_deref(),
+            Some("# Home\n\nhome body"),
+            "the untouched note is unaffected"
+        );
+        assert_eq!(
+            embedder.embedded(),
+            2,
+            "only the new note and the one whose slug moved may be re-embedded: \
+             an unchanged note still reuses its published vectors"
+        );
+    }
+
+    /// The wedge this bug produced: the prior generation is retained and marked
+    /// stale by a failed turn, and nothing republishes it. One successful turn
+    /// over the same duplicate-stem Vault has to clear that on its own, with no
+    /// file deleted and no cache wiped. The failed turn is staged here through
+    /// the one failure mode a fixed build still has - a Vault that reads as
+    /// empty - because the slug collision itself can no longer fail a turn; what
+    /// matters is that recovery seeds from the same stale published snapshot the
+    /// real wedge leaves behind.
+    #[test]
+    fn a_stale_snapshot_recovers_on_the_first_turn_that_indexes_a_duplicate_stem() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, first_index) =
+            index(&[("Projects/Overview.md", "# Overview\n\nprojects body")]);
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_vault_snapshot(id, &first_index, &embedder)
+            .expect("publish the first snapshot");
+
+        std::fs::create_dir_all(directory.path().join("Archive")).expect("archive dir");
+        std::fs::write(
+            directory.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("add the colliding note");
+        let collided = VaultIndex::build(directory.path()).expect("rebuild index");
+
+        // Strand the Vault exactly where a failed turn leaves it: the prior
+        // generation retained, searchable, and flagged stale.
+        std::fs::remove_file(directory.path().join("Archive/Overview.md")).expect("remove");
+        std::fs::remove_file(directory.path().join("Projects/Overview.md")).expect("remove");
+        assert!(
+            cache
+                .replace_vault_snapshot(id, &collided, &embedder)
+                .is_err(),
+            "a turn that can read nothing must fail and retain the prior generation"
+        );
+        assert_eq!(
+            cache
+                .snapshot_status(id)
+                .expect("read status")
+                .map(|status| status.freshness),
+            Some(VaultSnapshotFreshness::Stale),
+            "the Vault is now wedged the way the report describes"
+        );
+
+        std::fs::write(
+            directory.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("restore");
+        std::fs::write(
+            directory.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("restore");
+
+        cache
+            .replace_vault_snapshot(id, &collided, &embedder)
+            .expect("one successful turn must clear the wedge");
+
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
+            }),
+            "recovery takes no manual intervention"
+        );
+        assert_eq!(
+            cache
+                .read_vault_snapshot(id)
+                .expect("read snapshot")
+                .expect("snapshot participates")
+                .read
+                .notes
+                .len(),
+            2,
+            "both same-stem notes are published"
+        );
+    }
+
     /// Reuse must never cross an embedding space: a different model wipes the
     /// shared cache before seeding can offer it anything.
     #[test]

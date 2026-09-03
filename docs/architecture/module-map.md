@@ -1269,6 +1269,11 @@ and embedder identity/dimensions.
 - Every shared snapshot row and relationship is Vault-ID-qualified; failed
   replacement retains the prior snapshot as stale, disabling removes only
   participation, and disconnect deletes only that Vault's disposable rows.
+- A population pass drops every cached note row that will not still hold its
+  slug when the pass ends - the notes that left the Vault and the notes whose
+  slug moved to another path - before it writes any row. A slug is unique and
+  migrates between paths whenever a note is added, moved, or renamed beside a
+  same-named sibling, so releasing it late fails the whole turn (issue #226).
 
 **Validation:** `cargo test cache` and full backend checks. Schema/population
 changes require search and application-state tests too.
