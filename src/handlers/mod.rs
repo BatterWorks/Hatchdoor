@@ -10,10 +10,13 @@ mod vault_write;
 pub(crate) mod vaults;
 
 pub use api::health_handler;
+// No asset re-export: the contained-resource seam the MCP `get_attachment`
+// tool used to consume from here moved to the read core in #188, so no MCP
+// tool imports this module and `assets` is once again private to the HTTP
+// adapter.
 pub use settings::{
-    MAX_IN_MEMORY_UPLOAD_BYTES, generate_mcp_token_handler, get_git_status_handler,
-    get_index_status_handler, get_settings_handler, patch_settings_handler,
-    reveal_mcp_token_handler, reveal_web_token_handler,
+    MAX_IN_MEMORY_UPLOAD_BYTES, generate_mcp_token_handler, get_settings_handler,
+    patch_settings_handler, reveal_mcp_token_handler, reveal_web_token_handler,
 };
 pub use spa::spa_index_handler;
 pub use vault_collection_reads::{

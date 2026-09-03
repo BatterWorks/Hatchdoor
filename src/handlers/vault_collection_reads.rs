@@ -9,8 +9,11 @@
 //! [`crate::search::vault_scoped::VaultSearchCore::search`] — which already
 //! implement every one-or-all/partial/zero-Vault/grouped-vs-flattened
 //! behavior issue #62 and the wire-contract spec require. This file owns
-//! only scope parsing, query decoding, and response shaping: no
-//! collection-read domain logic lives here. Mounted in the same
+//! only query decoding and response shaping: no collection-read domain logic
+//! lives here, and not even the `{scope}` grammar — `VaultScope::parse`,
+//! `BrowseSurface::layer_selection`, and the limit clamps are the core's, so a
+//! scope or selector one surface accepts is never one the MCP tools refuse. A
+//! scope the core rejects becomes the structured `invalid_scope` error (`400`). Mounted in the same
 //! `/api/v1/vaults` router group as `handlers/vaults.rs` and
 //! `handlers/vault_content.rs`, sharing their auth posture, `VaultApiError`
 //! shape, and rejection-mapping helpers (`query_rejection_response`,
@@ -18,9 +21,6 @@
 //! reads in `vault_content.rs` — none of them is wrapped in `reject_demo_mutation`
 //! (#109): they stay reachable unauthenticated in demo mode, unlike the
 //! mutation and Vault-control routes in `vaults.rs`/`vault_write.rs`.
-
-use std::collections::BTreeSet;
-use std::str::FromStr;
 
 use axum::Json;
 use axum::extract::rejection::QueryRejection;
@@ -30,13 +30,15 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
 use crate::api_types::RecentlyModifiedQuery;
-use crate::app_state::{AppState, run_blocking};
+use crate::app_state::{AppState, internal_error, run_blocking};
 use crate::handlers::vault_content::vault_read_error_response;
-use crate::handlers::vaults::{VaultApiError, query_rejection_response};
+use crate::handlers::vaults::query_rejection_response;
+use crate::search::SearchMode;
 use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
-use crate::search::{LayerSelection, NoteFilters, SearchMode};
-use crate::vault_read::{BrowseSurface, VaultReadCore, VaultScope};
-use crate::vault_registry::VaultId;
+use crate::vault_read::{
+    BrowseSurface, OffloadedReadError, TreeScope, VaultReads, VaultScope, clamp_recent_limit,
+    clamp_search_limit, clamp_search_per_note_cap,
+};
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -62,66 +64,14 @@ pub struct VaultScopeSearchQuery {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Parses the `{scope}` path segment: the literal `all`, or a canonical Vault
-/// ID. Anything else is the structured `invalid_scope` error (`400`), one of
-/// the domain error codes issue #62 requires at least.
-fn parse_vault_scope(raw: &str) -> Result<VaultScope, VaultApiError> {
-    if raw == "all" {
-        return Ok(VaultScope::All);
-    }
-    VaultId::from_str(raw).map(VaultScope::One).map_err(|_| {
-        VaultApiError::new(
-            "invalid_scope",
-            "scope must be the literal 'all' or a canonical Vault ID",
-            None,
-            false,
-        )
-    })
-}
-
-fn bad_scope(error: VaultApiError) -> Response {
-    error.respond(StatusCode::BAD_REQUEST)
-}
-
-/// Builds a [`LayerSelection`] from raw, comma-separated HTTP query tokens.
-/// Deliberately does not consult any one Vault's known-layer catalog while
-/// parsing, unlike [`LayerSelection::parse`] (built for the single-Vault MCP
-/// surface, where an unrecognized token degrades to the default surface with
-/// a warning): issue #62 applies one layer selector *independently* to every
-/// participant, so a name valid in one Vault and absent from another is not a
-/// parse-time concern — `VaultSearchCore::search`'s own
-/// `invalid_layer_selection` check already covers the only real error case, a
-/// named layer absent from every usable participant.
-fn parse_layer_selection(raw: Option<&str>) -> LayerSelection {
-    let Some(raw) = raw else {
-        return LayerSelection::default_surface();
-    };
-    let tokens: Vec<&str> = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .collect();
-    if tokens.is_empty() {
-        return LayerSelection::default_surface();
-    }
-    if tokens.iter().any(|token| token.eq_ignore_ascii_case("all")) {
-        return LayerSelection::All;
-    }
-    let mut include_default = false;
-    let mut layers = BTreeSet::new();
-    for token in tokens {
-        if token.eq_ignore_ascii_case("default") {
-            include_default = true;
-        } else {
-            layers.insert(token.to_string());
-        }
-    }
-    if !include_default && layers.is_empty() {
-        include_default = true;
-    }
-    LayerSelection::Set {
-        include_default,
-        layers,
+/// Maps one offloaded read's failure onto a response: the Vault's own
+/// structured failure through the shared bucket map, and a blocking task that
+/// never completed through the same opaque `500` every other instance-side
+/// fault reports.
+fn read_error_response(error: OffloadedReadError) -> Response {
+    match error {
+        OffloadedReadError::Read(error) => vault_read_error_response(error),
+        OffloadedReadError::Failed(message) => internal_error(message).into_response(),
     }
 }
 
@@ -130,26 +80,25 @@ fn parse_layer_selection(raw: Option<&str>) -> LayerSelection {
 // ---------------------------------------------------------------------------
 
 /// `GET /api/v1/vaults/{scope}/tree` — grouped per Vault.
+///
+/// Always the whole tree. `get_tree`'s folder, depth and note narrowing (#192)
+/// lives in the read core and is exposed on the agent surface only: the web
+/// explorer draws the entire tree and has nothing to pass. Wiring the route to
+/// them later is small.
 pub async fn vault_scope_tree_handler(
     State(state): State<AppState>,
     Path(raw_scope): Path<String>,
 ) -> Response {
-    let scope = match parse_vault_scope(&raw_scope) {
+    let scope = match VaultScope::parse(&raw_scope) {
         Ok(scope) => scope,
-        Err(error) => return bad_scope(error),
+        Err(error) => return vault_read_error_response(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.trees(scope))
-    })
-    .await;
-    match result {
-        Ok(Ok(projection)) => (StatusCode::OK, Json(projection)).into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+    match VaultReads::new(&state)
+        .read(move |core| core.trees(scope, TreeScope::default()))
+        .await
+    {
+        Ok(projection) => (StatusCode::OK, Json(projection)).into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
@@ -158,22 +107,16 @@ pub async fn vault_scope_stats_handler(
     State(state): State<AppState>,
     Path(raw_scope): Path<String>,
 ) -> Response {
-    let scope = match parse_vault_scope(&raw_scope) {
+    let scope = match VaultScope::parse(&raw_scope) {
         Ok(scope) => scope,
-        Err(error) => return bad_scope(error),
+        Err(error) => return vault_read_error_response(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.statistics(scope))
-    })
-    .await;
-    match result {
-        Ok(Ok(projection)) => (StatusCode::OK, Json(projection)).into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+    match VaultReads::new(&state)
+        .read(move |core| core.statistics(scope))
+        .await
+    {
+        Ok(projection) => (StatusCode::OK, Json(projection)).into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
@@ -183,22 +126,16 @@ pub async fn vault_scope_graph_handler(
     State(state): State<AppState>,
     Path(raw_scope): Path<String>,
 ) -> Response {
-    let scope = match parse_vault_scope(&raw_scope) {
+    let scope = match VaultScope::parse(&raw_scope) {
         Ok(scope) => scope,
-        Err(error) => return bad_scope(error),
+        Err(error) => return vault_read_error_response(error),
     };
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.graphs(scope))
-    })
-    .await;
-    match result {
-        Ok(Ok(projection)) => (StatusCode::OK, Json(projection)).into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+    match VaultReads::new(&state)
+        .read(move |core| core.graphs(scope))
+        .await
+    {
+        Ok(projection) => (StatusCode::OK, Json(projection)).into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
@@ -209,75 +146,52 @@ pub async fn vault_scope_recent_handler(
     Path(raw_scope): Path<String>,
     query: Result<Query<RecentlyModifiedQuery>, QueryRejection>,
 ) -> Response {
-    let scope = match parse_vault_scope(&raw_scope) {
+    let scope = match VaultScope::parse(&raw_scope) {
         Ok(scope) => scope,
-        Err(error) => return bad_scope(error),
+        Err(error) => return vault_read_error_response(error),
     };
     let Query(query) = match query {
         Ok(query) => query,
         Err(error) => return query_rejection_response(error),
     };
-    let limit = query.limit.unwrap_or(5).clamp(1, 25);
-    let cache = state.startup_sqlite.clone();
-    let vaults = state.vaults.clone();
-    let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    let result = run_blocking(move || {
-        let core = VaultReadCore::new(&cache, &vaults).on_surface(surface);
-        Ok(core.recently_modified(scope, limit))
-    })
-    .await;
-    match result {
-        Ok(Ok(projection)) => (StatusCode::OK, Json(projection)).into_response(),
-        Ok(Err(error)) => vault_read_error_response(error),
-        Err(error) => error.into_response(),
+    let limit = clamp_recent_limit(query.limit);
+    match VaultReads::new(&state)
+        .read(move |core| core.recently_modified(scope, limit))
+        .await
+    {
+        Ok(projection) => (StatusCode::OK, Json(projection)).into_response(),
+        Err(error) => read_error_response(error),
     }
 }
 
 /// `GET /api/v1/vaults/{scope}/search?q=..&mode=..&limit=..&per_note_cap=..&layers=..`
 /// — one global ranking across every usable participant, flattened across
 /// Vaults. Mirrors the legacy `/api/search` defaults/clamps (limit 10 max
-/// 50; per_note_cap 2, 1..10). Never exposes `NoteFilters`/
-/// `include_properties` over this route, matching the legacy web search
-/// route's posture — those remain MCP/eval-only.
+/// 50; per_note_cap 2, 1..10).
 pub async fn vault_scope_search_handler(
     State(state): State<AppState>,
     Path(raw_scope): Path<String>,
     query: Result<Query<VaultScopeSearchQuery>, QueryRejection>,
 ) -> Response {
-    let scope = match parse_vault_scope(&raw_scope) {
+    let scope = match VaultScope::parse(&raw_scope) {
         Ok(scope) => scope,
-        Err(error) => return bad_scope(error),
+        Err(error) => return vault_read_error_response(error),
     };
     let Query(query) = match query {
         Ok(query) => query,
         Err(error) => return query_rejection_response(error),
     };
-    let limit = query.limit.unwrap_or(10).clamp(1, 50);
-    let per_note_cap = query.per_note_cap.unwrap_or(2).clamp(1, 10);
-    let mode = query.mode.unwrap_or_default();
-
     let cache = state.startup_sqlite.clone();
     let vaults = state.vaults.clone();
     let surface = BrowseSurface::for_demo_mode(state.demo_mode);
-    // #109: a demo has no operator and no layer toggle, so the selector is not
-    // an escape hatch out of the default surface. Clamping here rather than
-    // rejecting the query keeps a saved link with `?layers=` working and
-    // returning the same results an unadorned search would, so the demoted
-    // Notes' existence cannot be inferred from a differing error either.
-    let layers = match surface {
-        BrowseSurface::Everything => parse_layer_selection(query.layers.as_deref()),
-        BrowseSurface::DefaultOnly => LayerSelection::default_surface(),
-    };
     let embedder = state.embedder.clone();
     let request = VaultSearchRequest {
         scope,
         query: query.q,
-        mode,
-        limit,
-        per_note_cap,
-        filters: NoteFilters::default(),
-        include_properties: Vec::new(),
-        layers,
+        mode: query.mode.unwrap_or_default(),
+        limit: clamp_search_limit(query.limit),
+        per_note_cap: clamp_search_per_note_cap(query.per_note_cap),
+        layers: surface.layer_selection(query.layers.as_deref()),
     };
     // Query embedding (semantic mode) and SQLite work both run off the async
     // runtime, mirroring the legacy `search_handler`.
@@ -297,52 +211,16 @@ pub async fn vault_scope_search_handler(
 mod tests {
     use super::*;
 
+    /// The adapter's own mapping test: a scope the core refuses becomes this
+    /// route's `400`. What counts as a valid scope is the core's decision and
+    /// is tested there.
     #[test]
-    fn parse_vault_scope_accepts_all_and_canonical_ids_and_rejects_everything_else() {
-        assert_eq!(
-            parse_vault_scope("all").expect("all parses"),
-            VaultScope::All
-        );
-
-        let vault_id = VaultId::generate().expect("generate Vault id");
-        assert_eq!(
-            parse_vault_scope(&vault_id.to_string()).expect("uuid parses"),
-            VaultScope::One(vault_id)
-        );
-
-        let error = parse_vault_scope("not-a-scope").expect_err("malformed scope rejected");
+    fn a_malformed_scope_segment_is_a_structured_400() {
+        let error = VaultScope::parse("not-a-scope").expect_err("malformed scope rejected");
         assert_eq!(error.code, "invalid_scope");
-
-        let error = parse_vault_scope("All").expect_err("case-sensitive literal only");
-        assert_eq!(error.code, "invalid_scope");
-    }
-
-    #[test]
-    fn parse_layer_selection_matches_default_all_and_named_token_semantics() {
         assert_eq!(
-            parse_layer_selection(None),
-            LayerSelection::default_surface()
-        );
-        assert_eq!(
-            parse_layer_selection(Some("")),
-            LayerSelection::default_surface()
-        );
-        assert_eq!(parse_layer_selection(Some("all")), LayerSelection::All);
-        assert_eq!(parse_layer_selection(Some("ALL")), LayerSelection::All);
-
-        assert_eq!(
-            parse_layer_selection(Some("sources")),
-            LayerSelection::Set {
-                include_default: false,
-                layers: ["sources".to_string()].into_iter().collect(),
-            }
-        );
-        assert_eq!(
-            parse_layer_selection(Some("default, sources")),
-            LayerSelection::Set {
-                include_default: true,
-                layers: ["sources".to_string()].into_iter().collect(),
-            }
+            vault_read_error_response(error).status(),
+            StatusCode::BAD_REQUEST
         );
     }
 }

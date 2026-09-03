@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
@@ -8,15 +11,36 @@ use base64::Engine;
 
 use crate::api_types::ErrorResponse;
 
-/// Compare two byte strings without short-circuiting on the first differing
-/// byte. Length is allowed to leak (returns early), which is acceptable for the
-/// fixed-length tokens used here.
+#[cfg(test)]
+thread_local! {
+    static COMPARISON_WORK: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_comparison_work() {
+    COMPARISON_WORK.with(|work| work.set(0));
+}
+
+#[cfg(test)]
+fn comparison_work() -> usize {
+    COMPARISON_WORK.with(Cell::get)
+}
+
+#[cfg(test)]
+fn record_comparison_work() {
+    COMPARISON_WORK.with(|work| work.set(work.get() + 1));
+}
+
+/// Compare two bearer credentials without short-circuiting. Configuration
+/// permits arbitrary token strings, so first derive fixed-size BLAKE3
+/// representations before doing the fixed-width comparison.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let a = blake3::hash(a);
+    let b = blake3::hash(b);
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (x, y) in a.as_bytes().iter().zip(b.as_bytes()) {
+        #[cfg(test)]
+        record_comparison_work();
         diff |= x ^ y;
     }
     diff == 0
@@ -85,9 +109,10 @@ pub fn redact_query_token(query: &str) -> String {
         .join("&")
 }
 
-/// Tokens accepted by the attachment route. The web credential is fixed at
-/// startup, while the MCP credential is read from a live snapshot per request
-/// so an operator can rotate it without leaving the old one authorized.
+/// Tokens accepted by the attachment routes, inbound and outbound. The web
+/// credential is fixed at startup, while the MCP credential is read from a
+/// live snapshot per request so an operator can rotate it without leaving the
+/// old one authorized.
 #[derive(Clone)]
 pub(crate) struct WebOrLiveMcpToken {
     pub(crate) web: Option<Arc<str>>,
@@ -142,6 +167,125 @@ pub(crate) async fn require_web_or_live_mcp_token(
     } else {
         unauthorized()
     }
+}
+
+/// State for the asset-read gate: the web credential, the live snapshot the MCP
+/// credential is read from, and the `/mcp` transport's own rate limiter, shared
+/// so an MCP-authenticated asset read spends the same budget a tool call does.
+#[derive(Clone)]
+pub struct AssetReadTokens {
+    pub(crate) web: Arc<str>,
+    pub(crate) runtime_config: crate::runtime_config::RuntimeConfig,
+    pub(crate) limiter: Arc<crate::mcp::limits::RateLimiter>,
+}
+
+/// Marks a request admitted on the MCP bearer token rather than the web one, and
+/// carries the byte ceiling that credential is allowed to read through this
+/// route. Absent on a web-token request, which keeps the route's own larger
+/// bound.
+#[derive(Clone, Copy)]
+pub struct McpAssetRead {
+    pub(crate) max_bytes: u64,
+}
+
+/// Middleware enforcing either the web bearer token or the current MCP bearer
+/// token on the asset *read* route, which `get_attachment`'s default
+/// `download_url` points at (#176).
+///
+/// Three differences from [`require_web_or_live_mcp_token`], all following from
+/// this being a read rather than a write:
+///
+/// - The web token may still arrive as an `access_token` query parameter, because
+///   the browser reaches this route through `<img>` tags and download
+///   navigations that cannot set headers. The MCP token is header-only: an MCP
+///   client is always an out-of-band HTTP client, and keeping the credential out
+///   of the query string keeps it out of the request trace span.
+/// - A matching MCP bearer token is accepted whenever MCP is enabled, without
+///   requiring write mode. Disabling MCP is still an immediate revocation,
+///   checked per request.
+/// - Admission on the MCP token is *not* equivalent to admission on the web
+///   token, and the two guards below are what make the difference safe. An MCP
+///   client reading attachment bytes over `/mcp` is bounded by
+///   `HATCHDOOR_MCP_MAX_BASE64_BYTES` and by the #171 tool quota and concurrency
+///   caps; this route's own bound is far larger (64 MiB) and it sits outside the
+///   `/mcp` transport entirely. Left alone, the `download_url` would hand that
+///   credential a way around both limits. So an MCP-admitted request spends the
+///   same quota and concurrency budget a tool call spends, and carries
+///   [`McpAssetRead`] so the handler applies the same byte ceiling.
+pub(crate) async fn require_web_or_live_mcp_read_token(
+    State(tokens): State<AssetReadTokens>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let mcp = match crate::mcp::McpConfig::from_snapshot(&tokens.runtime_config.snapshot()) {
+        Ok(config) => config,
+        // A malformed runtime configuration must never turn this security gate
+        // into an unauthenticated asset route.
+        Err(_) => return unauthorized(),
+    };
+
+    if request_is_authorized(&request, tokens.web.as_bytes()) {
+        return next.run(request).await;
+    }
+
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let matches_mcp = presented.as_deref().is_some_and(|presented| {
+        mcp.enabled
+            && mcp
+                .bearer_token
+                .as_deref()
+                .is_some_and(|expected| constant_time_eq(presented.as_bytes(), expected.as_bytes()))
+    });
+    if !matches_mcp {
+        return unauthorized();
+    }
+
+    request.extensions_mut().insert(McpAssetRead {
+        max_bytes: mcp.max_base64_bytes,
+    });
+
+    if !mcp.rate_limits_enabled {
+        return next.run(request).await;
+    }
+
+    // Same order the `/mcp` transport uses: a concurrency rejection must not
+    // also spend quota on a request that never reached the handler.
+    let token = crate::mcp::subscriptions::McpBearerToken(Arc::from(
+        presented.expect("an MCP match presented a token"),
+    ));
+    let guard = match tokens
+        .limiter
+        .try_acquire(crate::mcp::limits::RequestClass::ToolCall)
+        .await
+    {
+        Ok(guard) => guard,
+        Err(retry_in) => return too_many_requests(retry_in),
+    };
+    if let Err(retry_in) = tokens
+        .limiter
+        .check_quota(&token, std::time::Instant::now())
+    {
+        return too_many_requests(retry_in);
+    }
+    let response = next.run(request).await;
+    drop(guard);
+    response
+}
+
+fn too_many_requests(retry_in: std::time::Duration) -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(
+            header::RETRY_AFTER,
+            crate::mcp::limits::retry_after_seconds(retry_in).to_string(),
+        )],
+    )
+        .into_response()
 }
 
 fn access_token_from_query(query: &str) -> Option<String> {
@@ -218,6 +362,55 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"secre"));
         assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn bearer_comparison_uses_fixed_work_for_equal_and_unequal_lengths() {
+        let expected = b"an arbitrary configured bearer token";
+        let attempts: [(&[u8], bool); 3] = [
+            (expected, true),
+            (b"an arbitrary configured bearer tokem", false),
+            (b"wrong", false),
+        ];
+
+        let mut observed_work = Vec::new();
+        for (presented, accepted) in attempts {
+            reset_comparison_work();
+            assert_eq!(constant_time_eq(presented, expected), accepted);
+            observed_work.push(comparison_work());
+        }
+
+        assert_eq!(observed_work, vec![32, 32, 32]);
+    }
+
+    #[test]
+    fn web_bearer_authorization_keeps_header_and_query_credentials_strict() {
+        let expected = b"an arbitrary configured bearer token";
+        for (uri, header, accepted) in [
+            (
+                "/protected",
+                Some("Bearer an arbitrary configured bearer token"),
+                true,
+            ),
+            (
+                "/protected",
+                Some("Bearer an arbitrary configured bearer tokem"),
+                false,
+            ),
+            ("/protected", Some("Bearer wrong"), false),
+            (
+                "/protected?access_token=an%20arbitrary%20configured%20bearer%20token",
+                None,
+                true,
+            ),
+        ] {
+            let mut request = Request::builder().uri(uri);
+            if let Some(header) = header {
+                request = request.header(header::AUTHORIZATION, header);
+            }
+            let request = request.body(axum::body::Body::empty()).expect("request");
+            assert_eq!(request_is_authorized(&request, expected), accepted, "{uri}");
+        }
     }
 
     #[test]

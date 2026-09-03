@@ -271,6 +271,45 @@ pub(super) fn relative_link_target(
     }
 }
 
+/// The vault-relative path of a directory that sits inside `vault_root`, as a
+/// `/`-joined string; the empty string for the vault root itself.
+pub(super) fn vault_relative_dir(vault_root: &Path, dir: &Path) -> Option<String> {
+    let relative = dir.strip_prefix(vault_root).ok()?;
+    Some(path_parts(relative)?.join("/"))
+}
+
+/// Resolve a note-relative asset reference against the folder the note lives
+/// in, collapsing `.` and `..` lexically, and return the result as a
+/// vault-relative path. `None` when the reference climbs out of the vault root
+/// or is not representable as plain UTF-8 components under it.
+///
+/// The collapsing has to happen here rather than being left to the kernel: the
+/// low-level opener walks a path one plain name at a time with `openat`, so any
+/// `..` that survives into a planned move is refused as an unsupported
+/// component (#225). Resolving lexically also keeps the check honest for a
+/// destination that does not exist yet.
+pub(super) fn resolve_reference_inside_root(
+    vault_root: &Path,
+    note_dir: &Path,
+    reference: &Path,
+) -> Option<String> {
+    let mut parts = path_parts(note_dir.strip_prefix(vault_root).ok()?)?;
+    for component in reference.components() {
+        match component {
+            Component::Normal(value) => parts.push(value.to_str()?.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(parts.join("/"))
+}
+
 fn path_parts(path: &Path) -> Option<Vec<String>> {
     let mut parts = Vec::new();
     for component in path.components() {

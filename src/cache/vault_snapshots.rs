@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::cache::{BuildOptions, SqliteCache};
+use crate::cache::{BuildHandles, BuildOptions, SqliteCache};
 use crate::embed::Embedder;
 use crate::vault::{NoteMetadata, VaultIndex};
 use crate::vault_registry::VaultId;
@@ -32,6 +32,31 @@ pub(crate) struct VaultSnapshotStatus {
     /// rebuilds it, so folding the two into one enum would produce states no
     /// caller could represent.
     pub(crate) searchable: bool,
+}
+
+/// How an Index turn hands its Vault's foreground mutation guard through a
+/// candidate build (issue #223).
+///
+/// The build reads the Vault from disk, then embeds, then publishes. Only the
+/// first of those three touches a filesystem path, and only the first needs
+/// the guard every HTTP and MCP Markdown write takes first. Holding it across
+/// the embedding pass — minutes on a CPU-only host — parks every write behind
+/// a turn that is no longer reading anything.
+///
+/// Supplied only by the Vault-work executor. Every other caller builds with no
+/// guard to manage and publishes [`VaultSnapshotFreshness::Fresh`].
+pub(crate) struct MutationGuardHandoff {
+    /// Released the moment the last note's content is in memory. Until then
+    /// the build holds it, so it cannot observe half of a multi-file
+    /// foreground mutation; after it, a write no longer waits on embedding.
+    pub(crate) read_phase: tokio::sync::OwnedMutexGuard<()>,
+    /// Called immediately before publication. Retakes the guard and answers
+    /// whether a foreground mutation completed while it was released,
+    /// returning the still-held guard so the verdict and the publication it
+    /// labels share one acquisition — the answer cannot change in between.
+    /// Runs on the build's blocking thread, so it may block.
+    pub(crate) freshness_at_publication:
+        Box<dyn FnOnce() -> (VaultSnapshotFreshness, tokio::sync::OwnedMutexGuard<()>) + Send>,
 }
 
 /// One Vault's complete published read snapshot. This is intentionally a
@@ -135,9 +160,14 @@ impl SqliteCache {
             embedder,
             embed_layers,
             None,
+            None,
         )
     }
 
+    /// `mutation_guard` is the Index turn's hold on this Vault's foreground
+    /// mutation lock, released at the read/embed boundary inside the build and
+    /// retaken to publish. See [`MutationGuardHandoff`]; `None` builds exactly
+    /// as before and publishes fresh.
     pub(crate) fn replace_vault_snapshot_with_embed_layers_and_progress(
         &self,
         vault_id: VaultId,
@@ -145,6 +175,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         embed_layers: bool,
         on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
+        mutation_guard: Option<MutationGuardHandoff>,
     ) -> Result<(), String> {
         let _epoch = self
             .snapshot_model_epoch
@@ -157,6 +188,13 @@ impl SqliteCache {
         // vector spaces.
         self.reset_if_embedder_changed(embedder)?;
         let attempt = self.begin_vault_snapshot_attempt(vault_id)?;
+        let (vault_read_guard, freshness_at_publication) = match mutation_guard {
+            Some(handoff) => (
+                Some(handoff.read_phase),
+                Some(handoff.freshness_at_publication),
+            ),
+            None => (None, None),
+        };
         let result = (|| {
             let candidate = SqliteCache::in_memory(embedder.embedding_dim())?;
             // Seed the empty candidate with this Vault's published rows so the
@@ -175,11 +213,30 @@ impl SqliteCache {
             candidate.replace_with_options(
                 index,
                 embedder,
-                on_progress,
+                BuildHandles {
+                    on_progress,
+                    vault_read_guard,
+                },
                 embed_layers,
                 &BuildOptions::default(),
             )?;
-            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity(), true)
+            // The verdict comes back with the guard that makes it true, and
+            // that guard outlives the publication below.
+            let (freshness, _published_under_guard) = match freshness_at_publication {
+                Some(verdict) => {
+                    let (freshness, guard) = verdict();
+                    (freshness, Some(guard))
+                }
+                None => (VaultSnapshotFreshness::Fresh, None),
+            };
+            self.publish_vault_candidate(
+                vault_id,
+                attempt,
+                &candidate,
+                &embedder.identity(),
+                true,
+                freshness,
+            )
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -224,14 +281,24 @@ impl SqliteCache {
             candidate.replace_with_options(
                 index,
                 embedder,
-                None,
+                // No read guard to hand over: the Index turn still holds its
+                // own across this pass — which reads every note's content —
+                // and releases it inside the embedding build that follows.
+                BuildHandles::default(),
                 embed_layers,
                 &BuildOptions {
                     embed: false,
                     ..BuildOptions::default()
                 },
             )?;
-            self.publish_vault_candidate(vault_id, attempt, &candidate, &embedder.identity(), false)
+            self.publish_vault_candidate(
+                vault_id,
+                attempt,
+                &candidate,
+                &embedder.identity(),
+                false,
+                VaultSnapshotFreshness::Fresh,
+            )
         })();
         if result.is_err() {
             self.mark_vault_snapshot_stale_if_current(vault_id, attempt)?;
@@ -699,6 +766,14 @@ impl SqliteCache {
     /// `searchable` records whether this generation carries vectors. A
     /// structure-only generation publishes with `false`; the embedding pass
     /// that follows republishes the same Vault with `true`.
+    ///
+    /// `freshness` is the caller's verdict on whether this generation still
+    /// describes the authoritative Markdown. A build that held the Vault's
+    /// foreground mutation guard from its first read to here publishes
+    /// `Fresh`; one that released the guard across its embedding pass
+    /// publishes `Stale` when a foreground mutation landed while it was
+    /// released (issue #223). A stale generation still participates and still
+    /// answers search — it is labelled, not withheld.
     fn publish_vault_candidate(
         &self,
         vault_id: VaultId,
@@ -706,6 +781,7 @@ impl SqliteCache {
         candidate: &SqliteCache,
         embedder_identity: &str,
         searchable: bool,
+        freshness: VaultSnapshotFreshness,
     ) -> Result<(), String> {
         let source = candidate.read()?;
         let attempts = self
@@ -722,10 +798,14 @@ impl SqliteCache {
             .map_err(|error| format!("start Vault snapshot publication: {error}"))?;
 
         delete_vault_snapshot(&tx, &vault_id)?;
+        let freshness = match freshness {
+            VaultSnapshotFreshness::Fresh => "fresh",
+            VaultSnapshotFreshness::Stale => "stale",
+        };
         tx.execute(
             "INSERT INTO vault_snapshots(vault_id, participating, freshness, searchable) \
-             VALUES (?1, 1, 'fresh', ?2)",
-            params![vault_id, i64::from(searchable)],
+             VALUES (?1, 1, ?2, ?3)",
+            params![vault_id, freshness, i64::from(searchable)],
         )
         .map_err(|error| format!("create Vault snapshot: {error}"))?;
 
@@ -1661,6 +1741,171 @@ mod tests {
                 .as_deref(),
             Some("# Home\n\nhome body, rewritten"),
             "the edit must still reach the published snapshot"
+        );
+    }
+
+    /// A slug is derived from a note's filename alone, so two notes with the
+    /// same stem in different folders compete for it and the index build hands
+    /// it to whichever path sorts first. The Index turn seeds its candidate
+    /// from the published snapshot, where the old holder still owns the slug,
+    /// so the new note's insert used to hit `notes.slug` and fail the turn -
+    /// forever, since the next turn seeds from the same unchanged snapshot
+    /// (issue #226).
+    #[test]
+    fn a_duplicate_filename_stem_in_another_folder_publishes_a_fresh_generation() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, first_index) = index(&[
+            ("Home.md", "# Home\n\nhome body"),
+            ("Projects/Overview.md", "# Overview\n\nprojects body"),
+        ]);
+        let embedder = CountingEmbedder::new();
+        cache
+            .replace_vault_snapshot(id, &first_index, &embedder)
+            .expect("publish the first snapshot");
+
+        std::fs::create_dir_all(directory.path().join("Archive")).expect("archive dir");
+        std::fs::write(
+            directory.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("add the colliding note");
+        let collided = VaultIndex::build(directory.path()).expect("rebuild index");
+        embedder.reset();
+
+        cache
+            .replace_vault_snapshot(id, &collided, &embedder)
+            .expect("a duplicate filename stem must not fail the Index turn");
+
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
+            }),
+            "the turn succeeded, so collection reads must stop reporting a stale \
+             participant - a collection read's `partial` is exactly \
+             `any(state != Fresh)` over these participants"
+        );
+        let read = cache
+            .read_vault_snapshot(id)
+            .expect("read snapshot")
+            .expect("snapshot participates")
+            .read;
+        assert_eq!(read.notes.len(), 3, "every visible note is published");
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "overview")
+                .expect("content")
+                .as_deref(),
+            Some("# Overview\n\narchive body"),
+            "the earlier-sorting path holds the undecorated slug"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "overview-2")
+                .expect("content")
+                .as_deref(),
+            Some("# Overview\n\nprojects body"),
+            "the note that lost the slug stays reachable under its new one"
+        );
+        assert_eq!(
+            cache
+                .snapshot_note_content(id, "home")
+                .expect("content")
+                .as_deref(),
+            Some("# Home\n\nhome body"),
+            "the untouched note is unaffected"
+        );
+        assert_eq!(
+            embedder.embedded(),
+            2,
+            "only the new note and the one whose slug moved may be re-embedded: \
+             an unchanged note still reuses its published vectors"
+        );
+    }
+
+    /// The wedge this bug produced: the prior generation is retained and marked
+    /// stale by a failed turn, and nothing republishes it. One successful turn
+    /// over the same duplicate-stem Vault has to clear that on its own, with no
+    /// file deleted and no cache wiped. The failed turn is staged here through
+    /// the one failure mode a fixed build still has - a Vault that reads as
+    /// empty - because the slug collision itself can no longer fail a turn; what
+    /// matters is that recovery seeds from the same stale published snapshot the
+    /// real wedge leaves behind.
+    #[test]
+    fn a_stale_snapshot_recovers_on_the_first_turn_that_indexes_a_duplicate_stem() {
+        let cache = SqliteCache::in_memory(384).expect("open cache");
+        let id = vault_id("12345678-1234-4567-89ab-1234567890ab");
+        let (directory, first_index) =
+            index(&[("Projects/Overview.md", "# Overview\n\nprojects body")]);
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_vault_snapshot(id, &first_index, &embedder)
+            .expect("publish the first snapshot");
+
+        std::fs::create_dir_all(directory.path().join("Archive")).expect("archive dir");
+        std::fs::write(
+            directory.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("add the colliding note");
+        let collided = VaultIndex::build(directory.path()).expect("rebuild index");
+
+        // Strand the Vault exactly where a failed turn leaves it: the prior
+        // generation retained, searchable, and flagged stale.
+        std::fs::remove_file(directory.path().join("Archive/Overview.md")).expect("remove");
+        std::fs::remove_file(directory.path().join("Projects/Overview.md")).expect("remove");
+        assert!(
+            cache
+                .replace_vault_snapshot(id, &collided, &embedder)
+                .is_err(),
+            "a turn that can read nothing must fail and retain the prior generation"
+        );
+        assert_eq!(
+            cache
+                .snapshot_status(id)
+                .expect("read status")
+                .map(|status| status.freshness),
+            Some(VaultSnapshotFreshness::Stale),
+            "the Vault is now wedged the way the report describes"
+        );
+
+        std::fs::write(
+            directory.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("restore");
+        std::fs::write(
+            directory.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("restore");
+
+        cache
+            .replace_vault_snapshot(id, &collided, &embedder)
+            .expect("one successful turn must clear the wedge");
+
+        assert_eq!(
+            cache.snapshot_status(id).expect("read status"),
+            Some(VaultSnapshotStatus {
+                participating: true,
+                freshness: VaultSnapshotFreshness::Fresh,
+                searchable: true,
+            }),
+            "recovery takes no manual intervention"
+        );
+        assert_eq!(
+            cache
+                .read_vault_snapshot(id)
+                .expect("read snapshot")
+                .expect("snapshot participates")
+                .read
+                .notes
+                .len(),
+            2,
+            "both same-stem notes are published"
         );
     }
 

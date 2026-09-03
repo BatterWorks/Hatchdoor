@@ -19,9 +19,24 @@ Backend (Rust):
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all
+cargo test --all --all-features
 ```
+
+The offline benchmark harness — the `eval` and `index_microbench` binaries and
+the candle-backed embedders they sweep — sits behind the non-default `eval`
+feature, so a default build compiles none of it. That is why the checks run
+twice: the default run is what a deployment actually ships, and the all-features
+run is the only thing that compiles the gated lines and executes the harness's
+own test targets, which a default `cargo test` skips entirely. Without the
+second run, gated code rots with nothing to say so.
+
+`--all-features` also enables `embedder-tests`, whose tests load real model
+weights. The first such run downloads them from Hugging Face — allow for that
+once, and for the disk it costs; afterwards they come from the local cache. If
+you need an offline run, `cargo test --all --features eval` covers the harness
+without the model downloads.
 
 Frontend (`frontend/`):
 
@@ -49,6 +64,45 @@ before the fix, and new behavior with tests that cover it.
 
 Do not commit real vault content, private eval queries, tokens, generated cache
 databases, or local model caches.
+
+## Documentation freshness
+
+`docs/user-vault/` is the canonical source of the user documentation. Before
+merging into `development`, check whether your branch left it stale:
+
+```bash
+just docs-freshness
+```
+
+It reports which user-facing surfaces the branch changed and which notes claim
+to document each one. The surfaces cover MCP tools, the HTTP API, settings,
+Git-backed Vaults, vault lifecycle, search and indexing, layers, attachments,
+Markdown, note mutations, security, starter content, startup, the Web UI, and
+deployment; the authoritative list is the table in the script. It exits
+non-zero, because it cannot tell you whether a note still reads true; only
+reading it can.
+
+Read every note it names, update whatever drifted, then record the review:
+
+```bash
+just docs-freshness-ack
+```
+
+A note the script marks "edited on this branch" only means the file moved. That
+is not evidence it is correct. Acknowledging without reading defeats the gate.
+
+The script's surface-to-note table lives in
+[`scripts/check-docs-freshness.mjs`](scripts/check-docs-freshness.mjs). When you
+add a user-facing surface it does not know about, or rename a note it points at,
+update the table and check that every entry still resolves:
+
+```bash
+node scripts/check-docs-freshness.mjs --validate-table
+node --test scripts/check-docs-freshness.test.mjs
+```
+
+A rule whose source path no longer exists matches nothing and silently stops
+guarding the surface it names, so the table is verified rather than trusted.
 
 ## Claiming scoped work
 

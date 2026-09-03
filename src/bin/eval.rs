@@ -52,6 +52,25 @@ fn peak_rss_mb() -> f64 {
     usage.ru_maxrss as f64 / 1024.0
 }
 
+/// Refuse to query a disposable eval cache whose vectors came from any
+/// representation other than the active embedder. Dimensions alone are not an
+/// embedding-space identity: model, max sequence length, document format, and
+/// Matryoshka truncation are all encoded by `Embedder::identity()`.
+fn validate_cache_embedder_identity(
+    cache: &hatchdoor::cache::SqliteCache,
+    embedder: &dyn Embedder,
+) -> Result<(), String> {
+    let expected = embedder.identity();
+    match cache.get_metadata("embedder_id")? {
+        Some(stamped) if stamped == expected => Ok(()),
+        Some(stamped) => Err(format!(
+            "cache was built with embedder {stamped} but the active embedder is {expected}. \
+             Rebuild the cache with this representation."
+        )),
+        None => Err("cache has no embedder_id stamp; rebuild it.".to_string()),
+    }
+}
+
 fn print_usage() {
     eprintln!(
         "usage:
@@ -328,10 +347,11 @@ fn main() -> ExitCode {
 
             let build_started_at = chrono::Utc::now();
             let started = std::time::Instant::now();
+            let embedder_id = embedder.identity();
             if let Err(e) = sqlite.replace_from_index_with_options_stamped(
                 &index,
                 embedder.as_ref(),
-                &model,
+                &embedder_id,
                 &opts,
             ) {
                 eprintln!("error populating cache: {e}");
@@ -413,20 +433,9 @@ fn main() -> ExitCode {
                 }
             };
 
-            let stamped = sqlite.get_metadata("embedder_id").unwrap_or(None);
-            match stamped.as_deref() {
-                Some(id) if id == model => {}
-                Some(id) => {
-                    eprintln!(
-                        "error: cache was built with embedder {id} but --model is {model}. \
-                         Rebuild the cache or pass --model {id}."
-                    );
-                    return ExitCode::from(1);
-                }
-                None => {
-                    eprintln!("error: cache has no embedder_id stamp; rebuild it.");
-                    return ExitCode::from(1);
-                }
+            if let Err(error) = validate_cache_embedder_identity(&sqlite, embedder.as_ref()) {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
             }
 
             let meta_str = |key: &str| sqlite.get_metadata(key).ok().flatten();
@@ -590,6 +599,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            if let Err(error) = validate_cache_embedder_identity(&sqlite, embedder.as_ref()) {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
             let qs = match hatchdoor::eval::query::load_jsonl(&queries) {
                 Ok(q) => q,
                 Err(e) => {
@@ -626,6 +639,52 @@ fn main() -> ExitCode {
             println!("  Recall@10 (all): {:.3}", report.recall_at_10_all);
             println!("  MRR           : {:.3}", report.mrr);
             println!("  FP-rate@5     : {:.3}", report.fp_rate_at_5);
+            match report.correct_heading_rate {
+                Some(rate) => println!("  Correct-heading: {rate:.3}"),
+                None => println!("  Correct-heading: n/a (no heading-scoped queries)"),
+            }
+            for group in &report.per_category {
+                println!(
+                    "  [category {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3} heading={}",
+                    group.label,
+                    group.n,
+                    group.recall_at_5_any,
+                    group.recall_at_10_any,
+                    group.mrr,
+                    group
+                        .correct_heading_rate
+                        .map(|rate| format!("{rate:.3}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                );
+            }
+            for group in &report.per_tier {
+                println!(
+                    "  [tier     {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3} heading={}",
+                    group.label,
+                    group.n,
+                    group.recall_at_5_any,
+                    group.recall_at_10_any,
+                    group.mrr,
+                    group
+                        .correct_heading_rate
+                        .map(|rate| format!("{rate:.3}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                );
+            }
+            for group in &report.per_language {
+                println!(
+                    "  [language {:>14}] n={:<3} R@5={:.3} R@10={:.3} MRR={:.3} heading={}",
+                    group.label,
+                    group.n,
+                    group.recall_at_5_any,
+                    group.recall_at_10_any,
+                    group.mrr,
+                    group
+                        .correct_heading_rate
+                        .map(|rate| format!("{rate:.3}"))
+                        .unwrap_or_else(|| "n/a".to_string()),
+                );
+            }
             if let Some(s) = report.rerank_latency_ms {
                 println!(
                     "  rerank lat ms : median={:.1} p90={:.1} max={:.1}",
@@ -679,6 +738,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            if let Err(error) = validate_cache_embedder_identity(&sqlite, embedder.as_ref()) {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
             let qs = match hatchdoor::eval::query::load_jsonl(&queries) {
                 Ok(q) => q,
                 Err(e) => {
@@ -871,6 +934,10 @@ fn main() -> ExitCode {
                     return ExitCode::from(1);
                 }
             };
+            if let Err(error) = validate_cache_embedder_identity(&sqlite, embedder.as_ref()) {
+                eprintln!("error: {error}");
+                return ExitCode::from(1);
+            }
             let qs = match hatchdoor::eval::query::load_jsonl(&queries) {
                 Ok(q) => q,
                 Err(e) => {
@@ -1117,5 +1184,28 @@ mod tests {
             Cmd::Rerank { initial_k, .. } => assert_eq!(initial_k, 20),
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn cache_querying_modes_require_an_exact_embedder_identity() {
+        let cache = hatchdoor::cache::SqliteCache::in_memory(384).expect("cache");
+        let embedder = hatchdoor::embed::StubEmbedder::new(384);
+
+        cache
+            .set_metadata("embedder_id", "other-model-384")
+            .expect("stamp different same-dimension model");
+        let mismatch = validate_cache_embedder_identity(&cache, &embedder)
+            .expect_err("same-dimension identity mismatch must be rejected");
+        assert!(mismatch.contains("other-model-384"));
+        assert!(mismatch.contains("stub-384"));
+
+        cache
+            .connection()
+            .expect("connection")
+            .execute("DELETE FROM metadata WHERE key = 'embedder_id'", [])
+            .expect("remove stamp");
+        let missing = validate_cache_embedder_identity(&cache, &embedder)
+            .expect_err("unstamped cache must be rejected");
+        assert!(missing.contains("no embedder_id stamp"));
     }
 }

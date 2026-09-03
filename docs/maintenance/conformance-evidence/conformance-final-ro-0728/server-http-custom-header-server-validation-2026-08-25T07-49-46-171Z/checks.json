@@ -1,0 +1,109 @@
+[
+  {
+    "id": "sep-2243-server-no-xmcp-tool",
+    "name": "HttpCustomHeaderServerNoTool",
+    "description": "Server has no tools with x-mcp-header annotations to test",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:46.184Z",
+    "errorMessage": "Not testable: server exposes no tool with x-mcp-header annotations, so none of the custom-header validation requirements could be exercised",
+    "specReferences": [
+      {
+        "id": "SEP-2243-Custom-Headers",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "server exposes no tool with x-mcp-header annotations, so none of the custom-header validation requirements could be exercised"
+    }
+  },
+  {
+    "id": "sep-2243-server-decode-base64",
+    "name": "NotTestable",
+    "description": "Declared check sep-2243-server-decode-base64 is not testable against this server",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:46.185Z",
+    "errorMessage": "Not testable: server exposes no tool with x-mcp-header annotations",
+    "specReferences": [
+      {
+        "id": "SEP-2243-Custom-Headers",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "server exposes no tool with x-mcp-header annotations"
+    }
+  },
+  {
+    "id": "sep-2243-server-validate-param-match",
+    "name": "NotTestable",
+    "description": "Declared check sep-2243-server-validate-param-match is not testable against this server",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:46.185Z",
+    "errorMessage": "Not testable: server exposes no tool with x-mcp-header annotations",
+    "specReferences": [
+      {
+        "id": "SEP-2243-Custom-Headers",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "server exposes no tool with x-mcp-header annotations"
+    }
+  },
+  {
+    "id": "sep-2243-server-reject-invalid-param-chars",
+    "name": "NotTestable",
+    "description": "Declared check sep-2243-server-reject-invalid-param-chars is not testable against this server",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:46.185Z",
+    "errorMessage": "Not testable: server exposes no tool with x-mcp-header annotations",
+    "specReferences": [
+      {
+        "id": "SEP-2243-Custom-Headers",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "server exposes no tool with x-mcp-header annotations"
+    }
+  },
+  {
+    "id": "sep-2243-server-reject-param-mismatch",
+    "name": "NotTestable",
+    "description": "Declared check sep-2243-server-reject-param-mismatch is not testable against this server",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:49:46.185Z",
+    "errorMessage": "Not testable: server exposes no tool with x-mcp-header annotations",
+    "specReferences": [
+      {
+        "id": "SEP-2243-Custom-Headers",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/transports#server-behavior-for-custom-headers"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "server exposes no tool with x-mcp-header annotations"
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:49:46.185Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

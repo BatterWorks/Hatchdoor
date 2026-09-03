@@ -180,18 +180,45 @@ impl VaultWorkCoordinator {
         if !state.accepting_work || state.drained_vaults.contains(&vault_id) {
             return ScheduleResult::Rejected;
         }
-        let vault = state.vaults.entry(vault_id).or_default();
-        if vault.pending_kinds.contains(&kind) {
+        if state
+            .vaults
+            .get(&vault_id)
+            .is_some_and(|vault| vault.pending_kinds.contains(&kind))
+        {
             return ScheduleResult::Coalesced;
         }
+        state.enqueue(vault_id, kind);
+        drop(state);
+        self.shared.ready.notify_one();
+        ScheduleResult::Queued
+    }
 
-        vault.pending.push_back(kind);
-        vault.pending_kinds.insert(kind);
-        let enqueue_vault = !vault.queued;
-        if enqueue_vault {
-            vault.queued = true;
-            state.fifo.push_back(vault_id);
+    /// Request one operation for a Vault only if that operation is not
+    /// already active or pending for it, reporting `Coalesced` when it is.
+    ///
+    /// Unlike [`Self::request`], this never adds the one guaranteed rerun an
+    /// already-active turn would otherwise get. It exists for an automatic,
+    /// unattended producer — `git::ManagedGitScheduler::tick`'s due-check —
+    /// whose whole job is to not pile turns onto a Vault that is already
+    /// working: a rerun queued while a turn is active fires the instant that
+    /// turn's execution closure returns, before the turn's outcome has armed
+    /// backoff, which defeats backoff entirely on a long turn.
+    ///
+    /// The check and the enqueue happen under the one lock that owns the
+    /// answer, so there is no window between them and no second, separately
+    /// tracked notion of "is this Vault busy" to drift out of agreement with
+    /// this one (issue #127). A user-driven request — a manual sync or retry
+    /// — must still use [`Self::request`] and its guaranteed rerun: someone
+    /// explicitly asking for a resync is not a case this skip should swallow.
+    pub fn request_if_idle(&self, vault_id: VaultId, kind: VaultWorkKind) -> ScheduleResult {
+        let mut state = self.shared.state.lock().expect("Vault work queue poisoned");
+        if !state.accepting_work || state.drained_vaults.contains(&vault_id) {
+            return ScheduleResult::Rejected;
         }
+        if state.vault_has_work(vault_id, kind) {
+            return ScheduleResult::Coalesced;
+        }
+        state.enqueue(vault_id, kind);
         drop(state);
         self.shared.ready.notify_one();
         ScheduleResult::Queued
@@ -199,18 +226,14 @@ impl VaultWorkCoordinator {
 
     /// Whether `kind` is currently active or already pending for `vault_id`.
     ///
-    /// A read-only query over the same per-Vault state `request` itself
-    /// consults, so a caller that wants to avoid adding a redundant queued
-    /// turn (rather than relying on `request`'s own coalescing, which still
-    /// adds one guaranteed rerun for a Vault whose matching work is already
-    /// active) can check first without risking drift from a second,
-    /// independently tracked notion of "is this Vault busy."
+    /// A test-only observation of the queue's own per-Vault state. Production
+    /// callers that need to act on this answer must not read it and then act:
+    /// use [`Self::request_if_idle`], which decides and enqueues under one
+    /// lock.
+    #[cfg(test)]
     pub fn has_work(&self, vault_id: VaultId, kind: VaultWorkKind) -> bool {
         let state = self.shared.state.lock().expect("Vault work queue poisoned");
-        state
-            .vaults
-            .get(&vault_id)
-            .is_some_and(|vault| vault.active == Some(kind) || vault.pending_kinds.contains(&kind))
+        state.vault_has_work(vault_id, kind)
     }
 
     /// Reopen a Vault after runtime activation or restart reconstruction.
@@ -321,6 +344,26 @@ impl VaultWorkWorker {
 }
 
 impl QueueState {
+    /// Whether `kind` is currently active or already pending for `vault_id`.
+    fn vault_has_work(&self, vault_id: VaultId, kind: VaultWorkKind) -> bool {
+        self.vaults
+            .get(&vault_id)
+            .is_some_and(|vault| vault.active == Some(kind) || vault.pending_kinds.contains(&kind))
+    }
+
+    /// Append `kind` to `vault_id`'s pending work, taking a FIFO position for
+    /// the Vault if it does not already hold one. The caller has already
+    /// decided this turn is required.
+    fn enqueue(&mut self, vault_id: VaultId, kind: VaultWorkKind) {
+        let vault = self.vaults.entry(vault_id).or_default();
+        vault.pending.push_back(kind);
+        vault.pending_kinds.insert(kind);
+        if !vault.queued {
+            vault.queued = true;
+            self.fifo.push_back(vault_id);
+        }
+    }
+
     fn take_next(&mut self) -> Option<VaultWorkRequest> {
         let vault_id = self.fifo.pop_front()?;
         let (kind, requeue) = {
@@ -471,6 +514,95 @@ mod tests {
             worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) }),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn request_if_idle_adds_no_rerun_while_the_same_kind_is_active() {
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        let (coordinator, mut worker) = VaultWorkCoordinator::new();
+        assert_eq!(
+            coordinator.request_if_idle(vault, VaultWorkKind::Git),
+            ScheduleResult::Queued,
+            "an idle Vault's first automatic request is admitted"
+        );
+        assert_eq!(
+            coordinator.request_if_idle(vault, VaultWorkKind::Git),
+            ScheduleResult::Coalesced,
+            "a pending turn is not duplicated"
+        );
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let running = tokio::spawn({
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+                worker
+                    .run_next(move |_| {
+                        let started = started.clone();
+                        let release = release.clone();
+                        async move {
+                            started.notify_one();
+                            release.notified().await;
+                            Ok::<(), VaultWorkError>(())
+                        }
+                    })
+                    .await
+                    .expect("active turn");
+                worker
+            }
+        });
+
+        started.notified().await;
+        assert_eq!(
+            coordinator.request_if_idle(vault, VaultWorkKind::Git),
+            ScheduleResult::Coalesced,
+            "an automatic request must not pre-queue a rerun that would fire \
+             before the active turn's outcome can arm backoff"
+        );
+        assert_eq!(
+            coordinator.request_if_idle(vault, VaultWorkKind::Index),
+            ScheduleResult::Queued,
+            "a different kind for the same Vault is unaffected"
+        );
+        release.notify_one();
+
+        let mut worker = running.await.expect("worker task");
+        let next = worker
+            .run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            .await
+            .expect("the Index turn queued during the active Git turn");
+        assert_eq!(
+            next.request,
+            VaultWorkRequest::new(vault, VaultWorkKind::Index)
+        );
+        assert!(
+            timeout(
+                Duration::from_millis(25),
+                worker.run_next(|_| async { Ok::<(), VaultWorkError>(()) })
+            )
+            .await
+            .is_err(),
+            "no Git rerun was queued by the skipped automatic requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_if_idle_is_rejected_for_a_drained_or_shut_down_vault() {
+        let vault = vault_id("00000000-0000-4000-8000-000000000001");
+        let (coordinator, _worker) = VaultWorkCoordinator::new();
+        coordinator.drain_vault(vault);
+        assert_eq!(
+            coordinator.request_if_idle(vault, VaultWorkKind::Git),
+            ScheduleResult::Rejected
+        );
+
+        let other = vault_id("00000000-0000-4000-8000-000000000002");
+        coordinator.shutdown();
+        assert_eq!(
+            coordinator.request_if_idle(other, VaultWorkKind::Git),
+            ScheduleResult::Rejected
+        );
     }
 
     #[tokio::test]

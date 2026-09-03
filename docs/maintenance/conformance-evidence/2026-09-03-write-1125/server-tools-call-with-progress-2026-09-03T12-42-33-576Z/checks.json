@@ -1,0 +1,33 @@
+[
+  {
+    "id": "tools-call-with-progress",
+    "name": "ToolsCallWithProgress",
+    "description": "Tool reports progress notifications",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:42:33.588Z",
+    "errorMessage": "Failed: Unknown MCP tool: test_tool_with_progress",
+    "specReferences": [
+      {
+        "id": "MCP-Progress",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/progress"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:33.588Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 5,
+      "violations": []
+    }
+  }
+]

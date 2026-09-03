@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use std::io;
 use std::path::PathBuf;
 
@@ -15,7 +16,7 @@ pub struct WriteOutcome {
     pub affected_paths: Vec<std::path::PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, JsonSchema)]
 pub struct AttachmentInfo {
     pub relative_path: String,
     pub size_bytes: u64,

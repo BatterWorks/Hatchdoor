@@ -1,0 +1,33 @@
+[
+  {
+    "id": "tasks-request-state-removal-setup",
+    "name": "TasksRequestStateRemovalSetup",
+    "description": "Failed to create a long-running task to exercise the absence-asserts",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:42:51.792Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:51.792Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

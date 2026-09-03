@@ -1,0 +1,33 @@
+[
+  {
+    "id": "tools-call-audio",
+    "name": "ToolsCallAudio",
+    "description": "Tool returns audio content",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:46:15.141Z",
+    "errorMessage": "Failed: Streamable HTTP error: Error POSTing to endpoint: MCP tool-call limit reached; retry later",
+    "specReferences": [
+      {
+        "id": "MCP-Tools-Call",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:46:15.141Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 4,
+      "violations": []
+    }
+  }
+]

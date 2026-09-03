@@ -56,6 +56,20 @@ impl Default for BuildOptions {
     }
 }
 
+/// What one *running* build's caller hands it beyond the index and options:
+/// where to report progress, and the Vault lock it holds only while the build
+/// is still reading Markdown from disk.
+#[derive(Default)]
+pub(crate) struct BuildHandles {
+    pub(crate) on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+    /// The Index turn's foreground mutation guard, dropped the moment the last
+    /// note's content is in memory, so a foreground writer does not wait out
+    /// the embedding pass that follows (issue #223). Everything past that point
+    /// is in-memory work and SQLite writes to this cache; nothing downstream
+    /// opens a Vault path. `None` for a caller holding no such lock.
+    pub(crate) vault_read_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
 pub enum UpsertOutcome {
     /// The note row was written; `content` is the file text already read (and
     /// hashed) during the upsert, threaded on so chunking reuses it instead of
@@ -104,7 +118,10 @@ impl SqliteCache {
         self.replace_with_options(
             index,
             embedder,
-            on_progress,
+            BuildHandles {
+                on_progress,
+                ..BuildHandles::default()
+            },
             embed_layers,
             &BuildOptions::default(),
         )
@@ -118,7 +135,7 @@ impl SqliteCache {
         embedder: &dyn Embedder,
         opts: &BuildOptions,
     ) -> Result<(), String> {
-        self.replace_with_options(index, embedder, None, true, opts)
+        self.replace_with_options(index, embedder, BuildHandles::default(), true, opts)
     }
 
     /// Core populate. `embed_layers` (`HATCHDOOR_EMBED_LAYERS`, default true)
@@ -130,7 +147,7 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        handles: BuildHandles,
         embed_layers: bool,
         opts: &BuildOptions,
     ) -> Result<(), String> {
@@ -138,7 +155,7 @@ impl SqliteCache {
             .snapshot_model_epoch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        self.replace_with_options_unlocked(index, embedder, on_progress, embed_layers, opts, None)
+        self.replace_with_options_unlocked(index, embedder, handles, embed_layers, opts, None)
     }
 
     /// Callers hold `snapshot_model_epoch`. `build_stamp` carries the metadata a
@@ -148,11 +165,15 @@ impl SqliteCache {
         &self,
         index: &VaultIndex,
         embedder: &dyn Embedder,
-        on_progress: Option<Arc<dyn Fn(IndexingProgressSnapshot) + Send + Sync>>,
+        handles: BuildHandles,
         embed_layers: bool,
         opts: &BuildOptions,
         build_stamp: Option<BuildStamp>,
     ) -> Result<(), String> {
+        let BuildHandles {
+            on_progress,
+            vault_read_guard,
+        } = handles;
         // If the embedding model changed since the last build, rebuild from
         // scratch so no vectors from the old model are reused (mixed-model vector
         // spaces make cosine/L2 distances meaningless).
@@ -236,21 +257,41 @@ impl SqliteCache {
         let layer_catalog_json = serde_json::to_string(&layer_catalog)
             .map_err(|e| format!("failed serializing layer catalog: {e}"))?;
 
-        let current_paths = entries
+        let slug_by_path = entries
             .iter()
-            .map(|entry| entry.relative_path.clone())
-            .collect::<HashSet<_>>();
+            .map(|entry| (entry.relative_path.as_str(), entry.slug.as_str()))
+            .collect::<HashMap<_, _>>();
         let now = current_unix_timestamp();
         let mut conn = self.connection()?;
         let tx = conn
             .transaction()
             .map_err(|e| format!("failed to start SQLite cache refresh: {e}"))?;
 
-        let cached_paths = cached_relative_paths(&tx)?;
-        let is_incremental_refresh = !cached_paths.is_empty();
-        for cached_path in cached_paths {
-            if !current_paths.contains(&cached_path) {
-                delete_note_by_relative_path(&tx, &cached_path)?;
+        // Drop every cached row that will not still be holding its slug when
+        // this pass ends: the notes that left the Vault, and the notes whose
+        // slug moved to another path. Both have to go before the first insert
+        // below, because `notes` constrains `slug` as well as `relative_path`
+        // and the note upsert can only resolve a `relative_path` conflict.
+        //
+        // A slug moves for an ordinary reason: it is derived from a filename
+        // alone, so adding `Archive/Overview.md` beside an indexed
+        // `Projects/Overview.md` hands `overview` to the new note and
+        // `overview-2` to the old one. Insert the new note while the old row
+        // still holds `overview` and the turn dies on the slug constraint -
+        // and it dies there on every following turn too, because each one
+        // seeds its candidate from the same published snapshot (issue #226).
+        //
+        // This runs before any note is read, so a slug-mover that happens to be
+        // unreadable on this pass loses its row and drops out of the generation
+        // this pass publishes, rather than being retained the way the per-note
+        // loop below retains an unreadable note. Retaining it is not available:
+        // its row is precisely the one holding a slug another note is about to
+        // claim. It returns on the first turn that can read it again.
+        let cached_slugs = cached_note_paths_and_slugs(&tx)?;
+        let is_incremental_refresh = !cached_slugs.is_empty();
+        for (cached_path, cached_slug) in &cached_slugs {
+            if slug_by_path.get(cached_path.as_str()) != Some(&cached_slug.as_str()) {
+                delete_note_by_relative_path(&tx, cached_path)?;
             }
         }
 
@@ -316,6 +357,13 @@ impl SqliteCache {
                 }
             }
         }
+
+        // Every note's content is in memory and nothing below opens a Vault
+        // path again, so the Index turn's foreground mutation guard has done
+        // its job: it kept this loop from reading half of a multi-file
+        // mutation. Holding it any longer would only park the next write
+        // behind the embedding pass (issue #223).
+        drop(vault_read_guard);
 
         // Tolerating individual unreadable files must not extend to a Vault
         // that has become unreadable as a whole — an unmounted volume or a
@@ -502,7 +550,7 @@ impl SqliteCache {
         self.replace_with_options_unlocked(
             index,
             embedder,
-            None,
+            BuildHandles::default(),
             true,
             opts,
             Some(BuildStamp {
@@ -966,12 +1014,17 @@ struct CachedNoteState {
     snapshot: FileSnapshot,
 }
 
-fn cached_relative_paths(tx: &Transaction<'_>) -> Result<Vec<String>, String> {
+/// Every cached note as `(relative_path, slug)`. The pass needs both: the path
+/// says whether the note still exists, and the slug says whether this row is
+/// still the one entitled to hold it.
+fn cached_note_paths_and_slugs(tx: &Transaction<'_>) -> Result<Vec<(String, String)>, String> {
     let mut stmt = tx
-        .prepare("SELECT relative_path FROM notes")
+        .prepare("SELECT relative_path, slug FROM notes")
         .map_err(|error| format!("failed to prepare cached path query: {error}"))?;
     let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| format!("failed to query cached note paths: {error}"))?;
 
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1127,6 +1180,11 @@ fn retain_vanished_classifications(
         .collect()
 }
 
+/// Requires that the caller has already dropped every cached row not entitled
+/// to the slug it holds. Under that precondition a surviving row at
+/// `entry.relative_path` always carries `entry.slug`, and `entry.slug` is held
+/// by no other row, so the upsert below can settle everything through its
+/// `relative_path` conflict target.
 fn upsert_note_if_changed(
     tx: &Transaction<'_>,
     entry: &NoteEntry,
@@ -1168,12 +1226,6 @@ fn upsert_note_if_changed(
             update_note_file_metadata(tx, entry, &content, snapshot, indexed_at)?;
             return Ok(UpsertOutcome::Unchanged);
         }
-    }
-
-    if let Some(cached) = cached.as_ref()
-        && cached.slug != entry.slug
-    {
-        delete_note_by_relative_path(tx, &entry.relative_path)?;
     }
 
     upsert_note_content(tx, entry, &content, &hash, snapshot, indexed_at)?;
@@ -1916,7 +1968,6 @@ mod tests {
     use super::*;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
-    use crate::search::LayerSelection;
     use crate::vault::VaultIndex;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1942,7 +1993,7 @@ mod tests {
             .replace_with_options(
                 &index,
                 &embedder,
-                None,
+                BuildHandles::default(),
                 embed_layers,
                 &BuildOptions::default(),
             )
@@ -1950,10 +2001,35 @@ mod tests {
         (dir, cache, embedder)
     }
 
-    fn sources_selection() -> LayerSelection {
-        let (selection, _) =
-            LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
-        selection
+    /// Counts rows in the demoted vec0 table: the direct evidence of whether
+    /// demoted layers were embedded, independent of any search entry point.
+    fn demoted_vector_count(cache: &SqliteCache) -> i64 {
+        cache
+            .read()
+            .expect("read")
+            .query_row("SELECT COUNT(*) FROM chunk_vectors_demoted", [], |row| {
+                row.get(0)
+            })
+            .expect("count demoted vectors")
+    }
+
+    /// Slugs whose chunk rows match `term` in the chunk FTS index, in slug
+    /// order: the direct evidence of what was written to `chunks`/`chunk_fts`,
+    /// independent of any search entry point.
+    fn chunk_fts_slugs(cache: &SqliteCache, term: &str) -> Vec<String> {
+        let conn = cache.read().expect("read");
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT chunks.note_slug FROM chunk_fts \
+                 JOIN chunks ON chunks.id = chunk_fts.rowid \
+                 WHERE chunk_fts MATCH ?1 ORDER BY chunks.note_slug",
+            )
+            .expect("prepare chunk FTS probe");
+        let rows = stmt
+            .query_map(params![term], |row| row.get::<_, String>(0))
+            .expect("query chunk FTS probe");
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .expect("read chunk FTS probe")
     }
 
     #[test]
@@ -2016,35 +2092,20 @@ mod tests {
 
     #[test]
     fn embed_layers_false_skips_demoted_vectors_but_keeps_keyword_search() {
-        let (_dir, cache, embedder) = demoted_vault_with_flag(false);
+        let (_dir, cache, _embedder) = demoted_vault_with_flag(false);
 
-        // No demoted vectors were built: a layer semantic search finds nothing.
-        let semantic = cache
-            .semantic_search_layered(&embedder, "melatonin circadian", 10, &sources_selection())
-            .expect("semantic");
-        assert!(
-            semantic.is_empty(),
-            "HATCHDOOR_EMBED_LAYERS=false must leave demoted layers without vectors: {:?}",
-            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+        // No demoted vectors were built: the demoted vector table is empty.
+        assert_eq!(
+            demoted_vector_count(&cache),
+            0,
+            "HATCHDOOR_EMBED_LAYERS=false must leave demoted layers without vectors"
         );
-        // The demoted vector table is genuinely empty.
-        let demoted_count: i64 = cache
-            .read()
-            .expect("read")
-            .query_row("SELECT COUNT(*) FROM chunk_vectors_demoted", [], |r| {
-                r.get(0)
-            })
-            .expect("count");
-        assert_eq!(demoted_count, 0);
 
         // Keyword search still finds the demoted note (chunk rows were written).
-        let keyword = cache
-            .fts_search_chunks_layered("melatonin", 10, &sources_selection())
-            .expect("keyword");
+        let matched = chunk_fts_slugs(&cache, "melatonin");
         assert!(
-            keyword.iter().any(|h| h.note_slug == "clip"),
-            "keyword search over the demoted layer must still find the note: {:?}",
-            keyword.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+            matched.iter().any(|slug| slug == "clip"),
+            "keyword search over the demoted layer must still find the note: {matched:?}"
         );
     }
 
@@ -2054,27 +2115,27 @@ mod tests {
         // actually build the demoted vectors, not leave them permanently empty
         // because no note's content changed.
         let (dir, cache, embedder) = demoted_vault_with_flag(false);
-        assert!(
-            cache
-                .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
-                .expect("semantic")
-                .is_empty(),
+        assert_eq!(
+            demoted_vector_count(&cache),
+            0,
             "precondition: no demoted vectors while the flag is false"
         );
 
         // Reindex the SAME vault (no content change) with the flag now true.
         let index = VaultIndex::build(dir.path()).expect("reindex");
         cache
-            .replace_with_options(&index, &embedder, None, true, &BuildOptions::default())
+            .replace_with_options(
+                &index,
+                &embedder,
+                BuildHandles::default(),
+                true,
+                &BuildOptions::default(),
+            )
             .expect("re-embed");
 
-        let semantic = cache
-            .semantic_search_layered(&embedder, "melatonin", 10, &sources_selection())
-            .expect("semantic after flip");
         assert!(
-            semantic.iter().any(|h| h.note_slug == "clip"),
-            "flipping the flag back to true must re-embed the demoted layer: {:?}",
-            semantic.iter().map(|h| &h.note_slug).collect::<Vec<_>>()
+            demoted_vector_count(&cache) > 0,
+            "flipping the flag back to true must re-embed the demoted layer"
         );
     }
 
@@ -2180,6 +2241,147 @@ mod tests {
         assert!(
             dur.parse::<f64>().is_ok(),
             "duration should parse as f64, got {dur}"
+        );
+    }
+
+    /// Reads the `slug` a note path holds in the notes table, or `None` when
+    /// no row carries that path.
+    #[cfg(test)]
+    fn cached_slug_for_path(cache: &SqliteCache, relative_path: &str) -> Option<String> {
+        let conn = cache.connection().expect("connection");
+        conn.query_row(
+            "SELECT slug FROM notes WHERE relative_path = ?1",
+            params![relative_path],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .expect("query slug")
+    }
+
+    /// A slug comes from a note's filename alone, so `Archive/Overview.md` and
+    /// `Projects/Overview.md` both want `overview`, and the index build hands it
+    /// to whichever path sorts first. The loser's cached row still holds that
+    /// slug when the winner is inserted, and `notes.slug` is unique, so the
+    /// rebuild used to die on the constraint - permanently, because the next
+    /// turn seeds from the same rows and reproduces it (issue #226).
+    #[test]
+    fn a_slug_moving_to_another_path_does_not_break_an_incremental_rebuild() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("Projects")).expect("dirs");
+        std::fs::write(
+            dir.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview").as_deref(),
+            Some("overview"),
+            "the only Overview note holds the undecorated slug"
+        );
+
+        std::fs::create_dir_all(dir.path().join("Archive")).expect("dirs");
+        std::fs::write(
+            dir.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("note");
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("a duplicate filename stem must not fail the rebuild");
+
+        assert_eq!(
+            cached_slug_for_path(&cache, "Archive/Overview").as_deref(),
+            Some("overview"),
+            "the earlier-sorting path takes the slug the build assigned it"
+        );
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview").as_deref(),
+            Some("overview-2"),
+            "the note that lost the slug keeps its row under the new one"
+        );
+    }
+
+    /// The pre-pass releases a moving slug before any note is read, so a note
+    /// that is mid-write on the very pass its slug moves away loses its row.
+    /// The alternative is not "keep the note": its row is the one holding the
+    /// slug the arriving note needs, so keeping it fails the whole turn. Pin
+    /// the tradeoff - the pass still publishes everything readable, and the
+    /// note returns on the first pass that can read it.
+    #[test]
+    fn an_unreadable_slug_mover_drops_out_of_the_pass_instead_of_failing_it() {
+        let dir = tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("Projects")).expect("dirs");
+        std::fs::write(dir.path().join("Home.md"), "# Home\n\nhome body").expect("note");
+        std::fs::write(
+            dir.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("note");
+        let cache = SqliteCache::in_memory(384).expect("cache");
+        let embedder = StubEmbedder::new(384);
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("index"),
+                &embedder,
+            )
+            .expect("first populate");
+
+        std::fs::create_dir_all(dir.path().join("Archive")).expect("dirs");
+        std::fs::write(
+            dir.path().join("Archive/Overview.md"),
+            "# Overview\n\narchive body",
+        )
+        .expect("note");
+        let index = VaultIndex::build(dir.path()).expect("reindex");
+        std::fs::remove_file(dir.path().join("Projects/Overview.md"))
+            .expect("make the slug mover unreadable after the scan listed it");
+
+        cache
+            .replace_from_index_with_embedder(&index, &embedder)
+            .expect("one unreadable note must not fail the pass");
+
+        assert_eq!(
+            cached_slug_for_path(&cache, "Archive/Overview").as_deref(),
+            Some("overview"),
+            "the arriving note still takes the slug it was assigned"
+        );
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview"),
+            None,
+            "the unreadable slug mover drops out of this generation"
+        );
+        assert_eq!(
+            cached_slug_for_path(&cache, "Home").as_deref(),
+            Some("home"),
+            "every other note is untouched"
+        );
+
+        std::fs::write(
+            dir.path().join("Projects/Overview.md"),
+            "# Overview\n\nprojects body",
+        )
+        .expect("restore the note");
+        cache
+            .replace_from_index_with_embedder(
+                &VaultIndex::build(dir.path()).expect("reindex"),
+                &embedder,
+            )
+            .expect("second populate");
+
+        assert_eq!(
+            cached_slug_for_path(&cache, "Projects/Overview").as_deref(),
+            Some("overview-2"),
+            "and returns on the first pass that can read it, under its new slug"
         );
     }
 
@@ -2403,9 +2605,7 @@ mod tests {
             .expect("note exists");
         assert_eq!(note.content, "# Home\nbravo token");
 
-        let hits = cache.search("bravo", true, 10).expect("content search");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].slug, "home");
+        assert_eq!(chunk_fts_slugs(&cache, "bravo"), vec!["home".to_string()]);
     }
 }
 

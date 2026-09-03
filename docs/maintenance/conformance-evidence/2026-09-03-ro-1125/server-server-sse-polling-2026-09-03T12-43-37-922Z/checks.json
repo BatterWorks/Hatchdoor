@@ -1,0 +1,181 @@
+[
+  {
+    "id": "outgoing-request",
+    "name": "OutgoingRequest",
+    "description": "Sending POST tools/call",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.930Z",
+    "details": {
+      "method": "POST",
+      "url": "http://127.0.0.1:42999/mcp",
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "mcp-session-id": "6eb572cd-9f5f-41d9-82fb-ea5beb42ba81",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "test_reconnection",
+          "arguments": {}
+        }
+      }
+    }
+  },
+  {
+    "id": "incoming-response",
+    "name": "IncomingResponse",
+    "description": "Received 200 response for POST",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.936Z",
+    "details": {
+      "statusCode": 200,
+      "headers": {
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+        "content-type": "text/event-stream",
+        "date": "Thu, 03 Sep 2026 12:43:37 GMT",
+        "keep-alive": "timeout=5",
+        "transfer-encoding": "chunked",
+        "x-accel-buffering": "no"
+      }
+    }
+  },
+  {
+    "id": "incoming-sse-event",
+    "name": "IncomingSseEvent",
+    "description": "Received SSE priming event (id: 0/0)",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.936Z",
+    "details": {
+      "eventId": "0/0",
+      "eventType": "message",
+      "isPriming": true,
+      "hasRetryField": true,
+      "retryValue": 3000,
+      "data": ""
+    }
+  },
+  {
+    "id": "incoming-sse-event",
+    "name": "IncomingSseEvent",
+    "description": "Received SSE event (id: 1/0)",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.936Z",
+    "details": {
+      "eventId": "1/0",
+      "eventType": "message",
+      "isPriming": false,
+      "hasRetryField": true,
+      "retryValue": 3000,
+      "data": "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Unknown MCP tool: test_reconnection\"}}"
+    }
+  },
+  {
+    "id": "stream-closed",
+    "name": "StreamClosed",
+    "description": "POST SSE stream closed after 2 event(s)",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.937Z",
+    "details": {
+      "eventCount": 2,
+      "lastEventId": "1/0",
+      "receivedToolResponse": false
+    }
+  },
+  {
+    "id": "server-sse-priming-event",
+    "name": "ServerSendsPrimingEvent",
+    "description": "Server SHOULD send priming event with id and empty data on POST SSE streams",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:37.937Z",
+    "specReferences": [
+      {
+        "id": "SEP-1699",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+      }
+    ],
+    "details": {
+      "hasPrimingEvent": true,
+      "primingEventIsFirst": true,
+      "hasEventId": true,
+      "lastEventId": "1/0",
+      "eventCount": 2
+    }
+  },
+  {
+    "id": "server-sse-retry-field",
+    "name": "ServerSendsRetryField",
+    "description": "Server SHOULD send retry field to control client reconnection timing",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:37.937Z",
+    "specReferences": [
+      {
+        "id": "SEP-1699",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+      }
+    ],
+    "details": {
+      "hasRetryField": true,
+      "retryValue": 3000
+    }
+  },
+  {
+    "id": "outgoing-request",
+    "name": "OutgoingRequest",
+    "description": "Sending GET request",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.937Z",
+    "details": {
+      "method": "GET",
+      "url": "http://127.0.0.1:42999/mcp",
+      "headers": {
+        "Accept": "text/event-stream",
+        "mcp-session-id": "6eb572cd-9f5f-41d9-82fb-ea5beb42ba81",
+        "mcp-protocol-version": "2025-11-25",
+        "last-event-id": "1/0"
+      }
+    }
+  },
+  {
+    "id": "incoming-response",
+    "name": "IncomingResponse",
+    "description": "Received 200 response for GET",
+    "status": "INFO",
+    "timestamp": "2026-09-03T12:43:37.940Z",
+    "details": {
+      "statusCode": 200,
+      "headers": {
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+        "content-type": "text/event-stream",
+        "date": "Thu, 03 Sep 2026 12:43:37 GMT",
+        "keep-alive": "timeout=5",
+        "transfer-encoding": "chunked",
+        "x-accel-buffering": "no"
+      }
+    }
+  },
+  {
+    "id": "server-sse-disconnect-resume",
+    "name": "ServerDisconnectResume",
+    "description": "Server closes SSE stream mid-call and resumes after client reconnects with Last-Event-ID",
+    "status": "WARNING",
+    "timestamp": "2026-09-03T12:43:37.940Z",
+    "specReferences": [
+      {
+        "id": "SEP-1699",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+      }
+    ],
+    "details": {
+      "lastEventIdUsed": "1/0",
+      "receivedToolResponse": false,
+      "message": "Tool response not received after reconnection"
+    },
+    "errorMessage": "Server did not send tool response after client reconnected with Last-Event-ID"
+  }
+]

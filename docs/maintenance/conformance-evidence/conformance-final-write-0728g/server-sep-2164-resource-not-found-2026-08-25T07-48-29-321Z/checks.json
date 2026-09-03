@@ -1,0 +1,72 @@
+[
+  {
+    "id": "sep-2164-no-empty-contents",
+    "name": "ResourcesNotFoundNoEmptyContents",
+    "description": "Server does not return an empty contents array for a non-existent resource",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:48:29.326Z",
+    "specReferences": [
+      {
+        "id": "SEP-2164",
+        "url": "https://modelcontextprotocol.io/specification/draft/server/resources#error-handling"
+      }
+    ],
+    "details": {
+      "requestedUri": "test://nonexistent-resource-for-conformance-testing",
+      "receivedResult": false
+    }
+  },
+  {
+    "id": "sep-2164-error-code",
+    "name": "ResourcesNotFoundErrorCode",
+    "description": "Server returns -32602 (Invalid Params) for non-existent resource (SHOULD)",
+    "status": "WARNING",
+    "timestamp": "2026-08-25T07:48:29.326Z",
+    "errorMessage": "Expected error code -32602 (Invalid Params), got -32601. ",
+    "specReferences": [
+      {
+        "id": "SEP-2164",
+        "url": "https://modelcontextprotocol.io/specification/draft/server/resources#error-handling"
+      }
+    ],
+    "details": {
+      "requestedUri": "test://nonexistent-resource-for-conformance-testing",
+      "receivedErrorCode": -32601,
+      "receivedResult": false
+    }
+  },
+  {
+    "id": "sep-2164-data-uri",
+    "name": "ResourcesNotFoundDataUri",
+    "description": "Server includes the requested URI in the error data field (SHOULD)",
+    "status": "WARNING",
+    "timestamp": "2026-08-25T07:48:29.326Z",
+    "errorMessage": "Error data.uri is undefined, expected \"test://nonexistent-resource-for-conformance-testing\". This is a SHOULD requirement.",
+    "specReferences": [
+      {
+        "id": "SEP-2164",
+        "url": "https://modelcontextprotocol.io/specification/draft/server/resources#error-handling"
+      }
+    ],
+    "details": {
+      "requestedUri": "test://nonexistent-resource-for-conformance-testing"
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:48:29.326Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "sep-2322-not-on-unsupported-requests",
+    "name": "NotOnUnsupportedRequests",
+    "description": "Server does not return InputRequiredResult on unsupported methods",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:51.694Z",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:51.694Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 4,
+      "violations": []
+    }
+  }
+]

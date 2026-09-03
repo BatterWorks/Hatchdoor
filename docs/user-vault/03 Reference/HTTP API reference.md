@@ -18,9 +18,9 @@ All request and response bodies are JSON unless noted. Errors from the `/api/v1/
 
 | Surface | Auth |
 | --- | --- |
-| `/health`, `/ready`, `/api/startup-status`, `/api/vault-status` | None, always |
+| `/health`, `/ready`, `/api/startup-status` | None, always |
 | `/api/model/*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
-| `/api/settings*`, `/api/index-status`, `/api/git-status` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
+| `/api/settings*` | Web bearer token (if configured); **absent entirely (`404`) in demo mode** |
 | `/mcp` | Its own MCP bearer token — see [[Connect your agent]] |
 | `/api/v1/vaults/...` reads (`GET`) | Web bearer token if configured, **unauthenticated in demo mode** |
 | `/api/v1/vaults/...` writes and Vault control | Web bearer token if configured; **refused with `403 demo_read_only` in demo mode** (not `404` — the route exists, it just declines) |
@@ -38,7 +38,6 @@ The web bearer token is sent as `Authorization: Bearer <token>`, or as an `acces
 | GET | `/health` | Liveness probe; also used by the container's own `--healthcheck`. Returns `200 ok` plaintext. |
 | GET | `/ready` | `200 ready` once legacy single-Vault startup (model + first index) is complete, else `503 not ready`. |
 | GET | `/api/startup-status` | JSON legacy startup-progress snapshot (model download/index progress). `Cache-Control: no-store`. |
-| GET | `/api/vault-status` | JSON snapshot of the legacy startup Vault's state. `Cache-Control: no-store`. |
 
 ## Model setup
 
@@ -58,13 +57,11 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | --- | --- | --- |
 | GET | `/api/settings` | Every known setting: `key`, current `value` (secrets redacted), `configured`, `source`, `locked`, `class` (`instant`/`reindex`), `kind` (text/switch/secret/number/mode). |
 | PATCH | `/api/settings` | Update one or more settings. Body: `{"updates": {"KEY": "value", ...}, "confirm": ["reindex", ...]}`. |
-| GET | `/api/index-status` | Background reindex status — whether the live settings document has drifted from the built index. `no-store`. |
-| GET | `/api/git-status` | Legacy single-Vault Git sync task status (mode, running/stopping, last error). `no-store`. |
 | POST | `/api/settings/web-token/reveal` | Returns the current web bearer token, `{"value": "..."}`. `404` if none is set. |
 | POST | `/api/settings/mcp-token/generate` | Returns a freshly generated candidate token, `{"value": "..."}`. Not saved or made live by this call alone. |
 | POST | `/api/settings/mcp-token/reveal` | Returns the live MCP bearer token — only if it equals the caller's own web token (seeing it grants no new access). `404` otherwise. |
 
-**`PATCH /api/settings` consequences.** A save that would reindex, initialize a fresh local Git repo, or downgrade remote versioning off a Vault that is no longer a Git repository returns `409` with a machine-readable consequence (`reindex` | `git_init` | `git_downgrade`) instead of applying. Resend the same request with that value added to `confirm` to proceed. Consequences accumulate across retries rather than one-at-a-time.
+**`PATCH /api/settings` consequences.** A save that would reindex returns `409` with the machine-readable consequence `reindex` instead of applying. Resend the same request with that value added to `confirm` to proceed. `reindex` is the only consequence: the instance-wide `git_init` and `git_downgrade` consequences were retired along with the routes that reported on them, and per-Vault Git changes carry their own consequences on `/api/v1/vaults/{vault_id}`.
 
 **Setting keys**, with change class (`instant` applies immediately; `reindex` triggers a background reindex) and kind:
 
@@ -75,6 +72,7 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 | `HATCHDOOR_EMBED_LAYERS` | reindex | switch |
 | `HATCHDOOR_MCP_ENABLED` | instant | switch |
 | `HATCHDOOR_MCP_WRITE_ENABLED` | instant | switch |
+| `HATCHDOOR_MCP_RATE_LIMITS_ENABLED` | instant | switch |
 | `HATCHDOOR_MCP_BEARER_TOKEN` | instant | secret |
 | `HATCHDOOR_MCP_ALLOWED_ORIGINS` | instant | text |
 | `HATCHDOOR_MAX_ATTACHMENT_BYTES` | instant | number |
@@ -134,7 +132,11 @@ Server-wide instance configuration. Not present in demo mode (routes don't exist
 
 - **`local`** — `{ "type": "local", "path": "<absolute container path>" }`. Hatchdoor never runs Git for it.
 - **`existing_git`** — `{ "type": "existing_git", "repository_path": "...", "repository_url": "...|null", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "local_history"|"pull_only"|"two_way", "poll_interval_secs": 86400 }`. A Git working copy that already exists on disk; Hatchdoor uses it in place and never clones it. `repository_url` is required for `pull_only`/`two_way`, may be null only for `local_history`.
-- **`managed_git`** — `{ "type": "managed_git", "repository_url": "...", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "pull_only"|"two_way", "poll_interval_secs": 900 }`. Hatchdoor clones and owns the checkout; no `local_history` mode (there is always a remote to track). `poll_interval_secs` minimum 60, default 86400.
+- **`managed_git`** — `{ "type": "managed_git", "repository_url": "...", "branch": "...|null", "vault_subdirectory": "...|null", "mode": "pull_only"|"two_way", "poll_interval_secs": 900 }`. Hatchdoor clones and owns the checkout; no `local_history` mode (there is always a remote to track). `poll_interval_secs` minimum 60, default 86400. There is no maximum, but the scheduler treats anything beyond ten years as ten years, so a very large value is stored as sent and read back unchanged while still producing a `next_attempt_at` you can read.
+
+**Git schedule fields on a listed Vault.** Alongside the status fields, a Vault whose source has a remote to poll (`managed_git`, or `existing_git` in `pull_only`/`two_way`) carries two optional RFC 3339 UTC timestamps: `last_checked_at`, when its last completed Git turn finished, and `next_attempt_at`, when the next scheduled one is due. Both are absent for a source with no remote and in demo mode. They are the supported way to tell a Vault that checked and found nothing from one that has stopped checking — a fetch that brings nothing new leaves no trace in the repository itself.
+
+`last_checked_at` reports the last check whether it succeeded or failed, so read it together with `git` and `git_error` rather than as a successful sync: a Vault that cannot authenticate still reports the time it last tried. It is absent until the first check completes, and it survives a restart. `next_attempt_at` is present for every Vault with a remote — one that has never checked is due immediately, not unscheduled — and reflects the live countdown, so it also accounts for a manual sync, a retry backoff, or an edit to the Vault's `poll_interval_secs`. Shortening the interval moves `next_attempt_at` back to one new interval after `last_checked_at`, which may be immediately; lengthening it leaves the pending attempt where it is. A Vault mid-backoff after a failed check keeps the backoff's own timing, so its `next_attempt_at` does not move until a check succeeds.
 
 `https_credentials`, `archive_folder`, and `commit_identity` are all optional; omitted, the server-wide defaults apply (`HATCHDOOR_GIT_HTTPS_*`, `HATCHDOOR_ARCHIVE_PREFIX`, `HATCHDOOR_GIT_AUTHOR_*`). Embedded credentials in `repository_url` are rejected — supply them via `https_credentials` instead.
 
@@ -161,7 +163,7 @@ Every route below is a read and stays reachable unauthenticated in demo mode (su
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/vaults/{scope}/tree` | Folder/note tree, grouped per Vault. |
+| GET | `/api/v1/vaults/{scope}/tree` | Folder/note tree, grouped per Vault. Always the whole tree — `get_tree`'s `folder`, `max_depth` and `include_notes` narrowing is on the MCP surface only. Each folder carries `note_count`, the notes held directly inside it; the notes themselves carry `title` and `slug` but no `vault_id`, because the tree around them already names its Vault. |
 | GET | `/api/v1/vaults/{scope}/recent?limit=` | Recently modified notes, flattened across Vaults. `limit` clamped 1–25, default 5. |
 | GET | `/api/v1/vaults/{scope}/stats` | Lean per-Vault statistics projection (for the exact/rich version, see `stats/detail` above). |
 | GET | `/api/v1/vaults/{scope}/graph` | Note-link graph, grouped per Vault; edges never cross a Vault boundary. |

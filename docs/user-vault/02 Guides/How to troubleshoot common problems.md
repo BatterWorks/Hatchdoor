@@ -23,13 +23,18 @@ You bound Hatchdoor to a non-loopback host and it generated one on first start (
 
 ## An agent can't connect over MCP
 
-Three distinct failures, distinguishable by the response:
+Five distinct failures, distinguishable by the response:
 
-- **`404 Not Found` on `/mcp`** — MCP is disabled. Turn on **Let assistants connect (MCP)** in **Settings** → **Agent access (MCP)**.
+- **`404 Not Found` on `/mcp`, with an empty body** — MCP is disabled. Turn on **Let assistants connect (MCP)** in **Settings** → **Agent access (MCP)**. Read the body before acting on a `404`: an empty one means this, and a `404` that *says* something means the next entry instead.
+- **`404 Not Found` whose body reads `Not Found: Session not found`** — MCP is on and the client got in, but the session it is quoting doesn't exist. Either it was never issued, or it was issued before Hatchdoor last restarted. The remedy belongs to the client: it has to run `initialize` again and use the session that comes back.
+- **`422 Unprocessable Entity`, "Unexpected message, expect initialize request"** — the same problem from the other side: the client sent an ordinary call with no session at all. The wording describes what the server was expecting to receive rather than what you should do about it; the remedy is the one above, re-initialize.
 - **`401`, JSON-RPC error `-32001`, "Missing or invalid MCP bearer token"** — the client's `Authorization: Bearer <token>` header doesn't match the current MCP password. Regenerate or re-copy it from Settings; the client and Settings must hold the exact same value.
 - **A write tool (`create_note`, `edit_vault`, etc.) returns "MCP write tools are disabled by HATCHDOOR_MCP_WRITE_ENABLED"** — MCP is connected and reading fine, but **Let assistants change notes** is off. This is a separate toggle from connecting at all; see [[Search and change notes with your agent]] for why that separation exists.
 
-A fourth, less common one: **`403 Forbidden`, "Forbidden MCP origin"** — an `Origin` header was sent that isn't on the allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`). This normally only matters for a browser-based MCP client, not a CLI agent.
+A sixth, less common one: **`403 Forbidden`, "Forbidden MCP origin"** — an `Origin` header was sent that isn't on the allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`). This normally only matters for a browser-based MCP client, not a CLI agent.
+
+> [!note]
+> MCP sessions are held in memory only, so restarting Hatchdoor ends every one of them. A client holding a session finds out on its next call — as the `Session not found` or the `422` above — and has to re-initialize. No Hatchdoor setting keeps sessions across a restart, so a client that keeps retrying the same failing call needs restarting or reconnecting; that lever is yours, not Hatchdoor's. Clients that don't use a session at all are unaffected.
 
 ## Model download is stuck or failed
 
@@ -70,6 +75,12 @@ Check the Vault's Sync console for the specific failure rather than assuming —
 
 > [!note]
 > A Vault reporting `git: pending` isn't stuck by default — that's the normal state while a clone or fetch is in flight. Only treat it as a problem if it stays `pending` well past the configured sync interval.
+
+## "Is this Vault still syncing on schedule?"
+
+`GET /api/v1/vaults` reports `last_checked_at` and `next_attempt_at` for every Vault with a remote — answer the question from those rather than from the repository's Git history. `last_checked_at` is when Hatchdoor last *tried*, not when it last succeeded, so read it next to the Vault's Git status: a Vault that is checking on schedule but failing every time shows a recent `last_checked_at` and an `unavailable` status with the reason. A check that finds nothing new leaves no trace in `git log` or `git reflog`, so an unchanged remote-tracking branch is not evidence that Hatchdoor stopped checking; it usually means there was nothing to fetch.
+
+If `next_attempt_at` is in the past by more than a minute or so, something is genuinely wrong. If it's in the future, the Vault is simply waiting out its interval — **Sync now** on the Vault's page overrides it, and shortening the Vault's sync schedule brings `next_attempt_at` forward to one new interval after `last_checked_at` — unless the Vault is mid-retry after a failed check, where the retry's own timing wins and `next_attempt_at` deliberately does not move. Read it next to the Git status: on a `ready` Vault a shortened schedule moves it, on an `unavailable` one it may not until a check succeeds. Note that restarting Hatchdoor no longer forces a sync: a Vault inside its interval resumes the countdown across a restart, so restarting is no longer a way to prod a Vault into checking.
 
 ## Search returns nothing, or not what you expected
 

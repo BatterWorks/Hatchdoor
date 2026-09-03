@@ -1,87 +1,25 @@
+use schemars::JsonSchema;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 
-use serde::Serialize;
-use tracing::{error, warn};
+use serde::{Deserialize, Serialize};
+use tracing::error;
 
 use crate::cache::SqliteCache;
 use crate::cache::vault_snapshots::VaultSnapshotFreshness;
-use crate::embed::Embedder;
-use crate::git::{
-    ManagedCheckoutLease, ManagedGitScheduler, ManagedGitTurnConfig, run_existing_git_remote_turn,
-    run_managed_git_turn,
-};
+use crate::git::ManagedGitScheduler;
 use crate::startup::IndexingProgressSnapshot;
 use crate::vault_registry::{
     VaultDefinition, VaultGitMode, VaultId, VaultRegistrySnapshot, VaultRegistryStore,
     VaultSource as RegistryVaultSource,
 };
 use crate::vault_watcher::{VaultWatcherHandle, spawn_vault_change_watcher};
-use crate::vault_work::{
-    VaultWorkCoordinator, VaultWorkError, VaultWorkErrorDetail, VaultWorkKind, VaultWorkRequest,
-};
-
-#[cfg(test)]
-static INDEX_MUTATION_PROBE: Mutex<Option<(VaultId, Arc<tokio::sync::Notify>)>> = Mutex::new(None);
-
-/// Test-only rendezvous for proving an Index turn has reached its foreground
-/// mutation-lock attempt without relying on scheduler timing.
-#[cfg(test)]
-pub(crate) struct IndexMutationProbe {
-    vault_id: VaultId,
-    lock_attempted: Arc<tokio::sync::Notify>,
-}
-
-#[cfg(test)]
-impl IndexMutationProbe {
-    pub(crate) fn install(vault_id: VaultId) -> Self {
-        let lock_attempted = Arc::new(tokio::sync::Notify::new());
-        *INDEX_MUTATION_PROBE
-            .lock()
-            .expect("Index mutation probe poisoned") = Some((vault_id, lock_attempted.clone()));
-        Self {
-            vault_id,
-            lock_attempted,
-        }
-    }
-
-    pub(crate) async fn lock_attempted(&self) {
-        self.lock_attempted.notified().await;
-    }
-}
-
-#[cfg(test)]
-impl Drop for IndexMutationProbe {
-    fn drop(&mut self) {
-        let mut installed = INDEX_MUTATION_PROBE
-            .lock()
-            .expect("Index mutation probe poisoned");
-        if installed
-            .as_ref()
-            .is_some_and(|(vault_id, _)| *vault_id == self.vault_id)
-        {
-            *installed = None;
-        }
-    }
-}
-
-#[cfg(test)]
-fn notify_index_mutation_lock_attempt(vault_id: VaultId) {
-    let probe = INDEX_MUTATION_PROBE
-        .lock()
-        .expect("Index mutation probe poisoned")
-        .as_ref()
-        .filter(|(probed_vault_id, _)| *probed_vault_id == vault_id)
-        .map(|(_, lock_attempted)| lock_attempted.clone());
-    if let Some(lock_attempted) = probe {
-        lock_attempted.notify_one();
-    }
-}
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkErrorDetail, VaultWorkKind};
 
 /// The server's own startup source. A Git-backed Vault is a registry Vault
 /// (`vault_registry::VaultSource`), acquired and synchronized per Vault; the
@@ -105,19 +43,19 @@ impl VaultSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultSourceKind {
     Local,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultSourceMode {
     Local,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultPhase {
     TermsRequired,
@@ -129,7 +67,7 @@ pub enum VaultPhase {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultCapabilities {
     pub browse: bool,
     pub search: bool,
@@ -174,7 +112,7 @@ pub struct VaultRuntimeSnapshot {
     pub error: Option<VaultRuntimeError>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 pub struct VaultRuntimeError {
     pub code: String,
     pub message: String,
@@ -194,7 +132,7 @@ pub struct VaultRuntimeError {
 /// truncated-looking — list.
 const MAX_REPORTED_SYNC_ERROR_PATHS: usize = 50;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum VaultRuntimeErrorDetail {
     /// Affected repository-relative paths for `managed_git_dirty_working_copy`
@@ -356,7 +294,7 @@ impl VaultRuntime {
 }
 
 /// Activation state for one definition in the live Vault collection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultActivationStatus {
     Active,
@@ -365,7 +303,7 @@ pub enum VaultActivationStatus {
 }
 
 /// Whether authoritative local Markdown can currently be used.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalContentStatus {
     ReadWrite,
@@ -374,7 +312,7 @@ pub enum LocalContentStatus {
 }
 
 /// Search availability is independent from local Markdown availability.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultSearchStatus {
     Unavailable,
@@ -390,7 +328,7 @@ pub enum VaultSearchStatus {
 }
 
 /// Git status is kept separate so a Git failure cannot hide local Markdown.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultGitStatus {
     Disabled,
@@ -399,7 +337,7 @@ pub enum VaultGitStatus {
     Unavailable,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultWatcherStatus {
     Running,
@@ -476,6 +414,12 @@ pub struct VaultControlBlock {
     vault_path: Arc<PathBuf>,
     snapshot: Arc<RwLock<CollectionVaultSnapshot>>,
     mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    /// How many foreground mutations have taken `mutation_lock`. Written once
+    /// per acquisition, by the acquirer, while it holds that lock — and read
+    /// only by the two accessors below, each of which also holds it. A holder
+    /// therefore reads a value that cannot move until it releases, which is
+    /// the only way to read it honestly.
+    mutations_taken: Arc<AtomicU64>,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
     accepting_operations: Arc<AtomicBool>,
     cancellation: tokio::sync::watch::Sender<bool>,
@@ -542,6 +486,7 @@ impl VaultControlBlock {
             vault_path: Arc::new(vault_path),
             snapshot: Arc::new(RwLock::new(snapshot)),
             mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            mutations_taken: Arc::new(AtomicU64::new(0)),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             accepting_operations: Arc::new(AtomicBool::new(true)),
             cancellation,
@@ -626,10 +571,71 @@ impl VaultControlBlock {
     pub async fn acquire_mutation(
         &self,
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
+        let guard = self.acquire_mutation_exclusion().await?;
+        // Under the lock, and only once admission is confirmed, so the count
+        // moves exactly once per mutation that actually gets to run and only
+        // while one holder can see it move. Counted on acquisition rather than
+        // release: by the time any other holder can read it, this mutation's
+        // filesystem work has finished and its guard is gone.
+        self.mutations_taken.fetch_add(1, Ordering::Relaxed);
+        Ok(guard)
+    }
+
+    /// Take this Vault's foreground mutation guard for a background Index
+    /// turn's read phase, and report the mutation generation observed under
+    /// it. The same exclusion a Markdown write gets, so a turn can never
+    /// observe half of a multi-file foreground mutation, minus the generation
+    /// advance: an Index turn reads the Vault rather than mutating it, and
+    /// counting itself would make every turn conclude a mutation had
+    /// intervened and report its own publication stale (issue #223).
+    ///
+    /// The generation is read here rather than exposed, because it is only
+    /// meaningful under this lock: pass it back to
+    /// [`Self::blocking_retake_mutation_for_index`], which decides and hands
+    /// back the guard to act under.
+    pub(crate) async fn acquire_mutation_for_index_reads(
+        &self,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, u64), VaultRuntimeError> {
+        let guard = self.acquire_mutation_exclusion().await?;
+        let generation = self.mutations_taken.load(Ordering::Relaxed);
+        Ok((guard, generation))
+    }
+
+    /// The exclusion itself: everything both acquisitions above have in common,
+    /// minus what makes one a mutation and the other a read.
+    async fn acquire_mutation_exclusion(
+        &self,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, VaultRuntimeError> {
         self.ensure_accepting_operations()?;
         let guard = self.mutation_lock.clone().lock_owned().await;
         self.ensure_accepting_operations()?;
         Ok(guard)
+    }
+
+    /// Retake the foreground mutation guard from a blocking thread and answer,
+    /// under that one acquisition, whether a foreground mutation completed
+    /// since `since` (a generation from
+    /// [`Self::acquire_mutation_for_index_reads`]).
+    ///
+    /// An Index turn releases the guard before its embedding pass and calls
+    /// this to publish afterwards: the verdict and the publication it labels
+    /// share the returned guard, so no mutation can land between deciding and
+    /// acting (the rule
+    /// [`crate::vault_work::VaultWorkCoordinator::request_if_idle`] records for
+    /// issue #127).
+    ///
+    /// Blocking by construction — call it only from a thread that is not
+    /// driving the async runtime, such as inside `spawn_blocking`; Tokio panics
+    /// otherwise. The wait is bounded by one in-flight foreground mutation, not
+    /// by a turn, which matters because the Index turn holds the cache's
+    /// process-wide model epoch across this call.
+    pub(crate) fn blocking_retake_mutation_for_index(
+        &self,
+        since: u64,
+    ) -> (bool, tokio::sync::OwnedMutexGuard<()>) {
+        let guard = self.mutation_lock.clone().blocking_lock_owned();
+        let mutated = self.mutations_taken.load(Ordering::Relaxed) != since;
+        (mutated, guard)
     }
 
     /// Wait until a mutation that was admitted before this control block was
@@ -1261,7 +1267,13 @@ impl VaultCollectionRuntime {
             .keys()
             .copied()
             .collect::<BTreeSet<_>>();
+        // A Vault in `previously_present` but not `currently_present` has left
+        // the collection: prune the durable Git-turn record along with its
+        // disposable cache rows, so nothing that reconnects under this Vault
+        // ID inherits its countdown. Disabling keeps both — the Vault is
+        // still in the collection and resumes its schedule when re-enabled.
         for vault_id in previously_present.difference(&currently_present) {
+            managed_git.forget_persisted_state(*vault_id);
             if active_retired.contains(vault_id) {
                 continue;
             }
@@ -1348,12 +1360,54 @@ impl VaultCollectionRuntime {
             // newly (re)activated managed-Git definition, independent of
             // Git status: an edit that only changes `poll_interval_secs`
             // still produces a non-retained control block here (its
-            // `VaultDefinition` compares unequal), but must not itself
-            // request a Git turn — only a `Pending` status does that, below.
-            if let Some(poll_interval) = runtime.definition().source().managed_git_poll_interval() {
+            // `VaultDefinition` compares unequal). Such an edit does not
+            // request a turn *of its own* — the due-check below is still the
+            // only thing that starts one — but it can leave the Vault due,
+            // and then that check starts a turn: `activate` brings an armed
+            // attempt forward when the new interval is shorter, and an
+            // interval shortened past the time already elapsed is due at
+            // once. That is the point of shortening it, not a reset.
+            let scheduled = runtime.definition().source().managed_git_poll_interval();
+            if let Some(poll_interval) = scheduled {
                 managed_git.activate(*vault_id, poll_interval);
+                // A fresh process publishes `Pending` for every Vault, which
+                // is only true of one that has never completed a turn. Now
+                // that a restart no longer forces an immediate turn, leaving
+                // it at `Pending` would report nothing wrong about a Vault
+                // that is in fact failing, for up to a whole poll interval.
+                // Republishing the remembered outcome carries the previous
+                // process's conclusion across the restart that erased it.
+                //
+                // Guarded on `Pending` so an in-process definition edit keeps
+                // whatever status it was carrying (`reconcile` preserves it
+                // through `prior_git`) — a Vault mid-backoff from a transient
+                // failure must not be reset to the last *interval-arming*
+                // outcome, which is older.
+                if snapshot.git == VaultGitStatus::Pending
+                    && let Some(remembered) = managed_git.remembered_turn(*vault_id)
+                {
+                    let (status, error) = remembered_git_status(&remembered);
+                    let _ = runtime.set_git_status(status, error);
+                }
+                // Due now — a Vault that has never synced, or one already
+                // past its interval — starts its turn here rather than
+                // waiting out a tick. One still inside its interval is left
+                // to the schedule its last turn armed.
+                managed_git.request_if_due(*vault_id);
             }
-            if snapshot.git == VaultGitStatus::Pending {
+            // A scheduler-tracked Vault has already had its due-check above,
+            // which is the only thing that should start one of its turns.
+            // Requesting here on `Pending` as well would undo it: activation
+            // publishes `Pending` on every fresh process, so every restart
+            // would re-sync and then re-arm the interval from the restart —
+            // exactly how a deployment redeployed more often than its poll
+            // interval never reached a scheduled turn.
+            //
+            // A Git-capable source the scheduler does *not* track — an
+            // `ExistingGit` Vault in `LocalHistory` mode, which has no remote
+            // to poll — still needs its activation turn from here, because
+            // nothing else will ever request one for it.
+            if snapshot.git == VaultGitStatus::Pending && scheduled.is_none() {
                 coordinator.request(*vault_id, VaultWorkKind::Git);
             }
         }
@@ -1527,6 +1581,27 @@ fn activation_snapshot(
     snapshot
 }
 
+/// The Git status a restarted instance should publish for a Vault whose last
+/// interval-arming turn is remembered. Only non-retryable failures are ever
+/// remembered as failures, so a remembered failure is never retryable.
+fn remembered_git_status(
+    remembered: &crate::vault_runtime_state::GitTurnRecord,
+) -> (VaultGitStatus, Option<VaultRuntimeError>) {
+    match &remembered.outcome {
+        crate::vault_runtime_state::GitTurnOutcome::Failed { code, message } => (
+            VaultGitStatus::Unavailable,
+            Some(VaultRuntimeError {
+                code: code.clone(),
+                message: message.clone(),
+                retryable: false,
+                detail: None,
+            }),
+        ),
+        crate::vault_runtime_state::GitTurnOutcome::UpToDate
+        | crate::vault_runtime_state::GitTurnOutcome::Synchronized => (VaultGitStatus::Ready, None),
+    }
+}
+
 /// A retained participating snapshot is immediately searchable after process
 /// reconstruction, even while the coordinator has queued a fresh Index turn.
 /// Cache read failure and nonparticipation remain conservatively unavailable.
@@ -1557,7 +1632,9 @@ fn retained_snapshot_search_status(
 /// at `reconcile()` time, and `publish_local_content_after_git_success` uses
 /// it again after a managed-Git checkout materializes, so the two call sites
 /// can never drift on what "unavailable" means for a Vault path.
-fn stat_local_content(vault_path: &Path) -> (LocalContentStatus, Option<VaultRuntimeError>) {
+pub(crate) fn stat_local_content(
+    vault_path: &Path,
+) -> (LocalContentStatus, Option<VaultRuntimeError>) {
     match std::fs::metadata(vault_path) {
         Ok(metadata) if metadata.is_dir() => {
             match directory_content_status(vault_path, &metadata) {
@@ -1630,20 +1707,7 @@ fn directory_is_writable(
     if result == 0 {
         return Ok(true);
     }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
-        Ok(false)
-    } else {
-        Err(VaultRuntimeError {
-            code: "vault_path_unavailable".to_string(),
-            message: format!(
-                "Vault path '{}' availability check failed: {error}",
-                vault_path.display()
-            ),
-            retryable: true,
-            detail: None,
-        })
-    }
+    classify_write_probe_failure(vault_path, &std::io::Error::last_os_error())
 }
 
 #[cfg(not(unix))]
@@ -1652,6 +1716,36 @@ fn directory_is_writable(
     metadata: &std::fs::Metadata,
 ) -> Result<bool, VaultRuntimeError> {
     Ok(!metadata.permissions().readonly())
+}
+
+/// Did the `W_OK` probe fail because the Vault is present but refuses writes,
+/// or because it is unreachable? The former is `Ok(false)`, which
+/// `directory_content_status` turns into `LocalContentStatus::ReadOnly`; the
+/// latter keeps surfacing as an unavailable path.
+///
+/// Issue #178: a Docker `:ro` bind mount answers the probe with `EROFS`, not
+/// `EACCES`. Both mean the same thing to us - browse and index the Vault,
+/// refuse mutations - so both must classify as read-only.
+#[cfg(unix)]
+fn classify_write_probe_failure(
+    vault_path: &Path,
+    error: &std::io::Error,
+) -> Result<bool, VaultRuntimeError> {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    ) {
+        return Ok(false);
+    }
+    Err(VaultRuntimeError {
+        code: "vault_path_unavailable".to_string(),
+        message: format!(
+            "Vault path '{}' availability check failed: {error}",
+            vault_path.display()
+        ),
+        retryable: true,
+        detail: None,
+    })
 }
 
 fn disabled_snapshot(definition: &VaultDefinition) -> CollectionVaultSnapshot {
@@ -1709,619 +1803,6 @@ fn collection_capabilities(
         .flatten()
         .any(|error| error.retryable),
     }
-}
-
-/// Execute one `VaultWorkKind::Index` turn for exactly one active Vault.
-///
-/// The authoritative Markdown scan and disposable candidate-cache build run
-/// off the async runtime. Publication replaces only this Vault's rows in the
-/// shared read model, so readers either retain its prior complete snapshot or
-/// observe the new complete snapshot. A failed scan or candidate build keeps a
-/// prior snapshot available but marks it stale; without a prior snapshot the
-/// Vault remains unavailable for search. A retained snapshot is also marked
-/// stale for the duration of the scan/build itself (not just after a
-/// failure): collection-shaped reads (`vault_read.rs`'s `collection` helper,
-/// `search/vault_scoped.rs`) derive participant freshness solely from this
-/// cache-published status, so without this the authoritative Markdown could
-/// already differ from a snapshot those reads keep reporting as fresh.
-#[cfg(test)]
-pub(crate) async fn dispatch_vault_index_turn(
-    collection: &VaultCollectionRuntime,
-    cache: Arc<SqliteCache>,
-    embedder: Arc<dyn Embedder>,
-    request: VaultWorkRequest,
-) -> Result<(), VaultWorkError> {
-    dispatch_vault_index_turn_with_embed_layers(collection, cache, embedder, true, request).await
-}
-
-/// Execute one Index turn using the immutable embed-layer setting bound by
-/// runtime composition at the turn's start.
-#[cfg(test)]
-pub(crate) async fn dispatch_vault_index_turn_with_embed_layers(
-    collection: &VaultCollectionRuntime,
-    cache: Arc<SqliteCache>,
-    embedder: Arc<dyn Embedder>,
-    embed_layers: bool,
-    request: VaultWorkRequest,
-) -> Result<(), VaultWorkError> {
-    dispatch_vault_index_turn_with_progress(
-        collection,
-        cache,
-        embedder,
-        embed_layers,
-        None,
-        request,
-    )
-    .await
-}
-
-pub(crate) async fn dispatch_vault_index_turn_with_progress(
-    collection: &VaultCollectionRuntime,
-    cache: Arc<SqliteCache>,
-    embedder: Arc<dyn Embedder>,
-    embed_layers: bool,
-    on_progress: Option<Arc<dyn Fn(crate::startup::IndexingProgressSnapshot) + Send + Sync>>,
-    request: VaultWorkRequest,
-) -> Result<(), VaultWorkError> {
-    let vault_id = request.vault_id();
-
-    // Lifecycle reconstruction queues Index work the moment a Vault activates,
-    // which can be well before first-run model setup has downloaded and
-    // installed the embedder. Running the turn against an empty embedder slot
-    // compares the cache's stored identity against a placeholder — wiping a
-    // valid cache and forcing a full reindex on every restart — and then panics
-    // in the chunker's tokenizer. Defer instead; the model-load path re-requests
-    // every active Vault once the embedder is installed.
-    if !embedder.is_ready() {
-        return Err(VaultWorkError::new(
-            "embedder_not_ready",
-            "The search model is still being set up; indexing resumes when setup completes.",
-            true,
-        ));
-    }
-
-    let Some(control_block) = collection.runtime(vault_id) else {
-        return Ok(());
-    };
-
-    // HTTP and MCP Markdown mutations hold this exact per-Vault guard across
-    // their filesystem transaction. Hold it through the authoritative scan
-    // and atomic disposable-cache publication too, so an Index turn cannot
-    // observe or publish a mixed multi-file foreground mutation.
-    #[cfg(test)]
-    notify_index_mutation_lock_attempt(vault_id);
-    let _mutation = control_block
-        .acquire_mutation()
-        .await
-        .map_err(vault_index_error)?;
-    control_block
-        .set_search_status(VaultSearchStatus::Indexing, None)
-        .map_err(vault_index_error)?;
-    let (result, stale_mark_required) = {
-        let _refresh = control_block
-            .acquire_refresh()
-            .await
-            .map_err(vault_index_error)?;
-        if let Err(message) = cache.mark_vault_snapshot_stale(vault_id) {
-            error!(
-                %vault_id,
-                %message,
-                "failed to mark the retained Vault snapshot stale for an active rebuild"
-            );
-        }
-        let indexing_control = control_block.clone();
-        let indexing_cache = cache.clone();
-        match tokio::task::spawn_blocking(move || {
-            let index = indexing_control
-                .authoritative_index()
-                .map_err(|error| (vault_index_error(error), true))?;
-            // Publish this Vault's structural rows before its vectors, so a
-            // first index makes it browsable in seconds instead of holding
-            // every read behind the embedding pass. A no-op for a Vault that
-            // already has a searchable generation to keep serving.
-            match indexing_cache.publish_vault_structure_snapshot(
-                vault_id,
-                &index,
-                embedder.as_ref(),
-                embed_layers,
-            ) {
-                Ok(true) => {
-                    let _ = indexing_control.set_search_status(VaultSearchStatus::Browsable, None);
-                }
-                Ok(false) => {}
-                // Browsing early is an improvement, not a precondition: a
-                // failed structure pass falls through to the full build
-                // rather than failing the turn.
-                Err(message) => warn!(
-                    %vault_id,
-                    %message,
-                    "could not publish the structure-only Vault snapshot; browsing waits for the full index"
-                ),
-            }
-            indexing_cache
-                .replace_vault_snapshot_with_embed_layers_and_progress(
-                    vault_id,
-                    &index,
-                    embedder.as_ref(),
-                    embed_layers,
-                    on_progress,
-                )
-                .map_err(|message| {
-                    (
-                        VaultWorkError::new("vault_index_failed", message, true),
-                        false,
-                    )
-                })
-        })
-        .await
-        {
-            Ok(Ok(())) => (Ok(()), false),
-            Ok(Err((error, stale_mark_required))) => (Err(error), stale_mark_required),
-            Err(error) => (
-                Err(VaultWorkError::new(
-                    "vault_index_task_panicked",
-                    error.to_string(),
-                    false,
-                )),
-                true,
-            ),
-        }
-    };
-
-    match &result {
-        Ok(()) => {
-            let _ = control_block.set_search_status(VaultSearchStatus::Ready, None);
-        }
-        Err(error) => {
-            let stale_mark_error = stale_mark_required
-                .then(|| cache.mark_vault_snapshot_stale(vault_id))
-                .transpose()
-                .err();
-            // A structure pass that succeeded before the embedding pass failed
-            // leaves a participating generation with no vectors. Reporting it
-            // `Stale` would grant the search capability to a Vault that can
-            // only ever answer with nothing, so the vectorless axis wins here
-            // exactly as it does in `retained_snapshot_search_status`. The
-            // failure is not lost: it rides along as this status's error.
-            let status = match cache.snapshot_status(vault_id) {
-                Ok(Some(snapshot)) if snapshot.participating && snapshot.searchable => {
-                    VaultSearchStatus::Stale
-                }
-                Ok(Some(snapshot)) if snapshot.participating => VaultSearchStatus::Browsable,
-                Ok(Some(_)) | Ok(None) | Err(_) => VaultSearchStatus::Unavailable,
-            };
-            let message = match stale_mark_error {
-                Some(mark_error) => format!(
-                    "{} (also could not mark the retained snapshot stale: {mark_error})",
-                    error.message()
-                ),
-                None => error.message().to_string(),
-            };
-            let _ = control_block.set_search_status(
-                status,
-                Some(VaultRuntimeError {
-                    code: error.code().to_string(),
-                    message,
-                    retryable: error.retryable(),
-                    detail: None,
-                }),
-            );
-        }
-    }
-    result
-}
-
-fn vault_index_error(error: VaultRuntimeError) -> VaultWorkError {
-    VaultWorkError::new("vault_index_failed", error.message, error.retryable)
-}
-
-/// Convert a [`VaultRuntimeError`] from [`VaultControlBlock::acquire_mutation`]
-/// into the [`VaultWorkError`] a Git turn's dispatch returns. Distinct from
-/// [`vault_index_error`] (Index-turn errors use `"vault_index_failed"`) so a
-/// failure to acquire the mutation lock ahead of a Git turn is never
-/// misreported as an indexing failure.
-fn managed_git_mutation_error(error: VaultRuntimeError) -> VaultWorkError {
-    VaultWorkError::new(
-        "managed_git_mutation_unavailable",
-        error.message,
-        error.retryable,
-    )
-}
-
-/// Execute one `VaultWorkKind::Git` turn for `request` and publish its
-/// result: Git status always, and — since `activation_snapshot` only stats
-/// `vault_path` once, at `reconcile()` time, before any managed checkout
-/// exists — authoritative local-content availability whenever a turn
-/// completes successfully. A Git failure never touches local-content status,
-/// so a Vault that already has a usable checkout stays browsable through a
-/// later sync failure.
-///
-/// A no-op returning `Ok(())` if the Vault has since been retired (its
-/// runtime is gone) or is not managed-Git (defensive: the coordinator only
-/// receives `Git` requests for managed-Git Vaults, but this seam does not
-/// assume that holds forever).
-///
-/// `author_name`/`author_email` are the instance-wide default commit
-/// identity; the Vault's own configured identity, if any, overrides them
-/// (see [`crate::git::config::resolve_commit_identity`]).
-pub async fn dispatch_managed_git_turn(
-    collection: &VaultCollectionRuntime,
-    registry: &VaultRegistryStore,
-    coordinator: &VaultWorkCoordinator,
-    managed_git: &ManagedGitScheduler,
-    author_name: &str,
-    author_email: &str,
-    request: VaultWorkRequest,
-) -> Result<(), VaultWorkError> {
-    dispatch_managed_git_turn_with(
-        collection,
-        registry,
-        coordinator,
-        managed_git,
-        author_name,
-        author_email,
-        request,
-        run_managed_git_turn,
-    )
-    .await
-}
-
-/// [`dispatch_managed_git_turn`] with the actual `git2` turn injectable,
-/// mirroring `git/task.rs`'s `SyncOps` dependency-injection pattern: `execute`
-/// is production's `run_managed_git_turn` in the real dispatch loop, and a
-/// deterministic fake in tests that need to drive a real failure through the
-/// full async path (credential resolution, `spawn_blocking`, status
-/// publishing, scheduler recording) without a reachable remote.
-#[allow(clippy::too_many_arguments)] // Production arguments plus the test-only executor.
-async fn dispatch_managed_git_turn_with<F>(
-    collection: &VaultCollectionRuntime,
-    registry: &VaultRegistryStore,
-    coordinator: &VaultWorkCoordinator,
-    managed_git: &ManagedGitScheduler,
-    author_name: &str,
-    author_email: &str,
-    request: VaultWorkRequest,
-    execute: F,
-) -> Result<(), VaultWorkError>
-where
-    F: FnOnce(
-            &ManagedGitTurnConfig,
-            &ManagedCheckoutLease,
-        ) -> Result<crate::git::ManagedGitOutcome, VaultWorkError>
-        + Send
-        + 'static,
-{
-    let vault_id = request.vault_id();
-    let Some(control_block) = collection.runtime(vault_id) else {
-        managed_git.deactivate(vault_id);
-        return Ok(());
-    };
-    // The Vault's own configured commit identity, if any, overrides the
-    // server-wide defaults for every branch below (#130).
-    let (author_name, author_email) = crate::git::config::resolve_commit_identity(
-        control_block.definition().commit_identity(),
-        author_name,
-        author_email,
-    );
-    let author_name = author_name.as_str();
-    let author_email = author_email.as_str();
-    let (repository_url, branch, vault_subdirectory, mode) =
-        match control_block.definition().source() {
-            RegistryVaultSource::ManagedGit {
-                repository_url,
-                branch,
-                vault_subdirectory,
-                mode,
-                poll_interval_secs: _,
-            } => (
-                repository_url.clone(),
-                branch.clone(),
-                vault_subdirectory.clone(),
-                *mode,
-            ),
-            // An existing checkout under Local-history versioning has no
-            // remote to sync: flush whatever Vault-subtree drift has
-            // accumulated into a local commit, off the async runtime, then
-            // publish through the exact same status/scheduler path a
-            // managed-Git turn uses. `run_local_history_git_turn` resolves
-            // its own placeholder `GitConfig` from `control_block.vault_path()`
-            // alone, so nothing else needs to be read off `source()` here.
-            RegistryVaultSource::ExistingGit {
-                mode: VaultGitMode::LocalHistory,
-                ..
-            } => {
-                let vault_path = control_block.vault_path().to_path_buf();
-                let author_name = author_name.to_string();
-                let author_email = author_email.to_string();
-                let result = tokio::task::spawn_blocking(move || {
-                    crate::git::run_local_history_git_turn(vault_path, author_name, author_email)
-                })
-                .await
-                .unwrap_or_else(|join_error| {
-                    Err(VaultWorkError::new(
-                        "existing_git_local_history_task_panicked",
-                        join_error.to_string(),
-                        false,
-                    ))
-                });
-                publish_managed_git_turn_outcome(
-                    &control_block,
-                    coordinator,
-                    managed_git,
-                    vault_id,
-                    &result,
-                );
-                return result.map(|_: crate::git::ManagedGitOutcome| ());
-            }
-            // An existing checkout under Pull-only or Two-way versioning is
-            // remote sync against the checkout that already exists at
-            // `repository_path` — no managed-checkout acquisition or lease:
-            // see `run_existing_git_remote_turn`'s doc comment for why
-            // `ManagedCheckoutLease` does not apply to an `ExistingGit`
-            // source. Holds the same per-Vault mutation lock a managed-Git
-            // turn holds below (defect 2 of issue #96's reopening): without
-            // it, a foreground Markdown write could race this turn's
-            // fetch/integrate/reset phases.
-            RegistryVaultSource::ExistingGit {
-                mode: existing_mode @ (VaultGitMode::PullOnly | VaultGitMode::TwoWay),
-                repository_path,
-                repository_url,
-                branch,
-                ..
-            } => {
-                let repository_path = repository_path.clone();
-                let repository_url = repository_url.clone();
-                let vault_path = control_block.vault_path().to_path_buf();
-                let branch = branch.clone();
-                let mode = *existing_mode;
-                let credentials = match registry.https_credentials(vault_id) {
-                    Ok(credentials) => credentials,
-                    Err(error) => {
-                        let result = Err(VaultWorkError::new(
-                            "managed_git_registry_unavailable",
-                            error.to_string(),
-                            true,
-                        ));
-                        publish_managed_git_turn_outcome(
-                            &control_block,
-                            coordinator,
-                            managed_git,
-                            vault_id,
-                            &result,
-                        );
-                        return result.map(|_: crate::git::ManagedGitOutcome| ());
-                    }
-                };
-                let mutation_guard = match control_block.acquire_mutation().await {
-                    Ok(guard) => guard,
-                    Err(error) => {
-                        let result = Err(managed_git_mutation_error(error));
-                        publish_managed_git_turn_outcome(
-                            &control_block,
-                            coordinator,
-                            managed_git,
-                            vault_id,
-                            &result,
-                        );
-                        return result.map(|_: crate::git::ManagedGitOutcome| ());
-                    }
-                };
-                let author_name = author_name.to_string();
-                let author_email = author_email.to_string();
-                let result = tokio::task::spawn_blocking(move || {
-                    run_existing_git_remote_turn(
-                        repository_path,
-                        vault_path,
-                        repository_url,
-                        branch,
-                        mode,
-                        credentials,
-                        author_name,
-                        author_email,
-                    )
-                })
-                .await
-                .unwrap_or_else(|join_error| {
-                    Err(VaultWorkError::new(
-                        "existing_git_remote_task_panicked",
-                        join_error.to_string(),
-                        false,
-                    ))
-                });
-                drop(mutation_guard);
-                publish_managed_git_turn_outcome(
-                    &control_block,
-                    coordinator,
-                    managed_git,
-                    vault_id,
-                    &result,
-                );
-                return result.map(|_: crate::git::ManagedGitOutcome| ());
-            }
-            // `Local` has no Git turn at all.
-            RegistryVaultSource::Local { .. } => {
-                return Ok(());
-            }
-        };
-    let credentials = match registry.https_credentials(vault_id) {
-        Ok(credentials) => credentials,
-        Err(error) => {
-            let result = Err(VaultWorkError::new(
-                "managed_git_registry_unavailable",
-                error.to_string(),
-                true,
-            ));
-            publish_managed_git_turn_outcome(
-                &control_block,
-                coordinator,
-                managed_git,
-                vault_id,
-                &result,
-            );
-            return result.map(|_: crate::git::ManagedGitOutcome| ());
-        }
-    };
-    let state_directory = registry
-        .path()
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-
-    let config = ManagedGitTurnConfig {
-        vault_id,
-        state_directory,
-        repository_url,
-        branch,
-        vault_subdirectory,
-        mode,
-        credentials,
-        author_name: author_name.to_string(),
-        author_email: author_email.to_string(),
-    };
-
-    // Obtain this Vault's checkout lease — reused from a previous turn if
-    // `ManagedGitScheduler` is already holding one, or freshly acquired
-    // otherwise (only the first turn since activation pays that one-time,
-    // local-filesystem-only cost; see
-    // `ManagedGitScheduler::take_or_acquire_checkout_lease`). Extracted
-    // *before* `spawn_blocking` — an owned `ManagedCheckoutLease` has no
-    // lifetime tied to `managed_git`, so it (and `config`) can move into
-    // the blocking closure below without borrowing `managed_git` there,
-    // which `spawn_blocking`'s `'static` bound would otherwise forbid.
-    let lease = match managed_git
-        .take_or_acquire_checkout_lease(config.state_directory.clone(), vault_id)
-    {
-        Ok(lease) => lease,
-        Err(error) => {
-            let result = Err(crate::git::managed_task::classify_checkout_error(error));
-            publish_managed_git_turn_outcome(
-                &control_block,
-                coordinator,
-                managed_git,
-                vault_id,
-                &result,
-            );
-            return result.map(|_: crate::git::ManagedGitOutcome| ());
-        }
-    };
-
-    // Hold the same per-Vault mutation lock a foreground Markdown write
-    // acquires (`handlers::vault_write`/`mcp::tools::write`'s own
-    // `acquire_mutation`) across this turn's blocking `git2` work (issue
-    // #96's reopening defect 2): without it, a write could land mid-merge,
-    // or this turn's checkout/reset could stomp a write mid-flight.
-    // Acquired *after* the checkout lease so a lease-acquisition failure
-    // above never blocks on it; the two locks are always acquired in this
-    // same order for the same Vault, and nothing else in this codebase ever
-    // acquires the checkout lease, so there is no risk of the mutation lock
-    // and the checkout lease being acquired in opposite orders elsewhere.
-    // Coarser than the legacy single-Vault path's fine-grained per-phase
-    // locking (`git/task.rs::run_sync_phases` releases its lock across the
-    // network-only fetch/push phases) — held for this whole turn instead,
-    // including `synchronize_managed_checkout`'s network round-trip.
-    // Reproducing the fine-grained scheme here would require splitting
-    // `synchronize_managed_checkout`'s monolithic fetch+integrate+push call
-    // into phases callable independently from this async dispatch layer, a
-    // substantially larger change than this fix warrants on its own.
-    let mutation_guard = match control_block.acquire_mutation().await {
-        Ok(guard) => guard,
-        Err(error) => {
-            let result = Err(managed_git_mutation_error(error));
-            publish_managed_git_turn_outcome(
-                &control_block,
-                coordinator,
-                managed_git,
-                vault_id,
-                &result,
-            );
-            return result.map(|_: crate::git::ManagedGitOutcome| ());
-        }
-    };
-
-    // The lease travels into the blocking task and back out again — it is
-    // never dropped here, only borrowed by `execute` — so the scheduler can
-    // hand it back to `keep_checkout_lease` afterward and keep holding it
-    // across turns instead of releasing its OS-level lock at the end of
-    // this one (issue #95).
-    let outcome = tokio::task::spawn_blocking(move || {
-        let result = execute(&config, &lease);
-        (result, lease)
-    })
-    .await;
-    drop(mutation_guard);
-    let (result, lease) = match outcome {
-        Ok((result, lease)) => (result, Some(lease)),
-        Err(join_error) => (
-            Err(VaultWorkError::new(
-                "managed_git_task_panicked",
-                join_error.to_string(),
-                false,
-            )),
-            // The panicking task owned `lease`; it was dropped (releasing
-            // the OS lock) during unwinding, so there is nothing to keep.
-            None,
-        ),
-    };
-    if let Some(lease) = lease {
-        managed_git.keep_checkout_lease(vault_id, lease);
-    }
-
-    publish_managed_git_turn_outcome(&control_block, coordinator, managed_git, vault_id, &result);
-    result.map(|_| ())
-}
-
-/// Publish one Git turn's result: Git status always, and — since
-/// `activation_snapshot` only stats `vault_path` once, at `reconcile()`
-/// time, before any managed checkout exists — authoritative local-content
-/// availability whenever a turn completes successfully. A Git failure never
-/// touches local-content status, so a Vault that already has a usable
-/// checkout stays browsable through a later sync failure. Also feeds the
-/// outcome back to the scheduler so it can arm the next attempt.
-///
-/// Separated from [`dispatch_managed_git_turn`] so this — the interesting
-/// behavior — is testable against a fabricated result, without needing a
-/// real `git2` clone/fetch against a reachable remote.
-fn publish_managed_git_turn_outcome(
-    control_block: &VaultControlBlock,
-    coordinator: &VaultWorkCoordinator,
-    managed_git: &ManagedGitScheduler,
-    vault_id: VaultId,
-    result: &Result<crate::git::ManagedGitOutcome, VaultWorkError>,
-) {
-    match result {
-        Ok(_) => {
-            let _ = control_block.set_git_status(VaultGitStatus::Ready, None);
-            publish_local_content_after_git_success(control_block);
-            if control_block.is_accepting_operations()
-                && matches!(
-                    control_block.snapshot().local_content,
-                    LocalContentStatus::ReadWrite | LocalContentStatus::ReadOnly
-                )
-            {
-                coordinator.request(vault_id, VaultWorkKind::Index);
-            }
-        }
-        Err(error) => {
-            let _ = control_block.set_git_status(
-                VaultGitStatus::Unavailable,
-                Some(VaultRuntimeError {
-                    code: error.code().to_string(),
-                    message: error.message().to_string(),
-                    retryable: error.retryable(),
-                    detail: error.detail().map(VaultRuntimeErrorDetail::from),
-                }),
-            );
-        }
-    }
-    managed_git.record_outcome(vault_id, result);
-}
-
-/// Re-derive and publish local-content availability after a successful Git
-/// turn, using the same directory check `activation_snapshot` uses at
-/// `reconcile()` time (via [`stat_local_content`]). A managed Vault's
-/// checkout may not have existed the last time that ran.
-fn publish_local_content_after_git_success(control_block: &VaultControlBlock) {
-    let (status, error) = stat_local_content(control_block.vault_path());
-    let _ = control_block.set_local_content_status(status, error);
 }
 
 #[cfg(test)]

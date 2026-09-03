@@ -122,8 +122,8 @@ enum RawMarker {
 }
 
 pub fn parse_marker(contents: &str) -> Result<LayerDecl, String> {
-    let raw: RawMarker =
-        serde_yaml::from_str(contents).map_err(|e| format!("malformed {MARKER_FILE_NAME}: {e}"))?;
+    let raw: RawMarker = serde_yaml_ng::from_str(contents)
+        .map_err(|e| format!("malformed {MARKER_FILE_NAME}: {e}"))?;
 
     let (name, description) = match raw {
         RawMarker::Bare(name) => (name, None),
@@ -494,6 +494,50 @@ mod tests {
         assert_eq!(
             parse_marker("name: default\n").expect("valid"),
             LayerDecl::Default
+        );
+    }
+
+    #[test]
+    fn parse_marker_reads_quoted_unicode_and_block_scalar_forms() {
+        // The marker is a whole YAML document, so the scalar styles an author
+        // may reach for all have to land on the same untagged enum.
+        assert_eq!(
+            parse_marker("\"sources\"\n").expect("quoted bare form"),
+            LayerDecl::Named {
+                name: "sources".to_string(),
+                description: None
+            }
+        );
+        assert_eq!(
+            parse_marker("name: 'sources'\ndescription: 'Ground truth.'\n").expect("single quotes"),
+            LayerDecl::Named {
+                name: "sources".to_string(),
+                description: Some("Ground truth.".to_string())
+            }
+        );
+        assert_eq!(
+            parse_marker("name: réseau-日本\ndescription: \"Sources — 🌱\"\n").expect("unicode"),
+            LayerDecl::Named {
+                name: "réseau-日本".to_string(),
+                description: Some("Sources — 🌱".to_string())
+            }
+        );
+        // A block scalar carries its trailing newline; the description
+        // sanitizer collapses it rather than leaking it into the tool schema.
+        assert_eq!(
+            parse_marker("name: sources\ndescription: |\n  Ground truth.\n").expect("block scalar"),
+            LayerDecl::Named {
+                name: "sources".to_string(),
+                description: Some("Ground truth.".to_string())
+            }
+        );
+        // A name that only looks numeric is still a name, not a number.
+        assert_eq!(
+            parse_marker("name: \"2026\"\n").expect("quoted numeric name"),
+            LayerDecl::Named {
+                name: "2026".to_string(),
+                description: None
+            }
         );
     }
 

@@ -1,0 +1,33 @@
+[
+  {
+    "id": "resources-list",
+    "name": "ResourcesList",
+    "description": "Server lists available resources with valid structure",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:48:29.296Z",
+    "errorMessage": "Failed: resources/list",
+    "specReferences": [
+      {
+        "id": "MCP-Resources-List",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/resources#listing-resources"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-25T07:48:29.296Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

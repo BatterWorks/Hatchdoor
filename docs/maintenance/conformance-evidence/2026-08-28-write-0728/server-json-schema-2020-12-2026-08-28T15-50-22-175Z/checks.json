@@ -1,0 +1,77 @@
+[
+  {
+    "id": "json-schema-2020-12-tool-found",
+    "name": "JsonSchema2020_12ToolFound",
+    "description": "Server advertises tool 'json_schema_2020_12_tool'",
+    "status": "FAILURE",
+    "timestamp": "2026-08-28T15:50:22.192Z",
+    "errorMessage": "Tool 'json_schema_2020_12_tool' not found. Available tools: get_model_setup_status, accept_gemma_terms, decline_gemma_terms, list_vaults, search_notes, get_note, get_note_links, resolve_wikilink, get_tree, get_stats, get_graph, get_frontmatter, list_note_attachments, get_attachment, get_attachment_import_config, recently_modified, batch, create_vault, edit_vault, enable_vault, disable_vault, disconnect_vault, sync_vault, retry_vault, create_note, update_note, append_to_note, edit_note, replace_section, update_frontmatter, rename_note, move_note, move_rename_note, archive_note, delete_note, import_attachment, move_attachment, rename_attachment, delete_attachment",
+    "specReferences": [
+      {
+        "id": "SEP-1613",
+        "url": "https://github.com/modelcontextprotocol/specification/pull/655"
+      }
+    ],
+    "details": {
+      "toolFound": false,
+      "availableTools": [
+        "get_model_setup_status",
+        "accept_gemma_terms",
+        "decline_gemma_terms",
+        "list_vaults",
+        "search_notes",
+        "get_note",
+        "get_note_links",
+        "resolve_wikilink",
+        "get_tree",
+        "get_stats",
+        "get_graph",
+        "get_frontmatter",
+        "list_note_attachments",
+        "get_attachment",
+        "get_attachment_import_config",
+        "recently_modified",
+        "batch",
+        "create_vault",
+        "edit_vault",
+        "enable_vault",
+        "disable_vault",
+        "disconnect_vault",
+        "sync_vault",
+        "retry_vault",
+        "create_note",
+        "update_note",
+        "append_to_note",
+        "edit_note",
+        "replace_section",
+        "update_frontmatter",
+        "rename_note",
+        "move_note",
+        "move_rename_note",
+        "archive_note",
+        "delete_note",
+        "import_attachment",
+        "move_attachment",
+        "rename_attachment",
+        "delete_attachment"
+      ]
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:22.192Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

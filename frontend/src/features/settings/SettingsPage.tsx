@@ -16,7 +16,6 @@ import {
   listHeldDrafts,
   type HeldDraft,
 } from "../../lib/writeDrafts";
-import { formatWhen } from "./relativeTime";
 import { UnsavedDrafts, type RestoreCreateDraft } from "./UnsavedDrafts";
 import { VaultSettingsDetail, VaultSettingsIndex } from "./VaultSettingsIndex";
 
@@ -31,33 +30,7 @@ type Setting = {
   kind: SettingKind;
 };
 
-type IndexStatus = {
-  state: "up_to_date" | "rebuilding" | "failed";
-  /** `state` already distinguishes why: `"rebuilding"` self-clears,
-   * `"failed"` needs a change or restart. There is no separate axis. */
-  stale: boolean;
-  notes_completed?: number;
-  notes_total?: number;
-  chunks_completed?: number;
-  chunks_total?: number;
-  tokens_completed?: number;
-  tokens_total?: number;
-  percent?: number;
-  eta_seconds?: number;
-  last_failure?: string | null;
-};
-
-type GitStatus = {
-  state: "disabled" | "starting" | "running" | "stopping";
-  mode: "off" | "local" | "remote";
-  last_sync_at?: string | null;
-  last_ok?: boolean;
-  last_error?: string | null;
-  pending?: number;
-  unpushed?: number;
-};
-
-type Consequence = "reindex" | "git_init" | "git_downgrade";
+type Consequence = "reindex";
 type Confirmation = {
   consequence: Consequence;
   updates: Record<string, string>;
@@ -66,8 +39,6 @@ type Confirmation = {
    * history) does not forget the first (issue #57). */
   confirm: Consequence[];
 };
-
-const STATUS_POLL_MS = 2_000;
 
 /** Remote-only fields: absent, not locked, when the mode is not remote (#61). */
 const REMOTE_ONLY = [
@@ -165,6 +136,11 @@ const COPY: Record<
     label: "Let assistants change notes",
     help: "Assistants can create, edit, move and delete notes and attachments. Off means they can only read.",
   },
+  HATCHDOOR_MCP_RATE_LIMITS_ENABLED: {
+    section: "agents",
+    label: "Limit how fast assistants work",
+    help: "Caps assistant activity on the MCP door: at most 120 tool calls per minute per assistant, eight running at once, two of them expensive searches. Over the limit, requests are told to retry shortly. Off removes the caps entirely.",
+  },
   HATCHDOOR_MCP_BEARER_TOKEN: {
     section: "agents",
     label: "MCP password",
@@ -234,23 +210,10 @@ const MODES = [
 const REINDEX_CONFIRMATION =
   "Saving this rebuilds the search index. The setting takes effect right away and search keeps working the whole time — it just keeps answering from the old setting until the rebuild finishes.";
 
-/** Issue #61: the init confirmation must state both that a hidden history
- * folder is created inside the notes directory, and that it grows
- * permanently, keeping every image and PDF even after deletion. The server
- * sends only the machine-readable consequence; this page owns the words
- * (issue #55, #58). */
-const GIT_INIT_CONFIRMATION =
-  "Local versioning creates a hidden .git folder inside your notes directory to hold its history. That folder grows permanently: every image and PDF you attach stays in it, even after you delete the file from the vault.";
-
-const GIT_DOWNGRADE_CONFIRMATION =
-  "Switching away from remote versioning stops sending future changes to your remote. Anything already sent stays there; only what happens next is affected.";
-
 /** The page's own words for each consequence a save may need consent for
  * (issue #55, #58): the server sends only the machine-readable identifier. */
 const CONSEQUENCE_COPY: Record<Consequence, string> = {
   reindex: REINDEX_CONFIRMATION,
-  git_init: GIT_INIT_CONFIRMATION,
-  git_downgrade: GIT_DOWNGRADE_CONFIRMATION,
 };
 
 const BUSY_MESSAGE =
@@ -308,22 +271,12 @@ function plaqueValue(setting: Setting): string {
   return value || "empty";
 }
 
-function formatEta(seconds: number | undefined): string {
-  if (seconds === undefined) return "estimating";
-  if (seconds < 90) return `about ${seconds} seconds left`;
-  return `about ${Math.round(seconds / 60)} minutes left`;
-}
-
 export function SettingsPage({
   vaults = [],
-  onVaultDiscoveryRefresh,
   onRestoreCreateDraft,
 }: {
   /** Enabled Vaults, for the held-draft destination picker (#151). */
   vaults?: VaultSummary[];
-  /** Refreshes the app-wide Vault discovery `App.tsx` drives the sidebar and
-   * scope zone from, on top of this page's own Vault list (issue #153). */
-  onVaultDiscoveryRefresh?: () => void;
   /** Held drafts that need a new note stay unrecoverable without it. */
   onRestoreCreateDraft?: RestoreCreateDraft;
 } = {}) {
@@ -364,8 +317,6 @@ export function SettingsPage({
   const [replacing, setReplacing] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
-  const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [selectedVaultId, setSelectedVaultId] = useState<string | null>(null);
 
   const handleDiscardHeldDraft = (id: string) => {
@@ -400,44 +351,6 @@ export function SettingsPage({
         ),
       )
       .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    let live = true;
-    const poll = async () => {
-      try {
-        const response = await apiFetch("/api/git-status");
-        if (!response.ok) throw new Error();
-        if (live) setGitStatus((await response.json()) as GitStatus);
-      } catch {
-        if (live) setGitStatus(null);
-      }
-    };
-    void poll();
-    const interval = window.setInterval(() => void poll(), STATUS_POLL_MS);
-    return () => {
-      live = false;
-      window.clearInterval(interval);
-    };
-  }, []);
-
-  useEffect(() => {
-    let live = true;
-    const poll = async () => {
-      try {
-        const response = await apiFetch("/api/index-status");
-        if (!response.ok) throw new Error();
-        if (live) setIndexStatus((await response.json()) as IndexStatus);
-      } catch {
-        if (live) setIndexStatus(null);
-      }
-    };
-    void poll();
-    const interval = window.setInterval(() => void poll(), STATUS_POLL_MS);
-    return () => {
-      live = false;
-      window.clearInterval(interval);
-    };
   }, []);
 
   const section = useMemo(
@@ -812,7 +725,6 @@ export function SettingsPage({
               setSelectedVaultId(vaultId);
             }}
             autoOpenCreation={autoOpenCreation}
-            onVaultCreated={onVaultDiscoveryRefresh}
           />
           <p className="settings-index-group">This server</p>
           <nav aria-label="Settings sections">
@@ -911,70 +823,6 @@ export function SettingsPage({
           />
         ) : (
           <div className="settings-main">
-            <div className="settings-console">
-              <div className="settings-console-cell">
-                <span className="settings-console-lbl">Search index</span>
-                {indexStatus?.state === "rebuilding" ? (
-                  <>
-                    <span className="settings-console-val">
-                      Rebuilding {indexStatus.percent ?? 0}%
-                    </span>
-                    <div className="settings-mini-bar">
-                      <span style={{ width: `${indexStatus.percent ?? 0}%` }} />
-                    </div>
-                    <span className="settings-muted">
-                      Still answering from the old setting ·{" "}
-                      {formatEta(indexStatus.eta_seconds)}
-                    </span>
-                  </>
-                ) : indexStatus?.state === "failed" ? (
-                  <>
-                    <span className="settings-console-val settings-warn">
-                      Rebuild failed
-                    </span>
-                    <span className="settings-muted">
-                      {indexStatus.last_failure ??
-                        "The last rebuild did not finish."}{" "}
-                      The next settings change or restart tries again.
-                    </span>
-                  </>
-                ) : indexStatus?.stale ? (
-                  <span className="settings-console-val settings-warn">
-                    Behind your settings
-                  </span>
-                ) : (
-                  <span className="settings-console-val">Up to date</span>
-                )}
-              </div>
-              <div className="settings-console-cell">
-                <span className="settings-console-lbl">Versioning</span>
-                <span className="settings-console-val">
-                  <span
-                    className={`settings-dot is-${gitStatus?.state ?? "disabled"}`}
-                  />
-                  {!gitStatus || gitStatus.state === "disabled"
-                    ? "Off"
-                    : gitStatus.state === "starting"
-                      ? "Starting…"
-                      : gitStatus.state === "stopping"
-                        ? "Finishing…"
-                        : gitStatus.mode === "local"
-                          ? "On, this machine"
-                          : "On, sending"}
-                </span>
-                {formatWhen(gitStatus?.last_sync_at) ? (
-                  <span className="settings-muted">
-                    last recorded {formatWhen(gitStatus?.last_sync_at)}
-                  </span>
-                ) : null}
-                {gitStatus?.mode === "remote" && gitStatus.unpushed != null ? (
-                  <span className="settings-muted">
-                    {gitStatus.unpushed} waiting to send
-                  </span>
-                ) : null}
-              </div>
-            </div>
-
             <div className="settings-sec-head">
               <div>
                 <h2 className="settings-sec-title">

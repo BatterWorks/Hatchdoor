@@ -16,7 +16,7 @@ pub use paths::strip_md_extension;
 pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
 };
-pub use seed::seed_empty_vault;
+pub use seed::{SeedError, seed_empty_vault, seed_new_vault};
 pub use types::{
     ExplorerFolder, ExplorerNote, ModifiedNote, Note, NoteEntry, NoteLink, NoteLinks, NoteMetadata,
     NoteSummary, SearchHit, VaultIndex, VaultScanConfig,
@@ -25,5 +25,5 @@ pub use write::{
     AttachmentInfo, AttachmentOutcome, SectionMode, WriteError, WriteOutcome,
     allowed_attachment_extensions, append_note, archive_note, create_note, delete_attachment,
     delete_note, edit_note, import_attachment_bytes, list_note_attachments, move_attachment,
-    move_or_rename_note, rename_attachment, replace_section, update_note,
+    move_or_rename_note, rename_attachment, replace_section, update_note, update_note_frontmatter,
 };

@@ -2,7 +2,7 @@
 //! at startup; the resulting values are threaded into `AppState`.
 
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use tracing_subscriber::EnvFilter;
@@ -127,10 +127,39 @@ impl AppConfig {
     }
 
     pub fn socket_addr(&self) -> Result<SocketAddr, String> {
-        format!("{}:{}", self.host, self.port)
-            .parse::<SocketAddr>()
-            .map_err(|e| format!("invalid bind address: {e}"))
+        socket_addr_for_host(&self.host, self.port)
     }
+}
+
+/// Convert the supported `HOST` forms to a socket address without DNS lookup.
+/// `localhost` is deliberately the IPv4 loopback alias; other hostnames are
+/// rejected so startup and the container health probe have one address family.
+pub fn socket_addr_for_host(host: &str, port: u16) -> Result<SocketAddr, String> {
+    let host = host.trim();
+    let normalized = match host {
+        "localhost" => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        _ => host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .unwrap_or(host)
+            .parse::<IpAddr>()
+            .map_err(|_| {
+                format!(
+                    "invalid HOST '{host}': use an IP literal or localhost; hostname resolution is not supported"
+                )
+            })?,
+    };
+    Ok(SocketAddr::new(normalized, port))
+}
+
+/// Choose the local probe address that matches the selected listener family.
+pub fn healthcheck_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
+    let listener = socket_addr_for_host(host, port)?;
+    let loopback = match listener.ip() {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+    };
+    Ok(SocketAddr::new(loopback, port))
 }
 
 pub fn parse_port(input: &str) -> Result<u16, String> {
@@ -191,23 +220,53 @@ mod tests {
     }
 
     #[test]
-    fn socket_addr_builds_expected_address() {
-        let cfg = AppConfig {
-            vault_source: VaultSource::Local {
-                vault_path: PathBuf::from("./vault"),
-            },
-            cache_db_path: PathBuf::from("./data/cache/hatchdoor-cache.sqlite3"),
-            host: "0.0.0.0".to_string(),
-            port: 42824,
-            web_bearer_token: None,
-            demo_mode: true,
-            archive_prefix: "90-archive/".to_string(),
-            exclude_patterns: Vec::new(),
-            embed_layers: true,
-        };
+    fn socket_addr_normalizes_every_accepted_loopback_spelling() {
+        for (host, expected) in [
+            ("127.0.0.1", "127.0.0.1:42824"),
+            ("localhost", "127.0.0.1:42824"),
+            ("::1", "[::1]:42824"),
+            ("[::1]", "[::1]:42824"),
+        ] {
+            let cfg = AppConfig {
+                vault_source: VaultSource::Local {
+                    vault_path: PathBuf::from("./vault"),
+                },
+                cache_db_path: PathBuf::from("./data/cache/hatchdoor-cache.sqlite3"),
+                host: host.to_string(),
+                port: 42824,
+                web_bearer_token: None,
+                demo_mode: true,
+                archive_prefix: "90-archive/".to_string(),
+                exclude_patterns: Vec::new(),
+                embed_layers: true,
+            };
 
-        let addr = cfg.socket_addr().expect("valid addr");
-        assert_eq!(addr.to_string(), "0.0.0.0:42824");
+            assert_eq!(cfg.socket_addr().expect(host).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn socket_addr_rejects_unsupported_hostnames_with_guidance() {
+        let error = socket_addr_for_host("hatchdoor.example", 42824)
+            .expect_err("hostname resolution is deliberately unsupported");
+        assert!(error.contains("HOST 'hatchdoor.example'"));
+        assert!(error.contains("IP literal or localhost"));
+    }
+
+    #[test]
+    fn healthcheck_target_matches_listener_address_family() {
+        assert_eq!(
+            healthcheck_socket_addr("localhost", 42824)
+                .expect("IPv4 loopback target")
+                .to_string(),
+            "127.0.0.1:42824"
+        );
+        assert_eq!(
+            healthcheck_socket_addr("[::1]", 42824)
+                .expect("IPv6 loopback target")
+                .to_string(),
+            "[::1]:42824"
+        );
     }
 
     #[test]

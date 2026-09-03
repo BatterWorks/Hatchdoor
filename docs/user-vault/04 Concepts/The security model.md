@@ -37,6 +37,27 @@ On top of the token, two more gates apply, independently:
 
 MCP also checks the request's `Origin` header against an allow-list (`HATCHDOOR_MCP_ALLOWED_ORIGINS`) as a defense against DNS-rebinding attacks, and validates the `MCP-Protocol-Version` header — neither of those is a secret, but both run before the bearer-token check on every request.
 
+### Where the MCP token works outside `/mcp`
+
+Two HTTP routes accept the MCP bearer token as well as the web one, so an agent that holds only the MCP credential can move attachment bytes in and out without being handed the web token too. Both read it from the live configuration on every request, so disabling MCP revokes them immediately, with no restart:
+
+| Route | Accepts the MCP token | Why that gate |
+| --- | --- | --- |
+| `POST /api/v1/vaults/{vault_id}/attachments` (upload) | while MCP **and** MCP writes are enabled | It writes. Turning write mode off has to revoke it, or the setting would mean nothing on this path. |
+| `GET /api/v1/vaults/{vault_id}/assets/{*path}` (download; where `get_attachment`'s `download_url` points) | while MCP is enabled | It reads. Write mode isn't the relevant gate for a read — but see below, because this one is not simply "the same as the web token". |
+
+The MCP token is header-only on both. Only the web token may ride in an `access_token` query parameter, because only the browser needs it to.
+
+On the download route the MCP credential is deliberately held to the **same limits it has over `/mcp`**, so the URL isn't a way around them:
+
+- **Size.** It can read up to `HATCHDOOR_MCP_MAX_BASE64_BYTES` (5 MiB by default), the same ceiling `get_attachment`'s base64 encoding enforces — not the route's own much larger bound. An attachment over that returns `413`. Lower the setting and both paths tighten together.
+- **Rate.** The request spends the same per-token quota and concurrency budget an MCP tool call spends, drawn from the same counter, and gets `429` with `Retry-After` when it runs out. Fetching through the URL instead of the tool does not buy a second allowance.
+
+A request carrying the **web** token is unaffected by both — it's the browser, and it was already trusted with the whole Vault.
+
+> [!note]
+> On a deployment with no web bearer token configured, the download route stays open exactly as it always was. Turning MCP on never starts demanding a credential the browser has never had.
+
 > [!note]
 > The web token and the MCP token are unrelated on purpose. An agent's MCP token leaking doesn't hand out Settings or Web UI access, and revoking one never requires rotating the other. Give an agent the MCP token, never the web token — it should never need Settings access to do its job.
 
@@ -48,7 +69,7 @@ This secret authenticates Hatchdoor *to the remote*, not a caller *to Hatchdoor*
 
 ## What's open regardless of any token
 
-`/health`, `/ready`, `/api/startup-status`, and `/api/vault-status` are never gated by any token — they're liveness/readiness probes, meant to be checked by infrastructure (a container orchestrator, a load balancer) that has no credential to present. They report process and indexing state, never Vault content.
+`/health`, `/ready`, and `/api/startup-status` are never gated by any token — they're liveness/readiness probes, meant to be checked by infrastructure (a container orchestrator, a load balancer) that has no credential to present. They report process and indexing state, never Vault content.
 
 ## Demo mode's narrower rule
 

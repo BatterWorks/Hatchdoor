@@ -1,0 +1,139 @@
+[
+  {
+    "id": "tasks-sync-tool-call",
+    "name": "TasksSyncToolCall",
+    "description": "Sync tool returns ToolResult (resultType:\"complete\"), no taskId at top level",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.180Z",
+    "errorMessage": "Unknown MCP tool: greet",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-result-type-task-on-create",
+    "name": "TasksServerTaskCreation",
+    "description": "Task-supporting tool returns flat CreateTaskResult (no nested `task` wrapper)",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.184Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-tasks-get-status-working",
+    "name": "TasksGetDuringWorking",
+    "description": "tasks/get returns status + metadata for an active task",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.184Z",
+    "errorMessage": "Not testable: no task was created by the preceding step, so this check could not be exercised",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "no task was created by the preceding step, so this check could not be exercised"
+    }
+  },
+  {
+    "id": "sep-2663-tasks-get-status-completed",
+    "name": "TasksGetTerminalInlinedResult",
+    "description": "Completed task tasks/get inlines result with content[] (no separate tasks/result method)",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.184Z",
+    "errorMessage": "Not testable: no task was created by the preceding step, so this check could not be exercised",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "no task was created by the preceding step, so this check could not be exercised"
+    }
+  },
+  {
+    "id": "sep-2663-tool-error-uses-completed-status",
+    "name": "TasksToolErrorCompletedIsError",
+    "description": "Tool execution error reports as completed + result.isError (NOT failed)",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.189Z",
+    "errorMessage": "Unknown MCP tool: failing_job",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-tasks-get-status-failed",
+    "name": "TasksProtocolErrorFailedShape",
+    "description": "Protocol-level error reports as failed + inlined error{code,message}, no result",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.193Z",
+    "errorMessage": "Unknown MCP tool: protocol_error_job",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-cancel-ack-empty-result",
+    "name": "TasksCancelEmptyAck",
+    "description": "tasks/cancel returns {resultType:\"complete\"} ack; status settles to cancelled",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.197Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-cancel-terminal-idempotent-ack",
+    "name": "TasksCancelTerminalIdempotentAck",
+    "description": "tasks/cancel on a terminal task returns the same empty-ack as on an active task (idempotent)",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.202Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:43.202Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 12,
+      "violations": []
+    }
+  }
+]

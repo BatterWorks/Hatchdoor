@@ -15,7 +15,7 @@ pub use attachments::{
 };
 pub use notes::{
     SectionMode, append_note, archive_note, create_note, delete_note, edit_note,
-    move_or_rename_note, replace_section, update_note,
+    move_or_rename_note, replace_section, update_note, update_note_frontmatter,
 };
 pub use paths::allowed_attachment_extensions;
 pub use types::{AttachmentInfo, AttachmentOutcome, WriteError, WriteOutcome};

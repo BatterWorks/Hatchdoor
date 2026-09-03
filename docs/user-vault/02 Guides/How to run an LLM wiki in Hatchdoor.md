@@ -39,6 +39,8 @@ Then have it turn that into (or fold it into) a curated wiki page — this is wh
 Search the wiki (default surface) for an existing page about [topic]. If one exists, read it and use append_to_note or replace_section to add what's new from [[raw source note]], with a wikilink back to the source. If none exists, create a new wiki page, link it from any obviously related pages you already found, and link it back to the raw source.
 ```
 
+A single source often produces several pages, or one new page plus edits to the pages that should link to it. That whole set can go in one `batch` call rather than a round trip each — including creating a page and then editing it again later in the same call, which needs no intermediate read. Batches are best-effort and have no rollback, so tell the agent to report each item's own outcome rather than assuming the set landed whole; see [[MCP tools reference#Batch]].
+
 > [!tip]
 > Small, well-linked pages beat one giant page. The wiki's value is in the link graph as much as the content — an agent that queries it later benefits from being able to follow `[[wikilinks]]` between related pages, not just semantic search hits.
 
@@ -58,6 +60,7 @@ Hatchdoor has no dedicated wiki-integrity tool yet — it's a known gap, not yet
 
 - Periodically `search_notes` with `layers: ["all"]` to check nothing landed on the wrong surface.
 - Use `recently_modified` and [[Browse and review through the Web UI]] to spot-check what the agent has been writing.
+- Pull metadata without the bodies: `get_frontmatter` returns one page's tags, aliases, and other properties on its own, and a `batch` of them across a set of pages is cheap enough to check a whole zone for tag drift in one call. Each answer carries that page's content hash too, so the fix does not need a second, heavier read: `update_frontmatter` spends the hash it already has and corrects what it found, one key at a time, without rewriting the page.
 - Ask the agent directly: *"Search the wiki for pages with no incoming or outgoing wikilinks — those are candidates for linking in or archiving."* This is a manual substitute for the automated check that doesn't exist yet.
 
 ---

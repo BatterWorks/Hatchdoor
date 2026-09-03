@@ -1,0 +1,34 @@
+[
+  {
+    "id": "sep-2322-request-state-incomplete",
+    "name": "InputRequiredResultRequestStateIncomplete",
+    "description": "Server returns InputRequiredResult with both inputRequests and requestState",
+    "status": "FAILURE",
+    "timestamp": "2026-08-28T15:50:21.953Z",
+    "errorMessage": "JSON-RPC error: Unknown MCP tool: test_input_required_result_request_state",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ],
+    "details": {}
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:21.953Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

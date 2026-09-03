@@ -218,6 +218,30 @@ pub fn migrate_legacy_vault(
         .next()
         .expect("a successful legacy import creates exactly one Vault");
 
+    // First boot on an empty `VAULT_PATH` gets the starter Vault, before the
+    // collection runtime activates the imported Vault and queues its first
+    // Index turn. Which imports qualify is `vault::seed_new_vault`'s decision,
+    // shared with the HTTP creation path: a Git-backed legacy deployment is
+    // never seeded, and a directory that already holds Markdown is left
+    // untouched. Read back from the committed definition so the canonicalized
+    // path and normalized exclude patterns are the ones judged.
+    if let Some(definition) = imported.definition(vault_id) {
+        match crate::vault::seed_new_vault(definition.source(), definition.exclude_patterns()) {
+            Ok(true) => {
+                tracing::info!(%vault_id, "Seeded imported Vault with Hatchdoor starter notes")
+            }
+            Ok(false) => {}
+            // Never fatal: the registry is already committed, and an unseeded
+            // Vault is a better outcome than a deployment that refuses to
+            // finish migrating.
+            Err(error) => tracing::error!(
+                %vault_id,
+                %error,
+                "could not seed the imported Vault with starter notes"
+            ),
+        }
+    }
+
     let mut cleanup_warnings = Vec::new();
     if let Err(error) = runtime_config.remove_stored(LEGACY_STORED_KEYS) {
         cleanup_warnings.push(format!(
@@ -1394,5 +1418,120 @@ mod tests {
         let identity = definition.commit_identity().expect("imported identity");
         assert_eq!(identity.name, "Custom Legacy Author");
         assert_eq!(identity.email, "legacy@example.test");
+    }
+
+    /// First boot with an explicitly configured but empty `VAULT_PATH` is the
+    /// documented fresh-install case: the imported Vault opens on the starter
+    /// notes rather than on nothing at all.
+    #[test]
+    fn importing_an_empty_vault_path_seeds_the_starter_vault() {
+        let root = tempdir().expect("temp dir");
+        let vault_path = root.path().join("notes");
+        std::fs::create_dir_all(&vault_path).expect("empty vault directory");
+        let runtime_config = RuntimeConfig::load(
+            root.path().join("cache/settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+
+        let outcome = migrate_legacy_vault(
+            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path: vault_path.clone(),
+                cache_db_path: root.path().join("cache/hatchdoor.sqlite3"),
+                environment: BTreeMap::from([(
+                    "VAULT_PATH".to_string(),
+                    vault_path.display().to_string(),
+                )]),
+            },
+        )
+        .expect("safe legacy import");
+
+        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
+        assert!(
+            vault_path.join("README.md").is_file(),
+            "an empty imported Vault must receive the starter notes"
+        );
+    }
+
+    /// An import of a directory that already holds the operator's Markdown is
+    /// left exactly as it was.
+    #[test]
+    fn importing_a_non_empty_vault_path_does_not_seed() {
+        let root = tempdir().expect("temp dir");
+        let vault_path = root.path().join("notes");
+        std::fs::create_dir_all(&vault_path).expect("vault directory");
+        std::fs::write(vault_path.join("Home.md"), "home").expect("existing note");
+        let runtime_config = RuntimeConfig::load(
+            root.path().join("cache/settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+
+        let outcome = migrate_legacy_vault(
+            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path: vault_path.clone(),
+                cache_db_path: root.path().join("cache/hatchdoor.sqlite3"),
+                environment: BTreeMap::from([(
+                    "VAULT_PATH".to_string(),
+                    vault_path.display().to_string(),
+                )]),
+            },
+        )
+        .expect("safe legacy import");
+
+        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
+        assert!(
+            !vault_path.join("README.md").exists(),
+            "a Vault that already holds Markdown must not be seeded"
+        );
+        assert_eq!(
+            std::fs::read_to_string(vault_path.join("Home.md")).expect("existing note"),
+            "home"
+        );
+    }
+
+    /// A legacy Git-backed deployment's content belongs to its repository:
+    /// seeding it would manufacture a commit the operator never asked for.
+    #[test]
+    fn importing_a_git_backed_legacy_deployment_never_seeds() {
+        let root = tempdir().expect("temp dir");
+        let vault_path = root.path().join("notes");
+        let _repository = initialize_legacy_repository(&vault_path);
+        std::fs::remove_file(vault_path.join("README.md")).expect("empty the working tree");
+        let runtime_config = RuntimeConfig::load(
+            root.path().join("cache/settings.json"),
+            Environment::empty(),
+            live_settings_defaults(),
+        )
+        .expect("runtime configuration");
+        runtime_config
+            .save([(
+                "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
+                "local".to_string(),
+            )])
+            .expect("legacy git setting");
+
+        let outcome = migrate_legacy_vault(
+            &VaultRegistryStore::new(root.path().join("state/vaults.json")),
+            &runtime_config,
+            LegacyMigrationInput {
+                vault_path: vault_path.clone(),
+                cache_db_path: root.path().join("cache/hatchdoor.sqlite3"),
+                environment: BTreeMap::new(),
+            },
+        )
+        .expect("safe legacy import");
+
+        assert!(matches!(outcome, LegacyMigrationOutcome::Imported { .. }));
+        assert!(
+            !vault_path.join("README.md").exists(),
+            "a Git-backed legacy deployment must never be seeded"
+        );
     }
 }

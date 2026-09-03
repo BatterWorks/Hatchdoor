@@ -162,7 +162,14 @@ pub fn append_rerank_section(path: &Path, report: &Report, initial_k: usize) -> 
     writeln!(f, "| Recall@10 (all) | {:.3} |", report.recall_at_10_all).ok();
     writeln!(f, "| MRR | {:.3} |", report.mrr).ok();
     writeln!(f, "| FP-rate@5 | {:.3} |", report.fp_rate_at_5).ok();
+    match report.correct_heading_rate {
+        Some(rate) => writeln!(f, "| Correct-heading | {rate:.3} |").ok(),
+        None => writeln!(f, "| Correct-heading | n/a |").ok(),
+    };
     writeln!(f).ok();
+    write_group_table(&mut f, "Per-category", &report.per_category);
+    write_group_table(&mut f, "Per-tier", &report.per_tier);
+    write_group_table(&mut f, "Per-language", &report.per_language);
     writeln!(f, "### Per-query breakdown").ok();
     writeln!(f).ok();
     writeln!(
@@ -398,7 +405,7 @@ pub fn append_compare_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::metrics::{PerQueryMetrics, Report};
+    use crate::eval::metrics::{GroupReport, PerQueryMetrics, Report};
 
     fn fake_report() -> Report {
         Report {
@@ -476,10 +483,31 @@ mod tests {
             recall_at_10_all: 0.99,
             mrr: 0.95,
             fp_rate_at_5: 0.0,
-            correct_heading_rate: None,
-            per_category: Vec::new(),
-            per_tier: Vec::new(),
-            per_language: Vec::new(),
+            correct_heading_rate: Some(1.0),
+            per_category: vec![GroupReport {
+                label: "operations".to_string(),
+                n: 2,
+                recall_at_5_any: 1.0,
+                recall_at_10_any: 1.0,
+                mrr: 0.95,
+                correct_heading_rate: Some(1.0),
+            }],
+            per_tier: vec![GroupReport {
+                label: "core".to_string(),
+                n: 2,
+                recall_at_5_any: 1.0,
+                recall_at_10_any: 1.0,
+                mrr: 0.95,
+                correct_heading_rate: Some(1.0),
+            }],
+            per_language: vec![GroupReport {
+                label: "en".to_string(),
+                n: 2,
+                recall_at_5_any: 1.0,
+                recall_at_10_any: 1.0,
+                mrr: 0.95,
+                correct_heading_rate: Some(1.0),
+            }],
             per_query: vec![
                 PerQueryMetrics {
                     id: "U5".to_string(),
@@ -522,6 +550,10 @@ mod tests {
         assert!(text.contains("Median rerank latency: 180.0 ms"));
         assert!(text.contains("p90: 240.0"));
         assert!(text.contains("Median end-to-end latency: 200.0 ms"));
+        assert!(text.contains("| Correct-heading | 1.000 |"));
+        assert!(text.contains("### Per-category"));
+        assert!(text.contains("### Per-tier"));
+        assert!(text.contains("### Per-language"));
         assert!(text.contains("| ID | Query | Rank pre | Rank post | Δ | Anti in top-5? |"));
         // D2 moved from rank 4 → 1, delta = 3
         assert!(text.contains("| D2 |"));

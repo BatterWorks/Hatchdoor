@@ -1,0 +1,57 @@
+[
+  {
+    "id": "sep-2322-validate-input-responses",
+    "name": "ValidateInputResponses",
+    "description": "Server validates InputResponses structure",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:54.642Z",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ],
+    "details": {
+      "error": {
+        "code": -32602,
+        "message": "Unknown MCP tool: test_input_required_result_elicitation"
+      }
+    }
+  },
+  {
+    "id": "sep-2322-error-on-protocol-error",
+    "name": "ErrorOnProtocolError",
+    "description": "Server returns JSON-RPC error for protocol-level input errors",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:54.646Z",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ],
+    "details": {
+      "error": {
+        "code": -32602,
+        "message": "Unknown MCP tool: test_input_required_result_elicitation"
+      }
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:54.646Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

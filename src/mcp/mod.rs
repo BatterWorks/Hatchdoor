@@ -1,8 +1,12 @@
+pub mod adapter;
 pub mod auth;
 pub mod config;
+pub mod limits;
 pub mod protocol;
+pub mod results;
 pub mod routes;
+pub mod subscriptions;
 pub mod tools;
 
 pub use config::McpConfig;
-pub use routes::{mcp_get_handler, mcp_post_handler};
+pub use routes::HatchdoorMcpTransport;

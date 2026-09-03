@@ -1,50 +1,51 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct TagStat {
     pub tag: String,
     pub note_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct NoteRef {
     pub title: String,
     pub slug: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct NoteWordRef {
     pub title: String,
     pub slug: String,
     pub word_count: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct LinkedNoteRef {
     pub title: String,
     pub slug: String,
     pub backlink_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct MonthActivity {
     pub month: String,
     pub modified_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct FolderStat {
     pub folder: String,
     pub note_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct NoteList {
     pub count: i64,
     pub notes: Vec<NoteRef>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, Deserialize)]
 pub struct VaultStatsResponse {
     pub note_count: i64,
     pub word_count: usize,
@@ -131,13 +132,6 @@ pub struct ResolveTargetResult {
 pub struct ResolveAssetResult {
     pub target: String,
     pub path: Option<String>,
-}
-
-/// Still consumed by `src/mcp/tools/read.rs`'s own refresh tool over the
-/// legacy shared-core call (#103, unaffected by #101's HTTP route removal).
-#[derive(Debug, Serialize)]
-pub struct RefreshResponse {
-    pub refreshed: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -141,3 +141,64 @@ python3 docs/design/palette.py
 It checks uniform lightness per theme, the chroma ceilings, and 4.5:1 contrast
 on the tinted and badge surfaces, and exits non-zero on a violation. No
 dependencies.
+
+## Branching
+
+All work happens on a branch off `development`. Never commit to `development`
+or `main` directly, whatever the size of the change.
+
+Before the first edit, check the current branch and cut one if you are sitting
+on a protected branch:
+
+```bash
+git branch --show-current
+git switch -c <prefix>/<short-slug> development
+```
+
+Use `feature/`, `fix/`, `docs/`, or `refactor/` as the prefix. Push that branch
+and open a pull request against `development`; `main` is the release branch and
+receives only merges from `development`.
+
+`development` refuses a direct push, so cutting the branch after the work is
+committed means moving commits off a branch you cannot push, not a quick fix.
+Check first.
+
+Every merge is a merge commit, including `development` into `main`. Do not
+squash, do not rebase-merge, and never force-push `development` or `main`.
+
+## Documentation freshness before merging into `development`
+
+Merging work into `development` requires a documentation freshness review. Run:
+
+```bash
+just docs-freshness
+```
+
+It names the user-facing surfaces the branch changed and the `docs/user-vault`
+notes that document them, then exits non-zero. That exit is the trigger, not a
+failure to work around: the script cannot judge whether a note still reads
+true, so it hands you the reading list instead.
+
+Open every note it names and compare it against what the branch actually
+changed. Update the notes that drifted (wording, examples, tool and setting
+names, described behavior) as part of this branch, not later. A note reported
+as "edited on this branch" only means the file moved; check it like the rest.
+
+Then record the review:
+
+```bash
+just docs-freshness-ack
+```
+
+Do not acknowledge a review you did not perform, and do not treat a clean
+`docs-freshness` run as permission to skip reading when you know a note is
+stale. If a surface changed that the script does not yet know about, add it to
+the table in `scripts/check-docs-freshness.mjs`, cover it in
+`scripts/check-docs-freshness.test.mjs`, and say so at hand-off.
+
+After editing that table, or after renaming or moving a note under
+`docs/user-vault`, confirm every entry still resolves:
+
+```bash
+node scripts/check-docs-freshness.mjs --validate-table
+```

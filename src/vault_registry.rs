@@ -5,6 +5,7 @@
 //! and recovery behavior. Runtime reconciliation, Git lifecycle, migration, and
 //! transport adapters remain outside this module.
 
+use schemars::JsonSchema;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -73,6 +74,26 @@ impl VaultId {
 pub enum VaultIdError {
     InvalidFormat,
     Randomness(String),
+}
+
+// Schemas describe the wire form (a canonical UUID string), not the internal
+// 16 bytes.
+impl JsonSchema for VaultId {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "VaultId".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::generate::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "format": "uuid",
+            "description": "Canonical Vault ID."
+        })
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
 }
 
 impl fmt::Display for VaultIdError {
@@ -175,7 +196,7 @@ fn decode_hex(value: u8) -> Option<u8> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VaultSource {
     Local {
@@ -278,7 +299,7 @@ impl VaultSource {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum VaultGitMode {
     LocalHistory,
@@ -303,7 +324,7 @@ pub struct HttpsCredentials {
 /// `HATCHDOOR_GIT_AUTHOR_NAME`/`HATCHDOOR_GIT_AUTHOR_EMAIL` settings for every
 /// commit the managed sync makes on its behalf. Not a secret: unlike
 /// [`HttpsCredentials`], it is safe to read back and log.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct VaultCommitIdentity {
     pub name: String,
@@ -1554,7 +1575,7 @@ fn normalize_https_repository_url(repository_url: String) -> Result<String, Vaul
 /// fixture cannot get one through `VaultRegistryStore` and should not try;
 /// either exercise the git2 layer directly (as `managed_checkout.rs`/
 /// `managed_sync.rs`/`managed_task.rs` do), or inject a fake turn executor at
-/// the `vault_runtime::dispatch_managed_git_turn_with` seam to drive a
+/// the `vault_executor::dispatch_git_turn_with` seam to drive a
 /// fabricated result through the full async/status-publishing path instead.
 pub(crate) fn is_safe_https_repository_url(repository_url: &str) -> bool {
     let Some(remainder) = repository_url.strip_prefix("https://") else {

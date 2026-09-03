@@ -1,0 +1,35 @@
+[
+  {
+    "id": "ping",
+    "name": "Ping",
+    "description": "Server responds to ping requests",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:43.732Z",
+    "specReferences": [
+      {
+        "id": "MCP-Ping",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/ping"
+      }
+    ],
+    "details": {
+      "result": {}
+    }
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-08-28T15:50:43.739Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2025-11-25/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 5,
+      "violations": []
+    }
+  }
+]

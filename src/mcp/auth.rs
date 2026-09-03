@@ -53,6 +53,17 @@ pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(
         }
     }
 
+    Ok(())
+}
+
+/// Rejects a request whose declared protocol revision is retired/unknown.
+/// Runs after the body is buffered so the JSON-RPC error can echo the
+/// request's `id` (SEP-2575: error responses carry the request id); the
+/// earlier origin/bearer checks stay pre-buffer by design.
+pub fn reject_unsupported_protocol_version(
+    headers: &HeaderMap,
+    request_id: Value,
+) -> Result<(), Box<Response>> {
     if let Some(protocol_version) = headers
         .get("MCP-Protocol-Version")
         .or_else(|| headers.get("Mcp-Protocol-Version"))
@@ -61,7 +72,7 @@ pub fn validate_mcp_request(headers: &HeaderMap, config: &McpConfig) -> Result<(
     {
         return Err(Box::new(jsonrpc_error_response(
             StatusCode::BAD_REQUEST,
-            Value::Null,
+            request_id,
             -32002,
             format!("Unsupported MCP protocol version: {protocol_version}"),
         )));

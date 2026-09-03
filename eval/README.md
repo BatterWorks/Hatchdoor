@@ -5,6 +5,19 @@ The checked-in `queries.jsonl` file is a tiny sample that targets the placeholde
 vault in this repository. For real measurements, create your own private query
 set against your own vault.
 
+## The `eval` feature
+
+The harness is not part of a default build. The `eval` and `index_microbench`
+binaries, the candle-backed Qwen3 and Nomic v2 MoE embedders, and the inference
+stack under them all live behind the non-default `eval` cargo feature, so a
+deployment build never compiles a benchmark dependency. Every command below
+therefore passes `--features eval`; without it cargo reports that the binary
+requires a feature it was not given, rather than a compile error.
+
+The `eval/*.local.sh` sweep runners are gitignored, so they are not carried by a
+clone and were not updated by this repository's history. If you keep your own,
+add `--features eval` to every `cargo build` and `cargo run` line in them.
+
 ## Vault path
 
 The eval binary indexes the vault at `VAULT_PATH`, falling back to `./vault`
@@ -13,7 +26,7 @@ startup, so if your `.env` sets `VAULT_PATH=/path/to/notes` you're done. To
 override for a single run, prefix the command:
 
 ```
-VAULT_PATH=/path/to/notes cargo run --release --bin eval -- build ...
+VAULT_PATH=/path/to/notes cargo run --release --features eval --bin eval -- build ...
 ```
 
 Sanity-check the indexing log: `notes=2` means it's still pointing at the
@@ -22,9 +35,9 @@ placeholder vault.
 ## Build the three caches (one-time, ~2 h total)
 
 ```
-cargo run --release --bin eval -- build --model BGESmallENV15      --cache data/cache/hatchdoor-cache-bge-small.sqlite3
-cargo run --release --bin eval -- build --model NomicEmbedTextV15  --cache data/cache/hatchdoor-cache-nomic-v1-5.sqlite3
-cargo run --release --bin eval -- build --model MxbaiEmbedLargeV1  --cache data/cache/hatchdoor-cache-mxbai-large.sqlite3
+cargo run --release --features eval --bin eval -- build --model BGESmallENV15      --cache data/cache/hatchdoor-cache-bge-small.sqlite3
+cargo run --release --features eval --bin eval -- build --model NomicEmbedTextV15  --cache data/cache/hatchdoor-cache-nomic-v1-5.sqlite3
+cargo run --release --features eval --bin eval -- build --model MxbaiEmbedLargeV1  --cache data/cache/hatchdoor-cache-mxbai-large.sqlite3
 ```
 
 `MxbaiEmbedLargeV1` is the slow one (~1 h on CPU). Run it overnight or in
@@ -34,7 +47,7 @@ per-note progress so silence means it has hung; non-silence means it is alive.
 ## Run the eval against any cache
 
 ```
-cargo run --release --bin eval -- run \
+cargo run --release --features eval --bin eval -- run \
   --model BGESmallENV15 \
   --cache data/cache/hatchdoor-cache-bge-small.sqlite3 \
   --queries eval/queries.jsonl
@@ -42,13 +55,18 @@ cargo run --release --bin eval -- run \
 
 Metrics print to stdout. A section is appended to `eval/results.md`.
 
+The cache records the exact embedding representation, not just its vector
+dimension. `run`, `rerank`, `hybrid`, and `compare` refuse a missing or
+mismatched stamp; rebuild the disposable cache with the same model, dimension,
+and document representation before querying it.
+
 ## Rerank an existing cache
 
 The `rerank` subcommand applies a cross-encoder reranker on top of an existing
 embedding cache. It does **not** rebuild anything — the cache stays untouched.
 
 ```
-cargo run --release --bin eval -- rerank \
+cargo run --release --features eval --bin eval -- rerank \
   --model NomicEmbedTextV15 \
   --cache data/cache/hatchdoor-cache-nomic-v1-5.sqlite3 \
   --reranker JINARerankerV2BaseMultilingual \
@@ -62,7 +80,7 @@ Available rerankers:
 
 The first invocation per reranker downloads its ONNX weights (~150 MB and ~570 MB respectively) into the fastembed cache. Subsequent runs are fast.
 
-`--initial-k` controls how many embedding candidates are passed to the reranker; default is 20. Metrics are still scored at k=5 and k=10 against the post-rerank order. A section is appended to `eval/results.md` with rank-pre / rank-post / Δ columns and median / p90 / max latency stats.
+`--initial-k` controls how many embedding candidates are passed to the reranker; default is 20. Metrics are still scored at k=5 and k=10 against the post-rerank order. A section is appended to `eval/results.md` with rank-pre / rank-post / Δ columns, correct-heading and category/tier/language slices, and median / p90 / max latency stats.
 
 ## Adding private queries
 

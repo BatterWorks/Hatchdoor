@@ -547,7 +547,7 @@ pub(super) fn move_file_no_follow(source: &Path, destination: &Path) -> Result<(
             destination.display()
         )));
     }
-    if let Err(error) = read_regular_file_at(&destination_parent, &destination_name) {
+    if let Err(error) = assert_regular_file_at(&destination_parent, &destination_name) {
         restore_move_from_gate(
             &source_parent,
             &source_name,
@@ -739,7 +739,10 @@ fn read_file_at_no_follow(parent: &fs::File, name: &CString) -> Result<String, s
     Ok(content)
 }
 
-fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, std::io::Error> {
+/// Assert the entry is an ordinary file: not a symlink, directory, device
+/// node, or FIFO. This is the whole of the safety property the move guard
+/// needs, and it says nothing about the bytes inside.
+fn assert_regular_file_at(parent: &fs::File, name: &CString) -> Result<(), std::io::Error> {
     let metadata = metadata_at_no_follow(parent, name)?;
     if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
         return Err(std::io::Error::new(
@@ -747,6 +750,15 @@ fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, std
             "source is not a regular file",
         ));
     }
+    Ok(())
+}
+
+/// The regular-file assertion plus a text read, for the paths that go on to
+/// hash the content as Markdown. Anything that only needs the file to be a
+/// file must call [`assert_regular_file_at`] instead: an attachment is
+/// arbitrary bytes and need not decode as UTF-8 (#220).
+fn read_regular_file_at(parent: &fs::File, name: &CString) -> Result<String, std::io::Error> {
+    assert_regular_file_at(parent, name)?;
     read_file_at_no_follow(parent, name)
 }
 
@@ -809,8 +821,18 @@ fn rename_exchange(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vault::write::tests::BINARY_ASSET;
     use crate::vault::write::types::AssetMove;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+
+        let name = CString::new(path.as_os_str().as_bytes()).expect("fifo path");
+        let result = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+        assert_eq!(result, 0, "mkfifo: {}", std::io::Error::last_os_error());
+    }
 
     #[test]
     fn atomic_write_persists_content_and_leaves_no_temp_file() {
@@ -940,6 +962,112 @@ mod tests {
         assert!(source.is_symlink());
         assert!(!destination.exists());
         assert_eq!(fs::read_to_string(&sentinel).unwrap(), "sentinel");
+    }
+
+    #[test]
+    fn move_file_no_follow_rejects_a_path_carrying_a_parent_component() {
+        // #225: the planner must normalise `..` away before it gets here. This
+        // pins the syscall-level rejection that catches it if it ever does not:
+        // the parent walk opens one plain name at a time, so `..` is refused
+        // rather than followed. Nothing above may relax this.
+        let dir = tempdir().expect("tempdir");
+        let nested = dir.path().join("folder-x");
+        fs::create_dir_all(&nested).expect("nested dir");
+        let source = dir.path().join("asset.png");
+        fs::write(&source, BINARY_ASSET).expect("source");
+        let destination = nested.join("../moved.png");
+
+        let error = move_file_no_follow(&source, &destination)
+            .expect_err("a destination carrying '..' must not reach the filesystem");
+
+        let WriteError::Io(message) = error else {
+            panic!("expected an I/O error naming the unsupported component");
+        };
+        assert!(
+            message.contains("write path has unsupported component"),
+            "unexpected message: {message}"
+        );
+        assert!(source.exists(), "the source must be left alone");
+        assert!(!dir.path().join("moved.png").exists());
+    }
+
+    #[test]
+    fn move_file_no_follow_moves_bytes_that_are_not_valid_utf8() {
+        // issue #220: an attachment is arbitrary bytes. The post-move guard
+        // exists to prove the moved thing is a regular file, not that it
+        // decodes as text, so a real image or PDF must move unchanged.
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("photo.jpg");
+        let destination = dir.path().join("moved.jpg");
+        fs::write(&source, BINARY_ASSET).expect("source");
+
+        move_file_no_follow(&source, &destination).expect("a binary asset must move");
+
+        assert!(!source.exists());
+        assert_eq!(fs::read(&destination).unwrap(), BINARY_ASSET);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_file_no_follow_rejects_a_fifo_source_and_restores_it() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let dir = tempdir().expect("tempdir");
+        let source = dir.path().join("asset.png");
+        let destination = dir.path().join("moved.png");
+        make_fifo(&source);
+
+        let error =
+            move_file_no_follow(&source, &destination).expect_err("a FIFO must not be moved");
+
+        assert!(matches!(error, WriteError::Conflict(_)));
+        assert!(
+            fs::symlink_metadata(&source)
+                .expect("fifo metadata")
+                .file_type()
+                .is_fifo(),
+            "the refused source must be restored as it was"
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn mutation_journal_restores_binary_asset_bytes_when_a_later_move_fails() {
+        // issue #220: rollback replays the same move primitive, so the bytes
+        // of an asset already moved by an earlier step must survive the round
+        // trip when a later step of the same mutation fails.
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        let binary = root.join("photo.jpg");
+        let sibling = root.join("notes.txt");
+        fs::write(&binary, BINARY_ASSET).expect("binary asset");
+        fs::write(&sibling, "text asset").expect("text asset");
+        let dst_dir = root.join("dst");
+        fs::create_dir(&dst_dir).expect("dst dir");
+
+        let mut journal = MutationJournal::new(root);
+        journal
+            .move_file(MutationPhase::Asset, &binary, &dst_dir.join("photo.jpg"))
+            .expect("binary asset move");
+        // The second asset's destination parent does not exist, so its move
+        // fails deterministically after the first has committed.
+        let cause = journal
+            .move_file(
+                MutationPhase::Asset,
+                &sibling,
+                &root.join("missing_dir").join("notes.txt"),
+            )
+            .expect_err("the later move must fail");
+        let error = journal.rollback(cause);
+
+        assert!(matches!(error, WriteError::Io(_)));
+        assert_eq!(
+            fs::read(&binary).expect("restored asset"),
+            BINARY_ASSET,
+            "rollback must restore the original bytes"
+        );
+        assert!(!dst_dir.join("photo.jpg").exists());
+        assert_eq!(fs::read_to_string(&sibling).unwrap(), "text asset");
     }
 
     #[test]

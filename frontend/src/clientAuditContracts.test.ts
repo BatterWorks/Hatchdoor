@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import appCss from "./App.css?raw";
+import appSource from "./App.tsx?raw";
 import graphPageSource from "./components/graph/GraphPage.tsx?raw";
 import notePageSource from "./components/NotePage.tsx?raw";
 import noteContentCss from "./styles/note-content.css?raw";
@@ -106,6 +107,22 @@ describe("client audit launch contracts", () => {
     );
     expect(appCss).toMatch(
       /\.modal-panel\s*{[^}]*max-height:\s*min\(720px,\s*calc\(var\(--visual-viewport-height,\s*100dvh\)/s,
+    );
+  });
+
+  it("lets the sidebar grid read the live --sidebar-width off the shell", () => {
+    // App.tsx sets --sidebar-width inline on `.app-shell`. A local
+    // declaration on `.app-layout` shadows that inherited value, so the
+    // resizer moved only the topbar column (which reads the inherited one)
+    // while the pane stayed pinned at the shadowed default.
+    expect(appSource).toMatch(
+      /app-shell[\s\S]{0,400}?"--sidebar-width":\s*`\$\{sidebarWidth\}px`/,
+    );
+    expect(explorerCss).not.toMatch(
+      /\.app-layout\s*{[^}]*--sidebar-width:\s*\d/s,
+    );
+    expect(explorerCss).toMatch(
+      /\.app-layout\s*{[^}]*grid-template-columns:\s*var\(--sidebar-width,\s*280px\)/s,
     );
   });
 

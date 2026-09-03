@@ -1,0 +1,60 @@
+[
+  {
+    "id": "outgoing-request",
+    "name": "OutgoingRequest",
+    "description": "Sending POST tools/call",
+    "status": "INFO",
+    "timestamp": "2026-08-25T07:46:16.030Z",
+    "details": {
+      "method": "POST",
+      "url": "http://127.0.0.1:42999/mcp",
+      "headers": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream, application/json",
+        "mcp-session-id": "0a9a7cf0-9a02-4ac5-889a-27c206a5f91a",
+        "mcp-protocol-version": "2025-11-25"
+      },
+      "body": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+          "name": "test_reconnection",
+          "arguments": {}
+        }
+      }
+    }
+  },
+  {
+    "id": "incoming-response",
+    "name": "IncomingResponse",
+    "description": "Received 429 response for POST",
+    "status": "INFO",
+    "timestamp": "2026-08-25T07:46:16.035Z",
+    "details": {
+      "statusCode": 429,
+      "headers": {
+        "connection": "keep-alive",
+        "content-length": "40",
+        "content-type": "text/plain; charset=utf-8",
+        "date": "Tue, 25 Aug 2026 07:46:16 GMT",
+        "keep-alive": "timeout=5",
+        "retry-after": "17"
+      }
+    }
+  },
+  {
+    "id": "server-sse-post-request",
+    "name": "ServerSSEPostRequest",
+    "description": "Server accepts POST request with SSE stream response",
+    "status": "FAILURE",
+    "timestamp": "2026-08-25T07:46:16.035Z",
+    "errorMessage": "Server returned HTTP 429",
+    "specReferences": [
+      {
+        "id": "SEP-1699",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+      }
+    ]
+  }
+]

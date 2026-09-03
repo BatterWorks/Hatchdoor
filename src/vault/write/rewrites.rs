@@ -2,17 +2,28 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::vault::types::VaultIndex;
+use crate::vault::paths::{normalize_link_target, normalize_title};
+use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::types::{TextRewrite, WriteError};
 
+/// Retarget every backlink to the moved note, keeping the form its author wrote.
+///
+/// A link written as a bare title stays a bare title, a path-qualified link
+/// gets the new full path, and `new_target: None` removes the link entirely
+/// (delete). The bare form is only safe while the new title names exactly one
+/// note, so a title another note already carries falls back to the full path:
+/// a link that resolved before the move must still resolve after it (#235).
 pub(super) fn backlink_rewrite_plan(
     index: &VaultIndex,
     moved_slug: &str,
     new_target: Option<&str>,
 ) -> Result<Vec<TextRewrite>, WriteError> {
+    let entries = index.ordered_entries();
+    let bare_new_target =
+        new_target.and_then(|target| unambiguous_bare_title(&entries, moved_slug, target));
     let mut rewrites = Vec::new();
-    for entry in index.ordered_entries() {
+    for entry in entries {
         if entry.slug == moved_slug {
             continue;
         }
@@ -23,13 +34,18 @@ pub(super) fn backlink_rewrite_plan(
             ))
         })?;
         let rewritten = transform_wikilinks(&content, |target| {
-            let should_change = index
-                .resolve_wikilink(target)
-                .is_some_and(|candidate| candidate.slug == moved_slug);
-            if !should_change {
+            let Some(candidate) = index.resolve_wikilink(target) else {
+                return Some(target.to_string());
+            };
+            if candidate.slug != moved_slug {
                 return Some(target.to_string());
             }
-            new_target.map(ToOwned::to_owned)
+            match bare_new_target.as_deref() {
+                Some(bare) if target_is_the_moved_notes_bare_title(target, &candidate.title) => {
+                    Some(bare.to_string())
+                }
+                _ => new_target.map(ToOwned::to_owned),
+            }
         });
         if rewritten != content {
             rewrites.push(TextRewrite {
@@ -39,6 +55,39 @@ pub(super) fn backlink_rewrite_plan(
         }
     }
     Ok(rewrites)
+}
+
+/// The moved note's new bare title, when no *other* note in the pre-move index
+/// already carries it.
+///
+/// Only the moved note changes name, so the pre-move index answers the
+/// post-move question. `resolve_wikilink` tries `by_path_title` before
+/// `by_title`, but a bare title holds no `/` while a nested note's path key
+/// always does, so the only note a bare title can capture on the path pass is
+/// a root-level note whose relative path is its own title — which carries that
+/// title too, and so is already caught here.
+fn unambiguous_bare_title(
+    entries: &[NoteEntry],
+    moved_slug: &str,
+    new_target: &str,
+) -> Option<String> {
+    let bare = new_target.rsplit('/').next().unwrap_or(new_target);
+    let normalized = normalize_title(bare);
+    let taken_by_another_note = entries
+        .iter()
+        .any(|entry| entry.slug != moved_slug && normalize_title(&entry.title) == normalized);
+    (!taken_by_another_note).then(|| bare.to_string())
+}
+
+/// Whether this target is the moved note's own title, written bare.
+///
+/// A slug-form target (`[[some-note]]` for "Some Note") is machine-authored
+/// and takes the full path like any other non-title form; for a single-word
+/// title the two forms normalize alike, so the distinction only ever arises
+/// for multi-word titles.
+fn target_is_the_moved_notes_bare_title(target: &str, moved_title: &str) -> bool {
+    let normalized = normalize_link_target(target);
+    !normalized.contains('/') && normalize_title(&normalized) == normalize_title(moved_title)
 }
 
 pub(super) fn transform_wikilinks<F>(content: &str, transform_target: F) -> String

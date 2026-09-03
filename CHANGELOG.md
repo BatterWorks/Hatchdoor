@@ -1,5 +1,107 @@
 # Changelog
 
+## v2.6.0 - 2026-09-03
+
+The MCP release. Agents get five new tools, a modern protocol revision, and a `get_tree` that no longer hands over the entire Vault when you asked about one folder. Everyone else gets a Git schedule that actually fires, a read-only mount that actually mounts, and a write layer that stops refusing to rename a note because of the picture sitting next to it.
+
+### ⚠️ Breaking changes — action required on upgrade
+- **`GET /api/index-status`, `GET /api/git-status` and `GET /api/vault-status` are gone**, and all three return `404`. Each described a single Vault back when there was only ever one. The two Settings consoles they fed, **Search index** and **Versioning**, leave the Settings page with them, along with their two-second polling. Each Vault's own settings page keeps its condition, its last error, and its **Sync now**, **Try again** and **Rebuild search index** buttons, and the scope zone and explorer still show a Vault as indexing.
+  **Action:** point uptime checks at `/api/startup-status`, which is unchanged and remains the unauthenticated startup probe, and anything asking about a specific Vault at `GET /api/v1/vaults`, which reports each Vault's condition, its last search or versioning error, and whether it is indexing. Nothing in Hatchdoor's configuration brings the old routes back. [#183]
+- **`PATCH /api/settings` no longer asks you to confirm `git_init` or `git_downgrade`.** Those consequences belonged to the instance-wide versioning lifecycle that the retired **Versioning** console explained, and no current deployment reaches it. A save that turns on local versioning, or switches off remote versioning, now applies on the first request instead of answering `409` and waiting for a resend.
+  **Action:** remove those two values from any API client, since an unknown consequence is refused as a validation error. `reindex` is unaffected and still confirmed exactly as before, and per-Vault Git changes keep their own confirmations on `/api/v1/vaults/{vault_id}`.
+- **MCP protocol revisions `2025-03-26` and `2025-06-18` are no longer served.** The endpoint advertises and accepts exactly `2026-07-28` and `2025-11-25`. A client pinned to a dropped revision is refused on the protocol-version header rather than silently downgraded.
+  **Action:** if an MCP client stops connecting after this upgrade, check which revision it pins and update it. Nothing in Hatchdoor's own configuration restores the dropped ones.
+- **Notes inside a `get_tree` result no longer carry `vault_id`.** It was a third of the payload, and the tree already names its Vault once at the top.
+  **Action:** read the Vault from the tree root. Flat results that mix Vaults in one list, `search_notes` and `recently_modified`, keep their per-note `vault_id` and need no change. [#211]
+- **The instance-wide Git and exclusion environment variables no longer do anything at runtime.** `HATCHDOOR_GIT_SYNC_ENABLED`, `HATCHDOOR_GIT_REMOTE`, `HATCHDOOR_GIT_BRANCH`, `HATCHDOOR_GIT_HTTPS_USERNAME`, `HATCHDOOR_GIT_HTTPS_TOKEN`, `HATCHDOOR_GIT_DEBOUNCE_SECONDS` and `HATCHDOOR_EXCLUDE` stay in Settings and keep their values, but nothing acts on them while the server runs. They are inputs to importing a pre-2.5.0 deployment on first boot, and are otherwise only checked for validity at startup. Each Vault's own exclusion patterns and Git mode are what apply, and saving one of these no longer creates or reconfigures a Git repository as a side effect.
+  **Action:** set exclusions and Git mode per Vault, in that Vault's settings. `HATCHDOOR_GIT_AUTHOR_NAME` and `HATCHDOOR_GIT_AUTHOR_EMAIL` are unaffected. They remain the commit identity a Vault without its own falls back to, and a change to either still reaches the next Git turn without a restart. [#185]
+
+### Added
+- **Read and write a note's properties without touching its body.** `get_frontmatter` returns the tags, aliases and other keys alone; `update_frontmatter` merges keys in and leaves your Markdown byte-for-byte identical. [#175]
+- **`get_frontmatter` also hands back the note's `content_hash`.** Every hash-protected write wants one, and the only way to get one was to pull the whole note body over the wire. A migration over hundreds of notes no longer reads every body to learn a 16-character string. [#227]
+- **`get_attachment` pulls a file back out of a Vault**, the mirror image of importing one. A download URL by default, base64 inline for clients that cannot fetch out of band. [#176]
+- **`batch` runs up to 50 reads or 20 writes as one call and one commit.** Content hashes chain inside it, so an agent can create a note and edit it again later in the same batch without reading it back. Best-effort, no rollback. [#177]
+- **`get_tree` takes `folder`, `max_depth` and `include_notes`.** Asking about one folder used to cost you the whole Vault. On a 530-note Vault the orientation call is 13x smaller than the full tree. [#192], [#211]
+- **`refresh_vault` asks one Vault for its next index turn.** Collection reads have always said when they have fallen behind the Markdown, and an agent had no way to act on that: `sync_vault` and `retry_vault` both resolve a Git poll interval first and refuse any Vault without a remote, so a plain local Vault had no MCP path to a rebuild at all. It answers `queued` on an idle Vault and `coalesced` when a turn is already pending, so repeat requests cannot pile turns onto one Vault. [#228]
+- **Every MCP tool ships an `outputSchema`**, so a client can validate a result instead of inferring its shape. [#167]
+- **The MCP endpoint speaks protocol revision `2026-07-28`**: stateless discovery, no handshake, and one opt-in `subscriptions/listen` stream in place of SSE subscribe and unsubscribe. Clients on `2025-11-25` are unaffected. [#169], [#170]
+- **MCP now has rate limits.** 120 calls a minute per token, 8 concurrent calls and 2 concurrent searches, refused with `429` and a `Retry-After`. Set `HATCHDOOR_MCP_RATE_LIMITS_ENABLED=false` to switch them off. [#171]
+- **The Vault asset route accepts an MCP bearer token**, so an agent can fetch the URL `get_attachment` hands it without also holding the web token. It spends the same quota and size limits as any MCP call. [#174]
+- **The public documentation Vault gained Guides, Concepts and a settings reference**, and the README links into it rather than duplicating it.
+- **The public demo and the documentation site link to each other now.** Each demo Vault points at the documentation page behind its layout, and the documentation's layout table links to the live Vault demonstrating each method.
+
+### Fixed
+- A Vault on a `:ro` Docker bind mount refused to come up at all, which is an awkward position for a product that supports read-only browsing. Read-only mounts answer the write probe with `EROFS`, and only "permission denied" counted as present but not writable. Such a Vault now activates read-only. [#178]
+- If you redeployed more often than your Git poll interval, a scheduled sync never fired once. Every process start re-armed the countdown from zero, so the only Git turns that ever ran were activations and manual syncs. The schedule was, in the strict sense, decorative. Each Vault now remembers when its last turn completed and resumes the countdown across a restart. [#200]
+- Straight after a restart, a Vault whose Git credentials were failing reported `pending` with no error, for up to a day on the default schedule. Activation now republishes the last known outcome, message included. [#200]
+- A Vault's read model could wedge permanently, and one new note was enough to do it. A slug comes from a filename alone, so two notes with the same stem in different folders compete for it, and the index build tried to give it to the arriving note while the departing one still held it. That failed the whole Index turn, and the next turn seeded from the same snapshot and failed at the same note, forever: `get_tree`, `get_graph` and `get_stats` reported `partial` at a frozen `collection_revision` while exact note reads stayed correct. The build now releases a moving slug before any note claims it, and a wedged cache recovers on its first turn with nothing deleted and no cache wiped. [#226]
+- An Index turn held the Vault's write lock for the whole turn, embedding included, so a write arriving during a multi-minute pass on a CPU-only host did not slow down, it parked. The caller's transport gave up on a write that then landed anyway, which is an at-least-once hazard the moment the caller retries. The lock now covers the turn's read phase only, and a Vault that took a write while it was released publishes itself stale rather than fresh and lets the watcher's catch-up turn sort it out. [#223]
+- A note holding a real image, PDF or archive could not be moved, renamed, archived or deleted, and neither could the file itself. The check run after an asset move read the file as text, so any byte that was not valid UTF-8 rolled the whole write back with "refusing to move unsafe source". The suite stayed green on this because every attachment fixture wrote the ASCII string `png` into a file named `.png`. The check now asserts an ordinary file and reads nothing. [#220]
+- A note referencing an asset outside its own folder could not be moved at all. The planner assumed every referenced asset was a sibling and built its destination by joining the reference onto the note's folder, so a link such as `../Attachments/image.png` carried its `..` all the way down to the move primitives, which refuse anything but plain names. An asset now travels with a note only when it already lives inside that note's own folder, or a subfolder of it. One kept elsewhere, such as the shared attachments folder of the usual Obsidian layout, stays exactly where it is; only the moving note's own link is repointed, and no other note is touched. A note in the Vault root has the whole Vault as its folder, so everything it references still travels when it moves. [#225], [#231]
+- `rename_note` refused any note that kept its picture beside it, and every note in the Vault root. A rename leaves the note in its folder, so an asset in that folder was already sitting at the destination computed for it, and the collision guard could not tell that apart from a genuine collision. A move to nowhere is now recognised as one: nothing moves, nothing is rewritten, and `moved_assets` reports `0`. A different file at an asset's destination still refuses, as before. [#238]
+- One rename could rewrite a Vault's prose out of the style it was written in. Every backlink to the moved note was retargeted to its full vault-relative path, so `[[Some Note]]` came back as `[[folder/subfolder/Some Note]]`. The links still resolved, but the prose got noisier on every rename and nothing rewrote it back. A backlink now keeps the form it was authored in, with the full path as the fallback where the new title is one another note already carries. Aliases, anchors and fenced code are untouched. [#235]
+- A writer saving faster than the watcher's quiet window deferred freshness for the whole burst. Every qualifying event restarted the 500 ms timer with no upper bound, so no Index turn was armed and the published snapshot could not advance until the writing stopped. The documented ceiling on that window is now enforced, and whichever of the two fires first wins. [#229]
+- An agent that edited a note was told Hatchdoor was still being set up, on instances that finished setting up months ago, and was then handed model-setup tools that could change nothing. Following that advice produced a second, differently wrong answer. The routine reindex behind the write was sharing one status field with first-run model setup. [#191]
+- After the backend restarted, the Vault list and its counts stopped updating until you reloaded the page. A new server counts revisions from zero again, and the client read that as stale. [#194]
+- Opening a Vault's settings page mid-refresh could leave it describing a Vault the Settings index disagreed with for the rest of the visit. [#194]
+- Dragging the sidebar resizer moved the note path in the topbar and left the pane itself where it was. The layout grid redeclared `--sidebar-width` at its 280px default, and a local declaration beats the live value inherited from the shell.
+- Asking for a folder that no Vault has picked one Vault at random and blamed it by id. The refusal now names none of them, because none is more at fault than the others. [#211]
+- Uploading a file called `.hatchdoor-layer` through the HTTP API silently reclassified a whole subtree as a demoted layer. It now returns `400 layer_marker_write`, as the MCP tools always did.
+- In demo mode, an attachment in a hidden layer was still served to anyone who knew its URL. Asset requests now go through the same browse surface as note reads.
+- Every semantic search embedded your query twice, once to retrieve and again during diversity backfill. It embeds it once.
+- Setting `HOST=localhost` failed to parse and the server refused to start. It is accepted now, and the container health probe follows the listener's address family instead of guessing at it.
+- A large note written through `update_note` or `archive_note` held up other MCP traffic while it was written. Both now write off the request thread, the way the HTTP routes always have, which also made three of their error payloads agree with their HTTP twins.
+- The length of your configured bearer token could be measured from outside, because the comparison returned early on a length mismatch. Both sides are hashed to a fixed width first now.
+
+### Under the hood
+No behaviour change in any of these, but they are why the list above is as short as it is.
+
+- The `/mcp` protocol boundary is the `rmcp` library rather than a hand-written JSON-RPC layer. Tool names, arguments, response shapes and the per-request security ordering are unchanged. [#168]
+- The legacy single-Vault indexing and Git lane is deleted. Hatchdoor had been carrying a second, unreachable copy of both since v2.5.0. [#185]
+- Every write, read and management operation crosses one Vault-qualified core now, with HTTP and MCP as thin adapters over it. That is why three MCP error payloads above could stop disagreeing with their HTTP twins. [#184], [#186], [#187], [#188]
+- Index turns and Git turns run behind a single Vault work executor. [#197]
+- The frontend reads the Vault collection through one client instead of several. [#198]
+- The eval harness is behind a non-default `eval` cargo feature, cutting 17 crates from a default build. [#195]
+- YAML parsing moved from the archived `serde_yaml` to `serde_yaml_ng`. [#196]
+- The unreachable search filters, and the second semantic retrieval path they gated, are deleted. [#210]
+
+[#167]: https://github.com/BatterWorks/Hatchdoor/issues/167
+[#168]: https://github.com/BatterWorks/Hatchdoor/issues/168
+[#169]: https://github.com/BatterWorks/Hatchdoor/issues/169
+[#170]: https://github.com/BatterWorks/Hatchdoor/issues/170
+[#171]: https://github.com/BatterWorks/Hatchdoor/issues/171
+[#174]: https://github.com/BatterWorks/Hatchdoor/issues/174
+[#175]: https://github.com/BatterWorks/Hatchdoor/issues/175
+[#176]: https://github.com/BatterWorks/Hatchdoor/issues/176
+[#177]: https://github.com/BatterWorks/Hatchdoor/issues/177
+[#178]: https://github.com/BatterWorks/Hatchdoor/issues/178
+[#183]: https://github.com/BatterWorks/Hatchdoor/issues/183
+[#184]: https://github.com/BatterWorks/Hatchdoor/issues/184
+[#185]: https://github.com/BatterWorks/Hatchdoor/issues/185
+[#186]: https://github.com/BatterWorks/Hatchdoor/issues/186
+[#187]: https://github.com/BatterWorks/Hatchdoor/issues/187
+[#188]: https://github.com/BatterWorks/Hatchdoor/issues/188
+[#191]: https://github.com/BatterWorks/Hatchdoor/issues/191
+[#192]: https://github.com/BatterWorks/Hatchdoor/issues/192
+[#194]: https://github.com/BatterWorks/Hatchdoor/issues/194
+[#195]: https://github.com/BatterWorks/Hatchdoor/issues/195
+[#196]: https://github.com/BatterWorks/Hatchdoor/issues/196
+[#197]: https://github.com/BatterWorks/Hatchdoor/issues/197
+[#198]: https://github.com/BatterWorks/Hatchdoor/issues/198
+[#200]: https://github.com/BatterWorks/Hatchdoor/issues/200
+[#210]: https://github.com/BatterWorks/Hatchdoor/issues/210
+[#211]: https://github.com/BatterWorks/Hatchdoor/issues/211
+[#220]: https://github.com/BatterWorks/Hatchdoor/issues/220
+[#223]: https://github.com/BatterWorks/Hatchdoor/issues/223
+[#225]: https://github.com/BatterWorks/Hatchdoor/issues/225
+[#226]: https://github.com/BatterWorks/Hatchdoor/issues/226
+[#227]: https://github.com/BatterWorks/Hatchdoor/issues/227
+[#228]: https://github.com/BatterWorks/Hatchdoor/issues/228
+[#229]: https://github.com/BatterWorks/Hatchdoor/issues/229
+[#231]: https://github.com/BatterWorks/Hatchdoor/issues/231
+[#235]: https://github.com/BatterWorks/Hatchdoor/issues/235
+[#238]: https://github.com/BatterWorks/Hatchdoor/issues/238
+
 ## v2.5.0 - 2026-08-17
 
 - Attachment embeds written the way Obsidian writes them now render. A bare

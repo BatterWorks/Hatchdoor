@@ -7,6 +7,7 @@ pub(crate) mod vault_snapshots;
 
 pub(crate) use schema::is_recognized_legacy_cache;
 
+pub(crate) use populate::BuildHandles;
 pub use populate::BuildOptions;
 pub use queries::SemanticHit;
 use std::collections::BTreeMap;

@@ -25,12 +25,14 @@ Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes ra
 | **Git** | `disabled`, `pending`, `ready`, `unavailable` | Is Git sync (if configured) working? |
 | **Watcher** | `running`, `disabled`, `unavailable` | Is the file-change watcher keeping the index current? |
 
+**Git** survives a restart for a Vault Hatchdoor polls on a schedule — one with a remote to check. A Vault that last checked cleanly comes back as `ready`, and one whose last check failed comes back as `unavailable` with the same reason it showed before, so `pending` means a Vault that has genuinely never completed a check rather than one Hatchdoor has simply forgotten about. A Vault with no remote to poll — an `existing_git` Vault in `local_history` mode, which only records your own edits — has no schedule to resume, so it starts as `pending` and settles on its first turn after startup. Alongside these, `GET /api/v1/vaults` reports `last_checked_at` and `next_attempt_at` for any Vault with a remote.
+
 **Search** deserves the closest look, because its middle values are easy to misread:
 
 - `indexing` — actively building; nothing usable yet for this axis.
 - `browsable` — a real, load-bearing state, not a typo for "ready." The Vault's structure (notes, links, headings) is published and current, but this generation has no vectors yet. You can open and read every note; semantic search returns nothing. This is reached once, on a Vault's very first successful index, between the structure pass and the embedding pass — a later rebuild of an already-searchable Vault never regresses through it, it just keeps serving the prior generation while the rebuild runs.
 - `ready` — fully current, structure and vectors both.
-- `stale` — a prior generation is still being served (so search still works) while a newer build is in progress or the last build failed; not an error by itself, just "what you're seeing might be a build behind."
+- `stale` — search still works, but what it answers from is a build behind. Three ways to get here: a newer build is in progress, the last build failed, or a note was written *during* the build that just finished, so the generation it published was already behind the moment it landed. That last one is normal during a bulk edit or migration — every write arms the next reindex, and the Vault settles on `ready` once the writing stops. Not an error by itself, just "what you're seeing might be a build behind."
 
 ## What capabilities actually come from
 

@@ -17,6 +17,9 @@ historical records.
   — implemented collaboration-boundary plan.
 - [`architecture/collaboration-pilot-assessment.md`](architecture/collaboration-pilot-assessment.md)
   — evidence and limitations from the initial boundary pilots.
+- [`architecture/frontend-assessment.md`](architecture/frontend-assessment.md)
+  — 2026-08-30 review of the frontend stack, size, the bespoke block editor,
+  and the three oversized components with their split seams.
 
 ## Product direction
 
@@ -35,7 +38,7 @@ historical records.
 - [`maintenance/dependency-update-plan.md`](maintenance/dependency-update-plan.md)
   — completed dependency-update plan and retained upgrade context.
 - [`maintenance/release-runbook.md`](maintenance/release-runbook.md) — release
-  PR squash-merge and post-merge branch-realignment procedure.
+  PR merge procedure and pre-merge checklist.
 
 ## Research
 

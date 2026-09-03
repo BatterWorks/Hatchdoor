@@ -113,6 +113,16 @@ export type VaultSummary = {
   local_content: "read_write" | "read_only" | "unavailable";
   search: "unavailable" | "indexing" | "browsable" | "ready" | "stale";
   git: "disabled" | "pending" | "ready" | "unavailable";
+  /** When this Vault's last scheduled or manual Git turn finished, RFC 3339
+   * UTC — whether it succeeded or failed, so read it with `git` rather than
+   * as a successful sync. Absent for a Vault with no remote to poll, one
+   * that has not completed a turn yet, and on the read-only demo. */
+  last_checked_at?: string;
+  /** When this Vault's next scheduled Git turn is due, RFC 3339 UTC. Present
+   * for every Vault with a remote to poll, including one that has never
+   * completed a turn — it is due immediately, not unscheduled. Absent for a
+   * Vault with no remote, and on the read-only demo. */
+  next_attempt_at?: string;
   watcher: "running" | "disabled" | "unavailable";
   capabilities: VaultCapabilities;
   activation_error?: VaultRuntimeError;
@@ -145,6 +155,39 @@ export type VaultDiscoveryResponse = {
   demo_mode: boolean;
 };
 
+/** A folder exactly as `GET /api/v1/vaults/{scope}/tree` sends it.
+ *
+ * `note_count` is the notes held directly in this folder, excluding its
+ * subfolders, and `truncated` marks a folder the server declined to expand.
+ * Neither is used here — the explorer draws the whole tree — but they are part
+ * of the payload and typed so nothing silently assumes they are absent. */
+export type WireExplorerFolder = {
+  name: string;
+  note_count: number;
+  truncated?: boolean;
+  folders: WireExplorerFolder[];
+  notes: WireExplorerNote[];
+};
+
+/** A note as the tree sends it: not vault-qualified, because the enclosing
+ * `WireVaultTree` already names the vault (#192). */
+export type WireExplorerNote = {
+  title: string;
+  slug: string;
+};
+
+/** One participating Vault's tree, as returned (grouped, never merged) by
+ * `GET /api/v1/vaults/{scope}/tree`. */
+export type WireVaultTree = {
+  vault_id: VaultId;
+  vault_name: string;
+  tree: WireExplorerFolder;
+};
+
+/** A folder as the app carries it, once each note has been stamped with the
+ * vault of the tree it arrived in. The grouping is lost the moment trees are
+ * merged or flattened, so the attribution happens on arrival rather than being
+ * rethreaded through every component that renders a note. */
 export type ExplorerFolder = {
   name: string;
   folders: ExplorerFolder[];
@@ -157,8 +200,6 @@ export type ExplorerNote = {
   slug: string;
 };
 
-/** One participating Vault's tree, as returned (grouped, never merged) by
- * `GET /api/v1/vaults/{scope}/tree`. */
 export type VaultTree = {
   vault_id: VaultId;
   vault_name: string;

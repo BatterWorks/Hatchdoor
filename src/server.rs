@@ -13,24 +13,25 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
-use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::app_state::AppState;
-use crate::auth::{WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_token, require_web_token};
+use crate::auth::{
+    AssetReadTokens, WebOrLiveMcpToken, WebToken, require_web_or_live_mcp_read_token,
+    require_web_or_live_mcp_token, require_web_token,
+};
 use crate::cache::SqliteCache;
 use crate::config::AppConfig;
 use crate::embed::{Embedder, FastembedEmbedder, RuntimeEmbedder};
-use crate::git::{self, GitConfig};
+use crate::git::GitConfig;
 use crate::handlers::{
     MAX_IN_MEMORY_UPLOAD_BYTES, create_vault_handler, demo_read_only_response,
     disable_vault_handler, disconnect_vault_handler, edit_vault_handler, enable_vault_handler,
-    generate_mcp_token_handler, get_git_status_handler, get_index_status_handler,
-    get_settings_handler, health_handler, list_vaults_handler, patch_settings_handler,
-    refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler, reveal_web_token_handler,
-    spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
+    generate_mcp_token_handler, get_settings_handler, health_handler, list_vaults_handler,
+    patch_settings_handler, refresh_vault_handler, retry_vault_handler, reveal_mcp_token_handler,
+    reveal_web_token_handler, spa_index_handler, start_with_no_vaults_handler, sync_vault_handler,
     vault_collection_events_handler, vault_scope_graph_handler, vault_scope_recent_handler,
     vault_scope_search_handler, vault_scope_stats_handler, vault_scope_tree_handler,
     vault_scoped_archive_note_handler, vault_scoped_asset_handler,
@@ -42,84 +43,22 @@ use crate::handlers::{
     vault_scoped_update_note_handler, vault_scoped_upload_attachment_handler,
     vault_scoped_write_capabilities_handler,
 };
-use crate::mcp::{McpConfig, mcp_get_handler, mcp_post_handler};
+use crate::mcp::{HatchdoorMcpTransport, McpConfig};
 use crate::model_setup::{ModelSetup, SelectedModel};
-use crate::runtime_config::{
-    ConfigSnapshot, RuntimeConfig, live_settings_defaults, settings_file_path,
-};
+use crate::runtime_config::{RuntimeConfig, live_settings_defaults, settings_file_path};
 use crate::startup::StartupTracker;
+use crate::vault_executor::VaultWorkExecutor;
 use crate::vault_migration::{LegacyMigrationInput, LegacyMigrationOutcome, migrate_legacy_vault};
 use crate::vault_registry::{VaultRegistryState, VaultRegistryStore};
-use crate::vault_runtime::{
-    VaultCollectionRuntime, VaultRuntime, VaultSource, dispatch_managed_git_turn,
-    dispatch_vault_index_turn_with_progress,
-};
-use crate::vault_work::{VaultWorkCoordinator, VaultWorkError, VaultWorkKind, VaultWorkRequest};
+use crate::vault_runtime::{VaultCollectionRuntime, VaultRuntime, VaultSource};
+#[cfg(test)]
+use crate::vault_work::VaultWorkError;
+use crate::vault_work::{VaultWorkCoordinator, VaultWorkKind};
 
 /// Hosts that only accept connections from the local machine. Binding to any
 /// other address exposes the port to the network.
 fn is_loopback_host(host: &str) -> bool {
     matches!(host.trim(), "127.0.0.1" | "::1" | "[::1]" | "localhost")
-}
-
-/// Dependencies captured once for one worker turn. The runtime snapshot is
-/// deliberately part of this value so an admitted operation observes one
-/// immutable configuration view even if settings change later.
-#[derive(Clone)]
-struct VaultWorkDispatchContext {
-    vaults: VaultCollectionRuntime,
-    registry: VaultRegistryStore,
-    work: VaultWorkCoordinator,
-    managed_git: Arc<crate::git::ManagedGitScheduler>,
-    cache: Arc<SqliteCache>,
-    embedder: Arc<dyn Embedder>,
-    runtime_snapshot: Arc<ConfigSnapshot>,
-    author_name: String,
-    author_email: String,
-    startup: StartupTracker,
-}
-
-impl VaultWorkDispatchContext {
-    async fn dispatch(self, request: VaultWorkRequest) -> Result<(), VaultWorkError> {
-        match request.kind() {
-            VaultWorkKind::Git => {
-                dispatch_managed_git_turn(
-                    &self.vaults,
-                    &self.registry,
-                    &self.work,
-                    &self.managed_git,
-                    &self.author_name,
-                    &self.author_email,
-                    request,
-                )
-                .await
-            }
-            VaultWorkKind::Index => {
-                let embed_layers = self
-                    .runtime_snapshot
-                    .setting("HATCHDOOR_EMBED_LAYERS")
-                    .map(|setting| crate::runtime_config::is_truthy(&setting.value))
-                    .unwrap_or(true);
-                let progress_startup = self.startup.clone();
-                dispatch_vault_index_turn_with_progress(
-                    &self.vaults,
-                    self.cache,
-                    self.embedder,
-                    embed_layers,
-                    Some(Arc::new(move |progress| {
-                        progress_startup.set_indexing(progress);
-                    })),
-                    request,
-                )
-                .await
-            }
-            VaultWorkKind::Repair => Err(VaultWorkError::new(
-                "vault_work_kind_not_yet_implemented",
-                format!("{:?} dispatch is not implemented yet", request.kind()),
-                false,
-            )),
-        }
-    }
 }
 
 async fn shutdown_signal() {
@@ -167,10 +106,20 @@ pub fn check_web_auth_posture(
     Ok(())
 }
 
+/// Refuse a demo start whose operator still has legacy instance-wide Git
+/// versioning or MCP configured.
+///
+/// `legacy_git_configured` is `HATCHDOOR_GIT_SYNC_ENABLED` resolving to a
+/// mode. Since #185 that setting drives nothing at runtime, so this is no
+/// longer the refusal that keeps a demo read-only — the registry check in
+/// [`check_demo_mode_registry_posture`] is. It is kept because the operator's
+/// `.env` and Hatchdoor's behaviour disagreeing is worth stopping over, and
+/// because the setting is still live input to the first-boot legacy import,
+/// which would register the Vault it names.
 pub fn check_demo_mode_posture(
     demo_mode: bool,
     mcp_enabled: bool,
-    git_writes_enabled: bool,
+    legacy_git_configured: bool,
 ) -> Result<(), String> {
     if !demo_mode {
         return Ok(());
@@ -181,7 +130,7 @@ pub fn check_demo_mode_posture(
                 .to_string(),
         );
     }
-    if git_writes_enabled {
+    if legacy_git_configured {
         return Err(
             "HATCHDOOR_DEMO_MODE=true is incompatible with Git writeback; disable HATCHDOOR_GIT_SYNC_ENABLED and managed bidirectional mode for public demos."
                 .to_string(),
@@ -334,8 +283,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/settings",
                 get(get_settings_handler).patch(patch_settings_handler),
             )
-            .route("/api/index-status", get(get_index_status_handler))
-            .route("/api/git-status", get(get_git_status_handler))
             .route(
                 "/api/settings/web-token/reveal",
                 post(reveal_web_token_handler),
@@ -363,15 +310,18 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
     // until the legacy embedding-model setup is ready, but Vault collection
     // discovery/management tools stay reachable throughout (#103), mirroring
     // `vaults_v1`'s own independence from that legacy readiness signal below.
-    let mcp = Router::new()
-        .route("/mcp", get(mcp_get_handler).post(mcp_post_handler))
+    // The transport itself is rmcp-owned (ADR-17); the sub-router layers the
+    // per-request authorization/body-limit middleware in front of it.
+    let mcp_transport = HatchdoorMcpTransport::new(state.clone());
+    let mcp = mcp_transport
+        .router(&state)
         .layer(DefaultBodyLimit::max(mcp_body_limit));
 
     // Vault-collection discovery, management, events, exact content reads, and
-    // #101's Vault-scoped mutations are deliberately not gated by any
-    // `require_vault_ready`-style middleware: connecting the first Vault and
-    // recovering a corrupt registry must stay reachable at zero enabled
-    // Vaults. Every operation gates per-request on its own targeted Vault
+    // #101's Vault-scoped mutations are deliberately behind no instance-wide
+    // readiness middleware: connecting the first Vault and recovering a
+    // corrupt registry must stay reachable at zero enabled Vaults. Every
+    // operation gates per-request on its own targeted Vault
     // instead (`vault_not_found`/`vault_disabled`/`vault_unavailable`/
     // `capability_unavailable` from `VaultReadCore`/`VaultControlBlock`),
     // which is the per-Vault equivalent this surface needs.
@@ -474,10 +424,6 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
                 "/api/v1/vaults/{vault_id}/resolve-batch",
                 post(vault_scoped_resolve_batch_handler),
             )
-            .route(
-                "/api/v1/vaults/{vault_id}/assets/{*path}",
-                get(vault_scoped_asset_handler),
-            )
             // Grouped with mutation-related routes (not #109's exposed safe-read
             // list) since it is write-capability discovery, not content
             // browsing; gated the same as the mutations it describes.
@@ -536,6 +482,39 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         }
     };
 
+    // Vault-scoped asset reads sit outside `vaults_v1`'s web-token-only auth for
+    // the same reason the upload route below does, in the opposite direction:
+    // `get_attachment`'s default response is a `download_url` pointing here
+    // (#176), and an MCP client holding only the MCP bearer token could not
+    // fetch it while this route accepted the web token alone. Read-only MCP
+    // already exposes the same bytes through `encoding: "base64"`, so accepting
+    // the MCP credential here widens no capability. The web token still works,
+    // including as an `access_token` query parameter, which is how the browser's
+    // `<img>` tags and download navigations reach it.
+    let vault_assets = Router::new().route(
+        "/api/v1/vaults/{vault_id}/assets/{*path}",
+        get(vault_scoped_asset_handler),
+    );
+    // Gated on exactly the condition `vaults_v1` uses above, and for the same
+    // two reasons: a deployment with no web token configured serves this route
+    // openly (enabling MCP must not suddenly demand a credential the browser
+    // has never had), and #109's demo mode publishes reads unauthenticated,
+    // with asset visibility decided by the handler's own layer rules rather
+    // than by this token check.
+    let vault_assets = match web_bearer_token.clone() {
+        Some(token) if !state.demo_mode => {
+            vault_assets.layer(axum::middleware::from_fn_with_state(
+                AssetReadTokens {
+                    web: token,
+                    runtime_config: state.runtime_config.clone(),
+                    limiter: mcp_transport.limiter(),
+                },
+                require_web_or_live_mcp_read_token,
+            ))
+        }
+        Some(_) | None => vault_assets,
+    };
+
     // Vault-scoped attachment upload sits outside `vaults_v1`'s web-token-only
     // auth, mirroring the legacy `/api/attachment` route it replaces: an MCP
     // agent that already holds the MCP bearer token can use it directly,
@@ -570,10 +549,10 @@ pub fn build_router(state: AppState, web_bearer_token: Option<Arc<str>>) -> Rout
         .route("/health", get(health_handler))
         .route("/ready", get(readiness_handler))
         .route("/api/startup-status", get(startup_status_handler))
-        .route("/api/vault-status", get(vault_status_handler))
         .merge(model_setup)
         .merge(settings)
         .merge(vaults_v1)
+        .merge(vault_assets)
         .merge(vault_attachment)
         .merge(mcp)
         .route("/", get(spa_index_handler))
@@ -666,16 +645,8 @@ async fn startup_status_handler(State(state): State<AppState>) -> Response {
     response
 }
 
-async fn vault_status_handler(State(state): State<AppState>) -> Response {
-    let mut response = Json(state.startup.snapshot()).into_response();
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response
-}
-
 async fn readiness_handler(State(state): State<AppState>) -> Response {
-    if state.startup.is_ready() {
+    if state.startup.collection_indexes_ready() {
         (StatusCode::OK, "ready").into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "not ready").into_response()
@@ -962,7 +933,11 @@ pub async fn run_server() {
         std::process::exit(1);
     }
 
-    let git_sync_config = match &config.vault_source {
+    // The instance-wide Git lane is gone (issue #185), so this parses
+    // `HATCHDOOR_GIT_*` for exactly two remaining purposes: validating that a
+    // configured mode is fully configured, and the demo posture refusal
+    // below. No runtime behaviour reads the result.
+    let legacy_git_config = match &config.vault_source {
         VaultSource::Local { vault_path } => {
             GitConfig::from_snapshot(vault_path.clone(), &startup_snapshot)
         }
@@ -975,7 +950,7 @@ pub async fn run_server() {
     if let Err(message) = check_demo_mode_posture(
         config.demo_mode,
         mcp_config.enabled,
-        git_sync_config.is_some(),
+        legacy_git_config.is_some(),
     ) {
         error!("{message}");
         std::process::exit(1);
@@ -1111,19 +1086,6 @@ pub async fn run_server() {
         "Demoted-layer vector embedding (HATCHDOOR_EMBED_LAYERS)"
     );
 
-    let vault_write_lock = Arc::new(tokio::sync::Mutex::new(()));
-    if let Some(git_config) = &git_sync_config {
-        let validation = match git_config.mode {
-            crate::git::GitMode::Local => git::validate_local_repo(git_config),
-            crate::git::GitMode::Remote => git::validate_repo(git_config),
-        };
-        if let Err(error) = validation {
-            error!("Git versioning configuration invalid: {error}");
-            std::process::exit(1);
-        }
-    }
-
-    let (vault_events, _) = tokio::sync::broadcast::channel(64);
     let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
     let vaults = VaultCollectionRuntime::with_watching_and_cache(
         config.cache_db_path.clone(),
@@ -1136,13 +1098,18 @@ pub async fn run_server() {
     // #90 establishes durable reconstruction and lifecycle admission. The
     // worker loop below is the one global dispatcher for all admitted turns.
     let (vault_work, vault_worker) = VaultWorkCoordinator::new();
-    let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
-    let git_author_name =
-        crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_NAME")
-            .unwrap_or_else(|| "Hatchdoor".to_string());
-    let git_author_email =
-        crate::git::config::non_empty_setting(&startup_snapshot, "HATCHDOOR_GIT_AUTHOR_EMAIL")
-            .unwrap_or_else(|| "hatchdoor@localhost".to_string());
+    // Beside the registry, in the same durable state directory: a Vault's
+    // poll interval is measured from its last remembered turn, so a redeploy
+    // resumes the countdown instead of restarting it (and no longer forces a
+    // Git turn on every start).
+    let managed_git = Arc::new(crate::git::ManagedGitScheduler::with_state_store(
+        vault_work.clone(),
+        Arc::new(
+            crate::vault_runtime_state::VaultRuntimeStateStore::beside_registry(
+                vault_registry.path(),
+            ),
+        ),
+    ));
     match (&registry_state, legacy_migration_recovery.as_ref()) {
         (_, Some(recovery)) => warn!(
             code = recovery.code(),
@@ -1172,39 +1139,25 @@ pub async fn run_server() {
     }
     let shutdown_vaults = vaults.clone();
     let state = AppState {
-        cache_db_path: config.cache_db_path.clone(),
         vault_registry,
         vaults,
         vault_work: vault_work.clone(),
         managed_git: managed_git.clone(),
         legacy_migration_recovery: Arc::new(std::sync::RwLock::new(legacy_migration_recovery)),
         startup_sqlite: sqlite.clone(),
-        ready_vault: Arc::new(RwLock::new(None)),
-        vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        vault_events,
         mcp_tools_changed,
         embedder,
         runtime_embedder,
         model_setup,
         model_setup_started: Arc::new(AtomicBool::new(false)),
-        startup_git_config: Arc::new(git_sync_config.clone()),
         web_auth_enabled: config.web_bearer_token.is_some(),
         demo_mode: config.demo_mode,
-        vault_write_lock,
-        git_sync: Arc::new(RwLock::new(None)),
-        scan_config_cache: Arc::new(std::sync::RwLock::new(Some((
-            startup_snapshot.clone(),
-            scan_config.clone(),
-        )))),
-        refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-        index_status: crate::app_state::IndexStatusTracker::up_to_date(),
         runtime_config,
         startup,
     };
 
     let web_bearer_token = config.web_bearer_token.clone().map(Arc::from);
     let app = build_router(state.clone(), web_bearer_token);
-    let shutdown_state = state.clone();
     let (shutdown_started, mut shutdown_received) = tokio::sync::watch::channel(false);
     let shutdown_task = tokio::spawn({
         let vault_work = vault_work.clone();
@@ -1215,84 +1168,17 @@ pub async fn run_server() {
         }
     });
 
-    // The one global consumer of `vault_work`/`vault_worker`: dispatches
-    // Git turns through the managed-Git scheduler and Index turns through the
-    // Vault-qualified disposable snapshot builder. Repair remains owned by
-    // its later packet.
+    // The one global consumer of `vault_work`/`vault_worker`. It takes the
+    // next coordinator position and hands it to the executor, which owns what
+    // a turn does and what the collection concludes from it. Repair remains
+    // owned by its later packet.
     // Exits on its own once `vault_work.shutdown()` drains to quiescence.
     let dispatch_task = tokio::spawn({
         let mut vault_worker = vault_worker;
-        let dispatch_vaults = state.vaults.clone();
-        let dispatch_registry = state.vault_registry.clone();
-        let dispatch_work = vault_work.clone();
-        let dispatch_managed_git = managed_git.clone();
-        let dispatch_cache = state.startup_sqlite.clone();
-        let dispatch_embedder = state.embedder.clone();
-        let dispatch_runtime_config = state.runtime_config.clone();
-        let dispatch_startup = state.startup.clone();
-        let dispatch_model_setup_started = state.model_setup_started.clone();
+        let executor = VaultWorkExecutor::from_state(&state);
         async move {
-            while let Some(outcome) = vault_worker
-                .run_next(|request| {
-                    let vaults = dispatch_vaults.clone();
-                    let registry = dispatch_registry.clone();
-                    let work = dispatch_work.clone();
-                    let managed_git = dispatch_managed_git.clone();
-                    let cache = dispatch_cache.clone();
-                    let embedder = dispatch_embedder.clone();
-                    let runtime_snapshot = dispatch_runtime_config.snapshot();
-                    let author_name = git_author_name.clone();
-                    let author_email = git_author_email.clone();
-                    let startup = dispatch_startup.clone();
-                    VaultWorkDispatchContext {
-                        vaults,
-                        registry,
-                        work,
-                        managed_git,
-                        cache,
-                        embedder,
-                        runtime_snapshot,
-                        author_name,
-                        author_email,
-                        startup,
-                    }
-                    .dispatch(request)
-                })
-                .await
-            {
-                if outcome.request.kind() == VaultWorkKind::Index {
-                    match &outcome.result {
-                        Ok(()) if collection_indexes_ready(&dispatch_vaults) => {
-                            dispatch_startup.set_ready();
-                            dispatch_model_setup_started.store(false, Ordering::Release);
-                            info!("Vault collection indexing complete");
-                        }
-                        Err(error) if error.code() != "embedder_not_ready" => {
-                            dispatch_startup.set_failed();
-                            dispatch_model_setup_started.store(false, Ordering::Release);
-                        }
-                        _ => {}
-                    }
-                }
-                if let Err(error) = outcome.result {
-                    // Repair remains expected until its dedicated packet;
-                    // Index and Git failures are actionable per-Vault status.
-                    if error.code() == "vault_work_kind_not_yet_implemented" {
-                        debug!(
-                            vault_id = %outcome.request.vault_id(),
-                            kind = ?outcome.request.kind(),
-                            "Vault background work kind not yet implemented"
-                        );
-                    } else {
-                        warn!(
-                            vault_id = %outcome.request.vault_id(),
-                            kind = ?outcome.request.kind(),
-                            code = error.code(),
-                            message = error.message(),
-                            "Vault background work turn failed"
-                        );
-                    }
-                }
+            while let Some(outcome) = vault_worker.run_next(|request| executor.run(request)).await {
+                executor.publish_outcome(&outcome);
             }
         }
     });
@@ -1359,11 +1245,6 @@ pub async fn run_server() {
     if let Err(error) = dispatch_task.await {
         error!(%error, "Vault background work dispatch loop exited unexpectedly");
     }
-    if let Some(git_sync) = shutdown_state.git_sync.read().await.clone()
-        && let Err(error) = git_sync.stop(std::time::Duration::from_secs(30)).await
-    {
-        error!(%error, "Git sync did not reach its shutdown boundary");
-    }
     if let Err(error) = shutdown_task.await {
         error!(%error, "Server shutdown task exited unexpectedly");
     }
@@ -1392,20 +1273,9 @@ fn forward_vault_change_intent(
     }
 }
 
-fn collection_indexes_ready(vaults: &VaultCollectionRuntime) -> bool {
-    let active = vaults.active_vault_ids();
-    !active.is_empty()
-        && active.into_iter().all(|vault_id| {
-            vaults.runtime(vault_id).is_some_and(|runtime| {
-                runtime.snapshot().search == crate::vault_runtime::VaultSearchStatus::Ready
-            })
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app_state::ReadyVault;
 
     #[test]
     fn compose_vault_path_alone_never_refuses_a_start() {
@@ -1507,43 +1377,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_readiness_follows_collection_index_completion() {
-        let directory = tempfile::tempdir().expect("temporary state directory");
-        let vault_path = directory.path().join("vault");
-        std::fs::create_dir_all(&vault_path).expect("create Vault directory");
-        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
-        let snapshot = registry
-            .add(
-                0,
-                crate::vault_registry::NewVaultDefinition {
-                    name: "Startup Vault".to_string(),
-                    enabled: true,
-                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
-                    exclude_patterns: Vec::new(),
-                    https_credentials: None,
-                    archive_folder: None,
-                    commit_identity: None,
-                },
-            )
-            .expect("add Vault");
-        let vault_id = snapshot
-            .definitions()
-            .next()
-            .expect("Vault definition")
-            .vault_id();
-        let vaults = VaultCollectionRuntime::new();
-        vaults.reconcile(&registry, &snapshot);
-
-        assert!(!collection_indexes_ready(&vaults));
-        vaults
-            .runtime(vault_id)
-            .expect("active Vault")
-            .set_search_status(crate::vault_runtime::VaultSearchStatus::Ready, None)
-            .expect("publish ready search status");
-        assert!(collection_indexes_ready(&vaults));
-    }
-
-    #[test]
     fn web_auth_posture_refuses_public_bind_without_token() {
         // Non-loopback host with no web token must refuse to start.
         for host in ["0.0.0.0", "192.168.1.50", "::"] {
@@ -1568,10 +1401,11 @@ mod tests {
         }
         // A token makes any host acceptable.
         assert!(check_web_auth_posture("0.0.0.0", true, false).is_ok());
-        // Loopback is fine without a token (only reachable from this machine).
-        assert!(check_web_auth_posture("127.0.0.1", false, false).is_ok());
-        assert!(check_web_auth_posture("localhost", false, false).is_ok());
-        assert!(check_web_auth_posture("::1", false, false).is_ok());
+        // Every loopback spelling accepted without a token has a corresponding
+        // structurally valid listener address (covered in config tests).
+        for host in ["127.0.0.1", "localhost", "::1", "[::1]"] {
+            assert!(check_web_auth_posture(host, false, false).is_ok(), "{host}");
+        }
     }
 
     #[test]
@@ -1767,16 +1601,11 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use std::time::Duration;
     use tempfile::TempDir;
-    use tokio::sync::RwLock;
     use tokio_stream::StreamExt;
     use tower::ServiceExt;
 
-    use crate::app_state::build_cache;
     use crate::cache::SqliteCache;
     use crate::embed::{Embedder, StubEmbedder};
-    use crate::search::vault_scoped::{VaultSearchCore, VaultSearchRequest};
-    use crate::search::{LayerSelection, NoteFilters, SearchMode};
-    use crate::vault_read::VaultScope;
 
     fn app_for_tests() -> (Router, TempDir) {
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -1793,197 +1622,103 @@ mod tests {
         web_bearer_token: Option<Arc<str>>,
         demo_mode: bool,
     ) -> (Router, TempDir, AppState) {
-        // These settings tests exercise the explicit fresh-repository consent
-        // flow. Keep the fixture outside Cargo's TMPDIR: the project build
-        // directory may sit inside Hatchdoor's own Git checkout, which would
-        // intentionally count as an enclosing existing repository for Local
-        // history.
+        let (router, tmp, state, _worker) = app_for_tests_with_worker(web_bearer_token, demo_mode);
+        (router, tmp, state)
+    }
+
+    /// The same fixture, keeping the coordinator's worker. Nothing else in a
+    /// test process consumes the queue, so a test that wants to observe which
+    /// turns a route *newly* requested has to drain the ones Vault creation
+    /// already queued first.
+    fn app_for_tests_with_worker(
+        web_bearer_token: Option<Arc<str>>,
+        demo_mode: bool,
+    ) -> (
+        Router,
+        TempDir,
+        AppState,
+        crate::vault_work::VaultWorkWorker,
+    ) {
+        // Keep the fixture outside Cargo's TMPDIR: the project build directory
+        // may sit inside Hatchdoor's own Git checkout, which a Git-backed
+        // Vault created by one of these tests would count as an enclosing
+        // existing repository.
+        //
+        // The state itself registers no Vault. Each test that needs one
+        // creates it over the real `/api/v1/vaults` route with
+        // `create_vault_with_files`, which registers it, activates it, and
+        // publishes its indexed snapshot the way a deployment does.
         let tmp = TempDir::new_in("/tmp").expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        std::fs::create_dir_all(&vault_root).expect("create vault");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let sqlite = Arc::new(SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
-        let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let (vault_work, vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
+        let managed_git = std::sync::Arc::new(
+            crate::git::ManagedGitScheduler::without_durable_state(vault_work.clone()),
+        );
         let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
-                vault_path: vault_root,
-                cache,
-            }))),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
+            startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
             runtime_embedder: Arc::new(RuntimeEmbedder::new()),
             model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
             model_setup_started: Arc::new(AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config: crate::runtime_config::RuntimeConfig::for_tests(),
             startup: StartupTracker::ready(),
         };
 
-        (build_router(state.clone(), web_bearer_token), tmp, state)
+        (
+            build_router(state.clone(), web_bearer_token),
+            tmp,
+            state,
+            vault_worker,
+        )
+    }
+
+    /// Run every turn already sitting in the coordinator's queue to completion,
+    /// so a later assertion sees only what the route under test requested.
+    async fn drain_queued_turns(worker: &mut crate::vault_work::VaultWorkWorker) {
+        while tokio::time::timeout(
+            Duration::from_millis(50),
+            worker.run_next(|_| async move { Ok::<(), crate::vault_work::VaultWorkError>(()) }),
+        )
+        .await
+        .is_ok()
+        {}
     }
 
     fn app_for_tests_with_state() -> (Router, TempDir, AppState) {
         app_for_tests_with_web_auth(None)
     }
 
-    #[tokio::test]
-    async fn queued_index_turn_uses_the_runtime_snapshot_captured_by_server_dispatch() {
-        let directory = TempDir::new_in("/tmp").expect("temporary state directory");
-        let vault_path = directory.path().join("vault");
-        std::fs::create_dir_all(vault_path.join("sources")).expect("create Vault directory");
-        std::fs::write(vault_path.join("sources/.hatchdoor-layer"), "sources")
-            .expect("write layer marker");
-        std::fs::write(
-            vault_path.join("sources/Clip.md"),
-            "# Clip\n\nmelatonin regulates the circadian rhythm",
-        )
-        .expect("write demoted note");
-
-        let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
-        let snapshot = registry
-            .add(
-                0,
-                crate::vault_registry::NewVaultDefinition {
-                    name: "Only".to_string(),
-                    enabled: true,
-                    source: crate::vault_registry::VaultSource::Local { path: vault_path },
-                    exclude_patterns: Vec::new(),
-                    https_credentials: None,
-                    archive_folder: None,
-                    commit_identity: None,
-                },
-            )
-            .expect("add Vault");
-        let vault_id = snapshot
-            .definitions()
-            .next()
-            .expect("Vault definition")
-            .vault_id();
-        let vaults = VaultCollectionRuntime::new();
-        let (work, mut worker) = VaultWorkCoordinator::new();
-        let managed_git = Arc::new(crate::git::ManagedGitScheduler::new(work.clone()));
-        vaults
-            .reconcile_and_reconstruct(&registry, &snapshot, &work, &managed_git)
-            .await;
-        let cache = Arc::new(SqliteCache::in_memory(384).expect("open shared cache"));
-        let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let runtime_config = RuntimeConfig::for_tests();
-        runtime_config
-            .save([("HATCHDOOR_EMBED_LAYERS".to_string(), "false".to_string())])
-            .expect("save disabled setting");
-        let captured = runtime_config.snapshot();
-        runtime_config
-            .save([("HATCHDOOR_EMBED_LAYERS".to_string(), "true".to_string())])
-            .expect("save later setting");
-
-        let outcome = worker
-            .run_next({
-                let vaults = vaults.clone();
-                let registry = registry.clone();
-                let work = work.clone();
-                let cache = cache.clone();
-                let embedder = embedder.clone();
-                move |request| {
-                    VaultWorkDispatchContext {
-                        vaults,
-                        registry,
-                        work,
-                        managed_git,
-                        cache,
-                        embedder,
-                        runtime_snapshot: captured,
-                        author_name: "Hatchdoor".to_string(),
-                        author_email: "hatchdoor@example.test".to_string(),
-                        startup: StartupTracker::scanning(),
-                    }
-                    .dispatch(request)
-                }
-            })
-            .await
-            .expect("queued Index turn");
-        outcome.result.expect("Index publication succeeds");
-
-        let (layers, _) = LayerSelection::parse(&["sources".to_string()], &["sources".to_string()]);
-        let search = VaultSearchCore::new(&cache, &vaults, embedder.as_ref());
-        let keyword = search
-            .search(VaultSearchRequest {
-                scope: VaultScope::One(vault_id),
-                query: "melatonin".to_string(),
-                mode: SearchMode::Keyword,
-                limit: 10,
-                per_note_cap: 1,
-                filters: NoteFilters::default(),
-                include_properties: Vec::new(),
-                layers: layers.clone(),
-            })
-            .expect("keyword search");
-        assert!(
-            keyword
-                .data
-                .results
-                .iter()
-                .any(|hit| hit.note_slug == "clip")
-        );
-        assert!(
-            search
-                .search(VaultSearchRequest {
-                    scope: VaultScope::One(vault_id),
-                    query: "melatonin circadian".to_string(),
-                    mode: SearchMode::Semantic,
-                    limit: 10,
-                    per_note_cap: 1,
-                    filters: NoteFilters::default(),
-                    include_properties: Vec::new(),
-                    layers,
-                })
-                .expect("semantic search")
-                .data
-                .results
-                .is_empty(),
-            "the turn must retain the false setting captured before the later save"
-        );
-    }
-
     fn app_for_tests_with_web_and_mcp_auth(
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
     ) -> (Router, TempDir) {
-        app_for_tests_with_web_and_mcp_auth_and_write_mode(web_bearer_token, mcp_bearer_token, true)
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            web_bearer_token,
+            mcp_bearer_token,
+            true,
+        );
+        (app, tmp)
     }
 
     fn app_for_tests_with_web_and_mcp_auth_and_write_mode(
         web_bearer_token: Option<Arc<str>>,
         mcp_bearer_token: Option<String>,
         mcp_write_enabled: bool,
-    ) -> (Router, TempDir) {
+    ) -> (Router, TempDir, AppState) {
+        // Registers no Vault of its own; see `app_for_tests_with_worker`.
         let tmp = TempDir::new().expect("temp dir");
-        let vault_root = tmp.path().join("vault");
-        std::fs::create_dir_all(&vault_root).expect("create vault");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
         let embedder: Arc<dyn Embedder> = Arc::new(StubEmbedder::new(384));
-        let cache = build_cache(&vault_root, embedder.as_ref()).expect("cache");
-        let (vault_events, _) = tokio::sync::broadcast::channel(64);
+        let sqlite = Arc::new(SqliteCache::in_memory(384).expect("in-memory cache"));
         let (mcp_tools_changed, _) = tokio::sync::broadcast::channel(16);
         let runtime_config = crate::runtime_config::RuntimeConfig::for_tests();
         if let Some(mcp_bearer_token) = mcp_bearer_token {
@@ -1999,40 +1734,28 @@ mod tests {
                 .expect("save MCP token");
         }
         let (vault_work, _vault_worker) = crate::vault_work::VaultWorkCoordinator::new();
-        let managed_git =
-            std::sync::Arc::new(crate::git::ManagedGitScheduler::new(vault_work.clone()));
+        let managed_git = std::sync::Arc::new(
+            crate::git::ManagedGitScheduler::without_durable_state(vault_work.clone()),
+        );
         let state = AppState {
-            cache_db_path: tmp.path().join("cache.sqlite3"),
             vault_registry: VaultRegistryStore::new(tmp.path().join("state/vaults.json")),
             vaults: VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
-            startup_sqlite: cache.sqlite.clone(),
-            ready_vault: Arc::new(RwLock::new(Some(ReadyVault {
-                vault_path: vault_root,
-                cache,
-            }))),
-            vault_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            vault_events,
+            startup_sqlite: sqlite,
             mcp_tools_changed,
             embedder,
             runtime_embedder: Arc::new(RuntimeEmbedder::new()),
             model_setup: Arc::new(ModelSetup::new(tmp.path().join("models"))),
             model_setup_started: Arc::new(AtomicBool::new(true)),
-            startup_git_config: Arc::new(None),
             web_auth_enabled: web_bearer_token.is_some(),
             demo_mode: false,
-            vault_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            git_sync: Arc::new(RwLock::new(None)),
-            scan_config_cache: Arc::new(std::sync::RwLock::new(None)),
-            refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
-            index_status: crate::app_state::IndexStatusTracker::up_to_date(),
             runtime_config,
             startup: StartupTracker::ready(),
         };
 
-        (build_router(state, web_bearer_token), tmp)
+        (build_router(state.clone(), web_bearer_token), tmp, state)
     }
 
     fn attachment_upload_request(
@@ -2134,7 +1857,7 @@ mod tests {
         // keeps working here: audit finding X-F01 made an MCP disable (or a
         // write-mode disable) an immediate revocation of that credential's
         // upload capability. The gate lives in `auth.rs`.
-        let (app, tmp) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
             Some(Arc::from("web-secret")),
             Some("mcp-secret".to_string()),
             false,
@@ -2251,10 +1974,12 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("accept", "application/json, text/event-stream")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -2268,11 +1993,12 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
                     .header("authorization", "Bearer first-token")
                     .header("origin", "https://evil.example")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+                        r#"{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
                     ))
                     .expect("request"),
             )
@@ -2387,12 +2113,16 @@ mod tests {
             .expect("response");
         assert_eq!(limited_attachment.status(), StatusCode::BAD_REQUEST);
 
+        let limited_session = initialize_mcp_session(&app, "first-token").await;
         let limited_base64 = app
             .clone()
             .oneshot(
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", limited_session)
+                    .header("accept", "application/json, text/event-stream")
                     .header("authorization", "Bearer first-token")
                     .header("content-type", "application/json")
                     .body(Body::from(format!(
@@ -2475,6 +2205,361 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(new_token.status(), StatusCode::OK);
+    }
+
+    /// Dedicated regression for the v2.5.0 security invariant across the
+    /// ADR-17 boundary swap (#172): the multipart attachment endpoint accepts
+    /// an MCP bearer token **only** while MCP *and* MCP write mode are both
+    /// live-enabled in the current runtime snapshot — and it re-checks the
+    /// snapshot on every request, not once at startup.
+    #[tokio::test]
+    async fn attachment_route_accepts_the_mcp_token_only_while_mcp_and_writes_are_live() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            true,
+        );
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Attachments",
+            &tmp.path().join("attachments"),
+            &[],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        let upload = |name: &'static str| {
+            let app = app.clone();
+            let request = attachment_upload_request(
+                &vault_id,
+                &format!("Attachments/{name}"),
+                Some("mcp-secret"),
+            );
+            async move { app.oneshot(request).await.expect("response") }
+        };
+        let save = |updates: &[(&str, &str)]| {
+            state
+                .runtime_config
+                .save(updates.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        };
+
+        // MCP fully disabled: the MCP credential matches nothing and is 401.
+        save(&[
+            ("HATCHDOOR_MCP_ENABLED", "false"),
+            ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
+        ])
+        .expect("save disabled");
+        assert_eq!(
+            upload("mcp-disabled.png").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // MCP enabled but write mode off: recognized, but revoked → 403.
+        save(&[
+            ("HATCHDOOR_MCP_ENABLED", "true"),
+            ("HATCHDOOR_MCP_WRITE_ENABLED", "false"),
+        ])
+        .expect("save read-only");
+        assert_eq!(
+            upload("read-only.png").await.status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            !tmp.path()
+                .join("attachments/Attachments/read-only.png")
+                .exists()
+        );
+
+        // Both live: accepted on the very next request against the same router.
+        save(&[("HATCHDOOR_MCP_WRITE_ENABLED", "true")]).expect("save writes");
+        assert_eq!(upload("both-live.png").await.status(), StatusCode::OK);
+        assert!(
+            tmp.path()
+                .join("attachments/Attachments/both-live.png")
+                .exists()
+        );
+
+        // And revocation is immediate again — no restart, no re-mount.
+        save(&[("HATCHDOOR_MCP_ENABLED", "false")]).expect("save re-disable");
+        assert_eq!(
+            upload("re-disabled.png").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_accepts_a_read_only_mcp_token_and_the_web_token_in_either_position() {
+        // #176: `get_attachment`'s default response is a download_url pointing
+        // at this route, so the MCP credential must be able to fetch it —
+        // including in read-only mode, since the same bytes are already
+        // reachable through that tool's base64 encoding. The web token keeps
+        // both positions because the browser reaches assets through `<img>`
+        // tags that cannot set headers.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-auth");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n\n![[diagram.png]]\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"not-really-a-png")
+            .expect("write attachment");
+
+        let fetch = |header: Option<&'static str>, query: &'static str| {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.png{query}");
+            async move {
+                let mut request = Request::builder().uri(uri);
+                if let Some(token) = header {
+                    request = request.header("authorization", format!("Bearer {token}"));
+                }
+                app.oneshot(request.body(Body::empty()).expect("request"))
+                    .await
+                    .expect("response")
+            }
+        };
+
+        assert_eq!(fetch(None, "").await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            fetch(Some("not-a-real-token"), "").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(fetch(Some("web-secret"), "").await.status(), StatusCode::OK);
+        assert_eq!(
+            fetch(None, "?access_token=web-secret").await.status(),
+            StatusCode::OK,
+            "the web token must still work in the query position for <img> tags"
+        );
+
+        // The point of the change: write mode is off, and the MCP token still
+        // reads.
+        let with_mcp_token = fetch(Some("mcp-secret"), "").await;
+        assert_eq!(with_mcp_token.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(with_mcp_token.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(bytes.as_ref(), b"not-really-a-png");
+
+        // The MCP token is header-only here, so it never lands in a trace span.
+        assert_eq!(
+            fetch(None, "?access_token=mcp-secret").await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_holds_the_mcp_token_to_its_own_base64_byte_ceiling() {
+        // The MCP credential's ceiling for attachment bytes is
+        // HATCHDOOR_MCP_MAX_BASE64_BYTES, enforced by get_attachment's base64
+        // encoding. The download_url that same tool advertises points here, at a
+        // route whose own bound is far larger, so without this clamp the URL
+        // would be a way around the setting. The web token is unaffected.
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        state
+            .runtime_config
+            .save([(
+                "HATCHDOOR_MCP_MAX_BASE64_BYTES".to_string(),
+                "8".to_string(),
+            )])
+            .expect("save a small base64 ceiling");
+
+        let vault_root = tmp.path().join("assets-ceiling");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("small.png"), b"12345678").expect("write small");
+        std::fs::write(vault_root.join("big.png"), b"0123456789abcdef").expect("write big");
+
+        let fetch = |name: &'static str, token: &'static str| {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/{name}");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+
+        assert_eq!(
+            fetch("small.png", "mcp-secret").await.status(),
+            StatusCode::OK
+        );
+
+        let refused = fetch("big.png", "mcp-secret").await;
+        assert_eq!(
+            refused.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "an attachment over the MCP ceiling must not be served to the MCP token"
+        );
+        assert_eq!(json_body(refused).await["code"], "asset_too_large");
+
+        assert_eq!(
+            fetch("big.png", "web-secret").await.status(),
+            StatusCode::OK,
+            "the web token keeps the route's own larger bound"
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_spends_the_mcp_tool_quota_and_answers_429_when_it_runs_out() {
+        // Without this the download_url would be an unmetered second channel:
+        // a credential rate-limited on /mcp could pull attachment bytes here
+        // without limit. The limiter instance is shared with the transport.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-quota");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"bytes").expect("write attachment");
+
+        let fetch = |token: &'static str| {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.png");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+
+        for _ in 0..crate::mcp::limits::TOOL_CALLS_PER_MINUTE {
+            assert_eq!(fetch("mcp-secret").await.status(), StatusCode::OK);
+        }
+
+        let throttled = fetch("mcp-secret").await;
+        assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            throttled.headers().contains_key("retry-after"),
+            "a throttled asset read must say when to come back"
+        );
+
+        assert_eq!(
+            fetch("web-secret").await.status(),
+            StatusCode::OK,
+            "the web token is not on the MCP quota"
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_route_stays_open_with_no_web_token_even_once_mcp_is_enabled() {
+        // Enabling MCP in Settings must not start demanding a credential the
+        // browser has never had: a deployment with no web token configured
+        // served assets openly before, and still does.
+        let (app, tmp, _state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            None,
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-open");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            None,
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"bytes").expect("write attachment");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/vaults/{vault_id}/assets/diagram.png"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn asset_route_stops_accepting_the_mcp_token_the_moment_mcp_is_disabled() {
+        let (app, tmp, state) = app_for_tests_with_web_and_mcp_auth_and_write_mode(
+            Some(Arc::from("web-secret")),
+            Some("mcp-secret".to_string()),
+            false,
+        );
+        let vault_root = tmp.path().join("assets-revocation");
+        let vault_id = create_vault_with_files_using_token(
+            &app,
+            "Assets",
+            &vault_root,
+            &[("Home.md", "# Home\n")],
+            0,
+            Some("web-secret"),
+        )
+        .await;
+        std::fs::write(vault_root.join("diagram.png"), b"bytes").expect("write attachment");
+
+        let fetch = || {
+            let app = app.clone();
+            let uri = format!("/api/v1/vaults/{vault_id}/assets/diagram.png");
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("authorization", "Bearer mcp-secret")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response")
+            }
+        };
+
+        assert_eq!(fetch().await.status(), StatusCode::OK);
+
+        state
+            .runtime_config
+            .save([("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string())])
+            .expect("save disabled");
+        assert_eq!(
+            fetch().await.status(),
+            StatusCode::UNAUTHORIZED,
+            "disabling MCP must revoke the credential on the very next request"
+        );
     }
 
     #[tokio::test]
@@ -2572,6 +2657,35 @@ mod tests {
         assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Perform the legacy initialize handshake against the real `/mcp`
+    /// transport and return the issued session ID.
+    async fn initialize_mcp_session(app: &Router, token: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("host", "localhost")
+                    .header("accept", "application/json, text/event-stream")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .expect("initialize issues Mcp-Session-Id")
+    }
+
     #[tokio::test]
     async fn mcp_route_accepts_an_authenticated_write_request_above_axums_default_limit() {
         // Axum's default request-body limit is 2 MiB. A valid write-enabled MCP
@@ -2597,6 +2711,7 @@ mod tests {
             ])
             .expect("configure write-enabled MCP");
         let app = build_router(state, None);
+        let session_id = initialize_mcp_session(&app, "mcp-secret").await;
         let body = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"padding":"{}"}}}}"#,
             "x".repeat(2 * 1024 * 1024 + 1)
@@ -2606,6 +2721,9 @@ mod tests {
                 Request::builder()
                     .uri("/mcp")
                     .method("POST")
+                    .header("host", "localhost")
+                    .header("mcp-session-id", session_id)
+                    .header("accept", "application/json, text/event-stream")
                     .header("content-type", "application/json")
                     .header("authorization", "Bearer mcp-secret")
                     .body(Body::from(body))
@@ -2615,11 +2733,6 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
-        let payload = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let payload: serde_json::Value = serde_json::from_slice(&payload).expect("JSON-RPC");
-        assert_eq!(payload["result"], serde_json::json!({}));
     }
 
     #[tokio::test]
@@ -2711,7 +2824,6 @@ mod tests {
     #[tokio::test]
     async fn unavailable_vault_keeps_liveness_status_and_spa_available() {
         let (_app, _tmp, mut state) = app_for_tests_with_state();
-        *state.ready_vault.write().await = None;
         state.startup = StartupTracker::new(VaultRuntime::new(VaultSource::Local {
             vault_path: "/data/vault".into(),
         }));
@@ -2721,7 +2833,7 @@ mod tests {
             .set_unavailable("vault_unreadable", "Vault could not be read.");
         let app = build_router(state, None);
 
-        for path in ["/health", "/api/startup-status", "/api/vault-status"] {
+        for path in ["/health", "/api/startup-status"] {
             let response = app
                 .clone()
                 .oneshot(
@@ -2758,10 +2870,14 @@ mod tests {
             "SPA route must reach the SPA handler rather than vault readiness middleware"
         );
 
+        // `/api/vault-status` was retired in #183; `/api/startup-status` is
+        // the remaining unauthenticated probe, and it still reports the
+        // unavailable Vault as a failed start without disclosing its
+        // filesystem path.
         let status = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/vault-status")
+                    .uri("/api/startup-status")
                     .body(Body::empty())
                     .expect("request"),
             )
@@ -2773,18 +2889,21 @@ mod tests {
                 .expect("status body"),
         )
         .expect("status json");
-        assert_eq!(payload["phase"], "unavailable");
-        assert_eq!(payload["source"], "local");
-        assert_eq!(payload["mode"], "local");
-        assert_eq!(payload["capabilities"]["mutate"], false);
+        assert_eq!(payload["state"], "failed");
         assert!(!payload.to_string().contains("/data/vault"));
     }
 
     #[tokio::test]
     async fn vault_scoped_pull_only_vault_disables_mutation() {
+        // The gate itself is asserted at the mutation core
+        // (`vault_mutation.rs`), for every primitive and for the capability
+        // probe. This is the route's mapping proof: that
+        // `capability_unavailable` reaches the client as a `409`, and that the
+        // capabilities route turns the same posture into its own warning.
+        //
         // A Pull-only Vault's `capabilities.mutate` is false regardless of local
         // content (issue #62): no real Git remote traffic is needed to prove
-        // the adapter's `ensure_mutable` gate, but the registry still requires
+        // the gate, but the registry still requires
         // `repository_path` to be a real Git working checkout to accept an
         // `existing_git` source at all.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
@@ -3220,7 +3339,7 @@ mod tests {
 
     #[tokio::test]
     async fn settings_routes_require_web_auth_and_are_absent_in_demo_mode() {
-        let (protected, _tmp, state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
+        let (protected, _tmp, _state) = app_for_tests_with_web_auth(Some(Arc::from("web-secret")));
         let unauthenticated = protected
             .clone()
             .oneshot(
@@ -3245,74 +3364,89 @@ mod tests {
             .expect("response");
         assert_eq!(authenticated.status(), StatusCode::OK);
 
-        state.index_status.queue_rebuild();
-        let index_status = protected
+        // #183 retired the two instance-wide consoles and the three routes
+        // that fed them. They are gone from the router, so a credential that
+        // opens `/api/settings` still finds nothing at any of them, and the
+        // unauthenticated probe surface no longer includes `/api/vault-status`.
+        for path in ["/api/index-status", "/api/git-status", "/api/vault-status"] {
+            let retired = protected
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("authorization", "Bearer web-secret")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(retired.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        // `/api/startup-status` is the probe that remains, and it is still
+        // reachable without a credential.
+        let startup_status = protected
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri("/api/index-status")
-                    .header("authorization", "Bearer web-secret")
+                    .uri("/api/startup-status")
                     .body(Body::empty())
                     .expect("request"),
             )
             .await
             .expect("response");
-        assert_eq!(index_status.status(), StatusCode::OK);
-        assert_eq!(index_status.headers()["cache-control"], "no-store");
-
-        let git_status = protected
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/git-status")
-                    .header("authorization", "Bearer web-secret")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(git_status.status(), StatusCode::OK);
-        assert_eq!(git_status.headers()["cache-control"], "no-store");
+        assert_eq!(startup_status.status(), StatusCode::OK);
+        assert_eq!(startup_status.headers()["cache-control"], "no-store");
 
         let (demo, _tmp, _) = app_for_tests_with_web_auth_and_demo_mode(None, true);
-        let absent = demo
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
-        let index_status_absent = demo
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/index-status")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(index_status_absent.status(), StatusCode::NOT_FOUND);
-        let git_status_absent = demo
-            .oneshot(
-                Request::builder()
-                    .uri("/api/git-status")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(git_status_absent.status(), StatusCode::NOT_FOUND);
+        for path in [
+            "/api/settings",
+            "/api/index-status",
+            "/api/git-status",
+            "/api/vault-status",
+        ] {
+            let absent = demo
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(absent.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
+    /// The reindex consequence is still the server's to demand, and the new
+    /// values are still durable before any rebuilding starts. What changed
+    /// (#181) is what a confirmed save then does: it requests one Index turn
+    /// per active Vault through the shared work coordinator instead of the
+    /// legacy instance-wide rebuild, which #185 deleted outright. Asserted
+    /// here over the real route with a registered Vault; the queueing rules
+    /// themselves (one turn per *active* Vault, none for a disabled one) are
+    /// proven in `handlers::settings::tests`.
     #[tokio::test]
-    async fn reindex_settings_persist_before_a_background_rebuild_and_then_converge() {
-        let (app, _tmp, state) = app_for_tests_with_state();
-        let held_refresh_lock = state.refresh_lock.lock().await;
+    async fn reindex_settings_require_confirmation_and_persist_over_the_collection_lane() {
+        let (app, tmp, state, mut worker) = app_for_tests_with_worker(None, false);
+        let vault_id = create_vault_with_files(
+            &app,
+            "Reindexed",
+            &tmp.path().join("reindexed"),
+            &[("Home.md", "# Home\n")],
+            0,
+        )
+        .await;
+        let vault_id: crate::vault_registry::VaultId = vault_id.parse().expect("Vault id");
+        // Activation queues this Vault's first Index turn; run it out, so the
+        // assertion below can only be satisfied by the settings save itself.
+        drain_queued_turns(&mut worker).await;
+        assert!(
+            !state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "precondition: no Index turn is pending before the save"
+        );
 
         let missing_confirmation = app
             .clone()
@@ -3363,8 +3497,12 @@ mod tests {
                 .value,
             "generated/**"
         );
-        assert_eq!(state.index_status.status().state, "rebuilding");
-        assert!(state.index_status.status().stale);
+        assert!(
+            state
+                .vault_work
+                .has_work(vault_id, crate::vault_work::VaultWorkKind::Index),
+            "a confirmed indexing save must request an Index turn for the active Vault"
+        );
 
         let second_response = app
             .oneshot(
@@ -3388,31 +3526,21 @@ mod tests {
                 .value,
             "false"
         );
-
-        drop(held_refresh_lock);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if state.index_status.status().state == "up_to_date" {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("background rebuild finishes");
-        assert!(!state.index_status.status().stale);
     }
 
+    /// #185 deleted the instance-wide Git lane, so the legacy
+    /// `HATCHDOOR_GIT_SYNC_ENABLED` key is a first-boot import input with no
+    /// runtime reader. Saving it still persists (the legacy importer reads
+    /// it) but must no longer ask for a consequence confirmation and must no
+    /// longer create a repository as a side effect of a settings save.
     #[tokio::test]
-    async fn enabling_local_versioning_requires_confirmation_then_succeeds() {
-        // S4/S5: the server is the authority on the git_init confirmation (a
-        // 409 carrying only the machine-readable consequence, not prose —
-        // the page owns the words), and a resend with `confirm` containing
-        // it must actually create the local repository.
+    async fn saving_the_legacy_git_mode_persists_without_touching_the_vault() {
         let (app, tmp, state) = app_for_tests_with_state();
+        let vault_root = tmp.path().join("legacy-git-mode");
+        std::fs::create_dir_all(&vault_root).expect("create vault directory");
+        assert!(!vault_root.join(".git").exists());
 
-        let missing_confirmation = app
-            .clone()
+        let response = app
             .oneshot(
                 Request::builder()
                     .uri("/api/settings")
@@ -3425,129 +3553,11 @@ mod tests {
             )
             .await
             .expect("response");
-        assert_eq!(missing_confirmation.status(), StatusCode::CONFLICT);
-        let body = axum::body::to_bytes(missing_confirmation.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(json["confirmation_required"], "git_init");
+        assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            json.get("error").is_none(),
-            "the server must not send prose for this consequence: {json}"
+            !vault_root.join(".git").exists(),
+            "a settings save must not initialize versioning on any directory"
         );
-        assert!(!tmp.path().join("vault/.git").exists());
-
-        let confirmed = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_init"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(confirmed.status(), StatusCode::OK);
-        assert!(tmp.path().join("vault/.git").exists());
-        assert_eq!(
-            state
-                .runtime_snapshot()
-                .setting("HATCHDOOR_GIT_SYNC_ENABLED")
-                .expect("setting")
-                .value,
-            "local"
-        );
-    }
-
-    #[tokio::test]
-    async fn downgrade_onto_a_non_repo_vault_accumulates_both_consents() {
-        // S4's two-consent case: switching remote -> local when the vault is
-        // no longer a git repository needs both `git_downgrade` (leaving
-        // remote sync) and `git_init` (creating fresh local history).
-        // Accepting one must not drop the other on the next round-trip: the
-        // page is expected to accumulate accepted consequences into one list
-        // across successive 409s, and the server must honor that list rather
-        // than only ever remembering the single most recent consent.
-        let (app, tmp, state) = app_for_tests_with_state();
-        state
-            .runtime_config
-            .save([
-                (
-                    "HATCHDOOR_GIT_SYNC_ENABLED".to_string(),
-                    "remote".to_string(),
-                ),
-                ("HATCHDOOR_GIT_HTTPS_TOKEN".to_string(), "token".to_string()),
-            ])
-            .expect("save initial remote config");
-        // No .git directory exists in this vault at all: remote mode was only
-        // ever configured, never actually initialized on disk.
-        assert!(!tmp.path().join("vault/.git").exists());
-
-        let no_confirmation = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"}}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(no_confirmation.status(), StatusCode::CONFLICT);
-        let body = axum::body::to_bytes(no_confirmation.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(json["confirmation_required"], "git_downgrade");
-
-        // Accept the downgrade only: must not silently also accept git_init.
-        let downgrade_only = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_downgrade"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(downgrade_only.status(), StatusCode::CONFLICT);
-        let body = axum::body::to_bytes(downgrade_only.into_body(), usize::MAX)
-            .await
-            .expect("body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
-        assert_eq!(
-            json["confirmation_required"], "git_init",
-            "the second consequence, not a ping-pong back to git_downgrade"
-        );
-
-        // The page accumulates: resend with BOTH accepted consequences.
-        let both_confirmed = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/settings")
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"updates":{"HATCHDOOR_GIT_SYNC_ENABLED":"local"},"confirm":["git_downgrade","git_init"]}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(both_confirmed.status(), StatusCode::OK);
-        assert!(tmp.path().join("vault/.git").exists());
         assert_eq!(
             state
                 .runtime_snapshot()
@@ -3826,6 +3836,9 @@ mod tests {
 
     #[tokio::test]
     async fn vault_scoped_update_note_rejects_stale_hash() {
+        // The mapping proof for `write_conflict`, which every hash-checked
+        // route shares; the concurrency rule itself is asserted at the
+        // mutation core (`vault_mutation.rs`).
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_id = create_vault_with_files(
             &app,
@@ -3970,120 +3983,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_scoped_create_note_rejects_a_noise_path() {
-        // A note written to this Vault's own noise-exclusion pattern would be
-        // indexed away; the create route must refuse it, matching the MCP write
-        // path and the legacy single-Vault write API.
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_root = tmp.path().join("noise");
-        let vault_id = create_vault_with_files(&app, "Noise", &vault_root, &[], 0).await;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r##"{"relative_path":"Notes/scratch.tmp","content":"# Ignored\n"}"##,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
-        assert!(!vault_root.join("Notes/scratch.tmp").exists());
-    }
-
-    #[tokio::test]
-    async fn vault_scoped_move_note_rejects_a_vault_owned_noise_path() {
-        // Moving an already-indexed note into a Vault-configured exclude pattern
-        // would make it disappear on the next read. Every write target, not just
-        // creates, must be checked against that Vault's own exclude patterns —
-        // not the legacy instance-wide HATCHDOOR_EXCLUDE setting.
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_root = tmp.path().join("noise-move");
-        std::fs::create_dir_all(&vault_root).expect("create vault directory");
-        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write note");
-        let created = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/api/v1/vaults")
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "expected_registry_revision": 0,
-                            "name": "NoiseMove",
-                            "enabled": true,
-                            "source": {"type": "local", "path": vault_root.to_string_lossy()},
-                            "exclude_patterns": [".trash/"],
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let vault_id = json_body(created).await["vault"]["vault_id"]
-            .as_str()
-            .expect("vault id")
-            .to_string();
-        let hash = crate::cache::parse::content_hash("# Home\n");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home/move"))
-                    .method("PATCH")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"target_folder":".trash","expected_content_hash":"{hash}"}}"#
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(json_body(response).await["code"], "noise_excluded_write");
-        assert!(vault_root.join("Home.md").exists());
-        assert!(!vault_root.join(".trash/Home.md").exists());
-    }
-
-    #[tokio::test]
-    async fn vault_scoped_move_note_rebuilds_the_index_from_this_vaults_own_content() {
-        // Write routes rebuild a short-lived index for slug/path work, scoped to
-        // this Vault's own directory — unrelated Vaults or the legacy instance
-        // config must not affect it. A note absent from this Vault's directory
-        // is simply not found.
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_id =
-            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
-        let hash = crate::cache::parse::content_hash("# Ignored\n");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/ignored"))
-                    .method("PUT")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r##"{{"content":"# Changed\n","expected_content_hash":"{hash}"}}"##
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
     async fn vault_scoped_archive_note_rejects_a_vault_owned_noise_path() {
+        // Every write target is checked against the Vault's own exclude
+        // patterns, and the refusal itself is asserted once at the mutation
+        // core's interface (`vault_mutation.rs`), for every primitive. This
+        // is the route's mapping proof: `noise_excluded_write` reaches the
+        // client as a `400` with its code intact, and nothing was written.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_root = tmp.path().join("noise-archive");
         std::fs::create_dir_all(&vault_root).expect("create vault directory");
@@ -4136,92 +4041,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vault_scoped_create_note_rejects_path_traversal() {
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_id =
-            create_vault_with_files(&app, "Notes", &tmp.path().join("notes"), &[], 0).await;
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes"))
-                    .method("POST")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r##"{"relative_path":"../escape.md","content":"# Nope\n"}"##,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test]
-    async fn vault_scoped_delete_note_rejects_stale_hash() {
-        let (app, tmp, _state) = app_for_tests_with_web_auth(None);
-        let vault_id = create_vault_with_files(
-            &app,
-            "Notes",
-            &tmp.path().join("notes"),
-            &[("Home.md", "# Home\n")],
-            0,
-        )
-        .await;
-
-        let note_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
-                    .method("GET")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        let original_hash = json_body(note_response).await["note"]["content_hash"]
-            .as_str()
-            .expect("hash")
-            .to_string();
-
-        let update = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
-                    .method("PUT")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r##"{{"content":"# Home\nfresh content\n","expected_content_hash":"{original_hash}"}}"##
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-        assert_eq!(update.status(), StatusCode::OK);
-
-        let stale_delete = app
-            .oneshot(
-                Request::builder()
-                    .uri(format!("/api/v1/vaults/{vault_id}/notes/home"))
-                    .method("DELETE")
-                    .header("content-type", "application/json")
-                    .body(Body::from(format!(
-                        r#"{{"expected_content_hash":"{original_hash}"}}"#
-                    )))
-                    .expect("request"),
-            )
-            .await
-            .expect("response");
-
-        assert_eq!(stale_delete.status(), StatusCode::CONFLICT);
-        assert_eq!(json_body(stale_delete).await["code"], "write_conflict");
-    }
-
-    #[tokio::test]
     async fn vault_scoped_creates_renames_moves_archives_and_deletes_note() {
+        // One status-and-envelope mapping pass over all five note routes.
+        // What each mutation does to the Vault is asserted at the mutation
+        // core (`vault_mutation.rs`); what this proves is that each route
+        // reaches it and shapes its outcome into the documented body.
         let (app, tmp, _state) = app_for_tests_with_web_auth(None);
         let vault_id =
             create_vault_with_files(&app, "Lifecycle", &tmp.path().join("lifecycle"), &[], 0).await;
@@ -5062,6 +4886,164 @@ mod tests {
             stats_body["data"][0]["note_count"], 1,
             "a demoted Note is not counted on a demo"
         );
+    }
+
+    #[tokio::test]
+    async fn demo_mode_serves_only_assets_on_its_readable_surface() {
+        let (demo, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("layered-assets");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n\n![[visible.png]]\n")
+            .expect("write visible note");
+        std::fs::write(vault_root.join("visible.png"), b"visible").expect("write visible asset");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(
+            vault_root.join("sources/Clipping.md"),
+            "# Clipping\n\n![[hidden.png]]\n",
+        )
+        .expect("write demoted note");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"hidden")
+            .expect("write hidden asset");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+
+        for (path, expected) in [
+            ("visible.png", StatusCode::OK),
+            ("sources/hidden.png", StatusCode::NOT_FOUND),
+        ] {
+            let response = demo
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/assets/{path}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_mode_asset_surface_excludes_noise_and_honours_nested_layer_markers() {
+        let (demo, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, true);
+        let vault_root = tmp.path().join("complete-asset-surface");
+        for directory in ["sources/nested", ".trash", "private"] {
+            std::fs::create_dir_all(vault_root.join(directory)).expect("create asset directory");
+        }
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write visible note");
+        std::fs::write(vault_root.join("asset-only.png"), b"public asset")
+            .expect("write public asset without note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write demoting marker");
+        std::fs::write(
+            vault_root.join("sources/asset-only.png"),
+            b"hidden layer asset",
+        )
+        .expect("write hidden asset without note");
+        std::fs::write(
+            vault_root.join("sources/nested/.hatchdoor-layer"),
+            "default",
+        )
+        .expect("write nested default reinclude marker");
+        std::fs::write(
+            vault_root.join("sources/nested/reincluded.png"),
+            b"reinclude asset",
+        )
+        .expect("write reincluded asset without note");
+        std::fs::write(vault_root.join(".trash/noise.png"), b"noise asset")
+            .expect("write built-in noise asset");
+        std::fs::write(vault_root.join("private/excluded.png"), b"excluded asset")
+            .expect("write configured excluded asset");
+
+        let snapshot = state
+            .vault_registry
+            .add(
+                0,
+                crate::vault_registry::NewVaultDefinition {
+                    name: "Complete surface".to_string(),
+                    enabled: true,
+                    source: crate::vault_registry::VaultSource::Local {
+                        path: vault_root.clone(),
+                    },
+                    exclude_patterns: vec!["private/".to_string()],
+                    https_credentials: None,
+                    archive_folder: None,
+                    commit_identity: None,
+                },
+            )
+            .expect("add vault to registry");
+        let vault_id = snapshot
+            .definitions()
+            .find(|definition| definition.name() == "Complete surface")
+            .expect("added vault")
+            .vault_id()
+            .to_string();
+        state
+            .vaults
+            .reconcile_and_reconstruct(
+                &state.vault_registry,
+                &snapshot,
+                &state.vault_work,
+                &state.managed_git,
+            )
+            .await;
+
+        for (path, expected) in [
+            ("asset-only.png", StatusCode::OK),
+            ("sources/asset-only.png", StatusCode::NOT_FOUND),
+            ("sources/nested/reincluded.png", StatusCode::OK),
+            (".trash/noise.png", StatusCode::NOT_FOUND),
+            ("private/excluded.png", StatusCode::NOT_FOUND),
+        ] {
+            let response = demo
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/assets/{path}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_mode_retains_access_to_assets_under_demoted_layers() {
+        let (app, tmp, state) = app_for_tests_with_web_auth_and_demo_mode(None, false);
+        let vault_root = tmp.path().join("ordinary-layered-assets");
+        std::fs::create_dir_all(vault_root.join("sources")).expect("create layer directory");
+        std::fs::create_dir_all(vault_root.join(".trash")).expect("create noise directory");
+        std::fs::write(vault_root.join("Home.md"), "# Home\n").expect("write visible note");
+        std::fs::write(vault_root.join("sources/.hatchdoor-layer"), "sources")
+            .expect("write layer marker");
+        std::fs::write(vault_root.join("sources/hidden.png"), b"operator asset")
+            .expect("write demoted asset");
+        std::fs::write(vault_root.join(".trash/noise.png"), b"operator noise asset")
+            .expect("write noise asset");
+
+        let vault_id = register_vaults_directly(&state, &[("Layered", vault_root.as_path(), true)])
+            .await[0]
+            .to_string();
+        for path in ["sources/hidden.png", ".trash/noise.png"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/v1/vaults/{vault_id}/assets/{path}"))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+        }
     }
 
     #[tokio::test]
@@ -6926,9 +6908,17 @@ mod tests {
             2
         );
         for vault_tree in tree_body["data"].as_array().unwrap() {
-            let vault_id = vault_tree["vault_id"].as_str().expect("vault_id");
-            for note in vault_tree["tree"]["notes"].as_array().unwrap() {
-                assert_eq!(note["vault_id"], vault_id);
+            // The tree names its Vault; its Notes do not repeat it (#192).
+            vault_tree["vault_id"].as_str().expect("vault_id");
+            let root = &vault_tree["tree"];
+            let notes = root["notes"].as_array().expect("notes");
+            assert_eq!(root["note_count"], notes.len());
+            // The route passes the default tree scope and always returns the
+            // whole tree, so nothing is ever held back.
+            assert!(root.get("truncated").is_none());
+            for note in notes {
+                assert!(note.get("vault_id").is_none());
+                note["slug"].as_str().expect("slug");
             }
         }
 
