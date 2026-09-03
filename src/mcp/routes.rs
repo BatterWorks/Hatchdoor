@@ -2492,6 +2492,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_frontmatter_reports_the_same_content_hash_get_note_does() {
+        // A note with no frontmatter block still answers a hash, because the
+        // hash covers the whole file rather than the frontmatter span (#227).
+        let (state, _tmp) = test_state();
+        let frontmatter = call_tool(&state, "get_frontmatter", json!({"slug": "home"})).await;
+        let projection = &frontmatter["result"]["structuredContent"];
+        assert_eq!(
+            projection["has_frontmatter"], false,
+            "the fixture this criterion rests on has no frontmatter block"
+        );
+        let hash = projection["content_hash"]
+            .as_str()
+            .expect("frontmatter hash")
+            .to_string();
+        assert_eq!(
+            hash,
+            crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]")
+        );
+
+        let note = call_tool(&state, "get_note", json!({"slug": "home"})).await;
+        assert_eq!(
+            note["result"]["structuredContent"]["note"]["content_hash"]
+                .as_str()
+                .expect("note hash"),
+            hash,
+            "both exact reads report one hash for the same note"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_frontmatter_hash_is_accepted_by_a_hash_protected_mutation() {
+        // The point of the field: harvest the hash at frontmatter cost, then
+        // spend it on an optimistic-concurrency write without a full read.
+        let (state, _tmp) = write_state();
+        let frontmatter = call_tool(&state, "get_frontmatter", json!({"slug": "home"})).await;
+        let hash = frontmatter["result"]["structuredContent"]["content_hash"]
+            .as_str()
+            .expect("frontmatter hash")
+            .to_string();
+
+        let updated = call_tool(
+            &state,
+            "update_frontmatter",
+            json!({"slug": "home", "frontmatter": {"status": "active"}, "expected_content_hash": hash}),
+        )
+        .await;
+        assert_eq!(
+            updated["result"]["structuredContent"]["ok"], true,
+            "harvested hash is spendable: {updated}"
+        );
+    }
+
+    #[tokio::test]
     async fn update_frontmatter_merges_and_preserves_the_body() {
         let (state, _tmp) = write_state();
         // Matches the test_state fixture byte-for-byte (no trailing newline).

@@ -200,11 +200,18 @@ pub struct NoteWriteResult {
 /// aliases, and every remaining property — without the Markdown body. A
 /// note with no frontmatter block answers `has_frontmatter: false` with an
 /// empty projection rather than an error.
+///
+/// `content_hash` sits with the note's other identity fields and is the same
+/// string `get_note` reports for that note at that instant, so it is spendable
+/// as a mutation's `expected_content_hash` (#227). It is never absent: the
+/// read has the note's content in hand either way, and a note with no
+/// frontmatter block still has a whole file to hash.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GetFrontmatterResult {
     pub vault_id: String,
     pub slug: String,
     pub relative_path: String,
+    pub content_hash: String,
     pub has_frontmatter: bool,
     pub tags: Vec<String>,
     pub aliases: Vec<String>,

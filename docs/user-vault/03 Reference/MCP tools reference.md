@@ -142,7 +142,7 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. Optional: `folder` (a Vault-relative folder to return as the root), `max_depth` (how far below it to descend, minimum 1), `include_notes` (default `true`). |
 | `get_stats` | `scope` | Grouped statistics for one Vault or all enabled Vaults. |
 | `get_graph` | `scope` | Grouped link graph for one Vault or all enabled Vaults. |
-| `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter metadata — `tags`, `aliases`, and every remaining top-level key under `properties` — without returning the Markdown body. A note with no frontmatter block answers `has_frontmatter: false` with empty collections rather than an error. It returns no `content_hash`: to write the metadata back, take the hash from `get_note`. |
+| `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter metadata — `tags`, `aliases`, and every remaining top-level key under `properties` — without returning the Markdown body. A note with no frontmatter block answers `has_frontmatter: false` with empty collections rather than an error. It also returns the note's `content_hash` — the same string `get_note` reports for that note at that instant, and covering the whole file, so a note with no frontmatter block still has one — which means the metadata can be written straight back without pulling the body over the wire first. |
 | `recently_modified` | `scope` | Recently modified notes. Optional `limit` (1–25, default 5). |
 | `list_note_attachments` | `vault_id`, `slug` | List the attachments one note references, without the note's full content. |
 | `get_attachment` | `vault_id`, `relative_path` | Fetch one attachment's bytes, addressed by the same `relative_path` `list_note_attachments` reports. Optional `encoding`: `url` (the default) returns a `download_url`, `base64` returns the bytes inline. |
@@ -164,7 +164,7 @@ Notes inside a tree carry `title` and `slug` but no `vault_id`: the tree they si
 
 ## Write content tools
 
-Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id` in addition to the parameters listed. Every mutating tool that targets an existing note also requires `expected_content_hash` — the hash most recently read from `get_note` — for optimistic concurrency: a stale hash means someone else changed the note since you read it, and the write is rejected rather than silently overwriting.
+Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id` in addition to the parameters listed. Every mutating tool that targets an existing note also requires `expected_content_hash` — the hash most recently read from `get_note`, or from `get_frontmatter` when the body is not needed — for optimistic concurrency: a stale hash means someone else changed the note since you read it, and the write is rejected rather than silently overwriting.
 
 | Tool | Required parameters (beyond `vault_id`) | Purpose |
 | --- | --- | --- |

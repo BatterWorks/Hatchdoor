@@ -51,7 +51,7 @@ Use `get_tree` only when folder structure or broad navigation is the task.
 
 Before editing an existing note:
 
-1. Fetch it with `get_note`.
+1. Fetch it with `get_note`, or with `get_frontmatter` when only its properties are changing — that answer carries the same content hash without the body.
 2. Use the returned content hash as the expected hash.
 3. Make the smallest change that satisfies the request.
 

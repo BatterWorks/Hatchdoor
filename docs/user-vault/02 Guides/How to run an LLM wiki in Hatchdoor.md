@@ -60,7 +60,7 @@ Hatchdoor has no dedicated wiki-integrity tool yet — it's a known gap, not yet
 
 - Periodically `search_notes` with `layers: ["all"]` to check nothing landed on the wrong surface.
 - Use `recently_modified` and [[Browse and review through the Web UI]] to spot-check what the agent has been writing.
-- Pull metadata without the bodies: `get_frontmatter` returns one page's tags, aliases, and other properties on its own, and a `batch` of them across a set of pages is cheap enough to check a whole zone for tag drift in one call. `update_frontmatter` fixes what it finds, one key at a time, without rewriting the page.
+- Pull metadata without the bodies: `get_frontmatter` returns one page's tags, aliases, and other properties on its own, and a `batch` of them across a set of pages is cheap enough to check a whole zone for tag drift in one call. Each answer carries that page's content hash too, so the fix does not need a second, heavier read: `update_frontmatter` spends the hash it already has and corrects what it found, one key at a time, without rewriting the page.
 - Ask the agent directly: *"Search the wiki for pages with no incoming or outgoing wikilinks — those are candidates for linking in or archiving."* This is a manual substitute for the automated check that doesn't exist yet.
 
 ---
