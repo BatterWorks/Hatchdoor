@@ -19,7 +19,7 @@ flowchart LR
 
 ## Start here
 
-Follow [[Welcome to Hatchdoor]] to deploy Hatchdoor, connect your own agent, make one deliberate change, and review it in the browser. These docs target Hatchdoor v2.5.0.
+Follow [[Welcome to Hatchdoor]] to deploy Hatchdoor, connect your own agent, make one deliberate change, and review it in the browser. These docs target Hatchdoor v2.6.0.
 
 ## Before you start: what kind of notes app is this
 
