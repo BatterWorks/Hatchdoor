@@ -1,0 +1,292 @@
+Running requirements 2026-07-28 (50 scenarios) against http://127.0.0.1:42999/mcp
+
+
+=== Running scenario: server-stateless ===
+Running client scenario 'server-stateless' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-server-stateless-2026-09-03T12-42-47-344Z
+
+=== Running scenario: completion-complete ===
+Running client scenario 'completion-complete' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-completion-complete-2026-09-03T12-42-51-278Z
+
+=== Running scenario: tools-list ===
+Running client scenario 'tools-list' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-list-2026-09-03T12-42-51-362Z
+
+=== Running scenario: tools-call-simple-text ===
+Running client scenario 'tools-call-simple-text' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-simple-text-2026-09-03T12-42-51-396Z
+
+=== Running scenario: tools-call-image ===
+Running client scenario 'tools-call-image' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-image-2026-09-03T12-42-51-430Z
+
+=== Running scenario: tools-call-audio ===
+Running client scenario 'tools-call-audio' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-audio-2026-09-03T12-42-51-436Z
+
+=== Running scenario: tools-call-embedded-resource ===
+Running client scenario 'tools-call-embedded-resource' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-embedded-resource-2026-09-03T12-42-51-441Z
+
+=== Running scenario: tools-call-mixed-content ===
+Running client scenario 'tools-call-mixed-content' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-mixed-content-2026-09-03T12-42-51-447Z
+
+=== Running scenario: tools-call-error ===
+Running client scenario 'tools-call-error' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-error-2026-09-03T12-42-51-453Z
+
+=== Running scenario: tools-call-with-progress ===
+Running client scenario 'tools-call-with-progress' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tools-call-with-progress-2026-09-03T12-42-51-458Z
+
+=== Running scenario: server-sse-multiple-streams ===
+Running client scenario 'server-sse-multiple-streams' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-server-sse-multiple-streams-2026-09-03T12-42-51-464Z
+
+=== Running scenario: resources-list ===
+Running client scenario 'resources-list' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-resources-list-2026-09-03T12-42-51-502Z
+
+=== Running scenario: resources-read-text ===
+Running client scenario 'resources-read-text' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-resources-read-text-2026-09-03T12-42-51-519Z
+
+=== Running scenario: resources-read-binary ===
+Running client scenario 'resources-read-binary' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-resources-read-binary-2026-09-03T12-42-51-530Z
+
+=== Running scenario: resources-templates-read ===
+Running client scenario 'resources-templates-read' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-resources-templates-read-2026-09-03T12-42-51-536Z
+
+=== Running scenario: sep-2164-resource-not-found ===
+Running client scenario 'sep-2164-resource-not-found' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-sep-2164-resource-not-found-2026-09-03T12-42-51-541Z
+
+=== Running scenario: prompts-list ===
+Running client scenario 'prompts-list' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-prompts-list-2026-09-03T12-42-51-546Z
+
+=== Running scenario: prompts-get-simple ===
+Running client scenario 'prompts-get-simple' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-prompts-get-simple-2026-09-03T12-42-51-553Z
+
+=== Running scenario: prompts-get-with-args ===
+Running client scenario 'prompts-get-with-args' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-prompts-get-with-args-2026-09-03T12-42-51-563Z
+
+=== Running scenario: prompts-get-embedded-resource ===
+Running client scenario 'prompts-get-embedded-resource' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-prompts-get-embedded-resource-2026-09-03T12-42-51-569Z
+
+=== Running scenario: prompts-get-with-image ===
+Running client scenario 'prompts-get-with-image' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-prompts-get-with-image-2026-09-03T12-42-51-573Z
+
+=== Running scenario: dns-rebinding-protection ===
+Running client scenario 'dns-rebinding-protection' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-dns-rebinding-protection-2026-09-03T12-42-51-578Z
+
+=== Running scenario: caching ===
+Running client scenario 'caching' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-caching-2026-09-03T12-42-51-590Z
+
+=== Running scenario: input-required-result-basic-elicitation ===
+Running client scenario 'input-required-result-basic-elicitation' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-basic-elicitation-2026-09-03T12-42-51-625Z
+
+=== Running scenario: input-required-result-basic-sampling ===
+Running client scenario 'input-required-result-basic-sampling' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-basic-sampling-2026-09-03T12-42-51-630Z
+
+=== Running scenario: input-required-result-basic-list-roots ===
+Running client scenario 'input-required-result-basic-list-roots' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-basic-list-roots-2026-09-03T12-42-51-634Z
+
+=== Running scenario: input-required-result-request-state ===
+Running client scenario 'input-required-result-request-state' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-request-state-2026-09-03T12-42-51-639Z
+
+=== Running scenario: input-required-result-multiple-input-requests ===
+Running client scenario 'input-required-result-multiple-input-requests' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-multiple-input-requests-2026-09-03T12-42-51-644Z
+
+=== Running scenario: input-required-result-multi-round ===
+Running client scenario 'input-required-result-multi-round' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-multi-round-2026-09-03T12-42-51-649Z
+
+=== Running scenario: input-required-result-missing-input-response ===
+Running client scenario 'input-required-result-missing-input-response' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-missing-input-response-2026-09-03T12-42-51-653Z
+
+=== Running scenario: input-required-result-non-tool-request ===
+Running client scenario 'input-required-result-non-tool-request' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-non-tool-request-2026-09-03T12-42-51-660Z
+
+=== Running scenario: input-required-result-result-type ===
+Running client scenario 'input-required-result-result-type' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-result-type-2026-09-03T12-42-51-664Z
+
+=== Running scenario: input-required-result-unsupported-methods ===
+Running client scenario 'input-required-result-unsupported-methods' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-unsupported-methods-2026-09-03T12-42-51-669Z
+
+=== Running scenario: input-required-result-tampered-state ===
+Running client scenario 'input-required-result-tampered-state' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-tampered-state-2026-09-03T12-42-51-695Z
+
+=== Running scenario: input-required-result-capability-check ===
+Running client scenario 'input-required-result-capability-check' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-capability-check-2026-09-03T12-42-51-700Z
+
+=== Running scenario: input-required-result-ignore-extra-params ===
+Running client scenario 'input-required-result-ignore-extra-params' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-ignore-extra-params-2026-09-03T12-42-51-705Z
+
+=== Running scenario: input-required-result-validate-input ===
+Running client scenario 'input-required-result-validate-input' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-input-required-result-validate-input-2026-09-03T12-42-51-710Z
+
+=== Running scenario: tasks-lifecycle ===
+Running client scenario 'tasks-lifecycle' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-lifecycle-2026-09-03T12-42-51-718Z
+
+=== Running scenario: tasks-capability-negotiation ===
+Running client scenario 'tasks-capability-negotiation' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-capability-negotiation-2026-09-03T12-42-51-743Z
+
+=== Running scenario: tasks-wire-fields ===
+Running client scenario 'tasks-wire-fields' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-wire-fields-2026-09-03T12-42-51-777Z
+
+=== Running scenario: tasks-request-state-removal ===
+Running client scenario 'tasks-request-state-removal' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-request-state-removal-2026-09-03T12-42-51-788Z
+
+=== Running scenario: tasks-mrtr-input ===
+Running client scenario 'tasks-mrtr-input' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-mrtr-input-2026-09-03T12-42-51-793Z
+
+=== Running scenario: tasks-request-headers ===
+Running client scenario 'tasks-request-headers' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-request-headers-2026-09-03T12-42-51-806Z
+
+=== Running scenario: tasks-dispatch-and-envelope ===
+Running client scenario 'tasks-dispatch-and-envelope' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-dispatch-and-envelope-2026-09-03T12-42-51-821Z
+
+=== Running scenario: tasks-status-notifications ===
+Running client scenario 'tasks-status-notifications' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-status-notifications-2026-09-03T12-42-51-854Z
+
+=== Running scenario: tasks-required-task-error ===
+Running client scenario 'tasks-required-task-error' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-required-task-error-2026-09-03T12-42-51-855Z
+
+=== Running scenario: tasks-mrtr-composition ===
+Running client scenario 'tasks-mrtr-composition' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-tasks-mrtr-composition-2026-09-03T12-42-51-860Z
+
+=== Running scenario: json-schema-2020-12 ===
+Running client scenario 'json-schema-2020-12' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-json-schema-2020-12-2026-09-03T12-42-51-865Z
+
+=== Running scenario: http-header-validation ===
+Running client scenario 'http-header-validation' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-http-header-validation-2026-09-03T12-42-51-885Z
+
+=== Running scenario: http-custom-header-server-validation ===
+Running client scenario 'http-custom-header-server-validation' against server: http://127.0.0.1:42999/mcp
+Results saved to /tmp/claude-1000/-home-battermanz-coding-hatchdoor/025db359-3237-44a3-99ac-6525f1f10ef9/scratchpad/conf-2026-09-03-write-0728/server-http-custom-header-server-validation-2026-09-03T12-42-51-963Z
+
+
+=== SUMMARY ===
+✗ server-stateless: 23 passed, 5 failed
+✓ completion-complete: 2 passed, 0 failed
+✓ tools-list: 3 passed, 0 failed
+✗ tools-call-simple-text: 1 passed, 1 failed
+✗ tools-call-image: 1 passed, 1 failed
+✗ tools-call-audio: 1 passed, 1 failed
+✗ tools-call-embedded-resource: 1 passed, 1 failed
+✗ tools-call-mixed-content: 1 passed, 1 failed
+✗ tools-call-error: 1 passed, 1 failed
+✗ tools-call-with-progress: 1 passed, 1 failed
+✓ server-sse-multiple-streams: 2 passed, 0 failed
+✗ resources-list: 1 passed, 1 failed
+✗ resources-read-text: 1 passed, 1 failed
+✗ resources-read-binary: 1 passed, 1 failed
+✗ resources-templates-read: 1 passed, 1 failed
+✓ sep-2164-resource-not-found: 2 passed, 0 failed
+✗ prompts-list: 1 passed, 1 failed
+✗ prompts-get-simple: 1 passed, 1 failed
+✗ prompts-get-with-args: 1 passed, 1 failed
+✗ prompts-get-embedded-resource: 1 passed, 1 failed
+✗ prompts-get-with-image: 1 passed, 1 failed
+✓ dns-rebinding-protection: 2 passed, 0 failed
+✗ caching: 4 passed, 3 failed
+✗ input-required-result-basic-elicitation: 1 passed, 1 failed
+✗ input-required-result-basic-sampling: 1 passed, 1 failed
+✗ input-required-result-basic-list-roots: 1 passed, 1 failed
+✗ input-required-result-request-state: 1 passed, 1 failed
+✗ input-required-result-multiple-input-requests: 1 passed, 1 failed
+✗ input-required-result-multi-round: 1 passed, 1 failed
+✓ input-required-result-missing-input-response: 1 passed, 0 failed
+✗ input-required-result-non-tool-request: 1 passed, 1 failed
+✗ input-required-result-result-type: 1 passed, 1 failed
+✓ input-required-result-unsupported-methods: 2 passed, 0 failed
+✗ input-required-result-tampered-state: 1 passed, 1 failed
+✗ input-required-result-capability-check: 1 passed, 1 failed
+✓ input-required-result-ignore-extra-params: 1 passed, 0 failed
+✓ input-required-result-validate-input: 3 passed, 0 failed
+✗ tasks-lifecycle: 1 passed, 8 failed
+✗ tasks-capability-negotiation: 1 passed, 4 failed
+✗ tasks-wire-fields: 1 passed, 3 failed
+✗ tasks-request-state-removal: 1 passed, 1 failed
+✗ tasks-mrtr-input: 1 passed, 3 failed
+✗ tasks-request-headers: 2 passed, 3 failed
+✗ tasks-dispatch-and-envelope: 3 passed, 6 failed
+✓ tasks-status-notifications: 0 passed, 0 failed
+✗ tasks-required-task-error: 1 passed, 1 failed
+✗ tasks-mrtr-composition: 1 passed, 1 failed
+✗ json-schema-2020-12: 1 passed, 1 failed
+✓ http-header-validation: 14 passed, 0 failed
+✗ http-custom-header-server-validation: 1 passed, 5 failed
+
+Total: 99 passed, 70 failed
+
+Expected failures (in baseline):
+  ~ server-stateless
+  ~ tools-call-simple-text
+  ~ tools-call-image
+  ~ tools-call-audio
+  ~ tools-call-embedded-resource
+  ~ tools-call-mixed-content
+  ~ tools-call-error
+  ~ tools-call-with-progress
+  ~ resources-list
+  ~ resources-read-text
+  ~ resources-read-binary
+  ~ resources-templates-read
+  ~ sep-2164-resource-not-found
+  ~ prompts-list
+  ~ prompts-get-simple
+  ~ prompts-get-with-args
+  ~ prompts-get-embedded-resource
+  ~ prompts-get-with-image
+  ~ caching
+  ~ input-required-result-basic-elicitation
+  ~ input-required-result-basic-sampling
+  ~ input-required-result-basic-list-roots
+  ~ input-required-result-request-state
+  ~ input-required-result-multiple-input-requests
+  ~ input-required-result-multi-round
+  ~ input-required-result-missing-input-response
+  ~ input-required-result-non-tool-request
+  ~ input-required-result-result-type
+  ~ input-required-result-tampered-state
+  ~ input-required-result-capability-check
+  ~ input-required-result-ignore-extra-params
+
+Baseline check passed: all failures are expected.

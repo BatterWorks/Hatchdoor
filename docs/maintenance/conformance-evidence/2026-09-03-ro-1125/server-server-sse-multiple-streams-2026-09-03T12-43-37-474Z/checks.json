@@ -1,0 +1,73 @@
+[
+  {
+    "id": "server-accepts-multiple-post-streams",
+    "name": "ServerAcceptsMultiplePostStreams",
+    "description": "Server allows multiple concurrent POST requests (each may return SSE or JSON)",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:37.494Z",
+    "specReferences": [
+      {
+        "id": "SEP-1699",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+      }
+    ],
+    "details": {
+      "numStreamsAttempted": 3,
+      "numStreamsAccepted": 3,
+      "numSseStreams": 3,
+      "statuses": [
+        200,
+        200,
+        200
+      ],
+      "contentTypes": [
+        "text/event-stream",
+        "text/event-stream",
+        "text/event-stream"
+      ]
+    }
+  },
+  {
+    "id": "server-sse-streams-functional",
+    "name": "ServerSSEStreamsFunctional",
+    "description": "Multiple POST SSE streams should be functional",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:37.495Z",
+    "specReferences": [
+      {
+        "id": "SEP-1699",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/issues/1699"
+      }
+    ],
+    "details": {
+      "numSseStreams": 3,
+      "functionalSseStreams": 3,
+      "results": [
+        {
+          "index": 0,
+          "type": "sse",
+          "event": {
+            "id": "0/0",
+            "data": ""
+          }
+        },
+        {
+          "index": 1,
+          "type": "sse",
+          "event": {
+            "id": "0/1",
+            "data": ""
+          }
+        },
+        {
+          "index": 2,
+          "type": "sse",
+          "event": {
+            "id": "0/2",
+            "data": ""
+          }
+        }
+      ]
+    }
+  }
+]

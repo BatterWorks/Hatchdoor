@@ -1,0 +1,65 @@
+[
+  {
+    "id": "tasks-wire-field-renames",
+    "name": "TasksWireFieldRenames",
+    "description": "CreateTaskResult uses ttlMs + pollIntervalMs (integer milliseconds); legacy ttl / pollInterval keys absent",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.241Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-no-early-ttl-expiry",
+    "name": "TasksNoEarlyTtlExpiry",
+    "description": "Task remains accessible via tasks/get for the duration of its ttlMs",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.241Z",
+    "errorMessage": "Not testable: no task was created by the preceding step, so this check could not be exercised",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ],
+    "details": {
+      "untestable": true,
+      "reason": "no task was created by the preceding step, so this check could not be exercised"
+    }
+  },
+  {
+    "id": "tasks-no-related-task-meta-on-inlined-result",
+    "name": "TasksNoRelatedTaskMetaOnInlinedResult",
+    "description": "tasks/get inlined result MUST NOT include the v1 io.modelcontextprotocol/related-task _meta key (taskId is at the root)",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.245Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:43.245Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 4,
+      "violations": []
+    }
+  }
+]

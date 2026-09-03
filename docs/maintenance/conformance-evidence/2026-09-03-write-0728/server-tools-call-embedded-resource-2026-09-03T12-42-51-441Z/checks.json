@@ -1,0 +1,33 @@
+[
+  {
+    "id": "tools-call-embedded-resource",
+    "name": "ToolsCallEmbeddedResource",
+    "description": "Tool returns embedded resource content",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:42:51.446Z",
+    "errorMessage": "Failed: Unknown MCP tool: test_embedded_resource",
+    "specReferences": [
+      {
+        "id": "MCP-Tools-Call",
+        "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools#calling-tools"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:51.446Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]

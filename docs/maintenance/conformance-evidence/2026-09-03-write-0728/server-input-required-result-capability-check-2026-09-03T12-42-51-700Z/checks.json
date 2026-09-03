@@ -1,0 +1,34 @@
+[
+  {
+    "id": "sep-2322-respect-client-capabilities",
+    "name": "RespectClientCapabilities",
+    "description": "Server only includes inputRequests for declared client capabilities",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:42:51.704Z",
+    "errorMessage": "JSON-RPC error: Unknown MCP tool: test_input_required_result_capabilities",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ],
+    "details": {}
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:51.704Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 2,
+      "violations": []
+    }
+  }
+]
