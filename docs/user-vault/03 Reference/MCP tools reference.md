@@ -207,6 +207,8 @@ Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id
 | `rename_attachment` | `source_relative_path`, `new_filename` | Rename an attachment in place and rewrite every note reference to it. |
 | `delete_attachment` | `source_relative_path` | Trash an attachment under `.hatchdoor-trash` and rewrite every note reference to it. |
 
+A backlink to a note that `rename_note`, `move_note`, `move_rename_note` or `archive_note` retargets keeps the form it was written in. A link written as a bare title, `[[Some Note]]`, stays a bare title and picks up the note's new title; a link written as a full path picks up the new full path. The one exception is a new title that another note already carries, where the link falls back to the full path so it keeps pointing at the note that moved. A move that does not change the note's title therefore leaves bare-title links alone entirely, and `rewritten_notes` counts only the notes that actually changed.
+
 An asset travels with a note only when it already lives inside that note's own folder, or a subfolder of it. An asset the note merely points at from somewhere else, such as a shared `_system/` or `Attachments/` folder sitting beside the note's folder, stays exactly where it is: `rename_note`, `move_note`, `move_rename_note`, `archive_note` and `delete_note` leave it alone and rewrite the moved note's own link so it still resolves from the note's new home. Other notes pointing at it are left untouched too, since nothing about it changed. `moved_assets` in the response counts only the assets that actually moved.
 
 > [!note]

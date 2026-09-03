@@ -891,7 +891,7 @@ fn move_note_rewrites_backlinks_and_moves_referenced_assets() {
     assert!(root.join("Archive/Renamed.md").exists());
     assert!(root.join("Archive/image.png").exists());
     let backlink = fs::read_to_string(root.join("Backlink.md")).expect("read");
-    assert!(backlink.contains("[[Archive/Renamed|Alias]]"));
+    assert!(backlink.contains("[[Renamed|Alias]]"));
     assert!(backlink.contains("![](Archive/image.png)"));
     assert!(backlink.contains("`[[Target]]`"));
     assert!(backlink.contains("```\n[[Target]]\n![](Notes/image.png)\n```"));
@@ -901,7 +901,7 @@ fn move_note_rewrites_backlinks_and_moves_referenced_assets() {
 }
 
 #[test]
-fn archive_note_moves_to_archive_prefix_and_rewrites_backlinks() {
+fn archive_note_moves_to_archive_prefix_and_leaves_a_bare_title_backlink_bare() {
     let tmp = TempDir::new().expect("tempdir");
     let root = tmp.path();
     fs::create_dir_all(root.join("40-reference")).expect("mkdir");
@@ -914,9 +914,31 @@ fn archive_note_moves_to_archive_prefix_and_rewrites_backlinks() {
         archive_note(root, &index, entry, "90-archive/", &content_hash("body")).expect("archive");
 
     assert_eq!(outcome.relative_path, Some("90-archive/Idea".to_string()));
-    assert_eq!(outcome.rewritten_notes, 1);
+    // The note keeps its title, so the bare-title link already reads true and
+    // no note needs rewriting at all (#235).
+    assert_eq!(outcome.rewritten_notes, 0);
     assert!(!root.join("40-reference/Idea.md").exists());
     assert!(root.join("90-archive/Idea.md").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Idea]]"
+    );
+}
+
+#[test]
+fn archive_note_rewrites_a_path_qualified_backlink_to_the_archived_path() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("40-reference")).expect("mkdir");
+    fs::write(root.join("40-reference/Idea.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "See [[40-reference/Idea]]").expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+
+    let outcome =
+        archive_note(root, &index, entry, "90-archive/", &content_hash("body")).expect("archive");
+
+    assert_eq!(outcome.rewritten_notes, 1);
     assert_eq!(
         fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
         "See [[90-archive/Idea]]"
@@ -1073,7 +1095,7 @@ fn move_note_carries_a_sibling_asset_whose_bytes_are_not_valid_utf8() {
     );
     let backlink = fs::read_to_string(root.join("Backlink.md")).expect("backlink");
     assert!(backlink.contains("![](Archive/photo.jpg)"));
-    assert!(backlink.contains("[[Archive/Renamed]]"));
+    assert!(backlink.contains("[[Renamed]]"));
 }
 
 /// A note in `Notes/` holding one attachment whose bytes are not valid UTF-8.
@@ -1678,4 +1700,183 @@ fn every_path_a_planned_asset_move_hands_the_filesystem_is_accepted_by_the_move_
         super::fs_ops::move_file_no_follow(&asset_move.source, &asset_move.destination)
             .expect("the move primitive must accept every path the planner produced");
     }
+}
+
+#[test]
+fn rename_note_leaves_a_bare_title_backlink_bare() {
+    // #235: a vault written in Obsidian's shortest-path style must come back
+    // from a rename in that same style. The link's target is retargeted, its
+    // form is not.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("homelab/decisions")).expect("mkdir");
+    fs::write(root.join("homelab/decisions/Wayfinder Efforts.md"), "body").expect("target");
+    fs::write(root.join("Operating Rules.md"), "See [[Wayfinder Efforts]]").expect("backlink");
+    let index = build(root);
+    let entry = index
+        .find_by_slug("wayfinder-efforts")
+        .expect("wayfinder efforts");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "homelab/decisions/ADR Wayfinder Efforts.md",
+        &content_hash("body"),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Operating Rules.md")).expect("backlink"),
+        "See [[ADR Wayfinder Efforts]]"
+    );
+}
+
+#[test]
+fn move_note_leaves_a_bare_title_backlink_untouched_when_the_title_does_not_change() {
+    // The sharper half of #235: nothing about the note's name changes, so a
+    // bare-title link has nothing to be rewritten to.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Idea.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "See [[Idea]]").expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+
+    move_or_rename_note(root, &index, entry, "Inbox/Idea.md", &content_hash("body")).expect("move");
+
+    assert!(root.join("Inbox/Idea.md").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Idea]]"
+    );
+}
+
+#[test]
+fn move_note_rewrites_a_path_qualified_backlink_to_the_new_full_path() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("mkdir");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[Notes/Target]], [[Notes/Target|Alias]], [[Notes/Target#Heading]] and ![[Notes/Target^block-id]]",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Archive/Renamed]], [[Archive/Renamed|Alias]], [[Archive/Renamed#Heading]] and ![[Archive/Renamed^block-id]]"
+    );
+}
+
+#[test]
+fn move_note_falls_back_to_the_full_path_when_the_new_title_collides() {
+    // Two notes would carry the title "Renamed" after the move, and a bare
+    // title resolves through `by_title` to a deterministic first path. The
+    // full path is the only form that still names the moved note.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::create_dir_all(root.join("Other")).expect("other");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    fs::write(root.join("Other/Renamed.md"), "unrelated").expect("collider");
+    fs::write(
+        root.join("Backlink.md"),
+        "See [[Target]], [[Target|Alias]], [[Target#Heading]] and ![[Target^block-id]]",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Archive/Renamed]], [[Archive/Renamed|Alias]], [[Archive/Renamed#Heading]] and ![[Archive/Renamed^block-id]]"
+    );
+    let moved_slug = outcome.slug.expect("moved slug");
+    let after = build(root);
+    assert_eq!(
+        after
+            .resolve_wikilink("Archive/Renamed")
+            .expect("the rewritten link must still resolve")
+            .slug,
+        moved_slug,
+        "the fallback form must resolve to the moved note, not its same-titled neighbour"
+    );
+}
+
+#[test]
+fn a_preserved_bare_title_backlink_keeps_its_alias_anchor_and_embed_form() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "[[Target|Alias]] [[Target#Heading]] [[Target^block-id]] ![[Target]] `[[Target]]`",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "[[Renamed|Alias]] [[Renamed#Heading]] [[Renamed^block-id]] ![[Renamed]] `[[Target]]`"
+    );
+}
+
+#[test]
+fn move_note_rewrites_a_slug_form_backlink_to_the_new_full_path() {
+    // Settled in triage on #235: a slug-form target is machine-authored, so it
+    // takes the full path like any other non-title form. No slug branch.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::write(root.join("Notes/Some Note.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "See [[some-note]]").expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("some-note").expect("some note");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Some Note.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "See [[Archive/Some Note]]"
+    );
 }
