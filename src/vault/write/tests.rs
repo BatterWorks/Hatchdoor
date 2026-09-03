@@ -1415,6 +1415,16 @@ fn vault_with_a_shared_attachments_folder(root: &Path) -> String {
     body.to_string()
 }
 
+/// A note that keeps its picture in a subfolder of its own folder - the layout
+/// a rename could not survive before #238.
+fn vault_with_an_asset_beside_its_note(root: &Path) -> String {
+    let body = "# B\n![](./media/own.png)\n";
+    fs::create_dir_all(root.join("folder-x/media")).expect("media dir");
+    fs::write(root.join("folder-x/media/own.png"), BINARY_ASSET).expect("own asset");
+    fs::write(root.join("folder-x/B.md"), body).expect("note");
+    body.to_string()
+}
+
 /// Resolve a note's asset reference the way a Markdown renderer would, so a
 /// test asserts the link still points at a real file rather than just matching
 /// the string a particular implementation happens to emit.
@@ -1878,5 +1888,100 @@ fn move_note_rewrites_a_slug_form_backlink_to_the_new_full_path() {
     assert_eq!(
         fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
         "See [[Archive/Some Note]]"
+    );
+}
+
+#[test]
+fn renaming_a_note_keeps_an_asset_that_is_already_in_place() {
+    // #238: a rename used to be refused by the note's own asset, which the
+    // planner found "already at" the destination it had just computed for it.
+    // This layer sees one entry point - `rename_note` and `move_rename_note`
+    // both reach it as a target path (`vault_mutation.rs`) - so what the two
+    // targets vary is the shape of that path: a bare new name, and one whose
+    // spaces and length make it a different string in the same folder.
+    for target in ["folder-x/C.md", "folder-x/Renamed B.md"] {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        let body = vault_with_an_asset_beside_its_note(root);
+        let index = build(root);
+        let entry = index.find_by_slug("b").expect("b");
+
+        let outcome = move_or_rename_note(root, &index, entry, target, &content_hash(&body))
+            .unwrap_or_else(|error| panic!("rename to '{target}' must succeed: {error:?}"));
+
+        assert_eq!(
+            outcome.moved_assets, 0,
+            "an asset already at its destination has not moved"
+        );
+        assert_eq!(
+            fs::read(root.join("folder-x/media/own.png")).expect("asset stays put"),
+            BINARY_ASSET
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(target)).expect("renamed note"),
+            body,
+            "the note's reference to an asset that did not move is unchanged"
+        );
+        embedded_asset_resolves_to(root, target, "folder-x/media/own.png");
+    }
+}
+
+#[test]
+fn renaming_a_note_in_the_vault_root_keeps_the_assets_it_references() {
+    // The whole Vault is a root note's own folder, so every asset it
+    // references is planned for a move and a rename used to fail on the first
+    // one. Nothing about which assets travel changes here (#225); they simply
+    // travel nowhere.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "# B\n![](_system/image.png)\n";
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::write(root.join("_system/image.png"), BINARY_ASSET).expect("asset");
+    fs::write(root.join("B.md"), body).expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let outcome =
+        move_or_rename_note(root, &index, entry, "C.md", &content_hash(body)).expect("rename");
+
+    assert_eq!(outcome.moved_assets, 0);
+    assert_eq!(
+        fs::read(root.join("_system/image.png")).expect("asset stays put"),
+        BINARY_ASSET
+    );
+    embedded_asset_resolves_to(root, "C.md", "_system/image.png");
+}
+
+#[test]
+fn moving_a_note_still_refuses_a_different_file_at_an_asset_destination() {
+    // The other half of #238: recognising a no-op move must not soften the
+    // guard for a genuine collision, where a *different* file already occupies
+    // the travelling asset's destination.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = vault_with_an_asset_beside_its_note(root);
+    fs::create_dir_all(root.join("folder-y/media")).expect("destination media dir");
+    fs::write(root.join("folder-y/media/own.png"), b"a different file").expect("occupant");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("b");
+
+    let error = move_or_rename_note(root, &index, entry, "folder-y/B.md", &content_hash(&body))
+        .expect_err("a different file at the destination must still refuse the move");
+
+    assert!(
+        matches!(&error, WriteError::Conflict(message) if message.contains("Destination asset already exists")),
+        "expected a conflict refusal, got {error:?}"
+    );
+    assert!(
+        root.join("folder-x/B.md").exists(),
+        "the note must not move"
+    );
+    assert_eq!(
+        fs::read(root.join("folder-x/media/own.png")).expect("own asset untouched"),
+        BINARY_ASSET
+    );
+    assert_eq!(
+        fs::read(root.join("folder-y/media/own.png")).expect("occupant untouched"),
+        b"a different file"
     );
 }

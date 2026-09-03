@@ -101,6 +101,19 @@ pub(super) fn asset_move_plan(
         } else {
             destination_dir.join(own_folder_relative)
         };
+        // A rename keeps the note in its folder, so an asset inside that folder
+        // is already sitting at the destination computed for it. That is the one
+        // occupied destination which is not a collision at all: it is the same
+        // file, it has nowhere to go, and the note's reference to it stays
+        // valid, so no move and no rewrite are planned (#238). The test is file
+        // identity rather than string equality, so a destination reached through
+        // a symlink counts as in place too - the asset stays put and the
+        // reference still resolves to it. A trash destination is always a fresh
+        // unique path and never matches its own source. Checked before any
+        // directory is created so a no-op leaves the Vault untouched.
+        if same_existing_path(&source_asset, &destination_asset) {
+            continue;
+        }
         create_parent_dir_inside_root(vault_root, &destination_asset, "asset")?;
         if !allow_trash_collision && destination_asset.exists() {
             return Err(WriteError::Conflict(format!(

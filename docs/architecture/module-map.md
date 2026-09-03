@@ -857,6 +857,11 @@ write API/types, and configuration for archive or upload limits.
   resolved before a move still resolves after it: the bare-title form is used
   only while the new title names exactly one note, and falls back to the full
   path otherwise (#235).
+- An asset travels with its note only from inside the note's own folder (#225),
+  and an occupied destination refuses the whole write - except where that
+  destination is the asset's own file, which is a move to nowhere rather than a
+  collision: no move and no rewrite are planned for it, and `moved_assets`
+  counts what actually moved (#238).
 - Paths remain within the canonical vault root.
 - Layer marker and excluded/noise writes remain protected at adapter and domain
   boundaries as applicable.
