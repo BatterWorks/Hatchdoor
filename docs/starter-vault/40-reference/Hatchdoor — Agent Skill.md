@@ -19,7 +19,7 @@ Use Hatchdoor MCP as the operational layer for this Markdown vault. Prefer Hatch
 ## Core rules
 
 1. Search before creating or editing notes.
-2. Use `get_note` before modifying an existing note.
+2. Use `get_note` before modifying an existing note, or `get_frontmatter` when only its properties change — both return the content hash the edit needs.
 3. Use the returned expected content hash for edits, updates, appends, moves, renames, archives, and deletes.
 4. Prefer small edits over full rewrites.
 5. Do not manually rewrite backlinks or asset paths after Hatchdoor move, rename, archive, or delete operations.

@@ -534,11 +534,15 @@ pub struct VaultResolveResponse {
     pub slug: Option<String>,
 }
 
-/// One Note's frontmatter, without its Markdown body.
+/// One Note's frontmatter, without its Markdown body. `content_hash` is the
+/// same canonical whole-file hash `exact_note` reports, so a caller can
+/// harvest a spendable `expected_content_hash` at frontmatter cost instead of
+/// pulling every body over the wire (#227).
 #[derive(Debug, Clone)]
 pub struct VaultNoteFrontmatter {
     pub slug: String,
     pub relative_path: String,
+    pub content_hash: String,
     pub has_frontmatter: bool,
     pub metadata: crate::cache::parse::FrontmatterMetadata,
 }
@@ -968,6 +972,11 @@ impl<'a> VaultReadCore<'a> {
         Ok(Some(VaultNoteFrontmatter {
             slug: entry.slug.clone(),
             relative_path: entry.relative_path.clone(),
+            // The same canonical helper every write receipt and every
+            // `expected_content_hash` comparison uses, over the content this
+            // read already holds: no second filesystem read, and no second
+            // hash implementation to drift out of step with the first.
+            content_hash: crate::cache::parse::content_hash(&content),
             has_frontmatter,
             metadata,
         }))

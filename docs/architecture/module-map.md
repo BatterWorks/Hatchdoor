@@ -933,6 +933,13 @@ behavior.
 counterparts of the frontmatter and attachment-listing reads the MCP tools used
 to answer from a raw index build of their own (#188); both return `Ok(None)`
 for a Note this surface withholds, indistinguishable from an absent one.
+`VaultNoteFrontmatter` carries `content_hash` (#227), computed by
+`cache::parse::content_hash` — the one canonical helper every write receipt and
+every `expected_content_hash` comparison uses — over the content the
+frontmatter read has already loaded. It is therefore identical to the hash
+`exact_note` reports for that Note at that instant and costs no extra
+filesystem read, and it is not optional: the hash covers the whole file, so a
+Note with no frontmatter block still has one to report.
 `vault_capabilities` reports one Vault's own mutation/sync posture under the
 same gate, for an adapter describing a Vault rather than reading it.
 `contained_asset` is the single home for the contained-resource policy both
@@ -2090,7 +2097,10 @@ round trip through a proxied HTTP response body, and its 2 MiB cap, are gone.
 `list_note_attachments` is a read tool on the read catalogue, reachable without
 MCP write permission and without the mutation capability, as is
 `get_frontmatter` — a body-free tags/aliases/properties projection of one note
-served from the same authoritative Markdown read. `get_attachment` is the
+served from the same authoritative Markdown read, carrying that note's
+`content_hash` beside its other identity fields (#227) so a caller can prepare
+a hash-protected write at frontmatter cost rather than reading every body.
+`get_attachment` is the
 outbound counterpart to `import_attachment`'s inbound flow, addressed by the
 same `relative_path` `list_note_attachments` reports: `encoding: "url"` (the
 default) returns an HTTP `download_url` under the existing Vault-scoped
