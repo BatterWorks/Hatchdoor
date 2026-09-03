@@ -1,0 +1,50 @@
+[
+  {
+    "id": "server-session-initialized-accepted",
+    "name": "SessionInitializedAccepted",
+    "description": "Server accepts the initialized notification on the issued session ID with a 2xx response",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:46.257Z",
+    "specReferences": [
+      {
+        "id": "MCP-Session-Management",
+        "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management"
+      }
+    ],
+    "details": {
+      "statusCode": 202
+    }
+  },
+  {
+    "id": "server-session-delete-accepted",
+    "name": "SessionDeleteAccepted",
+    "description": "Server accepts HTTP DELETE on the issued session ID",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:46.263Z",
+    "specReferences": [
+      {
+        "id": "MCP-Session-Management",
+        "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management"
+      }
+    ],
+    "details": {
+      "statusCode": 202
+    }
+  },
+  {
+    "id": "server-session-terminated-returns-404",
+    "name": "SessionTerminatedReturns404",
+    "description": "Server returns HTTP 404 for requests bearing a terminated session ID",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:42:46.263Z",
+    "specReferences": [
+      {
+        "id": "MCP-Session-Management",
+        "url": "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management"
+      }
+    ],
+    "details": {
+      "statusCode": 404
+    }
+  }
+]

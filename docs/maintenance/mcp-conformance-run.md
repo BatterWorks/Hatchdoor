@@ -9,7 +9,13 @@ release is the evidence. The release-runbook pre-merge checklist links here.
 
 Official suite: [`@modelcontextprotocol/conformance`](https://github.com/modelcontextprotocol/conformance),
 invoked via `npx`. Record the version used (`npx @modelcontextprotocol/conformance --version`)
-in the evidence; first verified with **0.1.16** (2026-08-24).
+in the evidence.
+
+**Pin the version explicitly:** `@0.2.0-alpha.11`, which is what every recorded
+run has used. The bare unpinned package resolves to the stable dist-tag,
+**0.1.16**, which has no `--requirements` option and therefore cannot run the
+Stage B invocations below at all — it offers only the superseded
+`--suite`/`--spec-version`. The pin is required, not cosmetic.
 
 ## Target configuration
 
@@ -82,17 +88,17 @@ Baseline rules:
 
 ```bash
 # Stage A — current development (legacy revisions, initialize-negotiated)
-npx @modelcontextprotocol/conformance server \
+npx -y @modelcontextprotocol/conformance@0.2.0-alpha.11 server \
   --url http://127.0.0.1:42999/mcp \
   --expected-failures docs/maintenance/conformance-baseline.yml \
   --output-dir /tmp/conformance-$(date +%F)
 
 # Stage B — after ADR-17 lands: one run per advertised revision
-npx @modelcontextprotocol/conformance server \
+npx -y @modelcontextprotocol/conformance@0.2.0-alpha.11 server \
   --url http://127.0.0.1:42999/mcp \
   --expected-failures docs/maintenance/conformance-baseline.yml \
   --requirements 2025-11-25 --output-dir /tmp/conformance-$(date +%F)-1125
-npx @modelcontextprotocol/conformance server \
+npx -y @modelcontextprotocol/conformance@0.2.0-alpha.11 server \
   --url http://127.0.0.1:42999/mcp \
   --expected-failures docs/maintenance/conformance-baseline.yml \
   --requirements 2026-07-28 --output-dir /tmp/conformance-$(date +%F)-0728

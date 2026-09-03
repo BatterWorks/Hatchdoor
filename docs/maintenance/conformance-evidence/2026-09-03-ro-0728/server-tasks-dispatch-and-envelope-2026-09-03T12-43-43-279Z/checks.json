@@ -1,0 +1,129 @@
+[
+  {
+    "id": "sep-2663-tasks-result-removed-method-not-found",
+    "name": "TasksRemovedTasksResult",
+    "description": "tasks/result is removed in v2 and MUST reject with -32601",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:43.283Z",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-removed-tasks-list",
+    "name": "TasksRemovedTasksList",
+    "description": "tasks/list is removed in v2 and MUST reject with -32601",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:43.288Z",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-server-directed-creation-no-hint",
+    "name": "TasksServerDirectedCreationNoHint",
+    "description": "tools/call with no client `task` hint param MUST still produce CreateTaskResult for task-supporting tools",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.292Z",
+    "errorMessage": "Unknown MCP tool: failing_job",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-legacy-task-param-ignored",
+    "name": "TasksLegacyTaskParamIgnored",
+    "description": "tools/call with legacy `task` param against a sync tool MUST NOT error and MUST NOT be promoted to a task",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.296Z",
+    "errorMessage": "Unknown MCP tool: greet",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-immediate-result-shortcut",
+    "name": "TasksImmediateResultShortcut",
+    "description": "For a fast operation, a task-supporting tool MAY skip task creation and return a sync ToolResult; either path is valid",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.301Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "tasks-result-type-complete-on-non-task-responses",
+    "name": "TasksResultTypeCompleteOnNonTaskResponses",
+    "description": "Sync tools/call, tasks/get, tasks/update ack, and tasks/cancel ack MUST all carry resultType:\"complete\"",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.305Z",
+    "errorMessage": "Unknown MCP tool: greet",
+    "specReferences": [
+      {
+        "id": "SEP-2322",
+        "url": "https://modelcontextprotocol.io/specification/draft/basic/utilities/mrtr"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-durable-create-strong-consistency",
+    "name": "TasksStrongConsistencyImmediateGet",
+    "description": "tasks/get issued immediately after CreateTaskResult arrives MUST resolve (server MUST NOT return CreateTaskResult before the task is durably created)",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.310Z",
+    "errorMessage": "Unknown MCP tool: slow_compute",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "sep-2663-tasks-get-invalid-task-id-32602",
+    "name": "TasksGetUnknownTaskIdRejected",
+    "description": "tasks/get for a taskId the server does not recognize MUST return -32602",
+    "status": "FAILURE",
+    "timestamp": "2026-09-03T12:43:43.314Z",
+    "errorMessage": "expected -32602; got -32601 (if the server is otherwise compliant, verify it does not validate other dimensions — routing headers, _meta, params shape — before method dispatch)",
+    "specReferences": [
+      {
+        "id": "SEP-2663",
+        "url": "https://modelcontextprotocol.io/seps/2663-tasks-extension"
+      }
+    ]
+  },
+  {
+    "id": "wire-schema-valid",
+    "name": "WireSchemaValid",
+    "description": "Every JSON-RPC message the implementation sent is valid per the spec JSON schema for the negotiated spec version",
+    "status": "SUCCESS",
+    "timestamp": "2026-09-03T12:43:43.314Z",
+    "specReferences": [
+      {
+        "id": "MCP-Schema",
+        "url": "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/draft/schema.json"
+      }
+    ],
+    "details": {
+      "messagesValidated": 16,
+      "violations": []
+    }
+  }
+]
