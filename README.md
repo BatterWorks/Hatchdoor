@@ -52,6 +52,7 @@ under close human review, with tests and a documented safety model.
 - [What You Get](#what-you-get)
 - [Screenshots](#screenshots)
 - [Who It Is For](#who-it-is-for)
+- [What Is Next](#what-is-next)
 - [Quick Start With Docker](#quick-start-with-docker)
 - [Data And Safety Model](#data-and-safety-model)
 - [Configuration](#configuration)
@@ -123,6 +124,33 @@ semantic search, and local development.
 Hatchdoor is not a hosted sync service, not a multi-user collaboration platform,
 and not a replacement for Obsidian. It is a self-hosted companion for a Markdown
 vault you control.
+
+## What Is Next
+
+The next large feature is multi-account handling with permission scoping. Today
+Hatchdoor assumes a single trusted user on a private deployment, so whoever
+reaches the instance sees every vault it serves. The plan is to let several
+people and agents share one instance, each scoped to the vaults they are
+granted, with an admin role that manages the rest. A household or a small team
+could then run one Hatchdoor instead of one per person.
+
+v2.5.0 already made vaults independent, addressable things the product manages,
+including vault scoping for MCP agents. What is missing is the half that was
+deliberately deferred: accounts, authentication, and an access boundary the
+server enforces rather than the UI implies. Targeted at v3.
+
+Two other things are wanted but not slotted to a version yet:
+
+- **Agent provenance and undo.** Which agent changed a note, a before/after diff
+  beside the commit it produced, and one-click revert. Today git is the whole
+  answer, and reading a commit log is not the same as seeing what an agent did
+  to your note.
+- **Vault integrity checks.** A vault-scoped lint for orphaned notes, broken
+  wikilinks, and layer markers whose declaration has vanished, so a vault an
+  agent maintains unattended cannot quietly drift out of shape.
+
+The [product roadmap](docs/roadmap/product-roadmap.md) has the full set of
+workstreams and where each one stands.
 
 ## Quick Start With Docker
 
