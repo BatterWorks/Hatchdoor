@@ -25,9 +25,9 @@ Everything on this roadmap should advance at least one of these:
    attributable, and reversible; mistakes are contained.
 3. **Always available and easy to self-host.** The app starts and stays usable
    even while background work runs or optional capabilities fail.
-4. **Grows without losing itself.** From single-user/single-vault today toward
-   many vaults and, eventually, many users — without compromising the objectives
-   above.
+4. **Grows without losing itself.** From the single-user instance it is today
+   toward many users and agents sharing one, without compromising the objectives
+   above. Many vaults per instance shipped in v2.5.0.
 
 ## Workstreams
 
@@ -162,9 +162,11 @@ rather than only self-hosted single-tenant. Authentication, accounts,
 authorization, isolation, and audit must be designed explicitly, since it means
 serving mutually untrusted users and agents on shared infrastructure.
 
-_Horizon: **v3** (long-term). Depends on the multi-vault work in
-[vault lifecycle & multi-vault](vault-lifecycle.md) existing first — you can't
-scope access to vaults that aren't yet independent, addressable entities._
+_Horizon: **v3** (long-term). The multi-vault prerequisite is met. v2.5.0 made
+vaults independent, addressable entities with per-vault MCP scoping (see
+[vault lifecycle & multi-vault](vault-lifecycle.md)), so there is something to
+scope access to. What remains is the half deferred on purpose: accounts,
+authentication, authorization, isolation, and audit._
 
 ## How to Use This Roadmap
 
