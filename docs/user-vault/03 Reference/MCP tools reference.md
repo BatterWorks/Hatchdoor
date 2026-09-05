@@ -163,7 +163,7 @@ Available whenever MCP is enabled, independent of write mode.
 | `get_note_links` | `vault_id`, `slug` | Outgoing links and backlinks for one exact note. |
 | `resolve_wikilink` | `vault_id`, `target` | Resolve a wikilink target within one Vault. |
 | `get_tree` | `scope` | Grouped explorer tree for one Vault or all enabled Vaults. Optional: `folder` (a Vault-relative folder to return as the root), `max_depth` (how far below it to descend, minimum 1), `include_notes` (default `true`). |
-| `get_stats` | `scope` | Grouped statistics for one Vault or all enabled Vaults. |
+| `get_stats` | `scope` | Grouped statistics for one Vault or all enabled Vaults. Also reports `hatchdoor_version`, the running instance's version string. |
 | `get_graph` | `scope` | Grouped link graph for one Vault or all enabled Vaults. |
 | `get_frontmatter` | `vault_id`, `slug` | Read one exact note's frontmatter metadata — `tags`, `aliases`, and every remaining top-level key under `properties` — without returning the Markdown body. A note with no frontmatter block answers `has_frontmatter: false` with empty collections rather than an error. It also returns the note's `content_hash` — the same string `get_note` reports for that note at that instant, and covering the whole file, so a note with no frontmatter block still has one — which means the metadata can be written straight back without pulling the body over the wire first. |
 | `recently_modified` | `scope` | Recently modified notes. Optional `limit` (1–25, default 5). |

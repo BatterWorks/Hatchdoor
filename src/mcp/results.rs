@@ -44,7 +44,17 @@ pub type GetNoteResult = crate::vault_read::VaultQualifiedNote;
 pub type GetNoteLinksResult = VaultQualifiedLinks;
 pub type ResolveWikilinkResult = VaultResolveResponse;
 pub type GetTreeResult = VaultReadProjection<Vec<VaultTree>>;
-pub type GetStatsResult = VaultReadProjection<Vec<VaultStatistics>>;
+pub type GetStatsResult = StampedStatsResult;
+
+/// `get_stats` stamps the running instance's version onto the shared read
+/// envelope so an agent can learn which build it is talking to without
+/// operator access — nightly dev images report `"X.Y.Z (dev <sha>)"`.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct StampedStatsResult {
+    pub hatchdoor_version: String,
+    #[serde(flatten)]
+    pub projection: VaultReadProjection<Vec<VaultStatistics>>,
+}
 pub type GetGraphResult = VaultReadProjection<Vec<VaultGraph>>;
 pub type RecentlyModifiedResult = VaultReadProjection<Vec<VaultRecentNote>>;
 pub type CreateVaultResult = VaultMutationResponse;
