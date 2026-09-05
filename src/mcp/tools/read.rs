@@ -325,10 +325,21 @@ pub(super) async fn get_stats_tool(
     state: AppState,
     arguments: Value,
 ) -> Result<Value, JsonRpcFailure> {
-    collection_read(state, "get_stats", arguments, |core, scope| {
-        core.statistics(scope)
-    })
-    .await
+    let args: ScopeArgs = parse("get_stats", arguments)?;
+    let scope = match tool_scope(&args.scope) {
+        Ok(scope) => scope,
+        Err(refusal) => return Ok(refusal),
+    };
+    match VaultReads::new(&state)
+        .read(move |core| core.statistics(scope))
+        .await
+    {
+        Ok(projection) => Ok(tool_result(&results::StampedStatsResult {
+            hatchdoor_version: crate::config::version_string(),
+            projection,
+        })),
+        Err(error) => read_failure(error),
+    }
 }
 
 pub(super) async fn get_graph_tool(

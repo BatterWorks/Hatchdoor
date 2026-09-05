@@ -66,11 +66,17 @@ impl ServerHandler for HatchdoorMcpHandler {
         // that happens to connect while a Vault is reindexing has a fully
         // set-up instance and needs the real instructions, not the first-run
         // ones (#191).
-        let instructions = if self.state.startup.model_setup_pending() {
-            SETUP_INSTRUCTIONS.to_string()
+        let base = if self.state.startup.model_setup_pending() {
+            SETUP_INSTRUCTIONS
         } else {
-            SERVER_INSTRUCTIONS.to_string()
+            SERVER_INSTRUCTIONS
         };
+        // serverInfo.version is invisible to most agents (their harness eats
+        // the handshake), so the version rides the instructions too.
+        let instructions = format!(
+            "{base} This instance runs Hatchdoor {}.",
+            crate::config::version_string()
+        );
         // The modern wire shape advertises `tools.listChanged: true` and
         // delivers on it via `subscriptions/listen` (#170). The legacy
         // handshake cannot open subscription streams, so `initialize`

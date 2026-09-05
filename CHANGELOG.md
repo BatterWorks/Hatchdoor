@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Agents can now tell which build they are talking to. The MCP server instructions end with the running version, and `get_stats` reports it as `hatchdoor_version`. Release builds report the plain version (for example `2.6.1`); images built with the new `GIT_SHA` Docker build arg report it as `2.6.1 (dev abc1234)`, which also appears in the startup log and MCP `serverInfo`.
+
 ### Fixed
 - A file in your Vault that Hatchdoor would not accept as an upload could not be moved, renamed or deleted either, which made every `.mp4` clip, voice memo, `.csv` and `.zip` permanently immovable. The upload allowlist is a policy about what may enter a Vault; it was being applied to bytes the Vault already stores. Worse was the quiet half: the planner that decides what travels with a moving note did not recognise those files at all, so a note moved to a new folder left its videos behind pointing at nothing, reported success, and `list_note_attachments` showed no sign of them. Attachment operations now accept any file that is not Markdown, whatever its extension, and every non-Markdown file a note references is listed and travels with it under the existing rules. What may be uploaded is unchanged, and so is what Hatchdoor will display: a video can now be organised but still cannot be fetched or rendered, which the attachment guide spells out. Four things the attachment tools will not touch, some of which the old extension check was only blocking by accident: a note, a `.hatchdoor-layer` marker, anything under `.git`, and anything in a folder the Vault excludes as noise, `.obsidian/` included. [#247]
 
