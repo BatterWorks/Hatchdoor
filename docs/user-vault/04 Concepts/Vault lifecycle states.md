@@ -44,6 +44,8 @@ Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes ra
 - **`pull`** / **`push`** — true only when Git status is `ready`, gated further by the configured Git mode (`pull_only` or `two_way` for pull; `two_way` only for push).
 - **`retry`** — true if *any* of the four per-axis error fields (activation, search, git, watcher) is marked retryable. This is what puts a **Try again** button in front of an operator instead of leaving a Vault silently stuck.
 
+One instance-wide exception: on a public read-only demo (`HATCHDOOR_DEMO_MODE=true`), `GET /api/v1/vaults` reports `mutate`, `pull`, `push` and `retry` as `false` for every Vault, whatever the axes say. Nothing about the Vault changed. The demo refuses every write and every Vault-control request with `403 demo_read_only`, so publishing the derived value would advertise a button that cannot work to a visitor who has no way to tell. `browse` and `search` are still derived normally, because those reads do work, and the axes themselves are untouched: a demo Vault on a writable folder still reports local content `read_write`.
+
 ## Two different things both called "Recovery"
 
 There are two unrelated recovery mechanisms, and they don't overlap:
