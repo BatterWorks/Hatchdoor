@@ -1205,8 +1205,12 @@ from the same structures the core returns.
 - HTTPS credentials never appear in any projection, error, or status;
   `credential_configured` is the only signal (#133).
 - Demo mode lists only enabled Vaults and withholds `source`, exclusion
-  patterns, archive folder, commit identity, and runtime error details (#109);
-  per-Vault `capabilities` are deliberately unchanged there.
+  patterns, archive folder, commit identity, and runtime error details (#109),
+  and reports per-Vault `capabilities` as what an unauthenticated visitor may
+  do rather than as derived: `mutate`, `pull`, `push`, and `retry` are false,
+  because the demo guard refuses every route behind them (#243). `browse` and
+  `search` stay derived, and the four status fields, `local_content` included,
+  keep describing the Vault.
 - An instance-side failure is logged with its detail and reported with a
   sanitized message here, so neither surface can leak a filesystem path by
   skipping the scrubbing.

@@ -92,6 +92,30 @@ impl VaultCapabilities {
             retry: false,
         }
     }
+
+    /// What an unauthenticated visitor to a public read-only demo may do
+    /// (#243).
+    ///
+    /// Both derivations above answer a question about the Vault: is this
+    /// directory writable, does this source have a remote to pull, is there a
+    /// retryable failure to clear. For an operator that is the right answer,
+    /// because their request is admitted. On a demo it is not: `demo_guard`
+    /// refuses every mutating route and every Vault-control route with `403
+    /// demo_read_only` before the handler runs, so a derived `mutate`, `pull`,
+    /// `push` or `retry` names a request that cannot succeed.
+    ///
+    /// `browse` and `search` survive derived, because those reads do work on a
+    /// demo, and passing them through keeps a Vault that is indexing or
+    /// unavailable as honest here as it is anywhere else.
+    pub(crate) fn for_public_demo(self) -> Self {
+        Self {
+            mutate: false,
+            pull: false,
+            push: false,
+            retry: false,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
