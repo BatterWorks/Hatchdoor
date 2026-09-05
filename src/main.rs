@@ -1,7 +1,7 @@
 use dotenvy::dotenv;
 use tracing::{error, info};
 
-use hatchdoor::config::init_logging;
+use hatchdoor::config::{init_logging, version_string};
 use hatchdoor::embed::FastembedEmbedder;
 use hatchdoor::server::run_server;
 
@@ -39,7 +39,10 @@ async fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     match parse_run_mode(&args) {
-        RunMode::Serve => run_server().await,
+        RunMode::Serve => {
+            info!("Hatchdoor {}", version_string());
+            run_server().await
+        }
         RunMode::PrefetchEmbedder => run_prefetch(),
         RunMode::Healthcheck => run_healthcheck(),
         RunMode::Unknown(flag) => {

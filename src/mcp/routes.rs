@@ -744,7 +744,10 @@ mod tests {
 
         assert_eq!(result["protocolVersion"], "2025-11-25");
         assert_eq!(result["serverInfo"]["name"], "hatchdoor");
-        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            result["serverInfo"]["version"],
+            crate::config::version_string()
+        );
         assert!(result["capabilities"]["tools"].is_object());
         assert_eq!(
             result["capabilities"]["tools"]["listChanged"], false,

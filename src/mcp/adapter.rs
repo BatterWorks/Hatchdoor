@@ -83,7 +83,10 @@ impl ServerHandler for HatchdoorMcpHandler {
             // Preferred revision for clients that request one we no longer
             // serve: the newest legacy revision, not the modern one.
             .with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25)
-            .with_server_info(Implementation::new("hatchdoor", env!("CARGO_PKG_VERSION")))
+            .with_server_info(Implementation::new(
+                "hatchdoor",
+                crate::config::version_string(),
+            ))
             .with_instructions(instructions)
     }
 
