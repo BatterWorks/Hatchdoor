@@ -341,6 +341,7 @@ mod tests {
         let vault_root = tmp.path().join("vault");
         fs::create_dir_all(&vault_root).expect("create dir");
         fs::write(vault_root.join("secret.txt"), b"secret").expect("write text");
+        fs::write(vault_root.join("demo.mp4"), b"video").expect("write video");
 
         assert_eq!(
             describe_asset(&vault_root, "../outside.png").err(),
@@ -348,6 +349,13 @@ mod tests {
         );
         assert_eq!(
             describe_asset(&vault_root, "secret.txt").err(),
+            Some(AssetPathError::Forbidden)
+        );
+        // #247 widened what the Vault will organise, deliberately not what it
+        // will serve: a video the attachment tools now move and list is still
+        // refused by this route and by the `get_attachment` tool above it.
+        assert_eq!(
+            describe_asset(&vault_root, "demo.mp4").err(),
             Some(AssetPathError::Forbidden)
         );
         assert_eq!(

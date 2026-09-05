@@ -863,6 +863,21 @@ write API/types, and configuration for archive or upload limits.
   collision: no move and no rewrite are planned for it, and `moved_assets`
   counts what actually moved (#238).
 - Paths remain within the canonical vault root.
+- The upload allowlist is ingest policy only. `import_attachment` and the HTTP
+  upload route apply it; `move_attachment`, `rename_attachment` and
+  `delete_attachment` do not, because they act on bytes the Vault already
+  stores (#247). What those three refuse instead is a Markdown target, which
+  belongs to the note tools, and anything under `.git`, which is the Vault's
+  own repository rather than content. Any non-Markdown file with an extension
+  counts as an asset reference for listing and for note-move travel; an
+  extension is still required, since that is what separates a file from a
+  wikilink to a note, and the existing existence check is what keeps a dotted
+  note title out of the plan.
+- What the Vault excludes as noise is not an attachment either, and since #247
+  `reject_noise_write` is applied to an attachment operation's source as well
+  as its destination. The upload allowlist was the only thing keeping these
+  tools out of `.obsidian/`; that protection now comes from the policy the
+  Vault already states.
 - Layer marker and excluded/noise writes remain protected at adapter and domain
   boundaries as applicable.
 - Concurrent writes to one Vault are serialized through

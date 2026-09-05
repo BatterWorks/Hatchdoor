@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 use crate::vault::LayerMap;
@@ -8,9 +9,10 @@ use crate::vault::types::{NoteEntry, VaultIndex};
 use super::assets::{asset_reference_rewrite_plan, referenced_assets};
 use super::fs_ops::{MutationJournal, atomic_write_bytes};
 use super::paths::{
-    create_parent_dir_inside_root, ensure_allowed_attachment_path,
-    ensure_existing_path_inside_root, normalize_attachment_relative_path,
-    normalize_staged_filename, resolve_existing_attachment_path, resolve_new_attachment_path,
+    create_parent_dir_inside_root, ensure_existing_path_inside_root,
+    ensure_movable_attachment_path, ensure_uploadable_attachment_path,
+    normalize_attachment_relative_path, normalize_staged_filename,
+    resolve_existing_attachment_path, resolve_new_attachment_path,
     unique_trash_attachment_relative_path, vault_relative_file_path,
 };
 use super::types::{AttachmentInfo, AttachmentOutcome, MutationPhase, WriteError};
@@ -53,7 +55,7 @@ pub fn import_attachment_bytes(
     overwrite: bool,
 ) -> Result<AttachmentOutcome, WriteError> {
     let target_path = resolve_new_attachment_path(vault_root, target_relative_path)?;
-    ensure_allowed_attachment_path(&target_path)?;
+    ensure_uploadable_attachment_path(&target_path)?;
     create_parent_dir_inside_root(vault_root, &target_path, "attachment")?;
 
     let size = bytes.len().min(u64::MAX as usize) as u64;
@@ -141,10 +143,11 @@ pub fn delete_attachment(
     source_relative_path: &str,
 ) -> Result<AttachmentOutcome, WriteError> {
     let source_path = resolve_existing_attachment_path(vault_root, source_relative_path)?;
-    ensure_allowed_attachment_path(&source_path)?;
+    // Checked before the trash path is derived from it, so a refusal never
+    // creates a trash folder for a file that is not going there.
+    ensure_movable_attachment_path(vault_root, &source_path)?;
     let trash_relative = unique_trash_attachment_relative_path(vault_root, source_relative_path)?;
     let trash_path = vault_root.join(&trash_relative);
-    ensure_allowed_attachment_path(&trash_path)?;
     create_parent_dir_inside_root(vault_root, &trash_path, "trash")?;
     move_attachment_by_paths_with_hook(
         vault_root,
@@ -175,8 +178,8 @@ fn move_attachment_by_paths_with_hook(
         )));
     }
     ensure_existing_path_inside_root(vault_root, source_path)?;
-    ensure_allowed_attachment_path(source_path)?;
-    ensure_allowed_attachment_path(target_path)?;
+    ensure_movable_attachment_path(vault_root, source_path)?;
+    ensure_movable_attachment_path(vault_root, target_path)?;
     create_parent_dir_inside_root(vault_root, target_path, "attachment")?;
     let rewrites =
         asset_reference_rewrite_plan(vault_root, index, "", source_path, target_path, &[])?;
@@ -238,35 +241,53 @@ fn attachment_info(
     let relative_path = vault_relative_file_path(vault_root, path)?.ok_or_else(|| {
         WriteError::InvalidInput("attachment path cannot escape the vault".to_string())
     })?;
-    let bytes = fs::read(path).map_err(|error| {
-        WriteError::Io(format!(
-            "failed to read attachment '{}': {error}",
-            path.display()
-        ))
-    })?;
+    let (size_bytes, content_hash) = size_and_hash(path)?;
     // An asset's layer is its containing folder's layer — the same longest-prefix
     // resolution the index uses for notes. Reported, never filtered on: an
     // embedded image in a demoted note must stay fetchable.
     let layer = layers.layer_for(&relative_path).map(str::to_string);
     Ok(AttachmentInfo {
         relative_path,
-        size_bytes: bytes.len().min(u64::MAX as usize) as u64,
-        content_hash: bytes_hash(&bytes),
+        size_bytes,
+        content_hash,
         layer,
     })
 }
 
-fn bytes_hash(bytes: &[u8]) -> String {
+/// Read in fixed-size chunks rather than slurping the file. The set of files
+/// this describes used to be images and PDFs; since #247 it includes whatever
+/// else a Vault holds, and `list_note_attachments` describes every attachment
+/// one note references in a single call, so a note embedding a few multi-gigabyte
+/// recordings would otherwise pull all of them into memory at once. The hash is
+/// the same value the whole-buffer version produced: FNV-1a folds byte by byte,
+/// so where the chunk boundaries fall makes no difference.
+fn size_and_hash(path: &Path) -> Result<(u64, String), WriteError> {
+    const CHUNK_BYTES: usize = 64 * 1024;
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
+    let read_error = |error: std::io::Error| {
+        WriteError::Io(format!(
+            "failed to read attachment '{}': {error}",
+            path.display()
+        ))
+    };
+    let mut file = fs::File::open(path).map_err(read_error)?;
+    let mut buffer = vec![0u8; CHUNK_BYTES];
+    let mut size: u64 = 0;
     let mut hash = FNV_OFFSET;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
+    loop {
+        let read = file.read(&mut buffer).map_err(read_error)?;
+        if read == 0 {
+            break;
+        }
+        size = size.saturating_add(read as u64);
+        for byte in &buffer[..read] {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
     }
-
-    format!("fnv1a64:{hash:016x}")
+    Ok((size, format!("fnv1a64:{hash:016x}")))
 }
 
 #[cfg(test)]

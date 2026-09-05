@@ -166,7 +166,84 @@ pub(super) fn resolve_existing_attachment_path(
     Ok(path)
 }
 
-pub(super) fn ensure_allowed_attachment_path(path: &Path) -> Result<(), WriteError> {
+/// Whether a path names a note. Compared case-insensitively, and shared with
+/// the asset-reference parser so "is this a note or an attachment?" has one
+/// answer across the write layer (#247).
+pub(super) fn is_markdown_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+}
+
+/// The gate on operations over a file the Vault already stores: a move, a
+/// rename, a delete. Ingest policy deliberately does not apply here (#247) —
+/// the bytes are already inside the Vault, and a `.mp4` screen recording or a
+/// `.csv` an analysis note cites was permanently immovable while it did. What
+/// the allowlist was incidentally refusing, and must keep refusing, is
+/// narrower than an extension list:
+///
+/// - A note is not an attachment. Moving one through this path would skip
+///   backlink rewriting, slug handling and the content-hash check.
+/// - A Vault's own repository is not content. `.git/config` carries no
+///   extension, so the allowlist covered it by accident; relocating one out of
+///   `.git` breaks a managed-Git Vault. Noise-excluded folders such as
+///   `.obsidian/` lost the same accidental cover, and get it back one level
+///   up, in the Vault-qualified core that already owns that policy.
+pub(super) fn ensure_movable_attachment_path(
+    vault_root: &Path,
+    path: &Path,
+) -> Result<(), WriteError> {
+    if is_markdown_path(path) {
+        return Err(WriteError::InvalidInput(format!(
+            "'{}' is a note, not an attachment; use the note tools to move, rename or delete it",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+        )));
+    }
+    ensure_outside_repository(vault_root, path)
+}
+
+/// Refuses a path that reaches `.git`, as written and as the filesystem sees
+/// it. Both passes are needed: a link named anything at all can lead into the
+/// repository, and only canonicalization sees through it. A move's destination
+/// does not exist yet, so what gets resolved there is its nearest existing
+/// ancestor, which is the part a link could hide in.
+fn ensure_outside_repository(vault_root: &Path, path: &Path) -> Result<(), WriteError> {
+    let refusal = || {
+        WriteError::InvalidInput(
+            "'.git' holds this Vault's repository internals, not attachments; \
+             attachment tools do not touch it"
+                .to_string(),
+        )
+    };
+    if names_repository_internals(vault_root, path) {
+        return Err(refusal());
+    }
+    // The Vault's own root is stripped before the components are read, so a
+    // Vault that happens to live under a directory called `.git` is not
+    // refused wholesale. That means the canonical pass needs the canonical
+    // root to strip; without one there is nothing to compare and the
+    // as-written pass above stands alone.
+    let Ok(root) = canonical_root(vault_root) else {
+        return Ok(());
+    };
+    match fs::canonicalize(nearest_existing_ancestor(path)) {
+        Ok(resolved) if names_repository_internals(&root, &resolved) => Err(refusal()),
+        _ => Ok(()),
+    }
+}
+
+fn names_repository_internals(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .any(|component| {
+            matches!(component, Component::Normal(name) if name.eq_ignore_ascii_case(".git"))
+        })
+}
+
+pub(super) fn ensure_uploadable_attachment_path(path: &Path) -> Result<(), WriteError> {
     let extension = path
         .extension()
         .and_then(|extension| extension.to_str())

@@ -796,6 +796,7 @@ impl VaultMutation {
     ) -> Result<AttachmentOutcome, VaultOperationError> {
         self.reject_marker_write(source_relative_path)?;
         self.reject_marker_write(target_relative_path)?;
+        self.reject_noise_write(source_relative_path)?;
         self.reject_noise_write(target_relative_path)?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
@@ -820,6 +821,7 @@ impl VaultMutation {
     ) -> Result<AttachmentOutcome, VaultOperationError> {
         self.reject_marker_write(source_relative_path)?;
         self.reject_marker_write(new_filename)?;
+        self.reject_noise_write(source_relative_path)?;
         self.reject_noise_write(&sibling_path(source_relative_path, new_filename))?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
@@ -836,6 +838,13 @@ impl VaultMutation {
         &self,
         source_relative_path: &str,
     ) -> Result<AttachmentOutcome, VaultOperationError> {
+        // The one attachment operation that was missing this guard. It did not
+        // show while the write layer's upload allowlist refused the extensionless
+        // marker basename underneath; dropping that allowlist (#247) makes the
+        // refusal this path's own job, and without it a caller could trash a
+        // folder's marker and silently promote the whole subtree.
+        self.reject_marker_write(source_relative_path)?;
+        self.reject_noise_write(source_relative_path)?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
         let source_relative_path = source_relative_path.to_string();
@@ -919,6 +928,13 @@ impl VaultMutation {
     /// Refuse a write whose target path matches this Vault's own
     /// noise-exclusion patterns: the index applies the same matcher, so the
     /// file would land on disk yet be invisible to every read surface.
+    /// Applied to an attachment operation's source as well as its destination
+    /// since #247. What a Vault excludes as noise - `.obsidian/` and the rest
+    /// of the built-in set, plus this Vault's own patterns - is not content,
+    /// and until the upload allowlist stopped gating files already in the
+    /// Vault it was that list, by accident, keeping the attachment tools out
+    /// of an Obsidian configuration folder. This is the policy that was
+    /// actually meant, and the Vault already states it.
     fn reject_noise_write(&self, path: &str) -> Result<(), VaultOperationError> {
         let exclude = ExcludeMatcher::new(self.control.definition().exclude_patterns())
             .map_err(|error| self.internal(error))?;
@@ -1417,6 +1433,57 @@ mod tests {
             .expect_err("marker must be refused case-insensitively");
         assert_code(&imported, "layer_marker_write");
         assert!(!workspace.exists("wiki/.hatchdoor-layer"));
+    }
+
+    #[tokio::test]
+    async fn deleting_an_attachment_refuses_the_reserved_layer_marker_basename() {
+        // #247: delete was the one attachment operation without this guard,
+        // covered only by the upload allowlist the write layer no longer
+        // applies to a file already in the Vault. Trashing a marker promotes
+        // its whole folder back onto the default surface.
+        let workspace = workspace(Fixture::new(&[("wiki/Home.md", "# Home\n")]));
+        std::fs::write(
+            workspace.vault_path.join("wiki/.hatchdoor-layer"),
+            "name: wiki\n",
+        )
+        .expect("marker");
+
+        let error = workspace
+            .core()
+            .delete_attachment(workspace.vault_id, "wiki/.hatchdoor-layer")
+            .await
+            .expect_err("marker must be refused");
+
+        assert_code(&error, "layer_marker_write");
+        assert!(workspace.exists("wiki/.hatchdoor-layer"));
+    }
+
+    #[tokio::test]
+    async fn attachment_operations_refuse_a_source_the_vault_excludes_as_noise() {
+        // #247: dropping the write layer's upload allowlist took with it the
+        // only thing keeping these tools out of an Obsidian configuration
+        // folder, which the Vault already says is not content. The destination
+        // was always checked; the source is now checked too.
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+        std::fs::create_dir_all(workspace.vault_path.join(".obsidian")).expect("obsidian dir");
+        std::fs::write(workspace.vault_path.join(".obsidian/app.json"), "{}").expect("config");
+        let core = workspace.core();
+        let vault_id = workspace.vault_id;
+
+        for error in [
+            core.move_attachment(vault_id, ".obsidian/app.json", "Media/app.json")
+                .await
+                .expect_err("move must refuse"),
+            core.rename_attachment(vault_id, ".obsidian/app.json", "stolen.json")
+                .await
+                .expect_err("rename must refuse"),
+            core.delete_attachment(vault_id, ".obsidian/app.json")
+                .await
+                .expect_err("delete must refuse"),
+        ] {
+            assert_code(&error, "noise_excluded_write");
+        }
+        assert!(workspace.exists(".obsidian/app.json"));
     }
 
     // -----------------------------------------------------------------

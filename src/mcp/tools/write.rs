@@ -771,7 +771,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "move_attachment",
-            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it.",
+            "description": "Move an existing attachment to a new vault-relative path and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -786,7 +786,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "rename_attachment",
-            "description": "Rename an existing attachment in its current folder and rewrite all note references to it.",
+            "description": "Rename an existing attachment in its current folder and rewrite all note references to it. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -801,7 +801,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "delete_attachment",
-            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path.",
+            "description": "Trash an existing attachment under .hatchdoor-trash and rewrite all note references to the trashed path. Any file the Vault already holds qualifies, whatever its extension and even with none: the upload allowlist gates import_attachment only. A Markdown note is refused - use the note tools - as is a .hatchdoor-layer marker or anything under .git or a folder this Vault excludes as noise.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -5,8 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
-    create_parent_dir_inside_root, ensure_existing_path_inside_root, is_trashed_path,
-    relative_link_target, resolve_reference_inside_root, same_existing_path,
+    create_parent_dir_inside_root, ensure_existing_path_inside_root, is_markdown_path,
+    is_trashed_path, relative_link_target, resolve_reference_inside_root, same_existing_path,
     unique_trash_attachment_relative_path, vault_relative_dir,
 };
 use super::rewrites::{parse_fence_marker, rewrite_content_or_read};
@@ -481,15 +481,22 @@ fn asset_path_from_target(target: &str) -> Option<PathBuf> {
     }) {
         return None;
     }
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    if matches!(
-        ext.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "avif" | "bmp" | "pdf"
-    ) {
-        Some(path.to_path_buf())
-    } else {
-        None
+    // Any file that is not Markdown counts (#247). A Vault is a plain folder
+    // the operator also edits in Obsidian, so it routinely holds video, audio,
+    // data and archives; while this list named nine image-ish types, every
+    // other file was invisible to the note-move planner and to
+    // `list_note_attachments`, which is how a video got left behind with a
+    // dead reference and nothing reported it.
+    //
+    // An extension is still required. It is what separates a file reference
+    // from a wikilink to a note, and every caller then checks the file exists
+    // before planning anything, which is what keeps a note titled
+    // `Q3 2026 v1.2` - apparent extension `2` - out of the asset plan.
+    path.extension()?;
+    if is_markdown_path(path) {
+        return None;
     }
+    Some(path.to_path_buf())
 }
 
 #[cfg(test)]
