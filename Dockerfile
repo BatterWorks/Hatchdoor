@@ -17,7 +17,8 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY docs/starter-vault ./docs/starter-vault
-RUN cargo build --release --bin hatchdoor
+ARG GIT_SHA=""
+RUN HATCHDOOR_GIT_SHA=$GIT_SHA cargo build --release --bin hatchdoor
 
 FROM docker.io/library/node:26-slim AS frontend-builder
 WORKDIR /app/frontend
