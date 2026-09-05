@@ -497,11 +497,15 @@ fn resolve_asset_rejects_targets_that_escape_the_vault_root() {
 fn resolve_asset_returns_none_for_an_absent_or_unservable_target() {
     let dir = tempdir().expect("temp dir");
     fs::write(dir.path().join("notes.txt"), b"text").expect("file");
+    fs::write(dir.path().join("demo.mp4"), b"video").expect("file");
 
     let index = VaultIndex::build(dir.path()).expect("index");
 
     assert_eq!(index.resolve_asset("missing.png", ""), None);
     assert_eq!(index.resolve_asset("notes.txt", ""), None);
+    // The asset name index still holds only servable types, so a video the
+    // attachment tools now manage never resolves as a wikilink (#247).
+    assert_eq!(index.resolve_asset("demo.mp4", ""), None);
 }
 
 #[test]

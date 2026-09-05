@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- A file in your Vault that Hatchdoor would not accept as an upload could not be moved, renamed or deleted either, which made every `.mp4` clip, voice memo, `.csv` and `.zip` permanently immovable. The upload allowlist is a policy about what may enter a Vault; it was being applied to bytes the Vault already stores. Worse was the quiet half: the planner that decides what travels with a moving note did not recognise those files at all, so a note moved to a new folder left its videos behind pointing at nothing, reported success, and `list_note_attachments` showed no sign of them. Attachment operations now accept any file that is not Markdown, whatever its extension, and every non-Markdown file a note references is listed and travels with it under the existing rules. What may be uploaded is unchanged, and so is what Hatchdoor will display: a video can now be organised but still cannot be fetched or rendered, which the attachment guide spells out. Four things the attachment tools will not touch, some of which the old extension check was only blocking by accident: a note, a `.hatchdoor-layer` marker, anything under `.git`, and anything in a folder the Vault excludes as noise, `.obsidian/` included. [#247]
+
 ## v2.6.0 - 2026-09-03
 
 The MCP release. Agents get five new tools, a modern protocol revision, and a `get_tree` that no longer hands over the entire Vault when you asked about one folder. Everyone else gets a Git schedule that actually fires, a read-only mount that actually mounts, and a write layer that stops refusing to rename a note because of the picture sitting next to it.

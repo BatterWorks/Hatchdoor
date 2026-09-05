@@ -4,13 +4,23 @@ tags: [type/how-to, topic/attachments]
 
 # How to import and work with attachments
 
-Attachments are images and PDFs living inside a Vault alongside its Markdown, referenced the ordinary Markdown way. This page covers getting them in (from the Web UI and from an agent) and managing them afterward. For the exact embed syntax, see [[Supported Markdown reference#Images and PDFs]].
+An attachment is any non-Markdown file living inside a Vault alongside its Markdown, referenced the ordinary Markdown way. This page covers getting them in (from the Web UI and from an agent) and managing them afterward. For the exact embed syntax, see [[Supported Markdown reference#Images and PDFs]].
 
-## What's supported
+Three different sets of file types matter here, and mixing them up is the usual source of confusion:
+
+| | Which types | Why it is drawn there |
+| --- | --- | --- |
+| What may be **uploaded** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | A policy about what may enter a Vault through Hatchdoor. |
+| What Hatchdoor will **manage** once present | anything that is not Markdown | A Vault is a plain folder you also edit in Obsidian and sync with Git, so it holds video, audio, data and archives no matter what Hatchdoor accepts on the way in. Those files are yours; Hatchdoor organises them rather than pretending they are not there. |
+| What Hatchdoor will **fetch or display** | `png`, `jpg`, `jpeg`, `gif`, `webp`, `svg`, `avif`, `bmp`, `pdf` | What the Web UI can render and `get_attachment` can hand back. |
+
+So a `.mp4` screen recording already in your Vault can be listed, moved, renamed, deleted and carried along when its note moves, but it cannot be uploaded through Hatchdoor, and `get_attachment` will refuse to hand you its bytes. Open it from the filesystem or through Obsidian instead. Widening the upload and fetch lists is a separate decision, not yet made.
+
+## What may be uploaded
 
 Every upload path, browser or agent, is limited to the same file types and enforces the same size caps server-side:
 
-| | Allowed | Default limit |
+| | Allowed on upload | Default limit |
 | --- | --- | --- |
 | Extensions | `png`, `jpg`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `pdf` | — |
 | HTTP upload (Web UI and agents) | — | `HATCHDOOR_MAX_ATTACHMENT_BYTES`, 10 MiB |
@@ -62,12 +72,16 @@ Reading an attachment is a read: `get_attachment` works whenever MCP is enabled,
 
 ## Managing attachments already in the Vault
 
+These tools act on bytes the Vault already stores, so the upload list does not apply to them: they accept any file that is not Markdown, whatever its extension, including files with no extension at all. Four things are refused. A note, because moving one this way would skip the backlink rewriting and the safety check the note tools do — use those instead. A folder's `.hatchdoor-layer` marker, since trashing one would quietly change which notes sit on the default surface (see [[The layer system]]). Anything under `.git`, which is the Vault's own version history rather than your content. And anything inside a folder the Vault excludes as noise, `.obsidian/` included, so an agent tidying up attachments cannot walk off into your Obsidian configuration.
+
 | Tool | Does | Write mode |
 | --- | --- | --- |
 | `list_note_attachments` | Every attachment one note references, without pulling the note's full content — useful before deciding whether a move or rename is safe. | Not required |
 | `move_attachment` | Moves the file and rewrites every note that referenced it. | Required |
 | `rename_attachment` | Renames the file in place and rewrites every reference. | Required |
 | `delete_attachment` | Trashes the file under `.hatchdoor-trash` and rewrites every reference — the same trash mechanism `delete_note` uses (see [[MCP tools reference#Write content tools]]), so it's recoverable from disk, not gone. | Required |
+
+One limit worth knowing: reference rewriting keys on the file extension, so a link to a file with no extension at all is left exactly as written when that file moves. Rename the file to carry an extension if you want its links to follow it.
 
 The three mutating tools need `HATCHDOOR_MCP_WRITE_ENABLED` and the same Vault-level `mutate` capability as any other write — see [[MCP tools reference#Write content tools]] for full parameters. To move, rename, or delete several attachments in one round trip, put them in a `batch` call (see [[MCP tools reference#Batch]]); it is best-effort, so read each item's own `ok` rather than assuming the whole set landed.
 
