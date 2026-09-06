@@ -883,6 +883,13 @@ write API/types, and configuration for archive or upload limits.
   path otherwise (#235). An escaped alias pipe is part of that form: the
   rewrite retargets `[[Old\|alias]]` and hands the escape back, so the table
   cell it protects stays valid Markdown (#252).
+- The note being renamed or moved is one more note holding links to the target,
+  so its own body follows that same rule (#254). Its rewrite is keyed to the
+  note's destination path, because the note has already moved by the time
+  rewrites are applied, and it composes with the stationary-asset rewrite that
+  targets the same path rather than replacing it. `rewritten_notes` still
+  counts only the other notes, so a rename whose one stale link is the note's
+  own reports zero. Delete leaves the trashed body's self-link as written.
 - An asset travels with its note only from inside the note's own folder (#225),
   and an occupied destination refuses the whole write - except where that
   destination is the asset's own file, which is a move to nowhere rather than a

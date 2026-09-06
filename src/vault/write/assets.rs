@@ -11,7 +11,7 @@ use super::paths::{
     is_trashed_path, relative_link_target, resolve_reference_inside_root, same_existing_path,
     unique_trash_attachment_relative_path, vault_relative_dir,
 };
-use super::rewrites::rewrite_content_or_read;
+use super::rewrites::{planned_content, rewrite_content_or_read};
 use super::types::{AssetMove, TextRewrite, WriteError};
 
 pub(super) fn asset_move_plan(
@@ -145,13 +145,22 @@ pub(super) fn asset_move_plan(
     // the note's destination path: by the time rewrites are applied, the note
     // itself has already moved there.
     if !stationary.is_empty() {
-        let rewritten = transform_asset_references(&content, |target| {
+        // The backlink planner keys the note's own self-link rewrite to that
+        // same destination path (#254), and the merge keeps only the last
+        // entry per path, so this composes onto whatever is already planned
+        // for the note instead of appending a rewrite that would discard it.
+        // The locally accumulated rewrites are consulted first, because they
+        // are applied after the baseline.
+        let planned = planned_content(destination_note, &rewrites)
+            .or_else(|| planned_content(destination_note, baseline_rewrites));
+        let note_body_so_far = planned.as_deref().unwrap_or(content.as_str());
+        let rewritten = transform_asset_references(note_body_so_far, |target| {
             stationary
                 .get(target)
                 .cloned()
                 .unwrap_or_else(|| target.to_string_lossy().into_owned())
         });
-        if rewritten != content {
+        if rewritten != note_body_so_far {
             rewrites.push(TextRewrite {
                 path: destination_note.to_path_buf(),
                 content: rewritten,

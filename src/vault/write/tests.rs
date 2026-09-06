@@ -2642,3 +2642,260 @@ fn an_escaped_embed_with_a_size_suffix_travels_with_its_note() {
         "the embed keeps its escape and its size suffix"
     );
 }
+
+#[test]
+fn rename_rewrites_the_notes_link_to_itself() {
+    // #254: the planner used to skip the note being moved, on the assumption
+    // that a note has nothing to say about its own name. A self-link is the
+    // case that assumption misses.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "See [[Power returns]] and [[Other]].\n";
+    fs::write(root.join("Power returns.md"), body).expect("target");
+    fs::write(root.join("Other.md"), "Link [[Power returns]]\n").expect("other");
+    let index = build(root);
+    let entry = index.find_by_slug("power-returns").expect("entry");
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Power restored.md",
+        &content_hash(body),
+    )
+    .expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Power restored.md")).expect("moved"),
+        "See [[Power restored]] and [[Other]].\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Other.md")).expect("other"),
+        "Link [[Power restored]]\n"
+    );
+    assert_eq!(
+        outcome.rewritten_notes, 1,
+        "the moved note is not one of the backlinks the operation reports"
+    );
+}
+
+#[test]
+fn a_rename_whose_only_stale_link_is_the_notes_own_reports_no_rewritten_notes() {
+    // `rewritten_notes` means "other notes rewritten". A caller comparing it
+    // against its own list of expected backlinks must not see the moved note
+    // counted twice: once as the operation's subject, once as a backlink.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "Only [[Solo]].\n";
+    fs::write(root.join("Solo.md"), body).expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("solo").expect("entry");
+
+    let outcome =
+        move_or_rename_note(root, &index, entry, "Duet.md", &content_hash(body)).expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Duet.md")).expect("moved"),
+        "Only [[Duet]].\n"
+    );
+    assert_eq!(outcome.rewritten_notes, 0);
+    assert_eq!(
+        outcome.content_hash.as_deref(),
+        Some(content_hash("Only [[Duet]].\n").as_str()),
+        "the reported hash must be of the content the caller will read back"
+    );
+}
+
+#[test]
+fn a_self_link_falls_back_to_the_full_path_when_the_new_title_collides() {
+    // #235's fallback applies to the note's own body exactly as it does to
+    // everyone else's: the bare form is only safe while the new title names
+    // one note.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    fs::create_dir_all(root.join("Other")).expect("other");
+    let body = "See [[Target]].\n";
+    fs::write(root.join("Notes/Target.md"), body).expect("target");
+    fs::write(root.join("Other/Renamed.md"), "unrelated").expect("collider");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("entry");
+
+    move_or_rename_note(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed.md",
+        &content_hash(body),
+    )
+    .expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Archive/Renamed.md")).expect("moved"),
+        "See [[Archive/Renamed]].\n"
+    );
+}
+
+#[test]
+fn move_rewrites_a_path_qualified_link_to_itself_and_leaves_the_bare_one() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("mkdir");
+    let body = "Path self [[Notes/Idea]] and bare self [[Idea]].\n";
+    fs::write(root.join("Notes/Idea.md"), body).expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("entry");
+
+    move_or_rename_note(root, &index, entry, "Archive/Idea.md", &content_hash(body)).expect("move");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Archive/Idea.md")).expect("moved"),
+        "Path self [[Archive/Idea]] and bare self [[Idea]].\n",
+        "the title did not change, so only the path-qualified form is stale"
+    );
+}
+
+#[test]
+fn archive_rewrites_a_path_qualified_link_to_itself_and_leaves_the_bare_one() {
+    // Archive is a move (ADR-11) through the same entry point, so it carries
+    // the same rule.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("mkdir");
+    let body = "Path self [[Notes/Idea]] and bare self [[Idea]].\n";
+    fs::write(root.join("Notes/Idea.md"), body).expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("entry");
+
+    archive_note(root, &index, entry, "90-archive/", &content_hash(body)).expect("archive");
+
+    assert_eq!(
+        fs::read_to_string(root.join("90-archive/Idea.md")).expect("archived"),
+        "Path self [[90-archive/Idea]] and bare self [[Idea]].\n"
+    );
+}
+
+#[test]
+fn a_renamed_notes_self_link_keeps_its_anchor_and_its_alias() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "[[Target#Heading]], [[Target|Alias]] and ![[Target^block-id]]\n";
+    fs::write(root.join("Target.md"), body).expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("entry");
+
+    move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash(body)).expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Renamed.md")).expect("moved"),
+        "[[Renamed#Heading]], [[Renamed|Alias]] and ![[Renamed^block-id]]\n"
+    );
+}
+
+#[test]
+fn a_rename_leaves_a_self_link_inside_code_untouched() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "live [[Target]]\ninline `[[Target]]`\n```\n[[Target]]\n```\n";
+    fs::write(root.join("Target.md"), body).expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("entry");
+
+    move_or_rename_note(root, &index, entry, "Renamed.md", &content_hash(body)).expect("rename");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Renamed.md")).expect("moved"),
+        "live [[Renamed]]\ninline `[[Target]]`\n```\n[[Target]]\n```\n"
+    );
+}
+
+#[test]
+fn a_move_repoints_both_a_self_link_and_a_stationary_asset_reference() {
+    // Both rewrites target the moved note's destination path, and the merge is
+    // last-wins per path, so the two have to compose rather than race.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "# B\n![](../_system/image.png)\nSee [[folder-x/B]].\n";
+    fs::create_dir_all(root.join("_system")).expect("system dir");
+    fs::write(root.join("_system/image.png"), BINARY_ASSET).expect("asset");
+    fs::create_dir_all(root.join("folder-x")).expect("folder-x");
+    fs::write(root.join("folder-x/B.md"), body).expect("note");
+    let index = build(root);
+    let entry = index.find_by_slug("b").expect("entry");
+
+    let outcome =
+        move_or_rename_note(root, &index, entry, "B.md", &content_hash(body)).expect("move");
+
+    assert_eq!(outcome.moved_assets, 0, "#225: the asset stays where it is");
+    assert_eq!(
+        fs::read_to_string(root.join("B.md")).expect("moved"),
+        "# B\n![](_system/image.png)\nSee [[B]].\n"
+    );
+    embedded_asset_resolves_to(root, "B.md", "_system/image.png");
+}
+
+#[test]
+fn a_failed_move_restores_the_self_link_the_rewrite_had_changed() {
+    use super::types::MutationPhase;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("notes");
+    let body = "See [[Target]].\n";
+    fs::write(root.join("Notes/Target.md"), body).expect("target");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("entry");
+
+    let error = super::notes::move_or_rename_note_with_failure(
+        root,
+        &index,
+        entry,
+        "Archive/Renamed.md",
+        &content_hash(body),
+        |completed| {
+            if completed == MutationPhase::Rewrite {
+                Err(WriteError::Io("injected failure".to_string()))
+            } else {
+                Ok(())
+            }
+        },
+    )
+    .expect_err("the injected failure must surface");
+    assert!(matches!(error, WriteError::Io(_)), "got {error:?}");
+
+    assert_eq!(
+        fs::read_to_string(root.join("Notes/Target.md")).expect("restored"),
+        body,
+        "the rolled-back note keeps its original self-link"
+    );
+    assert!(!root.join("Archive/Renamed.md").exists());
+}
+
+#[test]
+fn delete_leaves_the_trashed_bodys_link_to_itself_as_written() {
+    // #254 stops at the Vault's edge: the note is gone, so the link its
+    // trashed copy holds to itself has nothing left to point at either way.
+    // Links to it from every other note are still removed.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    let body = "See [[Target]] and [[Other]].\n";
+    fs::write(root.join("Target.md"), body).expect("target");
+    fs::write(root.join("Other.md"), "Link [[Target]]\n").expect("other");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("entry");
+
+    let outcome = delete_note(root, &index, entry, &content_hash(body)).expect("delete");
+
+    let trashed = format!("{}.md", outcome.trashed_path.expect("trash path"));
+    assert_eq!(
+        fs::read_to_string(root.join(trashed)).expect("trashed"),
+        body,
+        "the trashed body is kept byte for byte, self-link included"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Other.md")).expect("other"),
+        "Link \n",
+        "every other note still loses its link to the deleted note"
+    );
+    assert_eq!(outcome.rewritten_notes, 1);
+}
