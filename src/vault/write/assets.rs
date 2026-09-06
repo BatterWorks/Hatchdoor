@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::cache::parse::{for_non_code_line, parse_fence_marker};
+use crate::vault::paths::split_wikilink_asset_body;
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
@@ -373,12 +374,11 @@ fn transform_wiki_asset_body<F>(body: &str, transform_target: &F) -> String
 where
     F: Fn(&Path) -> String,
 {
-    let target_end = body.find('|').unwrap_or(body.len());
-    let target = body[..target_end].trim();
+    let (target, suffix) = split_wikilink_asset_body(body);
     let Some(asset) = asset_path_from_target(target) else {
         return body.to_string();
     };
-    format!("{}{}", transform_target(&asset), &body[target_end..])
+    format!("{}{suffix}", transform_target(&asset))
 }
 
 fn extract_markdown_assets(line: &str, assets: &mut Vec<PathBuf>) {
@@ -403,7 +403,7 @@ fn extract_wiki_assets(line: &str, assets: &mut Vec<PathBuf>) {
         let Some(end) = rest.find("]]") else {
             break;
         };
-        let target = rest[..end].split('|').next().unwrap_or("").trim();
+        let (target, _) = split_wikilink_asset_body(&rest[..end]);
         if let Some(asset) = asset_path_from_target(target) {
             assets.push(asset);
         }

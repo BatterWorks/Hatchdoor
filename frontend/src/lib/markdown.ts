@@ -2,9 +2,16 @@ export function parseWikilinkTarget(body: string): {
   target: string;
   label: string;
 } {
-  const [targetRaw, aliasRaw] = body.split("|", 2);
-  const target = (targetRaw || "").trim();
-  const label = (aliasRaw || "").trim() || target.split(/[#^]/)[0].trim();
+  const pipe = body.indexOf("|");
+  // A backslash directly before the alias pipe is the escape Markdown needs to
+  // stop the pipe closing a table cell (`[[Note\|alias]]`). It is part of the
+  // syntax, never the last character of the target: left on the target it is
+  // read as a path separator, nothing resolves, and the link renders as
+  // missing (#252).
+  const targetEnd = pipe > 0 && body[pipe - 1] === "\\" ? pipe - 1 : pipe;
+  const target = (targetEnd < 0 ? body : body.slice(0, targetEnd)).trim();
+  const alias = pipe < 0 ? "" : body.slice(pipe + 1).trim();
+  const label = alias || target.split(/[#^]/)[0].trim();
   return { target, label };
 }
 

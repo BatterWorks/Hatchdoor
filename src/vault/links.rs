@@ -3,7 +3,7 @@ use std::fs;
 
 use crate::cache::parse::for_non_code_line;
 
-use super::paths::{normalize_link_target, normalize_title, slugify};
+use super::paths::{normalize_link_target, normalize_title, slugify, split_wikilink_note_body};
 use super::types::NoteEntry;
 
 pub fn build_link_graph(
@@ -113,29 +113,14 @@ fn extract_line_wikilink_targets(line: &str, targets: &mut Vec<String>) {
 
         if !is_embed {
             let body = &line[idx + 2..end];
-            let target = parse_wikilink_target(body);
+            let (target, _) = split_wikilink_note_body(body);
             if !target.is_empty() {
-                targets.push(target);
+                targets.push(target.to_string());
             }
         }
 
         idx = end + 2;
     }
-}
-
-fn parse_wikilink_target(body: &str) -> String {
-    let before_alias = body.split('|').next().unwrap_or(body).trim();
-    let before_heading = before_alias
-        .split('#')
-        .next()
-        .unwrap_or(before_alias)
-        .trim();
-    before_heading
-        .split('^')
-        .next()
-        .unwrap_or(before_heading)
-        .trim()
-        .to_string()
 }
 
 fn resolve_target_slug(

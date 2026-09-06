@@ -790,7 +790,8 @@ synchronized; no automated cross-language schema check currently exists.
 
 **Public contract:** the intentional re-exports from `src/vault.rs`, notably
 `VaultIndex`, note/tree/link types, path normalization helpers, layer and
-exclusion types, `is_servable_asset`, `seed_empty_vault`, and `seed_new_vault`.
+exclusion types, `is_servable_asset`, `split_wikilink_asset_body`,
+`seed_empty_vault`, and `seed_new_vault`.
 `seed_new_vault` is the single decision point for which newly defined Vaults
 receive the starter notes — a `Local` source whose directory holds no Markdown,
 judged with that Vault's own exclude matcher so trashed notes do not count —
@@ -824,6 +825,12 @@ watching, and application startup.
 - Excluded/noise paths do not enter the index.
 - Layer markers remain visible to classification even under broad exclusions.
 - A note remains addressable while its layer is reported to callers.
+- A backslash before a wikilink's alias pipe is syntax rather than part of the
+  target, so `[[Note\|alias]]` - the form a Markdown table cell forces - names
+  the same note as `[[Note|alias]]` in the link graph and in wikilink
+  resolution. `src/vault/paths.rs` is the single home for that split, shared
+  with the write layer's rewriters, and no escape reaches
+  `normalize_link_target`, which would read it as a path separator (#252).
 
 **Validation:** `cargo test vault` and the full backend checks.
 
@@ -851,7 +858,10 @@ operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
 **Consumed dependencies:** vault index/types, the local filesystem, and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
 Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
-keeps every rewriter's idea of a code block identical to the indexer's.
+keeps every rewriter's idea of a code block identical to the indexer's. It
+also consumes the vault read model's wikilink body splits
+(`split_wikilink_note_body`, `split_wikilink_asset_body`), so a rewriter and
+the link graph can never disagree about where a target ends (#252).
 
 **Consumers:** the Vault-qualified mutation core (`src/vault_mutation.rs`),
 which since #186 is the sole caller of every write primitive. The one
@@ -870,7 +880,9 @@ write API/types, and configuration for archive or upload limits.
 - A rewritten backlink keeps the form its author wrote, and a link that
   resolved before a move still resolves after it: the bare-title form is used
   only while the new title names exactly one note, and falls back to the full
-  path otherwise (#235).
+  path otherwise (#235). An escaped alias pipe is part of that form: the
+  rewrite retargets `[[Old\|alias]]` and hands the escape back, so the table
+  cell it protects stays valid Markdown (#252).
 - An asset travels with its note only from inside the note's own folder (#225),
   and an occupied destination refuses the whole write - except where that
   destination is the asset's own file, which is a move to nowhere rather than a

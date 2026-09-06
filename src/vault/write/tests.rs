@@ -2480,3 +2480,165 @@ fn attachment_operations_refuse_a_symlink_that_leads_into_the_git_directory() {
         "the repository must be untouched"
     );
 }
+
+// #252: inside a markdown table a bare `|` closes the cell, so Obsidian's
+// alias pipe has to be written `\\|`. Every reader cut the target at the
+// first `|` without checking what preceded it, so the target came out as
+// `Target\\`, normalized into `Target/`, and matched no note. A link to a
+// note that does not exist is the one case a rewrite correctly leaves
+// alone, which is why 384 renames broke eight links and reported nothing.
+#[test]
+fn rename_rewrites_a_backlink_whose_alias_pipe_is_escaped() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "| port | host |\n| --- | --- |\n| 80 | [[Target\\|alias]] |\n",
+    )
+    .expect("backlink");
+    let index = build(root);
+
+    assert_eq!(index.outgoing_by_slug["backlink"], vec!["target"]);
+
+    let entry = index.find_by_slug("target").expect("target").clone();
+    let outcome = move_or_rename_note(root, &index, &entry, "Renamed.md", &content_hash("body"))
+        .expect("rename");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert!(
+        fs::read_to_string(root.join("Backlink.md"))
+            .expect("read")
+            .contains("[[Renamed\\|alias]]")
+    );
+}
+
+#[test]
+fn moving_a_note_rewrites_escaped_backlinks_by_path_and_by_anchor() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("mkdir");
+    fs::write(root.join("Notes/Target.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "| a | [[Notes/Target\\|by path]] |\n| b | [[Target#Heading\\|by anchor]] |\n",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target").clone();
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "Archive/Renamed.md",
+        &content_hash("body"),
+    )
+    .expect("move");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    let backlink = fs::read_to_string(root.join("Backlink.md")).expect("read");
+    // #235 unchanged: a path-qualified target keeps the full new path, and a
+    // bare title that names exactly one note stays bare.
+    assert!(
+        backlink.contains("[[Archive/Renamed\\|by path]]"),
+        "path-qualified escaped link not rewritten: {backlink}"
+    );
+    assert!(
+        backlink.contains("[[Renamed#Heading\\|by anchor]]"),
+        "anchored escaped link not rewritten: {backlink}"
+    );
+}
+
+#[test]
+fn archiving_a_note_rewrites_an_escaped_path_qualified_backlink() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("40-reference")).expect("mkdir");
+    fs::write(root.join("40-reference/Idea.md"), "body").expect("target");
+    fs::write(
+        root.join("Backlink.md"),
+        "| x | [[40-reference/Idea\\|the idea]] |",
+    )
+    .expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("idea").expect("idea");
+
+    let outcome =
+        archive_note(root, &index, entry, "90-archive/", &content_hash("body")).expect("archive");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "| x | [[90-archive/Idea\\|the idea]] |"
+    );
+}
+
+#[test]
+fn deleting_a_note_removes_an_escaped_backlink_like_any_other() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    fs::write(root.join("Backlink.md"), "| x | [[Target\\|alias]] |").expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target");
+
+    let outcome = delete_note(root, &index, entry, &content_hash("body")).expect("delete");
+
+    assert_eq!(outcome.rewritten_notes, 1);
+    assert_eq!(
+        fs::read_to_string(root.join("Backlink.md")).expect("backlink"),
+        "| x |  |"
+    );
+}
+
+#[test]
+fn a_rename_leaves_an_escaped_link_inside_code_byte_for_byte_unchanged() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::write(root.join("Target.md"), "body").expect("target");
+    let original =
+        "live [[Target\\|alias]]\ninline `[[Target\\|alias]]`\n```\n[[Target\\|alias]]\n```\n";
+    fs::write(root.join("Backlink.md"), original).expect("backlink");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target").clone();
+
+    move_or_rename_note(root, &index, &entry, "Renamed.md", &content_hash("body")).expect("rename");
+
+    let backlink = fs::read_to_string(root.join("Backlink.md")).expect("read");
+    assert_eq!(
+        backlink,
+        "live [[Renamed\\|alias]]\ninline `[[Target\\|alias]]`\n```\n[[Target\\|alias]]\n```\n"
+    );
+}
+
+#[test]
+fn an_escaped_embed_with_a_size_suffix_travels_with_its_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("Notes")).expect("mkdir");
+    let body = "| pic |\n| --- |\n| ![[image.png\\|200]] |\n";
+    fs::write(root.join("Notes/Target.md"), body).expect("target");
+    fs::write(root.join("Notes/image.png"), "png").expect("asset");
+    let index = build(root);
+    let entry = index.find_by_slug("target").expect("target").clone();
+
+    let outcome = move_or_rename_note(
+        root,
+        &index,
+        &entry,
+        "Archive/Renamed.md",
+        &content_hash(body),
+    )
+    .expect("move");
+
+    // #225: the asset sits inside the note's own folder, so it travels.
+    assert_eq!(outcome.moved_assets, 1);
+    assert!(root.join("Archive/image.png").exists());
+    assert!(!root.join("Notes/image.png").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("Archive/Renamed.md")).expect("read"),
+        "| pic |\n| --- |\n| ![[image.png\\|200]] |\n",
+        "the embed keeps its escape and its size suffix"
+    );
+}
