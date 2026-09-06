@@ -13,7 +13,7 @@ use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
 };
-use super::rewrites::{backlink_rewrite_plan, merge_rewrites};
+use super::rewrites::{MovedTo, backlink_rewrite_plan, merge_rewrites};
 use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
 use crate::cache::parse::frontmatter_span;
 
@@ -572,7 +572,14 @@ fn move_or_rename_note_with_hook(
     let target_without_ext =
         strip_md_extension(&normalize_note_relative_path(target_relative_path)?).to_string();
     let slug = slug_for_relative_path(index, &target_without_ext, &target_path, Some(&entry.slug));
-    let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, Some(&target_without_ext))?;
+    let backlink_rewrites = backlink_rewrite_plan(
+        index,
+        &entry.slug,
+        Some(MovedTo {
+            new_target: &target_without_ext,
+            destination: target_path.as_path(),
+        }),
+    )?;
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
         index,
@@ -596,12 +603,17 @@ fn move_or_rename_note_with_hook(
         &mut after_phase,
     )?;
     let moved_assets = asset_moves.len();
-    let rewritten = mutation.rewritten;
-    let rewritten_notes = rewritten.len();
-
-    let mut affected_paths = rewritten;
+    // The moved note's own self-link rewrite lands on its destination path,
+    // which this operation already reports as its subject. `rewritten_notes`
+    // counts the *other* notes, so counting it would report the same write
+    // twice, and `affected_paths` would name the destination twice (#254).
+    let mut affected_paths = mutation.rewritten;
+    let rewrote_its_own_body = affected_paths.contains(&target_path);
+    let rewritten_notes = affected_paths.len() - usize::from(rewrote_its_own_body);
     affected_paths.push(entry.path.clone());
-    affected_paths.push(target_path.clone());
+    if !rewrote_its_own_body {
+        affected_paths.push(target_path.clone());
+    }
     for asset in &asset_moves {
         affected_paths.push(asset.source.clone());
         affected_paths.push(asset.destination.clone());
@@ -689,6 +701,9 @@ fn delete_note_with_hook(
     let trash_relative = unique_trash_relative_path(vault_root, &entry.relative_path)?;
     let trash_path = vault_root.join(format!("{trash_relative}.md"));
 
+    // No destination: the link is removed from every other note, and the
+    // trashed body's link to itself is left as written, since the note is gone
+    // from the Vault and the link is moot in the trash (#254).
     let backlink_rewrites = backlink_rewrite_plan(index, &entry.slug, None)?;
     let (asset_moves, asset_rewrites) = asset_move_plan(
         vault_root,
