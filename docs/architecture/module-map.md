@@ -109,6 +109,12 @@ that production inventory are still checked for stale paths and duplicates.
 - `VaultCollectionRuntime` reconstructs disposable background turns at startup
   and, on process shutdown, stops new work and waits only for active
   background-turn and foreground-mutation safe boundaries.
+  A `VaultControlBlock` also owns that Vault's `git::WriteLedger`, the one
+  per-Vault handle both the mutation core and its Git turn already hold
+  (#249). An in-place definition edit rotates the control block, and the
+  ledger moves to the replacement alongside `prior_git`: its records describe
+  writes already on disk and still uncommitted, so the rotation must not drop
+  them.
   `AppState::vault_registry`, `AppState::vaults`, and
   `AppState::legacy_migration_recovery` expose the authoritative definition
   store, activated per-Vault control blocks, and safe legacy-recovery state to
@@ -390,6 +396,9 @@ small public surface — no trait, no framework, no second execution lane.
     resets, or merges, so it deliberately takes neither the lease nor the
     mutation lock.
   - `Local`: no Git turn at all; returns without publishing anything.
+
+  Every branch that can commit is handed the Vault's `write_ledger()` so the
+  commit it makes is named by the writes it records (#249).
 
   Both locked paths hold the mutation lock for the whole blocking turn
   (coarser than the legacy single-Vault task's fine-grained per-phase locking
@@ -1067,8 +1076,13 @@ mutation lock; building the authoritative index off the async runtime;
 resolving the slug to an entry; refusing a write to a path this Vault's own
 exclusion patterns would make invisible; resolving the archive prefix from the
 Vault's own archive folder or the instance default; running the blocking write
-off the async runtime; and returning `NoteWriteOutcome` or a structured
-`VaultOperationError`. `NoteWriteOutcome` carries the note's resulting layer,
+off the async runtime; recording what that write did in the Vault's
+`git::WriteLedger`, so the commit that eventually records it can say so
+(#249); and returning `NoteWriteOutcome` or a structured
+`VaultOperationError`. `VaultMutation::with_commit_summary` carries the
+caller's one-line description of the change into that record; the private
+`RecordedWrite` trait is what lets `run_write` build the record once for all
+fifteen primitives instead of at each of them. `NoteWriteOutcome` carries the note's resulting layer,
 resolved from the `LayerMap` the write's own pre-write index build already
 holds rather than from a post-write rescan (#101). `VaultMutationCore` carries a one-shot form — gate, lock, write — for each of
 the fifteen primitives, which is what a standalone caller wants:
@@ -1494,11 +1508,15 @@ superseding ADR-05.
 
 **Public contract:** `GitMode` (`off`/`local`, carried only by the legacy
 first-boot import — the instance-wide runtime lane is gone, #185), `GitConfig`,
-write-record/message types, commit outcomes and errors (including
+write-record/message types (`WriteRecord`, `WriteLedger`,
+`build_commit_message`), commit outcomes and errors (including
 `GitError::ManualRecovery` for repository operations that cannot be proven
 Hatchdoor-owned), and the local repository operations `validate_repo`,
 `validate_local_repo`, `init_local_repo`, `commit_local`,
-`has_uncommitted_changes`, and `run_local_history_git_turn`. Only the last
+`has_uncommitted_changes`, and `run_local_history_git_turn`. Since #249
+`run_local_history_git_turn` takes the Vault's `&WriteLedger` and names its
+commit from the batch waiting there, restoring that batch when the turn finds
+nothing to commit. Only the last
 three are on a live path; `validate_repo`, `init_local_repo`, and
 `has_uncommitted_changes` lost their production callers with the settings
 lifecycle and the boot-time legacy validation in #185 and are retained
@@ -1545,7 +1563,10 @@ checks out, polls, pushes, or attempts automatic reacquisition/recovery.
 `ManagedSyncError`, and `synchronize_managed_checkout` form the next shared-core
 managed-checkout graph boundary. A caller that holds the checkout lease and
 serializes Vault writes supplies the already validated repository and contained
-Vault root. Pull-only refuses and preserves any local work or local-only
+Vault root, plus that Vault's `&WriteLedger`: a Two-way commit takes the
+pending batch at the moment it is certain to commit and builds its message
+from it (#249), restoring the batch if the commit itself fails, while
+Pull-only never commits and leaves the ledger alone. Pull-only refuses and preserves any local work or local-only
 history, then only fast-forwards a clean checkout. Two-way commits Vault-subtree
 work before every tree-changing graph operation, refuses unrelated repository
 work, fast-forwards remote-only advancement, creates a merge commit for clean
@@ -1560,6 +1581,18 @@ operator-owned `ExistingGit` checkout are outside this boundary and untouched.
 Public HTTPS makes no credential callback; supplied credentials are callback
 input only and remain redacted. This boundary does not acquire, delete,
 schedule, poll, persist status, or repair checkouts.
+
+`WriteRecord`, `WriteLedger`, and `build_commit_message` are what makes a
+commit say what happened. One Git turn coalesces every Vault write since the
+last one, so the record of each write waits in the Vault's ledger in between:
+the mutation core appends one `WriteRecord` per successful write, and the two
+functions that actually commit — `commit_vault_drift` (Two-way) and
+`commit_local` through `run_local_history_git_turn` (Local history) — take the
+whole batch and name the commit from it. Title: the first three operations and
+the unique file count. Body: one `- ` line per caller-supplied summary. A
+commit whose batch is empty, which is what drift from outside Hatchdoor
+produces, keeps the generic `hatchdoor: vault update`. The ledger is bounded
+(`WriteLedger::CAPACITY`) because a `Local` Vault has no Git turn to take it.
 
 `ManagedGitTurnConfig`, `ManagedGitOutcome`, `run_managed_git_turn`,
 `ManagedGitScheduler`, `GitPollingClock`, `spawn_scheduler_tick`,

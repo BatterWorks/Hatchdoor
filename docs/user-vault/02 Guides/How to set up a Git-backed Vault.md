@@ -35,6 +35,8 @@ Open **Settings** → **Add a Vault**, then:
 | **Pull-only** | Also fetches from the remote on the sync schedule. Content flows in; Hatchdoor's own commits stay local and are never pushed. | Either |
 | **Two-way** | Also pushes Hatchdoor's own commits back to the remote. | Either |
 
+Hatchdoor commits on a schedule, not on every write, so one commit usually gathers several changes. The subject names the first few writes it recorded and how many files they touched, and the body carries whatever one-line summary each of those writes supplied. An agent connected over MCP can pass a summary on every write, which is what turns the history into an answer to "why did this note change?". Edits you make in the Vault folder yourself carry no summary, so a commit made up only of those keeps the generic `hatchdoor: vault update`.
+
 > [!warning]
 > Local history creates a hidden `.git` folder inside the Vault's own notes folder to hold its history, and that folder grows permanently: every image and PDF ever attached stays in it, even after you delete the file from the Vault. Don't reach for Local history on a Vault with large attachments unless you're prepared for that growth.
 

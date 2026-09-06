@@ -18,9 +18,11 @@
 //! `get_attachment`, `get_frontmatter`) moved to `read.rs` in #188, once the
 //! read core took over the gating those helpers provided.
 
-// The deserialization-only scope and retired legacy commit-summary fields are
-// intentionally retained until every old client gets a structured invalid
-// parameter response instead of silently accepting an ambiguous payload.
+// Every argument struct below deserializes `vault_id` it never reads: the
+// Vault is resolved from the raw arguments before any of them are parsed, and
+// `deny_unknown_fields` would reject the field if it were dropped. Kept as a
+// declared field rather than ignored, so an old client sending it still gets a
+// structured invalid-parameter response for anything genuinely unrecognized.
 #![allow(dead_code)]
 
 use serde::Deserialize;
@@ -54,17 +56,20 @@ pub(super) struct McpVault {
 }
 
 impl McpVault {
-    /// The mutation core's view of this Vault. `scoped_vault` has already
-    /// gated it and applied the core's own `ensure_mutable`, and the
-    /// dispatcher holds its mutation lock (`mod.rs` for the length of one
-    /// tool call, `batch.rs` for the length of a whole batch), which is why
-    /// the operations below never re-take it.
-    fn mutation(&self) -> VaultMutation {
+    /// The mutation core's view of this Vault, carrying this call's
+    /// `commit_summary` so the write it runs reaches the body of the commit
+    /// that records it (#249). `scoped_vault` has already gated it and
+    /// applied the core's own `ensure_mutable`, and the dispatcher holds its
+    /// mutation lock (`mod.rs` for the length of one tool call, `batch.rs`
+    /// for the length of a whole batch), which is why the operations below
+    /// never re-take it.
+    fn mutation(&self, commit_summary: Option<String>) -> VaultMutation {
         VaultMutation::gated(
             self.vault_id,
             self.control.clone(),
             Arc::clone(&self.settings),
         )
+        .with_commit_summary(commit_summary)
     }
 }
 
@@ -101,7 +106,7 @@ pub(super) async fn acquire_mutation(
     vault: &McpVault,
 ) -> Result<tokio::sync::OwnedMutexGuard<()>, JsonRpcFailure> {
     vault
-        .mutation()
+        .mutation(None)
         .acquire_mutation()
         .await
         .map_err(mutation_error)
@@ -226,7 +231,7 @@ pub(super) async fn create_note_tool(
     })?;
     let relative_path = non_empty_argument("relative_path", args.relative_path)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .create_note(
             &relative_path,
             &args.content,
@@ -247,7 +252,7 @@ pub(super) async fn update_note_tool(
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .update_note(&slug, &args.content, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -264,7 +269,7 @@ pub(super) async fn update_frontmatter_tool(
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .update_frontmatter(&slug, args.frontmatter, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -282,7 +287,7 @@ pub(super) async fn append_to_note_tool(
     let slug = non_empty_argument("slug", args.slug)?;
     let content = non_empty_argument("content", args.content)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .append_to_note(&slug, &content, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -299,7 +304,7 @@ pub(super) async fn edit_note_tool(
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .edit_note(
             &slug,
             &args.old_string,
@@ -333,7 +338,7 @@ pub(super) async fn replace_section_tool(
         }
     };
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .replace_section(
             &slug,
             &heading,
@@ -365,7 +370,7 @@ pub(super) async fn rename_note_tool(
         ));
     }
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .rename_note(&slug, &new_title, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -382,7 +387,7 @@ pub(super) async fn move_note_tool(
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .move_note(&slug, &args.target_folder, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -401,7 +406,7 @@ pub(super) async fn move_rename_note_tool(
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .move_rename_note(&slug, &target_relative_path, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -418,7 +423,7 @@ pub(super) async fn archive_note_tool(
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .archive_note(&slug, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -435,7 +440,7 @@ pub(super) async fn delete_note_tool(
     })?;
     let slug = non_empty_argument("slug", args.slug)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .delete_note(&slug, &args.expected_content_hash)
         .await
         .map_err(mutation_error)?;
@@ -491,7 +496,7 @@ pub(super) async fn import_attachment_tool(
         })?;
 
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .import_attachment(
             &target_relative_path,
             bytes,
@@ -516,7 +521,7 @@ pub(super) async fn move_attachment_tool(
     let target_relative_path =
         non_empty_argument("target_relative_path", args.target_relative_path)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .move_attachment(&source_relative_path, &target_relative_path)
         .await
         .map_err(mutation_error)?;
@@ -535,7 +540,7 @@ pub(super) async fn rename_attachment_tool(
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let new_filename = non_empty_argument("new_filename", args.new_filename)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .rename_attachment(&source_relative_path, &new_filename)
         .await
         .map_err(mutation_error)?;
@@ -553,7 +558,7 @@ pub(super) async fn delete_attachment_tool(
     let source_relative_path =
         non_empty_argument("source_relative_path", args.source_relative_path)?;
     let outcome = vault
-        .mutation()
+        .mutation(args.commit_summary)
         .delete_attachment(&source_relative_path)
         .await
         .map_err(mutation_error)?;

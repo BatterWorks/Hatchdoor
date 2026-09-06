@@ -449,6 +449,12 @@ pub struct VaultControlBlock {
     cancellation: tokio::sync::watch::Sender<bool>,
     revisions: CollectionRevisionPublisher,
     watcher: Arc<RwLock<Option<VaultWatcherHandle>>>,
+    /// This Vault's writes waiting to be named by their Git commit. The
+    /// mutation core appends one record per successful write; the Vault's
+    /// next Git turn takes the batch to build its commit message (#249).
+    /// Lives here because those two are the only things that touch it and
+    /// this is the one per-Vault handle both already hold.
+    write_ledger: Arc<crate::git::WriteLedger>,
 }
 
 impl VaultControlBlock {
@@ -459,6 +465,11 @@ impl VaultControlBlock {
         snapshot_cache: Option<&SqliteCache>,
         revisions: CollectionRevisionPublisher,
         prior_git: Option<(VaultGitStatus, Option<VaultRuntimeError>)>,
+        // The retiring block's write ledger when this activation replaces a
+        // live control block, so writes already on disk and still waiting for
+        // a commit keep their summaries across the rotation (#249). `None`
+        // for a genuinely new or re-enabled Vault, which has none.
+        prior_writes: Option<Arc<crate::git::WriteLedger>>,
     ) -> Self {
         let mut snapshot = activation_snapshot(&definition, &vault_path, snapshot_cache, prior_git);
         let watcher = if snapshot.activation == VaultActivationStatus::Active {
@@ -516,6 +527,7 @@ impl VaultControlBlock {
             cancellation,
             revisions,
             watcher: Arc::new(RwLock::new(watcher)),
+            write_ledger: prior_writes.unwrap_or_else(|| Arc::new(crate::git::WriteLedger::new())),
         }
     }
 
@@ -525,6 +537,13 @@ impl VaultControlBlock {
 
     pub fn vault_path(&self) -> &Path {
         &self.vault_path
+    }
+
+    /// This Vault's pending write records. Cloned rather than borrowed so a
+    /// Git turn can carry it into `spawn_blocking` without borrowing the
+    /// control block there.
+    pub fn write_ledger(&self) -> Arc<crate::git::WriteLedger> {
+        Arc::clone(&self.write_ledger)
     }
 
     /// Build an authoritative index for an exact read. Collection projections
@@ -1032,12 +1051,21 @@ impl VaultCollectionRuntime {
                         // transient failure) the retiring control block
                         // actually had. See `activation_snapshot`'s doc
                         // comment.
-                        let prior_git =
+                        //
+                        // The retiring block's pending write records move
+                        // across for the same reason: they describe writes
+                        // already on disk and still uncommitted, so dropping
+                        // them here would lose exactly the commit-message
+                        // lines #249 exists to deliver.
+                        let (prior_git, prior_writes) =
                             if let Some(VaultCollectionEntry::Active(runtime)) = previous_entry {
                                 let prior_snapshot = runtime.snapshot();
-                                Some((prior_snapshot.git, prior_snapshot.git_error.clone()))
+                                (
+                                    Some((prior_snapshot.git, prior_snapshot.git_error.clone())),
+                                    Some(runtime.write_ledger()),
+                                )
                             } else {
-                                None
+                                (None, None)
                             };
                         VaultCollectionEntry::Active(VaultControlBlock::activate(
                             definition,
@@ -1046,6 +1074,7 @@ impl VaultCollectionRuntime {
                             self.snapshot_cache.as_deref(),
                             revision_publisher.clone(),
                             prior_git,
+                            prior_writes,
                         ))
                     }
                 }

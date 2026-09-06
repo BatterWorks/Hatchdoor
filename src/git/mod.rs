@@ -19,7 +19,7 @@ pub use managed_task::{
     ManagedGitScheduler, ManagedGitTurnConfig, run_existing_git_remote_turn, run_managed_git_turn,
     spawn_scheduler_tick,
 };
-pub use message::{WriteRecord, build_commit_message};
+pub use message::{WriteLedger, WriteRecord, build_commit_message};
 pub use sync::{
     CommitOutcome, GitError, commit_local, has_uncommitted_changes, init_local_repo,
     run_local_history_git_turn, validate_local_repo, validate_repo,

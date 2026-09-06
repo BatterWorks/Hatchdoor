@@ -1275,7 +1275,7 @@ async fn dispatch_git_turn_with_publishes_a_real_failure_through_the_full_async_
                 "Hatchdoor",
                 "hatchdoor@example.test",
                 request,
-                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+                |_config, _lease, _ledger| Ok(crate::git::ManagedGitOutcome::UpToDate),
             )
         })
         .await
@@ -1308,7 +1308,7 @@ async fn dispatch_git_turn_with_publishes_a_real_failure_through_the_full_async_
                 "Hatchdoor",
                 "hatchdoor@example.test",
                 request,
-                |_config, _lease| {
+                |_config, _lease, _ledger| {
                     Err(VaultWorkError::new(
                         "managed_git_remote_unreachable",
                         "simulated remote outage",
@@ -1403,7 +1403,7 @@ async fn a_managed_git_turn_waits_for_a_concurrent_foreground_mutation_to_releas
             "Hatchdoor",
             "hatchdoor@example.test",
             request,
-            |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+            |_config, _lease, _ledger| Ok(crate::git::ManagedGitOutcome::UpToDate),
         )
     });
     tokio::pin!(dispatch);
@@ -2277,7 +2277,7 @@ async fn a_managed_git_vault_keeps_polling_on_its_configured_interval() {
                 "Hatchdoor",
                 "hatchdoor@example.test",
                 request,
-                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+                |_config, _lease, _ledger| Ok(crate::git::ManagedGitOutcome::UpToDate),
             )
         })
         .await
@@ -2312,7 +2312,7 @@ async fn a_managed_git_vault_keeps_polling_on_its_configured_interval() {
                 "Hatchdoor",
                 "hatchdoor@example.test",
                 request,
-                |_config, _lease| Ok(crate::git::ManagedGitOutcome::UpToDate),
+                |_config, _lease, _ledger| Ok(crate::git::ManagedGitOutcome::UpToDate),
             )
         })
         .await
