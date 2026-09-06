@@ -88,7 +88,7 @@ A request for the notes whose properties, tags, or path satisfy stated condition
 _Avoid_: Search, filter, lookup
 
 **Saved query**:
-A query stored inside a note rather than supplied by a caller, evaluated against that note's own vault each time the note is read. Its meaning does not vary by caller or by scope, which is the reason it exists.
+A query stored inside a note rather than supplied by a caller, evaluated against that note's own vault each time the note is read. Its meaning does not vary by caller or by scope, which is the reason it exists. A note may hold several; each may carry a name, unique within that note, by which it is addressed from outside.
 _Avoid_: Base, view, aggregator note, dashboard
 
 **Query result**:
