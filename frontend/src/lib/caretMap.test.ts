@@ -76,3 +76,20 @@ describe("wikilinks", () => {
     expect(sourceOffsetForRenderedOffset("![[a.png]] after", 1)).toBe(11);
   });
 });
+
+describe("sourceOffsetForRenderedOffset inside an escaped wikilink", () => {
+  it("places the caret inside the alias of a table-cell link", () => {
+    // Rendered as "battergate": clicking before "gate" is rendered offset 6.
+    const source = "[[Host\\|battergate]]";
+    expect(sourceOffsetForRenderedOffset(source, 6)).toBe(
+      source.indexOf("battergate") + 6,
+    );
+  });
+
+  it("counts only the alias as visible text after an escaped link", () => {
+    const source = "[[Host\\|battergate]] tail";
+    expect(sourceOffsetForRenderedOffset(source, 11)).toBe(
+      source.indexOf(" tail") + 1,
+    );
+  });
+});

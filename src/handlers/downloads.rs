@@ -6,7 +6,7 @@ use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use zip::write::SimpleFileOptions;
 
-use crate::vault::Note;
+use crate::vault::{Note, split_wikilink_asset_body};
 
 /// Note downloads are assembled in memory so Markdown links can be rewritten
 /// into a self-contained archive. Bound every intermediate buffer rather than
@@ -250,7 +250,7 @@ fn extract_wiki_asset_targets(line: &str, targets: &mut Vec<String>) {
         let Some(end) = rest.find("]]") else {
             break;
         };
-        let target = rest[..end].split('|').next().unwrap_or("").trim();
+        let (target, _) = split_wikilink_asset_body(&rest[..end]);
         if is_export_asset_target(target) {
             targets.push(target.to_string());
         }
@@ -388,12 +388,10 @@ fn rewrite_wiki_asset_links(markdown: &str, target_map: &HashMap<&str, &str>) ->
             return out;
         };
         let body = &rest[..end];
-        let target = body.split('|').next().unwrap_or("").trim();
-        let label = body
-            .split_once('|')
-            .map(|(_, label)| label.trim())
-            .filter(|label| !label.is_empty())
-            .unwrap_or(target);
+        let (target, suffix) = split_wikilink_asset_body(body);
+        // The label comes out of the same split as the target, so the two can
+        // never disagree about where the alias pipe is - escaped or not.
+        let label = alias_from_suffix(suffix).unwrap_or(target);
         if let Some(zip_path) = target_map.get(target) {
             out.push_str(&format!(
                 "![{}]({})",
@@ -440,6 +438,20 @@ fn strip_note_wikilinks(markdown: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The display text a wikilink suffix carries, if it carries one.
+///
+/// `suffix` is what [`split_wikilink_asset_body`] returns after the target:
+/// the alias pipe and everything past it, with the backslash that escapes the
+/// pipe inside a table cell still attached (#252).
+fn alias_from_suffix(suffix: &str) -> Option<&str> {
+    suffix
+        .strip_prefix('\\')
+        .unwrap_or(suffix)
+        .strip_prefix('|')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
 }
 
 fn wikilink_label(body: &str) -> &str {
@@ -772,6 +784,52 @@ mod tests {
         assert_eq!(
             markdown,
             "# Home\n\nSee Plan.\n\n![Topology](Home-assets/diagram.png)\n\n[External](https://example.com)"
+        );
+
+        let mut asset = Vec::new();
+        archive
+            .by_name("Home-assets/diagram.png")
+            .expect("asset file")
+            .read_to_end(&mut asset)
+            .expect("asset bytes");
+        assert_eq!(asset, b"png-bytes");
+    }
+
+    #[test]
+    fn build_note_export_bundles_an_asset_whose_size_suffix_pipe_is_escaped() {
+        // #252: inside a table cell the pipe has to be written `\\|`, and the
+        // export read the target as `diagram.png\\`, so the file was neither
+        // bundled nor relinked and the note shipped with a dead image.
+        let dir = tempdir().expect("temp dir");
+        let vault = dir.path();
+        let notes = vault.join("Notes");
+        std::fs::create_dir_all(&notes).expect("notes dir");
+        std::fs::write(notes.join("diagram.png"), b"png-bytes").expect("asset");
+        let note = Note {
+            title: "Home".to_string(),
+            slug: "home".to_string(),
+            relative_path: "Notes/Home".to_string(),
+            content:
+                "| pic |\n| --- |\n| ![[diagram.png\\|200]] |\n\n| link |\n| [[Plan\\|the plan]] |"
+                    .to_string(),
+            content_hash: "fnv1a64:0000000000000000".to_string(),
+            layer: None,
+            metadata: Default::default(),
+        };
+
+        let export = build_note_export(vault, &note).expect("export");
+
+        let reader = Cursor::new(export.bytes);
+        let mut archive = zip::ZipArchive::new(reader).expect("zip archive");
+        let mut markdown = String::new();
+        archive
+            .by_name("Home.md")
+            .expect("markdown file")
+            .read_to_string(&mut markdown)
+            .expect("markdown text");
+        assert_eq!(
+            markdown,
+            "| pic |\n| --- |\n| ![200](Home-assets/diagram.png) |\n\n| link |\n| the plan |"
         );
 
         let mut asset = Vec::new();

@@ -166,3 +166,36 @@ describe("rewriteWikilinks asset resolution", () => {
     ).toBe("![shot\\.png](/api/v1/vaults/vault-1/assets/97_Notes/shot.png)");
   });
 });
+
+describe("rewriteWikilinks with an escaped alias pipe", () => {
+  it("renders a table-cell link as a resolved link labelled with its alias", () => {
+    const resolved = new Map([
+      ["Host - BatterGate", { slug: "host-battergate", archived: false }],
+    ]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "| 443 | [[Host - BatterGate\\|battergate]] |",
+        "Home.md",
+        resolved,
+      ),
+    ).toBe("| 443 | [battergate](/v/vault-1/n/host-battergate) |");
+  });
+
+  it("resolves an escaped embed's asset and labels it with the size suffix", () => {
+    const assets = new Map([["image.png", "98_Attachments/image.png"]]);
+
+    expect(
+      rewriteWikilinks(
+        VAULT_ID,
+        "| pic | ![[image.png\\|200]] |",
+        "97_Notes/Some note.md",
+        new Map(),
+        assets,
+      ),
+    ).toBe(
+      "| pic | ![200](/api/v1/vaults/vault-1/assets/98_Attachments/image.png) |",
+    );
+  });
+});

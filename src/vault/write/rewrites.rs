@@ -3,7 +3,7 @@ use std::io;
 use std::path::Path;
 
 use crate::cache::parse::parse_fence_marker;
-use crate::vault::paths::{normalize_link_target, normalize_title};
+use crate::vault::paths::{normalize_link_target, normalize_title, split_wikilink_note_body};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::types::{TextRewrite, WriteError};
@@ -191,12 +191,10 @@ fn transform_wikilink_body<F>(body: &str, transform_target: &F) -> Option<String
 where
     F: Fn(&str) -> Option<String>,
 {
-    let target_end = body.find(['|', '#', '^']).unwrap_or(body.len());
-    let target = body[..target_end].trim();
+    let (target, suffix) = split_wikilink_note_body(body);
     if target.is_empty() {
         return Some(body.to_string());
     }
-    let suffix = &body[target_end..];
     transform_target(target).map(|new_target| format!("{new_target}{suffix}"))
 }
 

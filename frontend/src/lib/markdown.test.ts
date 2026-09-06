@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeTags,
   parseFrontmatter,
+  parseWikilinkTarget,
   stripVaultNoteLinks,
 } from "./markdown";
 
@@ -114,5 +115,42 @@ describe("stripVaultNoteLinks line counts", () => {
     const input = "See [[Real\nNote]] there.";
 
     expect(stripVaultNoteLinks(input)).toBe(input);
+  });
+});
+
+describe("parseWikilinkTarget", () => {
+  it("reads an escaped alias pipe as syntax, not as part of the target", () => {
+    // The form a markdown table cell forces: a bare pipe would end the cell.
+    expect(parseWikilinkTarget("Some Note\\|alias")).toEqual({
+      target: "Some Note",
+      label: "alias",
+    });
+  });
+
+  it("gives the escaped form the same target as the unescaped one", () => {
+    expect(parseWikilinkTarget("Some Note\\|alias").target).toBe(
+      parseWikilinkTarget("Some Note|alias").target,
+    );
+  });
+
+  it("keeps a backslash that is a path separator rather than an escape", () => {
+    expect(parseWikilinkTarget("folder\\Some Note")).toEqual({
+      target: "folder\\Some Note",
+      label: "folder\\Some Note",
+    });
+  });
+
+  it("reads an escaped pipe after a path or an anchor", () => {
+    expect(parseWikilinkTarget("folder/Old\\|alias").target).toBe("folder/Old");
+    expect(parseWikilinkTarget("Old#Heading\\|alias").target).toBe(
+      "Old#Heading",
+    );
+  });
+
+  it("reads an escaped size suffix on an asset embed", () => {
+    expect(parseWikilinkTarget("image.png\\|200")).toEqual({
+      target: "image.png",
+      label: "200",
+    });
   });
 });

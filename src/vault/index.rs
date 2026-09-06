@@ -9,7 +9,7 @@ use super::layers::LayerMap;
 use super::links::build_link_graph;
 use super::paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title,
-    relative_note_path_without_ext, slugify, unique_slug,
+    relative_note_path_without_ext, slugify, split_wikilink_note_body, unique_slug,
 };
 use super::types::{
     ExplorerFolder, ExplorerNote, Note, NoteEntry, NoteLink, NoteLinks, SearchHit, VaultIndex,
@@ -198,14 +198,12 @@ impl VaultIndex {
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn resolve_wikilink(&self, raw_target: &str) -> Option<&NoteEntry> {
-        // Strip heading (#) and block (^) anchors — they point within a note, not to a different note
-        let note_target = raw_target
-            .split('#')
-            .next()
-            .unwrap_or(raw_target)
-            .split('^')
-            .next()
-            .unwrap_or(raw_target);
+        // Heading (#) and block (^) anchors point within a note rather than at
+        // a different one, and an alias is display text, so the shared split
+        // drops all three. It also drops the backslash escaping an alias pipe
+        // inside a table cell, which `normalize_link_target` would otherwise
+        // read as a path separator (#252).
+        let (note_target, _) = split_wikilink_note_body(raw_target);
         let normalized_target = normalize_link_target(note_target);
 
         if let Some(slug) = self.by_path_title.get(&normalize_title(&normalized_target)) {

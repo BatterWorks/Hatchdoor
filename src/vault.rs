@@ -15,6 +15,7 @@ pub use layers::{LayerDecl, LayerMap, MARKER_FILE_NAME};
 pub use paths::strip_md_extension;
 pub use paths::{
     content_snippet, is_servable_asset, normalize_link_target, normalize_title, slugify,
+    split_wikilink_asset_body,
 };
 pub use seed::{SeedError, seed_empty_vault, seed_new_vault};
 pub use types::{
