@@ -2193,8 +2193,18 @@ Vault collection management core directly (#187) rather than proxying an HTTP
 handler, and answers with the same shared collection shapes HTTP returns;
 `create_vault` is the only zero-ID exception because the registry atomically
 generates its immutable ID. MCP
-returns shared domain failures as structured error tool results. No
-scope-less/default/sole-Vault tool remains reachable.
+returns shared domain failures as structured error tool results. Since #255
+such a result signals its failure twice: `isError` on the result object, and
+`ok: false` inside the structured payload beside the domain error's own `code`,
+`message`, `retryable`, and optional `vault_id`. The two signals are
+independent, so a client reading only the structured payload can still tell a
+refusal from a success. Reading it that way is what the advertised
+`outputSchema` invites, since that schema describes the success shape alone.
+`src/mcp/protocol.rs`'s
+`tool_structured_error` is the only place that marker is set, and the shared
+Vault error type is deliberately not the carrier: it also serialises into HTTP
+bodies and into `batch` item `error` values, neither of which changes shape.
+No scope-less/default/sole-Vault tool remains reachable.
 `get_attachment_import_config` names one Vault and answers under every write
 posture, reporting the instance-wide write switch and that Vault's own
 mutation capability as separate fields rather than refusing the call.

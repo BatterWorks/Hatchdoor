@@ -2965,6 +2965,67 @@ mod tests {
         assert!(!vault_path.join("Home.md").exists());
     }
 
+    /// The reported scenario, end to end: a scripted pass sends `update_note`
+    /// content with no trailing newline, the write normalises the bytes, and
+    /// the following `rename_note` guards on a hash of what the caller sent
+    /// rather than the `content_hash` the write handed back. The rename is
+    /// refused and nothing moves on disk. A caller that reads only
+    /// `structuredContent`, as the advertised `outputSchema` invites, can still
+    /// see that it was refused.
+    #[tokio::test]
+    async fn a_refused_write_says_so_inside_its_structured_content() {
+        let (state, _tmp) = write_state();
+        let unterminated = "# Home\nalpha token\n[[Plan]]\nno trailing newline";
+        let updated = call_tool(
+            &state,
+            "update_note",
+            json!({
+                "slug": "home",
+                "content": unterminated,
+                "expected_content_hash": crate::cache::parse::content_hash(
+                    "# Home\nalpha token\n[[Plan]]",
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(updated["result"]["isError"], false, "{updated:#}");
+        let sent = crate::cache::parse::content_hash(unterminated);
+        assert_ne!(
+            updated["result"]["structuredContent"]["content_hash"], sent,
+            "the write is expected to normalise the caller's bytes; without that \
+             divergence this test no longer reproduces the report",
+        );
+
+        let refused = call_tool(
+            &state,
+            "rename_note",
+            json!({
+                "slug": "home",
+                "new_title": "Renamed Home",
+                "expected_content_hash": sent,
+            }),
+        )
+        .await;
+        assert_eq!(refused["result"]["isError"], true, "{refused:#}");
+        let payload = &refused["result"]["structuredContent"];
+        assert_eq!(payload["code"], "write_conflict", "{payload:#}");
+        assert_eq!(payload["ok"], false, "{payload:#}");
+
+        // Text and structured content are two renderings of one payload, so a
+        // caller reading either reaches the same verdict.
+        let text: Value = serde_json::from_str(
+            refused["result"]["content"][0]["text"]
+                .as_str()
+                .expect("error text"),
+        )
+        .expect("the error text is a serialisation of the payload");
+        assert_eq!(&text, payload, "{refused:#}");
+
+        let vault_path = registered_vault_path(&state);
+        assert!(vault_path.join("Home.md").exists());
+        assert!(!vault_path.join("Renamed Home.md").exists());
+    }
+
     #[tokio::test]
     async fn replace_section_overwrites_and_rejects_invalid_mode() {
         let (state, _tmp) = write_state();

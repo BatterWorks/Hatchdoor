@@ -227,6 +227,8 @@ A successful note write returns `vault_id`, `slug`, `relative_path`, `content_ha
 
 A write conflict (stale `expected_content_hash`, or a registry revision that moved under a Vault-management call) is reported as a retryable tool error — re-read the current state and retry rather than assuming the operation is unsafe to repeat.
 
+Any read or write refused this way says so twice: `isError` is true on the result itself, and the structured result carries `ok: false` beside the `code`, `message`, `retryable` and, where the failure names a Vault, `vault_id`. Branch on whichever of the two you already read. The second signal matters if you read the structured result as the tool's typed answer, since the schema each tool advertises describes only the success payload and a refusal arrives in a different shape. The rule is that an `ok` field present and false means the call did not happen: a successful write still returns `ok: true`, and a successful read carries no `ok` field at all. The exception is the handful of setup-state refusals, returned before setup finishes or once a search model is chosen, which carry a plain sentence and no structured result to read.
+
 ## Batch
 
 `batch` runs an ordered list of the tools above in a single call. There is one such tool, not a batching variant per tool: each item names an `op` and carries that tool's own `arguments` exactly as a standalone call would, `vault_id` included, so one batch can span several Vaults.

@@ -42,7 +42,7 @@ use crate::vault_registry::VaultId;
 
 use super::super::config::McpConfig;
 use super::super::limits::{BATCH_MAX_READ_ITEMS, BATCH_MAX_WRITE_ITEMS};
-use super::super::protocol::{JsonRpcFailure, tool_success};
+use super::super::protocol::{JsonRpcFailure, OUTCOME_FIELD, tool_success};
 use super::super::results::{BatchItemResult, BatchResult, result_to_value};
 use super::write::WRITE_OPS;
 use super::{READ_OPS, WRITE_DISABLED_MESSAGE, dispatch_read_tool, write, write_tool_annotations};
@@ -150,10 +150,7 @@ pub(super) async fn batch_tool(
             Ok(value) => {
                 if value.get("isError").and_then(Value::as_bool) == Some(true) {
                     failed += 1;
-                    let error = value
-                        .get("structuredContent")
-                        .cloned()
-                        .unwrap_or_else(|| json!({ "message": value["content"][0]["text"] }));
+                    let error = item_error_value(&value);
                     items.push(BatchItemResult {
                         index,
                         op,
@@ -275,6 +272,28 @@ fn record_chain(chain: &mut HashChain, op: &str, result: &Value) {
     if let (Some(vault_id), Some(slug), Some(hash)) = (vault_id, slug, hash) {
         chain.insert((vault_id.to_string(), slug.to_string()), hash.to_string());
     }
+}
+
+/// Unwraps the error object out of a tool result that already rendered its own
+/// failure envelope (the read tools return one instead of a `JsonRpcFailure`).
+///
+/// The batch item's own [`BatchItemResult::ok`] is the authoritative outcome
+/// here, and it is what the tools reference tells a caller to read, so the
+/// nested `error` stays the bare `{code, message, retryable, vault_id?}` object
+/// it has always been. That means dropping the [`OUTCOME_FIELD`]
+/// `tool_structured_error` sets: an item error carrying its own `ok: false`
+/// next to the item's `ok: false` would say the same thing twice, in a place
+/// where the write half of the allow-list says it once. Write items never reach
+/// this function at all, since [`dispatch_one`] hands their failures back as a
+/// `JsonRpcFailure` for [`failure_to_error_value`] to shape.
+fn item_error_value(value: &Value) -> Value {
+    let Some(mut error) = value.get("structuredContent").cloned() else {
+        return json!({ "message": value["content"][0]["text"] });
+    };
+    if let Some(object) = error.as_object_mut() {
+        object.remove(OUTCOME_FIELD);
+    }
+    error
 }
 
 /// Renders a per-item dispatch failure the same way the top-level dispatcher
@@ -466,6 +485,24 @@ mod tests {
         let plain = failure_to_error_value(JsonRpcFailure::invalid_params("bad input"));
         assert_eq!(plain["code"], -32602);
         assert_eq!(plain["message"], "bad input");
+    }
+
+    /// Both halves of the allow-list produce the same bare error object for an
+    /// item: the write half never passes through a tool-result envelope, and
+    /// the read half has the envelope's failure marker taken back off.
+    #[test]
+    fn an_item_error_keeps_the_bare_domain_error_shape() {
+        let domain = json!({"code": "note_not_found", "message": "gone", "retryable": false});
+        let from_envelope =
+            item_error_value(&crate::mcp::protocol::tool_structured_error(domain.clone()));
+        assert_eq!(from_envelope, domain);
+        assert_eq!(
+            from_envelope,
+            failure_to_error_value(JsonRpcFailure::not_found(domain.to_string())),
+        );
+
+        let plain_text = item_error_value(&crate::mcp::protocol::tool_error("no payload".into()));
+        assert_eq!(plain_text, json!({"message": "no payload"}));
     }
 
     #[test]
