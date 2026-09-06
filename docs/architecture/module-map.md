@@ -843,6 +843,7 @@ watching, and application startup.
 - `src/vault/write.rs`
 - `src/vault/write/assets.rs`
 - `src/vault/write/attachments.rs`
+- `src/vault/write/frontmatter.rs`
 - `src/vault/write/fs_ops.rs`
 - `src/vault/write/notes.rs`
 - `src/vault/write/paths.rs`
@@ -854,6 +855,9 @@ watching, and application startup.
 `src/vault.rs`, including note CRUD-by-move, section/edit primitives,
 shallow frontmatter merge (`update_note_frontmatter`), attachment
 operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
+`frontmatter.rs` is internal to the layer: `edit_frontmatter_block` is a plain
+`pub(super)` function, deliberately not a trait or an extension point
+(ADR-13), and its second caller will be the vault-wide tag rename (#242).
 
 **Consumed dependencies:** vault index/types, the local filesystem, and
 `cache::parse` for content hashing, frontmatter span parsing, and the shared
@@ -876,6 +880,19 @@ write API/types, and configuration for archive or upload limits.
 
 - All HTTP and MCP mutations use this shared layer (ADR-03).
 - Optimistic concurrency uses the expected content hash.
+- A write that names part of a note edits that part and leaves every other byte
+  alone (ADR-22). `update_note_frontmatter` rewrites only the lines its named
+  keys own, so key order, one-line versus block lists, indentation, quoting,
+  comments, and blank lines survive untouched; a replaced value inherits the
+  shape its author used, and a new key is appended with any list on one line.
+  A named key that cannot be located and replaced unambiguously refuses the
+  whole call by name. The edited block is then reparsed and compared against the
+  intended merge before anything reaches disk, which is the backstop for a block
+  the key scanner reads differently from a YAML parser, an indented top-level
+  mapping being the example, and the one case where an unnamed key can refuse a
+  call (#257). Whole-content writes
+  (`update_note`) keep their line-ending and trailing-newline normalisation;
+  ADR-22 constrains partial writes only.
 - Delete is recoverable trash; archive is move-based (ADR-11).
 - A rewritten backlink keeps the form its author wrote, and a link that
   resolved before a move still resolves after it: the bare-title form is used

@@ -2843,9 +2843,11 @@ mod tests {
         let content =
             std::fs::read_to_string(registered_vault_path(&state).join("Home.md")).expect("read");
         assert!(content.starts_with("---\n"), "block created: {content:?}");
+        // Both keys are new, so both are appended, and the list is written on
+        // one line (ADR-22).
         assert_eq!(
             content,
-            "---\nstatus: active\ntags:\n- one\n- two\n---\n# Home\nalpha token\n[[Plan]]"
+            "---\nstatus: active\ntags: [one, two]\n---\n# Home\nalpha token\n[[Plan]]"
         );
         let new_hash = updated["result"]["structuredContent"]["content_hash"]
             .as_str()

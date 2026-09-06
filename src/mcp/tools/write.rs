@@ -666,7 +666,7 @@ pub(super) fn write_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "update_frontmatter",
-            "description": "Shallow top-level YAML merge into an existing note's frontmatter, leaving the body untouched. An explicit null value deletes a key; keys not mentioned survive; nested mappings replace wholesale (shallow semantics). A note with no frontmatter block gets one created. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
+            "description": "Shallow top-level YAML merge into an existing note's frontmatter. Only the keys you name change: every other byte of the block keeps the author's formatting - key order, one-line versus multi-line lists, indentation, quoting, comments - and the body is untouched. An explicit null value deletes a key; nested mappings replace wholesale (shallow semantics). A replaced list keeps the shape it had; a brand-new key is appended at the end of the block, with a list on one line. The whole call is refused, writing nothing, when a key you named cannot be edited unambiguously - a key written twice in the same block being the case that occurs in practice. A note with no frontmatter block gets one created. Requires expected_content_hash from get_note, or from get_frontmatter when the body is not needed.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
