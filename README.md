@@ -468,7 +468,8 @@ npm test
 npm run build
 ```
 
-Build and publish the Docker image:
+Build and publish the Docker image (requires BuildKit; see
+[container build targets and Cargo caching](docs/development/container-builds.md)):
 
 ```bash
 docker build -t battermanz/hatchdoor:latest .
