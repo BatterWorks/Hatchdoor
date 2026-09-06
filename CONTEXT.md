@@ -78,3 +78,19 @@ _Avoid_: Reindex, rebuild, refresh (when meant instance-wide)
 **Git turn**:
 One unit of background Git work for exactly one vault, requested through the same work coordinator by the managed-Git scheduler, a manual sync or retry, or activation, and run under that vault's mutation lock. The vault source and Git mode select the operation: acquire or reuse and synchronise a managed checkout, synchronise an existing checkout with its remote, or commit local history.
 _Avoid_: Sync task, git sync, debounce (when meant instance-wide)
+
+**Note property**:
+A labelled fact in one note's frontmatter, such as a price or a renewal date. Distinct from the frontmatter block itself, which is where properties live; a query tests properties, not the block.
+_Avoid_: Field, attribute, metadata
+
+**Query**:
+A request for the notes whose properties, tags, or path satisfy stated conditions. A query selects: a note either qualifies or it does not, and the notes come back in a stable order. Distinct from a search, which finds notes by meaning and ranks them by how well they match.
+_Avoid_: Search, filter, lookup
+
+**Saved query**:
+A query stored inside a note rather than supplied by a caller, evaluated against that note's own vault each time the note is read. Its meaning does not vary by caller or by scope, which is the reason it exists.
+_Avoid_: Base, view, aggregator note, dashboard
+
+**Query result**:
+The notes a query selects, projected as rows carrying the properties the query asked for. Derived state: recomputed on demand and never written into a note. A saved query's result is not vault content, so it is absent from search, backlinks, statistics, and the graph.
+_Avoid_: Computed content, rendered note
