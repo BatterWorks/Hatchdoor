@@ -799,7 +799,9 @@ is shared with the read core's contained-resource seam
 route or the MCP `get_attachment` tool would refuse.
 
 **Consumed dependencies:** filesystem traversal and parsing; `cache::parse`
-currently supplies content hashing to the index.
+currently supplies content hashing to the index and, since #248, the shared
+Markdown code-region scanner (`for_non_code_line`) the link reader uses to skip
+fenced code blocks and inline code spans.
 
 **Consumers:** cache population, handlers, MCP reads, write coordination,
 watching, and application startup.
@@ -837,7 +839,10 @@ watching, and application startup.
 shallow frontmatter merge (`update_note_frontmatter`), attachment
 operations, allowed attachment extensions, `WriteOutcome`, and `WriteError`.
 
-**Consumed dependencies:** vault index/types and the local filesystem.
+**Consumed dependencies:** vault index/types, the local filesystem, and
+`cache::parse` for content hashing, frontmatter span parsing, and the shared
+Markdown code-region scanner (`for_non_code_line`, `parse_fence_marker`) that
+keeps every rewriter's idea of a code block identical to the indexer's.
 
 **Consumers:** the Vault-qualified mutation core (`src/vault_mutation.rs`),
 which since #186 is the sole caller of every write primitive. The one
@@ -1275,7 +1280,19 @@ to answer that verdict under one acquisition with the publication it labels
 (issue #223). `parse` is currently public and
 also supplies parsing/hash behavior to vault indexing, and its
 `frontmatter_span`/`parse_frontmatter_metadata` parsing to the shared write
-layer's frontmatter merge. The crate-private
+layer's frontmatter merge. It is also the single home of the Markdown
+code-region scanner: the crate-private `for_non_code_line`, which walks the
+lines Markdown renders as prose, and `parse_fence_marker`, which recognizes a
+fence delimiter. The Vault link reader and the asset-reference rewriter consume
+`for_non_code_line`; the backlink, section, and asset-reference rewriters
+consume `parse_fence_marker` for their own line-rebuilding loops, which must
+preserve line endings and so cannot use the visiting form. It lives here
+because tag extraction, link extraction, and rewriting have to agree on what
+counts as code: an indexer that reads a hashtag inside a fenced block as a tag
+while a rewrite refuses to touch it makes a Vault-wide tag rename look
+half-applied (#248, unblocking #242). The copies merged here were behaviorally
+identical, so consolidating them changed nothing; the point is that the next
+correction lands in one place instead of three. The crate-private
 `is_recognized_legacy_cache` inspection seam owns the supported legacy schema
 fingerprint and opens existing files read-only for the one-time migration.
 `ReadSnapshot` is the crate-private pinned-read seam used where participant

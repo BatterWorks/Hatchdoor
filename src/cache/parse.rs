@@ -210,37 +210,130 @@ fn extract_frontmatter_tags(frontmatter: &str, tags: &mut HashSet<String>) {
     }
 }
 
-fn push_tag(raw: &str, tags: &mut HashSet<String>) {
-    let cleaned: String = raw
-        .chars()
+/// The leading run of tag characters in `raw` — the text that actually gets
+/// stored as a tag. Everything from the first character outside the tag
+/// charset onwards is dropped.
+fn tag_candidate(raw: &str) -> String {
+    raw.chars()
         .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '-' | '_' | '/'))
-        .collect();
+        .collect()
+}
+
+fn push_tag(raw: &str, tags: &mut HashSet<String>) {
+    let cleaned = tag_candidate(raw);
     if !cleaned.is_empty() {
         tags.insert(cleaned.to_lowercase());
     }
 }
 
 fn extract_inline_tags(body: &str, tags: &mut HashSet<String>) {
-    for token in body.split_whitespace() {
-        let token = token.trim_matches(|ch: char| {
-            matches!(
-                ch,
-                ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}'
-            )
-        });
-        let Some(tag) = token.strip_prefix('#') else {
-            continue;
-        };
-        if tag.is_empty() || tag.starts_with('#') || tag.chars().all(|ch| ch == '-') {
+    for_non_code_line(body, |line| {
+        for token in line.split_whitespace() {
+            let token = token.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    ',' | '.' | ';' | ':' | '!' | '?' | ')' | '(' | '[' | ']' | '{' | '}'
+                )
+            });
+            let Some(tag) = token.strip_prefix('#') else {
+                continue;
+            };
+            // The namespace check has to run against the candidate that will be
+            // stored, not the raw whitespace token. A citation written as
+            // `#1177](https://example.com/x/1177)` is one token whose slash comes
+            // from the URL, and truncation drops it again before the tag is
+            // inserted — so the two used to disagree and a bare number got
+            // indexed (issue #248).
+            let candidate = tag_candidate(tag);
+            // Inline tags must be namespaced (e.g. #area/health), not free-form words or bare numbers.
+            let slash = candidate.find('/');
+            if !slash.is_some_and(|pos| pos > 0 && pos < candidate.len() - 1) {
+                continue;
+            }
+            tags.insert(candidate.to_lowercase());
+        }
+    });
+}
+
+/// Visit every line of `content` that Markdown renders as prose: fenced code
+/// blocks are skipped whole and inline code spans are blanked out of the lines
+/// that survive.
+///
+/// Shared with the Vault link reader and the asset-reference rewriter so that
+/// what the index treats as prose and what a rewrite is willing to edit cannot
+/// drift apart.
+pub(crate) fn for_non_code_line<F>(content: &str, mut visit: F)
+where
+    F: FnMut(&str),
+{
+    let mut fenced_marker: Option<(u8, usize)> = None;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if let Some((marker, min_len)) = fenced_marker {
+            if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
+                && close_marker == marker
+                && close_len >= min_len
+            {
+                fenced_marker = None;
+            }
             continue;
         }
-        // Inline tags must be namespaced (e.g. #area/health), not free-form words or bare numbers.
-        let slash = tag.find('/');
-        if !slash.is_some_and(|pos| pos > 0 && pos < tag.len() - 1) {
+        if let Some(marker) = parse_fence_marker(trimmed) {
+            fenced_marker = Some(marker);
             continue;
         }
-        push_tag(tag, tags);
+        let no_inline_code = strip_inline_code_segments(line);
+        visit(&no_inline_code);
     }
+}
+
+/// `line` with every inline code span removed, backticks included.
+fn strip_inline_code_segments(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut idx = 0usize;
+    let mut inline_marker_len = 0usize;
+    while idx < chars.len() {
+        if chars[idx] == '`' {
+            let mut marker_len = 1usize;
+            while idx + marker_len < chars.len() && chars[idx + marker_len] == '`' {
+                marker_len += 1;
+            }
+            if inline_marker_len == 0 {
+                inline_marker_len = marker_len;
+            } else if marker_len == inline_marker_len {
+                inline_marker_len = 0;
+            }
+            idx += marker_len;
+            continue;
+        }
+        if inline_marker_len == 0 {
+            out.push(chars[idx]);
+        }
+        idx += 1;
+    }
+    out
+}
+
+/// The fence character and its run length when `trimmed_line` opens or closes a
+/// fenced code block, otherwise `None`.
+pub(crate) fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
+    let bytes = trimmed_line.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let marker = bytes[0];
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+
+    let mut len = 1usize;
+    while len < bytes.len() && bytes[len] == marker {
+        len += 1;
+    }
+
+    if len >= 3 { Some((marker, len)) } else { None }
 }
 
 pub fn build_fts_query(input: &str) -> Option<String> {
@@ -375,6 +468,49 @@ mod tests {
         assert!(!tags.contains("freeform"), "free-form inline tag rejected");
         assert!(!tags.contains("1"), "numeric inline tag rejected");
         assert!(!tags.contains("0599"), "numeric inline tag rejected");
+    }
+
+    #[test]
+    fn markdown_link_citation_numbers_are_not_inline_tags() {
+        // `#1177](https://.../1177)` is one whitespace token, so the slash that
+        // used to satisfy the namespace check came from the URL and was then
+        // truncated away before the tag was stored (issue #248).
+        let content = concat!(
+            "See [ebusd discussion #1177](https://github.com/john30/ebusd/discussions/1177)\n",
+            "and [thread #25433](https://example.com/t/25433) for details.\n",
+        );
+        let tags = extract_tags(content);
+        assert!(!tags.contains("1177"), "citation number rejected");
+        assert!(!tags.contains("25433"), "citation number rejected");
+        assert!(tags.is_empty(), "no tag at all from citations: {tags:?}");
+    }
+
+    #[test]
+    fn hashtags_inside_fenced_blocks_and_inline_code_are_not_tags() {
+        let content = concat!(
+            "Real #area/health in prose.\n",
+            "\n",
+            "```markdown\n",
+            "#fenced/tag\n",
+            "```\n",
+            "\n",
+            "~~~\n",
+            "#tilde/tag\n",
+            "~~~\n",
+            "\n",
+            "Documented as `#inline/tag` in a code span.\n",
+        );
+        let tags = extract_tags(content);
+        assert!(tags.contains("area/health"), "prose tag still indexed");
+        assert!(!tags.contains("fenced/tag"), "backtick-fenced tag skipped");
+        assert!(!tags.contains("tilde/tag"), "tilde-fenced tag skipped");
+        assert!(!tags.contains("inline/tag"), "inline code span skipped");
+    }
+
+    #[test]
+    fn multi_segment_inline_tags_are_still_accepted() {
+        let tags = extract_tags("nested #a/b/c here");
+        assert!(tags.contains("a/b/c"), "multi-segment inline tag accepted");
     }
 
     #[test]

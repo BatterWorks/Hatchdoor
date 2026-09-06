@@ -2,6 +2,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::cache::parse::parse_fence_marker;
 use crate::vault::paths::{normalize_link_target, normalize_title};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
@@ -197,19 +198,6 @@ where
     }
     let suffix = &body[target_end..];
     transform_target(target).map(|new_target| format!("{new_target}{suffix}"))
-}
-
-pub(super) fn parse_fence_marker(trimmed_line: &str) -> Option<(u8, usize)> {
-    let bytes = trimmed_line.as_bytes();
-    let marker = *bytes.first()?;
-    if marker != b'`' && marker != b'~' {
-        return None;
-    }
-    let mut len = 1usize;
-    while len < bytes.len() && bytes[len] == marker {
-        len += 1;
-    }
-    if len >= 3 { Some((marker, len)) } else { None }
 }
 
 pub(super) fn merge_rewrites(left: Vec<TextRewrite>, right: Vec<TextRewrite>) -> Vec<TextRewrite> {
