@@ -3369,7 +3369,13 @@ envelope/participant shapes.
 These paths are outside the runtime module catalog and require separate work
 packet scope:
 
-- `Dockerfile` and `docker-compose.yml`: packaging/deployment.
+- `Dockerfile` and `docker-compose.yml`: packaging/deployment. The Dockerfile's
+  default target produces the rootless runtime image; `verification` runs the
+  default-feature locked Rust suite. BuildKit Cargo cache mounts and optional
+  Cargo build controls are documented in `docs/development/container-builds.md`.
+  Consumers are local Docker builders and external CI; no provider-specific
+  configuration belongs in this contract. Validate cold/warm verification,
+  source/dependency invalidation, and the final image's platform/healthcheck.
 - `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`: Rust build and dependency
   coordination.
 - `frontend/package.json`, lockfile, TypeScript/Vite/ESLint configuration:
