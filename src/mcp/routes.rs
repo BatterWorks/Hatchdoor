@@ -655,7 +655,12 @@ mod tests {
         };
         if matches!(
             name,
-            "search_notes" | "get_tree" | "get_stats" | "get_graph" | "recently_modified"
+            "search_notes"
+                | "get_tree"
+                | "get_stats"
+                | "get_graph"
+                | "recently_modified"
+                | "query_notes"
         ) {
             arguments["scope"] = json!(vault_id);
         } else if !matches!(
@@ -915,6 +920,7 @@ mod tests {
                 "list_note_attachments",
                 "get_attachment",
                 "get_attachment_import_config",
+                "query_notes",
                 "recently_modified",
                 "batch",
             ]
@@ -1411,6 +1417,31 @@ mod tests {
             "POST",
             [("content-type", "application/json".into())].to_vec(),
             Some(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}).to_string()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// `query_notes` is refused with MCP off the way every other read tool is:
+    /// by the endpoint itself, with no per-tool gate of its own to drift.
+    #[tokio::test]
+    async fn disabled_mcp_refuses_a_query_notes_call() {
+        let (state, _tmp) = layered_test_state();
+        state
+            .runtime_config
+            .save([("HATCHDOOR_MCP_ENABLED".to_string(), "false".to_string())])
+            .expect("disable MCP");
+        let response = send(
+            transport(&state),
+            "POST",
+            [("content-type", "application/json".into())].to_vec(),
+            Some(
+                json!({
+                    "jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"query_notes","arguments":{"scope":"all","conditions":[{"type":"tag","tag":"topic"}]}}
+                })
+                .to_string(),
+            ),
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -2143,11 +2174,64 @@ mod tests {
         assert!(content["participants"].is_array());
     }
 
+    /// `query_notes` came back in #274 with an explicit scope, so the argument
+    /// shape the pre-multi-Vault tool accepted stays refused: a client still
+    /// sending the old scope-less call gets an argument error, not a silent
+    /// whole-collection answer.
     #[tokio::test]
-    async fn retired_scope_less_query_notes_is_unreachable() {
+    async fn query_notes_refuses_the_retired_scope_less_arguments() {
         let (state, _tmp) = layered_test_state();
-        let body = call_tool(&state, "query_notes", json!({})).await;
+        let body = call_tool_unscoped(&state, "query_notes", json!({})).await;
         assert_eq!(body["error"]["code"], -32602);
+
+        let filters = call_tool(
+            &state,
+            "query_notes",
+            json!({"filters": {"tags": ["topic/x"]}}),
+        )
+        .await;
+        assert_eq!(filters["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn query_notes_selects_by_tag_inside_the_shared_collection_envelope() {
+        let (state, _tmp) = layered_test_state();
+        let body = call_tool(
+            &state,
+            "query_notes",
+            json!({"conditions": [{"type": "tag", "tag": "topic"}]}),
+        )
+        .await;
+        let content = &body["result"]["structuredContent"];
+        assert!(content.get("scope").is_some(), "{body:#}");
+        assert!(content.get("collection_revision").is_some());
+        assert!(content["participants"].is_array());
+        assert_eq!(content["data"]["truncated"], false);
+
+        let paths: Vec<&str> = content["data"]["notes"]
+            .as_array()
+            .expect("notes array")
+            .iter()
+            .map(|note| note["relative_path"].as_str().expect("relative_path"))
+            .collect();
+        // Ordered by path, and a demoted Note is selectable like any other:
+        // a query reads the same structural rows the explorer does.
+        assert_eq!(paths, vec!["sources/Clip", "wiki/Page"]);
+    }
+
+    #[tokio::test]
+    async fn query_notes_refuses_an_unanswerable_query_as_a_structured_error() {
+        let (state, _tmp) = layered_test_state();
+        for arguments in [
+            json!({"conditions": []}),
+            json!({"conditions": [{"type": "property", "name": "status", "operator": "lt"}]}),
+        ] {
+            let body = call_tool(&state, "query_notes", arguments).await;
+            assert_eq!(
+                body["result"]["structuredContent"]["code"], "invalid_query",
+                "{body:#}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2220,8 +2304,17 @@ mod tests {
 
         // A malformed `scope` is the core's own structured refusal, on every
         // collection read.
-        for name in ["get_tree", "get_stats", "get_graph", "recently_modified"] {
-            let body = call_tool_unscoped(&state, name, json!({"scope": "not-a-scope"})).await;
+        for (name, arguments) in [
+            ("get_tree", json!({"scope": "not-a-scope"})),
+            ("get_stats", json!({"scope": "not-a-scope"})),
+            ("get_graph", json!({"scope": "not-a-scope"})),
+            ("recently_modified", json!({"scope": "not-a-scope"})),
+            (
+                "query_notes",
+                json!({"scope": "not-a-scope", "conditions": [{"type": "tag", "tag": "topic"}]}),
+            ),
+        ] {
+            let body = call_tool_unscoped(&state, name, arguments).await;
             assert_eq!(
                 body["result"]["structuredContent"]["code"], "invalid_scope",
                 "{name}: {body:#}"

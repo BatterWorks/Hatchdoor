@@ -16,8 +16,10 @@ use crate::vault_registry::VaultId;
 use crate::vault_runtime::{VaultCapabilities, VaultCollectionRuntime};
 
 mod assets;
+mod query;
 
 pub(crate) use assets::{AssetPathError, AssetReadError, ResolvedAsset, asset_download_path};
+pub use query::{NoteQuery, NoteQueryCondition, NoteQueryResponse, NoteQueryRow, PropertyOperator};
 
 /// An explicit collection read target. There is deliberately no selected,
 /// default, or sole-Vault variant.
@@ -163,6 +165,7 @@ impl VaultReadError {
             | "vault_scan_config_invalid"
             | "vault_read_unavailable"
             | "invalid_scope"
+            | "invalid_query"
             | "invalid_search_query"
             | "invalid_layer_selection"
             | "folder_not_found"
@@ -871,6 +874,40 @@ impl<'a> VaultReadCore<'a> {
             partial: projection.partial,
             participants: projection.participants,
             data: notes,
+        })
+    }
+
+    /// The Notes in scope whose tags, path, and frontmatter properties satisfy
+    /// every stated condition.
+    ///
+    /// This selects; it does not rank. Nothing here reaches the retrieval path:
+    /// conditions are tested against the published snapshot's structural rows,
+    /// so a Vault whose generation carries no vectors answers in full and no
+    /// score exists to order by. Ordering, the limit, and the truncation flag
+    /// are applied once across every participating Vault rather than per Vault,
+    /// so which rows survive a `limit` cannot depend on where a Note lives.
+    ///
+    /// The query is compiled — validated and normalised — before any Vault is
+    /// resolved, so a malformed one is refused identically at every scope.
+    pub fn query_notes(
+        &self,
+        scope: VaultScope,
+        request: &NoteQuery,
+    ) -> Result<VaultReadProjection<NoteQueryResponse>, VaultReadError> {
+        let compiled = query::CompiledQuery::compile(request)?;
+        let projection = self.collection(scope, |vault_id, _vault_name, snapshot| {
+            compiled.rows_for(vault_id, &snapshot.notes)
+        })?;
+        let mut notes = projection.data.into_iter().flatten().collect::<Vec<_>>();
+        query::sort_rows(&mut notes);
+        let truncated = notes.len() > compiled.limit;
+        notes.truncate(compiled.limit);
+        Ok(VaultReadProjection {
+            scope: projection.scope,
+            collection_revision: projection.collection_revision,
+            partial: projection.partial,
+            participants: projection.participants,
+            data: NoteQueryResponse { notes, truncated },
         })
     }
 
@@ -1932,8 +1969,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        TreeScope, VaultExplorerFolder, VaultParticipantState, VaultReadCore, VaultScope,
-        clamp_tree_max_depth,
+        NoteQuery, NoteQueryCondition, PropertyOperator, TreeScope, VaultExplorerFolder,
+        VaultParticipantState, VaultReadCore, VaultScope, clamp_tree_max_depth,
     };
     use crate::cache::SqliteCache;
     use crate::embed::StubEmbedder;
@@ -2014,6 +2051,435 @@ mod tests {
             let path = root.join(path);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
             std::fs::write(path, contents).expect("write note");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Selecting Notes by tag, path and frontmatter property (#274)
+    // -----------------------------------------------------------------------
+
+    /// The Vault #19's four queries were written against: two device notes, a
+    /// hobby note, a reference clipping, and one Note with no frontmatter at
+    /// all, so "the property is absent" has something to select.
+    const PROPERTY_VAULT: &[(&str, &str)] = &[
+        (
+            "hobbies/Selfhosting.md",
+            "---\ntags: [space/hobby/selfhosting]\nstatus: active\n---\n# Selfhosting",
+        ),
+        (
+            "devices/Router.md",
+            "---\ntags: [type/device-note, space/hobby/selfhosting/network, action/review]\nfor: [reference, archive]\nreview-date: 2026-08-01\nport-count: 8\n---\n# Router",
+        ),
+        (
+            "devices/Switch.md",
+            "---\ntags: [type/device-note, action/review]\nreview-date: 2026-12-01\nport-count: 24.0\nstatus: \"\"\n---\n# Switch",
+        ),
+        (
+            "devices-archive/Hub.md",
+            "---\ntags: [type/device-note]\nstatus: retired\n---\n# Hub",
+        ),
+        (
+            "inbox/Clip.md",
+            "---\ntags: [for/reference]\naliases: [Clipping]\nstatus:\n---\n# Clip",
+        ),
+        ("inbox/Plain.md", "# Plain\n\nno frontmatter at all"),
+    ];
+
+    fn tag_condition(tag: &str) -> NoteQueryCondition {
+        NoteQueryCondition::Tag {
+            tag: tag.to_string(),
+        }
+    }
+
+    fn property_condition(
+        name: &str,
+        operator: PropertyOperator,
+        value: Option<serde_json::Value>,
+    ) -> NoteQueryCondition {
+        NoteQueryCondition::Property {
+            name: name.to_string(),
+            operator,
+            value,
+        }
+    }
+
+    fn query(conditions: Vec<NoteQueryCondition>) -> NoteQuery {
+        NoteQuery {
+            conditions,
+            properties: Vec::new(),
+            limit: None,
+        }
+    }
+
+    /// The selected Notes' paths, which are also their identity in every
+    /// assertion below: the fixture gives each Note a distinct path.
+    fn selected(reads: &VaultReadCore<'_>, scope: VaultScope, request: &NoteQuery) -> Vec<String> {
+        reads
+            .query_notes(scope, request)
+            .expect("query")
+            .data
+            .notes
+            .into_iter()
+            .map(|note| note.relative_path)
+            .collect()
+    }
+
+    #[test]
+    fn every_query_named_in_issue_19_answers_against_a_fixture_vault() {
+        let workspace = workspace(&[("Reference", PROPERTY_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let scope = VaultScope::One(workspace.vault_ids[0]);
+
+        // "Find all notes tagged space/hobby/selfhosting" — including the Note
+        // that only carries a tag nested under it.
+        assert_eq!(
+            selected(
+                &reads,
+                scope,
+                &query(vec![tag_condition("space/hobby/selfhosting")])
+            ),
+            vec!["devices/Router", "hobbies/Selfhosting"]
+        );
+
+        // "List all type/device-note notes".
+        assert_eq!(
+            selected(
+                &reads,
+                scope,
+                &query(vec![tag_condition("type/device-note")])
+            ),
+            vec!["devices-archive/Hub", "devices/Router", "devices/Switch"]
+        );
+
+        // "Show notes with action/review and review-date before today".
+        assert_eq!(
+            selected(
+                &reads,
+                scope,
+                &query(vec![
+                    tag_condition("action/review"),
+                    property_condition(
+                        "review-date",
+                        PropertyOperator::Lt,
+                        Some(serde_json::json!("2026-09-06")),
+                    ),
+                ]),
+            ),
+            vec!["devices/Router"]
+        );
+
+        // "Search only within notes where for/reference is present".
+        assert_eq!(
+            selected(&reads, scope, &query(vec![tag_condition("for/reference")])),
+            vec!["inbox/Clip"]
+        );
+    }
+
+    #[test]
+    fn a_path_prefix_selects_a_folder_and_never_its_namesake() {
+        let workspace = workspace(&[("Reference", PROPERTY_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let scope = VaultScope::One(workspace.vault_ids[0]);
+
+        assert_eq!(
+            selected(
+                &reads,
+                scope,
+                &query(vec![NoteQueryCondition::PathPrefix {
+                    prefix: "devices".to_string(),
+                }]),
+            ),
+            vec!["devices/Router", "devices/Switch"]
+        );
+        // Case and surrounding slashes are noise, but `devices-archive` is a
+        // different folder and stays out.
+        assert_eq!(
+            selected(
+                &reads,
+                scope,
+                &query(vec![NoteQueryCondition::PathPrefix {
+                    prefix: "/DEVICES/".to_string(),
+                }]),
+            ),
+            vec!["devices/Router", "devices/Switch"]
+        );
+    }
+
+    #[test]
+    fn property_conditions_cover_equality_ordering_existence_and_emptiness() {
+        let workspace = workspace(&[("Reference", PROPERTY_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let scope = VaultScope::One(workspace.vault_ids[0]);
+        let select = |condition| selected(&reads, scope, &query(vec![condition]));
+
+        assert_eq!(
+            select(property_condition(
+                "status",
+                PropertyOperator::Eq,
+                Some(serde_json::json!("active")),
+            )),
+            vec!["hobbies/Selfhosting"]
+        );
+        // A multi-value property is equal to a value the list contains.
+        assert_eq!(
+            select(property_condition(
+                "for",
+                PropertyOperator::Eq,
+                Some(serde_json::json!("reference")),
+            )),
+            vec!["devices/Router"]
+        );
+        // 24.0 and 24 are the same number however the author spelled it.
+        assert_eq!(
+            select(property_condition(
+                "port-count",
+                PropertyOperator::Gte,
+                Some(serde_json::json!(24)),
+            )),
+            vec!["devices/Switch"]
+        );
+        assert_eq!(
+            select(property_condition(
+                "review-date",
+                PropertyOperator::Exists,
+                None
+            )),
+            vec!["devices/Router", "devices/Switch"]
+        );
+        // Blank and bare `status:` are empty; `retired` and `active` are not.
+        assert_eq!(
+            select(property_condition("status", PropertyOperator::Empty, None)),
+            vec!["devices/Switch", "inbox/Clip"]
+        );
+        assert_eq!(
+            select(property_condition(
+                "status",
+                PropertyOperator::NotEmpty,
+                None
+            )),
+            vec!["devices-archive/Hub", "hobbies/Selfhosting"]
+        );
+        // Only `missing` selects a Note that never mentions the property, and
+        // it selects every such Note including the one with no frontmatter.
+        assert_eq!(
+            select(property_condition(
+                "status",
+                PropertyOperator::Missing,
+                None
+            )),
+            vec!["devices/Router", "inbox/Plain"]
+        );
+        assert_eq!(
+            select(property_condition(
+                "status",
+                PropertyOperator::Ne,
+                Some(serde_json::json!("active")),
+            )),
+            vec!["devices-archive/Hub", "devices/Switch", "inbox/Clip"]
+        );
+    }
+
+    #[test]
+    fn a_query_projects_only_the_properties_it_asked_for() {
+        let workspace = workspace(&[("Reference", PROPERTY_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let scope = VaultScope::One(workspace.vault_ids[0]);
+
+        let rows = reads
+            .query_notes(
+                scope,
+                &NoteQuery {
+                    conditions: vec![tag_condition("for/reference")],
+                    properties: vec![
+                        "status".to_string(),
+                        "review-date".to_string(),
+                        "tags".to_string(),
+                        "aliases".to_string(),
+                    ],
+                    limit: None,
+                },
+            )
+            .expect("query")
+            .data
+            .notes;
+
+        assert_eq!(rows.len(), 1);
+        let projected = &rows[0].properties;
+        // `status:` is present and null, so it is projected as null; the
+        // property this Note does not carry is simply absent, so the two stay
+        // distinguishable.
+        assert_eq!(projected.get("status"), Some(&serde_json::Value::Null));
+        assert!(!projected.contains_key("review-date"));
+        // The parser lifts tags and aliases out of the property map, so both
+        // are projected from their parsed lists rather than silently missing.
+        assert_eq!(
+            projected.get("tags"),
+            Some(&serde_json::json!(["for/reference"]))
+        );
+        assert_eq!(
+            projected.get("aliases"),
+            Some(&serde_json::json!(["Clipping"]))
+        );
+    }
+
+    #[test]
+    fn an_all_scope_query_is_vault_qualified_stably_ordered_and_reports_truncation() {
+        let workspace = workspace(&[
+            (
+                "First",
+                &[("shared/Note.md", "---\ntags: [topic]\n---\n# A")],
+            ),
+            (
+                "Second",
+                &[
+                    ("shared/Note.md", "---\ntags: [topic]\n---\n# B"),
+                    ("zeta/Later.md", "---\ntags: [topic]\n---\n# C"),
+                ],
+            ),
+        ]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let request = query(vec![tag_condition("topic")]);
+
+        let projection = reads
+            .query_notes(VaultScope::All, &request)
+            .expect("all-scope query");
+        assert!(!projection.partial);
+        assert_eq!(projection.participants.len(), 2);
+        assert!(!projection.data.truncated);
+
+        // Equal paths in different Vaults are separate rows, each carrying its
+        // own Vault, ordered by path then Vault. Two identical calls agree.
+        let rows: Vec<(String, VaultId)> = projection
+            .data
+            .notes
+            .iter()
+            .map(|note| (note.relative_path.clone(), note.vault_id))
+            .collect();
+        let mut expected = [
+            ("shared/Note".to_string(), workspace.vault_ids[0]),
+            ("shared/Note".to_string(), workspace.vault_ids[1]),
+        ];
+        expected.sort_by_key(|entry| entry.1);
+        assert_eq!(&rows[..2], &expected[..]);
+        assert_eq!(rows[2].0, "zeta/Later");
+        assert_eq!(
+            reads
+                .query_notes(VaultScope::All, &request)
+                .expect("repeat")
+                .data
+                .notes,
+            projection.data.notes
+        );
+
+        // The limit is applied once across the collection, after ordering, and
+        // says so rather than letting a full page read as a complete answer.
+        let capped = reads
+            .query_notes(
+                VaultScope::All,
+                &NoteQuery {
+                    limit: Some(2),
+                    ..request.clone()
+                },
+            )
+            .expect("capped query");
+        assert!(capped.data.truncated);
+        assert_eq!(capped.data.notes.len(), 2);
+        assert_eq!(
+            capped.data.notes,
+            projection.data.notes[..2].to_vec(),
+            "a limit keeps the first rows of the same order"
+        );
+    }
+
+    #[test]
+    fn one_unavailable_vault_leaves_the_rest_answering_inside_the_shared_envelope() {
+        let workspace = workspace(&[
+            ("First", &[("Home.md", "---\ntags: [topic]\n---\n# Home")]),
+            ("Second", &[("Home.md", "---\ntags: [topic]\n---\n# Home")]),
+        ]);
+        let second = workspace.vault_ids[1];
+        workspace
+            .cache
+            .disconnect_vault_snapshot(second)
+            .expect("remove second snapshot");
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+
+        let projection = reads
+            .query_notes(VaultScope::All, &query(vec![tag_condition("topic")]))
+            .expect("partial aggregate");
+        assert!(projection.partial);
+        assert_eq!(projection.data.notes.len(), 1);
+        assert_eq!(projection.data.notes[0].vault_id, workspace.vault_ids[0]);
+        assert!(projection.participants.iter().any(|participant| {
+            participant.vault_id == second
+                && participant.state == VaultParticipantState::Unavailable
+        }));
+
+        // Asked for that one Vault alone, the same non-participation is the
+        // failure itself rather than an empty selection.
+        let refused = reads
+            .query_notes(
+                VaultScope::One(second),
+                &query(vec![tag_condition("topic")]),
+            )
+            .expect_err("unavailable Vault");
+        assert_eq!(refused.code, "vault_unavailable");
+    }
+
+    #[test]
+    fn a_vault_with_no_vectors_answers_a_query_in_full() {
+        let workspace = workspace(&[("Reference", PROPERTY_VAULT)]);
+        let vault_id = workspace.vault_ids[0];
+        // Drop the searchable generation, then republish structure only — the
+        // state a Vault sits in between the two passes of an Index turn.
+        workspace
+            .cache
+            .disconnect_vault_snapshot(vault_id)
+            .expect("remove snapshot");
+        let index = VaultIndex::build(&workspace.vault_paths[0]).expect("index");
+        let published = workspace
+            .cache
+            .publish_vault_structure_snapshot(vault_id, &index, &StubEmbedder::new(384), true)
+            .expect("structure-only publish");
+        assert!(published, "the structure pass must have run");
+
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let projection = reads
+            .query_notes(
+                VaultScope::One(vault_id),
+                &query(vec![tag_condition("type/device-note")]),
+            )
+            .expect("vectorless query");
+        // No embedding is involved, so the Vault is a full, fresh participant
+        // rather than a degraded one.
+        assert!(!projection.partial);
+        assert_eq!(
+            projection.participants[0].state,
+            VaultParticipantState::Fresh
+        );
+        assert_eq!(projection.data.notes.len(), 3);
+    }
+
+    #[test]
+    fn a_malformed_query_is_refused_before_any_vault_is_resolved() {
+        let workspace = workspace(&[("Reference", PROPERTY_VAULT)]);
+        let reads = VaultReadCore::new(&workspace.cache, &workspace.vaults);
+        let missing_vault = VaultId::generate().expect("generate Vault id");
+
+        // The same refusal at every scope, including a Vault that does not
+        // exist: compiling the query happens first, so a caller debugging a
+        // malformed query is not sent chasing a Vault error instead.
+        for scope in [
+            VaultScope::All,
+            VaultScope::One(workspace.vault_ids[0]),
+            VaultScope::One(missing_vault),
+        ] {
+            let error = reads
+                .query_notes(scope, &query(Vec::new()))
+                .expect_err("refused");
+            assert_eq!(error.code, "invalid_query");
+            assert_eq!(error.vault_id, None);
+            assert!(!error.retryable);
         }
     }
 

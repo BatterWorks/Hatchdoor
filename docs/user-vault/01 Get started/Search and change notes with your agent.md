@@ -35,6 +35,7 @@ The expected agent workflow is compact:
 | Goal | Safe tool sequence |
 | --- | --- |
 | Find a note | `list_vaults` → `search_notes` |
+| Find every note with a tag, in a folder, or with a property | `list_vaults` → `query_notes` |
 | Inspect it | `get_note` |
 | Add one item under a heading | `edit_note` or `replace_section`, with the returned content hash |
 | Change its tags or other metadata | `get_frontmatter` to see what's there, then `update_frontmatter` with the content hash `get_frontmatter` returned alongside it |
