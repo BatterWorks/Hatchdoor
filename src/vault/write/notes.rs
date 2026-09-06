@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cache::parse::content_hash;
+use crate::cache::parse::{content_hash, parse_fence_marker};
 use crate::vault::paths::{slugify, strip_md_extension};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
@@ -13,7 +13,7 @@ use super::paths::{
     create_parent_dir_inside_root, normalize_note_relative_path, resolve_new_note_path,
     unique_trash_relative_path,
 };
-use super::rewrites::{backlink_rewrite_plan, merge_rewrites, parse_fence_marker};
+use super::rewrites::{backlink_rewrite_plan, merge_rewrites};
 use super::types::{AssetMove, MutationPhase, TextRewrite, WriteError, WriteOutcome};
 use crate::cache::parse::frontmatter_span;
 

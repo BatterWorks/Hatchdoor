@@ -101,6 +101,22 @@ status: current
 
 Hatchdoor parses frontmatter and can show properties (tags, aliases, and arbitrary key/value pairs) separately from the note body, without them cluttering the rendered text.
 
+## Tags
+
+A note's tags come from two places. Anything listed under `tags:` in frontmatter counts, in whatever shape you write it, including plain words and numbers.
+
+In the body, only a namespaced hashtag counts: `#area/health` and `#type/reference/draft` are tags, a bare `#todo` or `#1177` is not. The namespace requirement is what keeps ordinary prose, issue numbers, and headings out of your tag list.
+
+Hashtags inside code are never tags, so a note that documents a tag convention does not get filed under it. That covers both a fenced block and an inline span written with backticks:
+
+````markdown
+```
+#not/a-tag
+```
+
+Write it as `#not/a-tag` in your note.
+````
+
 ---
 
 Related: [[MCP tools reference]] · [[HTTP API reference]]

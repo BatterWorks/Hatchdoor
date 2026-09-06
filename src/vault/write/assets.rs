@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::cache::parse::{for_non_code_line, parse_fence_marker};
 use crate::vault::types::{NoteEntry, VaultIndex};
 
 use super::paths::{
@@ -9,7 +10,7 @@ use super::paths::{
     is_trashed_path, relative_link_target, resolve_reference_inside_root, same_existing_path,
     unique_trash_attachment_relative_path, vault_relative_dir,
 };
-use super::rewrites::{parse_fence_marker, rewrite_content_or_read};
+use super::rewrites::rewrite_content_or_read;
 use super::types::{AssetMove, TextRewrite, WriteError};
 
 pub(super) fn asset_move_plan(
@@ -378,58 +379,6 @@ where
         return body.to_string();
     };
     format!("{}{}", transform_target(&asset), &body[target_end..])
-}
-
-fn for_non_code_line<F>(content: &str, mut visit: F)
-where
-    F: FnMut(&str),
-{
-    let mut fenced_marker: Option<(u8, usize)> = None;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if let Some((marker, min_len)) = fenced_marker {
-            if let Some((close_marker, close_len)) = parse_fence_marker(trimmed)
-                && close_marker == marker
-                && close_len >= min_len
-            {
-                fenced_marker = None;
-            }
-            continue;
-        }
-        if let Some(marker) = parse_fence_marker(trimmed) {
-            fenced_marker = Some(marker);
-            continue;
-        }
-        let no_inline_code = strip_inline_code_segments(line);
-        visit(&no_inline_code);
-    }
-}
-
-fn strip_inline_code_segments(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    let mut out = String::with_capacity(line.len());
-    let mut idx = 0usize;
-    let mut inline_marker_len = 0usize;
-    while idx < chars.len() {
-        if chars[idx] == '`' {
-            let mut marker_len = 1usize;
-            while idx + marker_len < chars.len() && chars[idx + marker_len] == '`' {
-                marker_len += 1;
-            }
-            if inline_marker_len == 0 {
-                inline_marker_len = marker_len;
-            } else if marker_len == inline_marker_len {
-                inline_marker_len = 0;
-            }
-            idx += marker_len;
-            continue;
-        }
-        if inline_marker_len == 0 {
-            out.push(chars[idx]);
-        }
-        idx += 1;
-    }
-    out
 }
 
 fn extract_markdown_assets(line: &str, assets: &mut Vec<PathBuf>) {

@@ -2380,6 +2380,61 @@ fn a_wikilink_to_a_note_whose_title_contains_a_dot_is_not_an_asset() {
 }
 
 #[test]
+fn an_asset_reference_inside_code_is_not_collected_or_rewritten_by_a_move() {
+    // Pins this rewriter to the shared Markdown code-region scanner
+    // (`cache::parse::for_non_code_line`, consolidated in #248). An embed
+    // written inside a fenced block or an inline code span is documentation of
+    // syntax, not a live reference: it must not drag a file along on a move,
+    // and its text must survive the rewrite untouched.
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("folder-x/media")).expect("media dir");
+    fs::write(root.join("folder-x/media/live.png"), BINARY_ASSET).expect("live asset");
+    fs::write(root.join("folder-x/media/fenced.png"), BINARY_ASSET).expect("fenced asset");
+    fs::write(root.join("folder-x/media/inline.png"), BINARY_ASSET).expect("inline asset");
+    let body = concat!(
+        "# B\n",
+        "![](./media/live.png)\n",
+        "\n",
+        "```markdown\n",
+        "![](./media/fenced.png)\n",
+        "```\n",
+        "\n",
+        "Write it as `![](./media/inline.png)` in your note.\n",
+    );
+    fs::write(root.join("folder-x/B.md"), body).expect("note");
+    let index = build(root);
+
+    let entry = index.find_by_slug("b").expect("b");
+    let outcome = move_or_rename_note(root, &index, entry, "folder-z/B.md", &content_hash(body))
+        .expect("move the note");
+
+    assert_eq!(outcome.moved_assets, 1, "only the live embed travels");
+    assert!(
+        root.join("folder-z/media/live.png").exists(),
+        "the live embed's file moved with the note"
+    );
+    assert!(
+        root.join("folder-x/media/fenced.png").exists(),
+        "an embed inside a fenced block is not a reference"
+    );
+    assert!(
+        root.join("folder-x/media/inline.png").exists(),
+        "an embed inside an inline code span is not a reference"
+    );
+
+    let moved = fs::read_to_string(root.join("folder-z/B.md")).expect("read moved note");
+    assert!(
+        moved.contains("![](./media/fenced.png)"),
+        "the fenced embed's text is left exactly as written: {moved}"
+    );
+    assert!(
+        moved.contains("`![](./media/inline.png)`"),
+        "the inline-code embed's text is left exactly as written: {moved}"
+    );
+}
+
+#[test]
 fn attachment_operations_refuse_a_symlink_that_leads_into_the_git_directory() {
     // Reading the path as written is not enough: a link named anything at all
     // can lead into `.git`, and only the filesystem's own view sees through it.
