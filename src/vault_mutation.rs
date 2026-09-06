@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use crate::app_state::AppState;
 use crate::cache::SqliteCache;
+use crate::git::WriteRecord;
 use crate::runtime_config::ConfigSnapshot;
 use crate::vault::{
     AttachmentOutcome, ExcludeMatcher, LayerMap, NoteEntry, SectionMode, VaultIndex, WriteError,
@@ -455,11 +456,65 @@ pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOpera
     VaultOperationError::new(code, message, Some(vault_id), retryable)
 }
 
+/// What a `vault/write` outcome must expose for its write to be recorded in
+/// the Vault's write ledger: which files it touched, and where the write
+/// landed. Two implementors, one caller ([`VaultMutation::run_write`]) — it
+/// exists so the ledger entry is built once for every mutation rather than
+/// fifteen times, and so a new mutation cannot quietly skip it.
+trait RecordedWrite {
+    /// Absolute paths this operation created, modified, or removed.
+    fn affected_paths(&self) -> &[std::path::PathBuf];
+    /// The path to record this write against, when the outcome names a
+    /// better one than the caller did — a slug is lowercased, and a create
+    /// carries the `.md` the record should not. `None` falls back to what the
+    /// caller addressed.
+    fn written_path(&self) -> Option<&str>;
+}
+
+impl RecordedWrite for WriteOutcome {
+    fn affected_paths(&self) -> &[std::path::PathBuf] {
+        &self.affected_paths
+    }
+
+    fn written_path(&self) -> Option<&str> {
+        // Always `Some` in practice, a delete included: `delete_note` reports
+        // the path the note was deleted *from*, and reports where it went
+        // separately as `trashed_path`.
+        self.relative_path.as_deref()
+    }
+}
+
+impl RecordedWrite for AttachmentOutcome {
+    fn affected_paths(&self) -> &[std::path::PathBuf] {
+        &self.affected_paths
+    }
+
+    fn written_path(&self) -> Option<&str> {
+        // A trashed attachment reports its path *inside* the trash folder,
+        // and trash is bookkeeping rather than a destination anyone chose
+        // (ADR-11), so record the path the caller deleted instead — the same
+        // path a deleted note reports. An archive, a move, and a rename all
+        // keep reporting where the file went, because there the destination
+        // is the point of the operation.
+        if self.trashed_path.is_some() {
+            return None;
+        }
+        Some(&self.attachment.relative_path)
+    }
+}
+
 /// One gated, capability-checked Vault, ready to mutate.
 pub struct VaultMutation {
     vault_id: VaultId,
     control: VaultControlBlock,
     settings: Arc<ConfigSnapshot>,
+    /// The caller's one-line description of the change, carried into the
+    /// commit message of whichever Git turn ends up recording this write
+    /// (#249). Set per operation, because that is the grain the MCP
+    /// `commit_summary` argument arrives at: one summary describes one write,
+    /// and a batch supplies a different one per item. `None` from a surface
+    /// that has no such argument, which is every HTTP write route.
+    commit_summary: Option<String>,
 }
 
 impl VaultMutation {
@@ -479,7 +534,16 @@ impl VaultMutation {
             vault_id,
             control,
             settings,
+            commit_summary: None,
         }
+    }
+
+    /// Attach the caller's summary of this change. It reaches the body of the
+    /// commit that records the write, one `- ` line per summary in the batch
+    /// that commit coalesces (`git::build_commit_message`).
+    pub fn with_commit_summary(mut self, summary: Option<String>) -> Self {
+        self.commit_summary = summary.filter(|summary| !summary.trim().is_empty());
+        self
     }
 
     /// Take this Vault's mutation lock. The guard is owned, so a caller may
@@ -520,11 +584,11 @@ impl VaultMutation {
         let catalog = self.authoritative_catalog().await?;
         let layers = catalog.layers.clone();
         let vault_path = self.control.vault_path().to_path_buf();
-        let relative_path = relative_path.to_string();
+        let target_path = relative_path.to_string();
         let content = content.to_string();
         let outcome = self
-            .run_write(move || {
-                create_note(&vault_path, &relative_path, &content, overwrite, &catalog)
+            .run_write("create", relative_path, move || {
+                create_note(&vault_path, &target_path, &content, overwrite, &catalog)
             })
             .await?;
         Ok(NoteWriteOutcome::resolve(&layers, outcome))
@@ -542,7 +606,9 @@ impl VaultMutation {
         let content = content.to_string();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || update_note(&entry, &content, &expected_content_hash))
+            .run_write("update", slug, move || {
+                update_note(&entry, &content, &expected_content_hash)
+            })
             .await?;
         Ok(NoteWriteOutcome::resolve(&index.layers, outcome))
     }
@@ -559,7 +625,9 @@ impl VaultMutation {
         let content = content.to_string();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || append_note(&entry, &content, &expected_content_hash))
+            .run_write("append", slug, move || {
+                append_note(&entry, &content, &expected_content_hash)
+            })
             .await?;
         Ok(NoteWriteOutcome::resolve(&index.layers, outcome))
     }
@@ -579,7 +647,7 @@ impl VaultMutation {
         let new_string = new_string.to_string();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || {
+            .run_write("edit", slug, move || {
                 edit_note(
                     &entry,
                     &old_string,
@@ -607,7 +675,7 @@ impl VaultMutation {
         let content = content.to_string();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || {
+            .run_write("replace section in", slug, move || {
                 replace_section(&entry, &heading, mode, &content, &expected_content_hash)
             })
             .await?;
@@ -625,7 +693,9 @@ impl VaultMutation {
         let entry = self.note_entry(&index, slug)?;
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || update_note_frontmatter(&entry, frontmatter, &expected_content_hash))
+            .run_write("update frontmatter of", slug, move || {
+                update_note_frontmatter(&entry, frontmatter, &expected_content_hash)
+            })
             .await?;
         Ok(NoteWriteOutcome::resolve(&index.layers, outcome))
     }
@@ -640,8 +710,15 @@ impl VaultMutation {
         let index = self.authoritative_index().await?;
         let entry = self.note_entry(&index, slug)?;
         let target_relative_path = renamed_note_path(&entry.relative_path, new_title);
-        self.move_entry(index, entry, target_relative_path, expected_content_hash)
-            .await
+        self.move_entry(
+            "rename",
+            slug,
+            index,
+            entry,
+            target_relative_path,
+            expected_content_hash,
+        )
+        .await
     }
 
     /// Move one note into another folder, keeping its filename. An empty
@@ -660,8 +737,15 @@ impl VaultMutation {
         } else {
             format!("{target_folder}/{}", file_name_of(&entry.relative_path))
         };
-        self.move_entry(index, entry, target_relative_path, expected_content_hash)
-            .await
+        self.move_entry(
+            "move",
+            slug,
+            index,
+            entry,
+            target_relative_path,
+            expected_content_hash,
+        )
+        .await
     }
 
     /// Move and rename one note in a single operation.
@@ -674,6 +758,8 @@ impl VaultMutation {
         let index = self.authoritative_index().await?;
         let entry = self.note_entry(&index, slug)?;
         self.move_entry(
+            "move",
+            slug,
             index,
             entry,
             target_relative_path.to_string(),
@@ -701,7 +787,7 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || {
+            .run_write("archive", slug, move || {
                 archive_note(
                     &vault_path,
                     &index,
@@ -726,7 +812,9 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || delete_note(&vault_path, &index, &entry, &expected_content_hash))
+            .run_write("delete", slug, move || {
+                delete_note(&vault_path, &index, &entry, &expected_content_hash)
+            })
             .await?;
         Ok(NoteWriteOutcome::resolve(&layers, outcome))
     }
@@ -736,6 +824,8 @@ impl VaultMutation {
     /// reduce to.
     async fn move_entry(
         &self,
+        label: &'static str,
+        addressed: &str,
         index: VaultIndex,
         entry: NoteEntry,
         target_relative_path: String,
@@ -746,7 +836,7 @@ impl VaultMutation {
         let vault_path = self.control.vault_path().to_path_buf();
         let expected_content_hash = expected_content_hash.to_string();
         let outcome = self
-            .run_write(move || {
+            .run_write(label, addressed, move || {
                 move_or_rename_note(
                     &vault_path,
                     &index,
@@ -775,15 +865,9 @@ impl VaultMutation {
         self.reject_marker_write(target_relative_path)?;
         self.reject_noise_write(target_relative_path)?;
         let vault_path = self.control.vault_path().to_path_buf();
-        let target_relative_path = target_relative_path.to_string();
-        self.run_write(move || {
-            import_attachment_bytes(
-                &vault_path,
-                &target_relative_path,
-                &bytes,
-                max_bytes,
-                overwrite,
-            )
+        let target_path = target_relative_path.to_string();
+        self.run_write("import attachment", target_relative_path, move || {
+            import_attachment_bytes(&vault_path, &target_path, &bytes, max_bytes, overwrite)
         })
         .await
     }
@@ -800,15 +884,10 @@ impl VaultMutation {
         self.reject_noise_write(target_relative_path)?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
-        let source_relative_path = source_relative_path.to_string();
-        let target_relative_path = target_relative_path.to_string();
-        self.run_write(move || {
-            move_attachment(
-                &vault_path,
-                &index,
-                &source_relative_path,
-                &target_relative_path,
-            )
+        let source_path = source_relative_path.to_string();
+        let target_path = target_relative_path.to_string();
+        self.run_write("move attachment", source_relative_path, move || {
+            move_attachment(&vault_path, &index, &source_path, &target_path)
         })
         .await
     }
@@ -825,10 +904,10 @@ impl VaultMutation {
         self.reject_noise_write(&sibling_path(source_relative_path, new_filename))?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
-        let source_relative_path = source_relative_path.to_string();
+        let source_path = source_relative_path.to_string();
         let new_filename = new_filename.to_string();
-        self.run_write(move || {
-            rename_attachment(&vault_path, &index, &source_relative_path, &new_filename)
+        self.run_write("rename attachment", source_relative_path, move || {
+            rename_attachment(&vault_path, &index, &source_path, &new_filename)
         })
         .await
     }
@@ -847,9 +926,11 @@ impl VaultMutation {
         self.reject_noise_write(source_relative_path)?;
         let index = self.authoritative_index().await?;
         let vault_path = self.control.vault_path().to_path_buf();
-        let source_relative_path = source_relative_path.to_string();
-        self.run_write(move || delete_attachment(&vault_path, &index, &source_relative_path))
-            .await
+        let source_path = source_relative_path.to_string();
+        self.run_write("delete attachment", source_relative_path, move || {
+            delete_attachment(&vault_path, &index, &source_path)
+        })
+        .await
     }
 
     // -----------------------------------------------------------------
@@ -980,12 +1061,22 @@ impl VaultMutation {
         Ok(())
     }
 
-    /// Runs a synchronous `vault/write` primitive on the blocking pool.
+    /// Runs a synchronous `vault/write` primitive on the blocking pool, then
+    /// records what it did in this Vault's write ledger.
+    ///
     /// Moves rewrite every backlinking note, which must not stall a tokio
     /// worker; a panic maps to a `write_failed` error instead of unwinding
     /// through the adapter. Both surfaces offload, because the core does.
-    async fn run_write<T: Send + 'static>(
+    ///
+    /// The recording is here rather than in each operation above so that no
+    /// mutation can be added without it: `label` names the operation for the
+    /// commit title, `addressed` is what the caller named, and the outcome
+    /// supplies the resulting path and the files actually touched. A write
+    /// that failed records nothing, because nothing changed on disk.
+    async fn run_write<T: RecordedWrite + Send + 'static>(
         &self,
+        label: &'static str,
+        addressed: &str,
         op: impl FnOnce() -> Result<T, WriteError> + Send + 'static,
     ) -> Result<T, VaultOperationError> {
         let result = tokio::task::spawn_blocking(op)
@@ -993,7 +1084,14 @@ impl VaultMutation {
             .unwrap_or_else(|join_error| {
                 Err(WriteError::Io(format!("write task panicked: {join_error}")))
             });
-        result.map_err(|error| write_operation_error(self.vault_id, error))
+        let outcome = result.map_err(|error| write_operation_error(self.vault_id, error))?;
+        self.control.write_ledger().record(WriteRecord {
+            op: label.to_string(),
+            target: outcome.written_path().unwrap_or(addressed).to_string(),
+            affected_paths: outcome.affected_paths().to_vec(),
+            summary: self.commit_summary.clone(),
+        });
+        Ok(outcome)
     }
 
     fn internal(&self, message: impl Into<String>) -> VaultOperationError {
@@ -1167,6 +1265,28 @@ mod tests {
             )
         }
 
+        /// This Vault's pending write records, taken from the same ledger the
+        /// Vault's Git turn takes them from.
+        fn pending_writes(&self) -> Vec<crate::git::WriteRecord> {
+            self.vaults
+                .runtime(self.vault_id)
+                .expect("Vault runtime")
+                .write_ledger()
+                .take()
+        }
+
+        /// A gated mutation target carrying `summary`, the way the MCP write
+        /// tools build one from their `commit_summary` argument.
+        fn summarized(&self, summary: &str) -> super::VaultMutation {
+            let control = self.vaults.runtime(self.vault_id).expect("Vault runtime");
+            super::VaultMutation::gated(
+                self.vault_id,
+                control,
+                std::sync::Arc::clone(&self.settings),
+            )
+            .with_commit_summary(Some(summary.to_string()))
+        }
+
         fn read(&self, relative_path: &str) -> String {
             std::fs::read_to_string(self.vault_path.join(relative_path)).expect("read note")
         }
@@ -1197,6 +1317,92 @@ mod tests {
 
     fn assert_code(error: &VaultOperationError, code: &str) {
         assert_eq!(error.code, code, "unexpected error: {error:?}");
+    }
+
+    /// Issue #249: `commit_summary` is what an agent spends tokens composing on
+    /// every write, and it has to survive as far as the batch the Vault's next
+    /// commit is named from.
+    #[tokio::test]
+    async fn a_summarized_write_reaches_the_batch_its_commit_will_be_named_from() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+
+        workspace
+            .summarized("tighten the intro")
+            .update_note("home", "# Home\n\nrewritten\n", &hash("# Home\n"))
+            .await
+            .expect("update");
+
+        let batch = workspace.pending_writes();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].op, "update");
+        assert_eq!(batch[0].target, "Home");
+        assert_eq!(batch[0].summary.as_deref(), Some("tighten the intro"));
+        assert_eq!(
+            batch[0].affected_paths,
+            vec![workspace.vault_path.join("Home.md")]
+        );
+    }
+
+    /// A burst of writes is what one debounced commit coalesces, so the batch
+    /// has to keep every summary in the order they were written.
+    #[tokio::test]
+    async fn every_write_in_a_burst_keeps_its_own_summary() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+
+        workspace
+            .summarized("first")
+            .append_to_note("home", "one\n", &hash("# Home\n"))
+            .await
+            .expect("append");
+        workspace
+            .summarized("second")
+            .create_note("Second.md", "# Second\n", false)
+            .await
+            .expect("create");
+
+        let summaries: Vec<_> = workspace
+            .pending_writes()
+            .into_iter()
+            .filter_map(|record| record.summary)
+            .collect();
+        assert_eq!(summaries, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    /// A write from a surface with no `commit_summary` argument — every HTTP
+    /// route — still shapes the commit title, it just adds no body line.
+    #[tokio::test]
+    async fn an_unsummarized_write_still_reaches_the_batch() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+
+        workspace
+            .core()
+            .delete_note(workspace.vault_id, "home", &hash("# Home\n"))
+            .await
+            .expect("delete");
+
+        let batch = workspace.pending_writes();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].op, "delete");
+        assert_eq!(
+            batch[0].target, "Home",
+            "a delete is recorded where it was, not in the trash"
+        );
+        assert_eq!(batch[0].summary, None);
+    }
+
+    /// A refused write changed nothing on disk, so there is nothing for a
+    /// commit message to claim.
+    #[tokio::test]
+    async fn a_refused_write_records_nothing() {
+        let workspace = workspace(Fixture::new(&[("Home.md", "# Home\n")]));
+
+        workspace
+            .summarized("never happened")
+            .update_note("home", "# Home\n\nrewritten\n", &hash("stale"))
+            .await
+            .expect_err("stale hash is refused");
+
+        assert!(workspace.pending_writes().is_empty());
     }
 
     #[tokio::test]

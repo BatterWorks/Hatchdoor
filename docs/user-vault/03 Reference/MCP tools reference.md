@@ -216,7 +216,7 @@ An asset travels with a note only when it already lives inside that note's own f
 > [!note]
 > A note sitting in the Vault root has the whole Vault as its own folder, so every asset it references counts as living inside it and does travel with the note when it moves to another folder. A rename keeps the note where it is, so nothing travels. Keep notes that share an attachments folder in a folder of their own if you want that folder left alone.
 
-Every write tool accepts an optional `commit_summary` (a one-line string) used in the Git commit body for Vaults with versioning enabled.
+Every write tool accepts an optional `commit_summary`, a one-line string describing what the change was for. On a Vault with versioning enabled it reaches the body of the commit that records that write. One commit usually covers several writes, since Hatchdoor commits on a schedule rather than per call: the subject names the first few operations and how many files they touched, and the body lists one `- ` line per summary, in the order the writes happened. A write with no summary still shapes the subject. Pass one on every write and the Vault's history reads as a log of why each note changed.
 
 > [!warning]
 > No write tool can create, rename, or move a file named `.hatchdoor-layer` (the layer marker) — that call is rejected outright, since a marker silently changes how a whole folder is classified and is meant to be edited directly in the Vault. Writes are also rejected if the target path matches the Vault's own noise-exclusion patterns, since such a file would be written to disk but stay invisible to every read surface.

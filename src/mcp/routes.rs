@@ -2904,6 +2904,49 @@ mod tests {
         );
     }
 
+    /// Issue #249: the `commit_summary` every write tool advertises has to
+    /// leave this surface, not stop at deserialization. Proved at the ledger
+    /// the Vault's Git turn reads, because that is the only thing between the
+    /// tool call and the commit message.
+    #[tokio::test]
+    async fn a_write_tools_commit_summary_reaches_the_vaults_pending_write_batch() {
+        let (state, _tmp) = write_state();
+        let hash = crate::cache::parse::content_hash("# Home\nalpha token\n[[Plan]]");
+        let edited = call_tool(
+            &state,
+            "edit_note",
+            json!({
+                "slug": "home",
+                "old_string": "alpha",
+                "new_string": "ALPHA",
+                "expected_content_hash": hash,
+                "commit_summary": "shout the token"
+            }),
+        )
+        .await;
+        assert_eq!(edited["result"]["structuredContent"]["ok"], true);
+
+        let vault_id = match state.vault_registry.load().expect("load registry") {
+            crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot
+                .definitions()
+                .next()
+                .expect("test definition")
+                .vault_id(),
+            crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("test recovery"),
+        };
+        let batch = state
+            .vaults
+            .runtime(vault_id)
+            .expect("Vault runtime")
+            .write_ledger()
+            .take();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].op, "edit");
+        assert_eq!(batch[0].target, "Home");
+        assert_eq!(batch[0].summary.as_deref(), Some("shout the token"));
+    }
+
     #[tokio::test]
     async fn rename_note_returns_new_slug() {
         let (state, _tmp) = write_state();

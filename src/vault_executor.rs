@@ -622,6 +622,7 @@ where
     F: FnOnce(
             &ManagedGitTurnConfig,
             &ManagedCheckoutLease,
+            &crate::git::WriteLedger,
         ) -> Result<ManagedGitOutcome, VaultWorkError>
         + Send
         + 'static,
@@ -774,10 +775,15 @@ where
     F: FnOnce(
             &ManagedGitTurnConfig,
             &ManagedCheckoutLease,
+            &crate::git::WriteLedger,
         ) -> Result<ManagedGitOutcome, VaultWorkError>
         + Send
         + 'static,
 {
+    // Every Git turn that can commit names its commit from this Vault's
+    // pending write records (#249). Cloned once here so each branch below can
+    // move it into its own blocking closure.
+    let write_ledger = control_block.write_ledger();
     match control_block.definition().source() {
         // An existing checkout under Local-history versioning has no remote
         // to sync: flush whatever Vault-subtree drift has accumulated into a
@@ -795,7 +801,12 @@ where
                 holds_mutation_lock: false,
                 panic_code: "existing_git_local_history_task_panicked",
                 work: GitTurnWork::Unleased(Box::new(move || {
-                    crate::git::run_local_history_git_turn(vault_path, author_name, author_email)
+                    crate::git::run_local_history_git_turn(
+                        vault_path,
+                        author_name,
+                        author_email,
+                        &write_ledger,
+                    )
                 })),
             }))
         }
@@ -833,6 +844,7 @@ where
                         credentials,
                         author_name,
                         author_email,
+                        &write_ledger,
                     )
                 })),
             }))
@@ -865,7 +877,7 @@ where
                 panic_code: "managed_git_task_panicked",
                 work: GitTurnWork::Leased {
                     state_directory,
-                    run: Box::new(move |lease| execute(&config, lease)),
+                    run: Box::new(move |lease| execute(&config, lease, &write_ledger)),
                 },
             }))
         }

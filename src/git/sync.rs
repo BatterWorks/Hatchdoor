@@ -4,7 +4,7 @@ use git2::{Repository, Signature};
 
 use super::config::{GitConfig, GitMode};
 use super::managed_task::ManagedGitOutcome;
-use super::message::build_commit_message;
+use super::message::WriteLedger;
 use crate::vault_work::VaultWorkError;
 
 /// Result of the local commit phase: whether a new commit was created.
@@ -155,10 +155,25 @@ pub fn validate_local_repo(config: &GitConfig) -> Result<(), GitError> {
 /// caller here needs only the Vault's resolved path and commit identity —
 /// not the full settings-derived `GitConfig` the retired single-Vault lane
 /// built from `HATCHDOOR_GIT_*` configuration.
+///
+/// `ledger` is the Vault's pending batch of write records (issue #249): the
+/// batch names this commit, and goes back to the ledger untouched when the
+/// turn finds nothing to commit.
+///
+/// Unlike the Two-way graph, this turn runs without the Vault's mutation
+/// lock, which leaves a narrow window between taking the batch and
+/// `commit_local` staging the working tree. A write landing inside it has its
+/// content committed by this turn while its summary waits for the next one,
+/// so that line arrives one commit late. Deliberately not closed by taking
+/// the mutation lock: this turn commits already-settled drift and must not
+/// park foreground writes behind itself (ADR-18). A late line is the cheaper
+/// cost, and it is why `WriteLedger::restore` puts a batch back ahead of
+/// anything recorded since rather than overwriting it.
 pub fn run_local_history_git_turn(
     vault_path: PathBuf,
     author_name: String,
     author_email: String,
+    ledger: &WriteLedger,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let config = GitConfig {
         vault_path,
@@ -172,9 +187,12 @@ pub fn run_local_history_git_turn(
         author_email,
     };
     validate_local_repo(&config).map_err(classify_local_history_error)?;
-    let message = build_commit_message(&[]);
-    let outcome = commit_local(&config, &[], &message).map_err(classify_local_history_error)?;
-    Ok(if outcome.committed {
+    let committed = ledger
+        .commit_batch(|message| {
+            commit_local(&config, &[], message).map(|outcome| outcome.committed)
+        })
+        .map_err(classify_local_history_error)?;
+    Ok(if committed {
         ManagedGitOutcome::Synchronized
     } else {
         ManagedGitOutcome::UpToDate
@@ -516,6 +534,7 @@ fn stage_vault_drift(
 
 #[cfg(test)]
 mod tests {
+    use super::super::message::WriteRecord;
     use super::*;
     use git2::Repository;
     use std::fs;
@@ -644,6 +663,77 @@ mod tests {
         );
     }
 
+    /// Issue #249: a Local-history commit is named by the writes it records,
+    /// and an idle turn leaves the batch alone rather than swallowing it.
+    #[test]
+    fn run_local_history_git_turn_names_its_commit_from_the_pending_write_batch() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        fs::write(root.path().join("README.md"), "root readme").expect("root readme");
+        commit_all(&repo, "initial commit");
+
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        fs::write(vault_path.join("Idea.md"), "# idea\n").expect("drift note");
+
+        let ledger = WriteLedger::new();
+        ledger.record(WriteRecord {
+            op: "create".to_string(),
+            target: "Idea".to_string(),
+            affected_paths: vec![vault_path.join("Idea.md")],
+            summary: Some("capture the idea".to_string()),
+        });
+
+        let outcome = run_local_history_git_turn(
+            vault_path.clone(),
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &ledger,
+        )
+        .expect("local history turn succeeds");
+        assert_eq!(outcome, ManagedGitOutcome::Synchronized);
+
+        let head = repo.head().expect("head").peel_to_commit().expect("commit");
+        assert_eq!(
+            head.message().expect("commit message"),
+            "hatchdoor: create \"Idea\" (1 file)\n\n- capture the idea"
+        );
+        assert!(ledger.take().is_empty(), "a committed batch is consumed");
+    }
+
+    #[test]
+    fn a_local_history_turn_with_nothing_to_commit_keeps_the_batch() {
+        let root = tempfile::tempdir().expect("repository root");
+        let repo = Repository::init(root.path()).expect("init repository");
+        let vault_path = root.path().join("notes");
+        fs::create_dir(&vault_path).expect("notes directory");
+        fs::write(vault_path.join("Idea.md"), "# idea\n").expect("note");
+        commit_all(&repo, "initial commit");
+
+        let ledger = WriteLedger::new();
+        ledger.record(WriteRecord {
+            op: "create".to_string(),
+            target: "Idea".to_string(),
+            affected_paths: vec![vault_path.join("Idea.md")],
+            summary: Some("already committed by someone else".to_string()),
+        });
+
+        let outcome = run_local_history_git_turn(
+            vault_path,
+            "Test".to_string(),
+            "test@example.invalid".to_string(),
+            &ledger,
+        )
+        .expect("local history turn succeeds");
+
+        assert_eq!(outcome, ManagedGitOutcome::UpToDate);
+        assert_eq!(
+            ledger.take().len(),
+            1,
+            "an idle turn must not swallow writes the next commit still owes a line to"
+        );
+    }
+
     /// `run_local_history_git_turn` is `dispatch_git_turn_with`'s
     /// `ExistingGit` + `VaultGitMode::LocalHistory` counterpart to
     /// `run_managed_git_turn`. The composed `vault_runtime` test exercises it
@@ -674,6 +764,7 @@ mod tests {
             vault_path.clone(),
             "Test".to_string(),
             "test@example.invalid".to_string(),
+            &WriteLedger::new(),
         )
         .expect("local history turn succeeds");
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
@@ -712,6 +803,7 @@ mod tests {
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
+            &WriteLedger::new(),
         )
         .expect("second local history turn succeeds");
         assert_eq!(second, ManagedGitOutcome::UpToDate);
@@ -739,6 +831,7 @@ mod tests {
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
+            &WriteLedger::new(),
         )
         .expect("local history turn succeeds");
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
@@ -777,6 +870,7 @@ mod tests {
             vault_path,
             "Test".to_string(),
             "test@example.invalid".to_string(),
+            &WriteLedger::new(),
         )
         .expect_err("bare repository has no working tree to version");
         assert_eq!(error.code(), "existing_git_local_history_validation_failed");

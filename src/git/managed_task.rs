@@ -30,6 +30,7 @@ use super::managed_sync::{
     ManagedSyncConfig, ManagedSyncError, ManagedSyncMode, ManagedSyncOutcome,
     synchronize_managed_checkout,
 };
+use super::message::WriteLedger;
 
 /// The default interval a managed Vault waits before its next scheduled Git
 /// turn after a success or non-retryable failure, absent an explicitly
@@ -150,6 +151,7 @@ pub enum ManagedGitOutcome {
 pub fn run_managed_git_turn(
     config: &ManagedGitTurnConfig,
     lease: &ManagedCheckoutLease,
+    ledger: &WriteLedger,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let sync_mode = match config.mode {
         VaultGitMode::PullOnly => ManagedSyncMode::PullOnly,
@@ -192,7 +194,8 @@ pub fn run_managed_git_turn(
         author_name: config.author_name.clone(),
         author_email: config.author_email.clone(),
     };
-    let outcome = synchronize_managed_checkout(&sync_config).map_err(classify_sync_error)?;
+    let outcome =
+        synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
     Ok(match outcome {
         ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
         ManagedSyncOutcome::PullOnlyFastForwarded
@@ -237,6 +240,7 @@ pub fn run_existing_git_remote_turn(
     credentials: Option<HttpsCredentials>,
     author_name: String,
     author_email: String,
+    ledger: &WriteLedger,
 ) -> Result<ManagedGitOutcome, VaultWorkError> {
     let Some(repository_url) = repository_url else {
         return Err(classify_sync_error(ManagedSyncError::Validation));
@@ -284,7 +288,8 @@ pub fn run_existing_git_remote_turn(
         author_name,
         author_email,
     };
-    let outcome = synchronize_managed_checkout(&sync_config).map_err(classify_sync_error)?;
+    let outcome =
+        synchronize_managed_checkout(&sync_config, ledger).map_err(classify_sync_error)?;
     Ok(match outcome {
         ManagedSyncOutcome::UpToDate => ManagedGitOutcome::UpToDate,
         ManagedSyncOutcome::PullOnlyFastForwarded
@@ -1069,7 +1074,8 @@ mod tests {
         let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
             .expect("lease");
 
-        let outcome = run_managed_git_turn(&config, &lease).expect("first turn acquires and syncs");
+        let outcome = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect("first turn acquires and syncs");
 
         assert_eq!(outcome, ManagedGitOutcome::UpToDate);
         assert!(
@@ -1093,7 +1099,7 @@ mod tests {
         // held.
         let lease = ManagedCheckoutLease::acquire(config.state_directory.clone(), config.vault_id)
             .expect("lease");
-        run_managed_git_turn(&config, &lease).expect("first turn");
+        run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first turn");
 
         let repository_root = config
             .state_directory
@@ -1102,8 +1108,8 @@ mod tests {
             .join("repository");
         std::fs::write(repository_root.join("vault/Local.md"), "local\n").expect("local edit");
 
-        let outcome =
-            run_managed_git_turn(&config, &lease).expect("second turn reuses the checkout");
+        let outcome = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect("second turn reuses the checkout");
 
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
     }
@@ -1119,7 +1125,8 @@ mod tests {
         let lease = ManagedCheckoutLease::acquire(scratch.path().to_path_buf(), config.vault_id)
             .expect("scratch lease");
 
-        let error = run_managed_git_turn(&config, &lease).expect_err("Local history has no remote");
+        let error = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect_err("Local history has no remote");
 
         assert_eq!(error.code(), "managed_git_not_remote");
         assert!(!error.retryable());
@@ -1864,7 +1871,7 @@ mod tests {
         let lease = scheduler
             .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
             .expect("first turn acquires a fresh lease");
-        run_managed_git_turn(&config, &lease).expect("first turn");
+        run_managed_git_turn(&config, &lease, &WriteLedger::new()).expect("first turn");
         scheduler.keep_checkout_lease(config.vault_id, lease);
 
         // Between turns — exactly the gap the old, turn-scoped lease used
@@ -1892,8 +1899,8 @@ mod tests {
         let lease = scheduler
             .take_or_acquire_checkout_lease(config.state_directory.clone(), config.vault_id)
             .expect("second turn reuses the held lease");
-        let outcome =
-            run_managed_git_turn(&config, &lease).expect("second turn reuses the checkout");
+        let outcome = run_managed_git_turn(&config, &lease, &WriteLedger::new())
+            .expect("second turn reuses the checkout");
         assert_eq!(outcome, ManagedGitOutcome::Synchronized);
         scheduler.keep_checkout_lease(config.vault_id, lease);
 

@@ -8,6 +8,7 @@ use git2::{
 };
 
 use super::managed_checkout::ManagedHttpsCredentials;
+use super::message::WriteLedger;
 
 /// The two managed remote behaviors that share checkout synchronization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,13 +115,18 @@ const MAX_PUSH_RACE_ATTEMPTS: usize = 2;
 /// The caller retains the checkout lease and serializes this function with
 /// Vault writes. This boundary neither acquires a checkout nor schedules,
 /// polls, retries later, persists status, or repairs a failed checkout.
+///
+/// `ledger` is the Vault's pending batch of write records (issue #249). Only
+/// the Two-way graph ever commits, and it takes the batch at the moment it
+/// builds a commit message; a Pull-only checkout leaves it alone.
 pub fn synchronize_managed_checkout(
     config: &ManagedSyncConfig,
+    ledger: &WriteLedger,
 ) -> Result<ManagedSyncOutcome, ManagedSyncError> {
     let repository = open_validated_repository(config)?;
     match config.mode {
         ManagedSyncMode::PullOnly => synchronize_pull_only(&repository, config),
-        ManagedSyncMode::TwoWay => synchronize_two_way(&repository, config),
+        ManagedSyncMode::TwoWay => synchronize_two_way(&repository, config, ledger),
     }
 }
 
@@ -150,24 +156,26 @@ fn synchronize_pull_only(
 fn synchronize_two_way(
     repository: &Repository,
     config: &ManagedSyncConfig,
+    ledger: &WriteLedger,
 ) -> Result<ManagedSyncOutcome, ManagedSyncError> {
-    synchronize_two_way_with_push(repository, config, push)
+    synchronize_two_way_with_push(repository, config, ledger, push)
 }
 
 fn synchronize_two_way_with_push<F>(
     repository: &Repository,
     config: &ManagedSyncConfig,
+    ledger: &WriteLedger,
     mut push_operation: F,
 ) -> Result<ManagedSyncOutcome, ManagedSyncError>
 where
     F: FnMut(&Repository, &ManagedSyncConfig) -> Result<(), ManagedSyncError>,
 {
-    let mut committed = prepare_two_way_worktree(repository, config)?;
+    let mut committed = prepare_two_way_worktree(repository, config, ledger)?;
     let mut integrated = false;
 
     for attempt in 0..MAX_PUSH_RACE_ATTEMPTS {
         fetch(repository, config)?;
-        committed |= prepare_two_way_worktree(repository, config)?;
+        committed |= prepare_two_way_worktree(repository, config, ledger)?;
         let relation = graph(repository, config)?;
 
         if relation.behind > 0 {
@@ -319,6 +327,7 @@ fn dirty_worktree_error(files: Vec<PathBuf>) -> ManagedSyncError {
 fn prepare_two_way_worktree(
     repository: &Repository,
     config: &ManagedSyncConfig,
+    ledger: &WriteLedger,
 ) -> Result<bool, ManagedSyncError> {
     let vault_relative = vault_relative_path(repository, config)?;
     let files = changed_paths(repository)?;
@@ -333,7 +342,7 @@ fn prepare_two_way_worktree(
     if files.is_empty() {
         return Ok(false);
     }
-    commit_vault_drift(repository, config, &vault_relative)
+    commit_vault_drift(repository, config, &vault_relative, ledger)
 }
 
 fn changed_paths(repository: &Repository) -> Result<Vec<PathBuf>, ManagedSyncError> {
@@ -374,6 +383,7 @@ fn commit_vault_drift(
     repository: &Repository,
     config: &ManagedSyncConfig,
     vault_relative: &Path,
+    ledger: &WriteLedger,
 ) -> Result<bool, ManagedSyncError> {
     // Read the operator's on-disk index status *before* building this
     // commit's own in-memory index below: `has_staged_vault_changes` reads
@@ -414,16 +424,21 @@ fn commit_vault_drift(
 
     let signature = signature(config)?;
     let parents = parent.iter().collect::<Vec<_>>();
-    repository
-        .commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            "hatchdoor: record local Vault changes",
-            &tree,
-            &parents,
-        )
-        .map_err(|_| ManagedSyncError::Validation)?;
+    // Reached only once this commit is certain, so a turn that found no drift
+    // has already returned above with the batch untouched (issue #249).
+    ledger.commit_batch(|message| {
+        repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                message,
+                &tree,
+                &parents,
+            )
+            .map(|_| true)
+            .map_err(|_| ManagedSyncError::Validation)
+    })?;
 
     // `commit` advances HEAD but does not update the on-disk index. Refresh
     // precisely the Vault subtree when it had no existing staging. If an
@@ -749,6 +764,7 @@ mod tests {
     use git2::{Repository, Signature};
     use tempfile::TempDir;
 
+    use super::super::message::WriteRecord;
     use super::*;
 
     fn commit(repository: &Repository, path: &str, contents: &str, message: &str) {
@@ -868,7 +884,8 @@ mod tests {
         let (_root, config) = fixture(ManagedSyncMode::PullOnly);
         std::fs::write(config.vault_path.join("Home.md"), "local edit\n").expect("local edit");
 
-        let error = synchronize_managed_checkout(&config).expect_err("dirty pull-only work");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("dirty pull-only work");
 
         assert!(matches!(error, ManagedSyncError::DirtyWorkingCopy { .. }));
         assert_eq!(
@@ -887,7 +904,8 @@ mod tests {
             .expect("head")
             .target();
 
-        let outcome = synchronize_managed_checkout(&config).expect("pull-only sync");
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("pull-only sync");
 
         assert_eq!(outcome, ManagedSyncOutcome::PullOnlyFastForwarded);
         let checkout = Repository::open(&config.repository_path).expect("checkout");
@@ -901,8 +919,8 @@ mod tests {
         let checkout = Repository::open(&config.repository_path).expect("checkout");
         commit(&checkout, "vault/Local.md", "local\n", "local-only commit");
 
-        let error =
-            synchronize_managed_checkout(&config).expect_err("local history is unsupported");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("local history is unsupported");
 
         assert!(matches!(error, ManagedSyncError::LocalCommits { ahead: 1 }));
         let remote = Repository::open_bare(root.path().join("remote.git")).expect("remote");
@@ -925,7 +943,8 @@ mod tests {
         let (root, config) = fixture(ManagedSyncMode::TwoWay);
         std::fs::write(config.vault_path.join("Home.md"), "two-way local\n").expect("local edit");
 
-        let outcome = synchronize_managed_checkout(&config).expect("two-way sync");
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("two-way sync");
 
         assert_eq!(
             outcome,
@@ -939,12 +958,89 @@ mod tests {
     }
 
     #[test]
+    fn a_two_way_commit_is_named_by_the_writes_it_records() {
+        let (_root, config) = fixture(ManagedSyncMode::TwoWay);
+        // Longer than the committed content on purpose: git2's status check
+        // trusts the index stat cache, and a same-size rewrite in the same
+        // second reads as unchanged.
+        std::fs::write(config.vault_path.join("Home.md"), "# Home\n\ntightened\n")
+            .expect("local edit");
+        let ledger = WriteLedger::new();
+        ledger.record(WriteRecord {
+            op: "update".to_string(),
+            target: "Home".to_string(),
+            affected_paths: vec![config.vault_path.join("Home.md")],
+            summary: Some("tighten the intro".to_string()),
+        });
+
+        synchronize_managed_checkout(&config, &ledger).expect("two-way sync");
+
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        let head = checkout
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        let message = head.message().expect("commit message");
+        assert_eq!(
+            message,
+            "hatchdoor: update \"Home\" (1 file)\n\n- tighten the intro"
+        );
+        assert!(
+            ledger.take().is_empty(),
+            "the committed batch is not carried into the next commit"
+        );
+    }
+
+    #[test]
+    fn a_two_way_turn_with_no_drift_leaves_the_batch_for_the_turn_that_commits() {
+        let (_root, config) = fixture(ManagedSyncMode::TwoWay);
+        let ledger = WriteLedger::new();
+        ledger.record(WriteRecord {
+            op: "update".to_string(),
+            target: "Home".to_string(),
+            affected_paths: vec![config.vault_path.join("Home.md")],
+            summary: Some("not committed yet".to_string()),
+        });
+
+        synchronize_managed_checkout(&config, &ledger).expect("two-way sync");
+
+        let batch = ledger.take();
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].summary.as_deref(), Some("not committed yet"));
+    }
+
+    #[test]
+    fn a_commit_recording_no_agent_writes_keeps_the_generic_message() {
+        let (_root, config) = fixture(ManagedSyncMode::TwoWay);
+        std::fs::write(
+            config.vault_path.join("Home.md"),
+            "# Home\n\nedited by hand\n",
+        )
+        .expect("local edit");
+
+        synchronize_managed_checkout(&config, &WriteLedger::new()).expect("two-way sync");
+
+        let checkout = Repository::open(&config.repository_path).expect("checkout");
+        let head = checkout
+            .head()
+            .expect("head")
+            .peel_to_commit()
+            .expect("commit");
+        assert_eq!(
+            head.message().expect("commit message"),
+            "hatchdoor: vault update"
+        );
+    }
+
+    #[test]
     fn two_way_merges_diverged_histories_and_pushes_the_merge() {
         let (root, config) = fixture(ManagedSyncMode::TwoWay);
         remote_commit(root.path(), "vault/Remote.md", "remote\n", "remote change");
         std::fs::write(config.vault_path.join("Local.md"), "local\n").expect("local edit");
 
-        let outcome = synchronize_managed_checkout(&config).expect("diverged sync");
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("diverged sync");
 
         assert_eq!(
             outcome,
@@ -971,13 +1067,18 @@ mod tests {
         let checkout = Repository::open(&config.repository_path).expect("checkout");
         let mut injected_race = false;
 
-        let outcome = synchronize_two_way_with_push(&checkout, &config, |repository, config| {
-            if !injected_race {
-                injected_race = true;
-                remote_commit(root.path(), "vault/Race.md", "race\n", "push race");
-            }
-            push(repository, config)
-        })
+        let outcome = synchronize_two_way_with_push(
+            &checkout,
+            &config,
+            &WriteLedger::new(),
+            |repository, config| {
+                if !injected_race {
+                    injected_race = true;
+                    remote_commit(root.path(), "vault/Race.md", "race\n", "push race");
+                }
+                push(repository, config)
+            },
+        )
         .expect("bounded replay resolves one push race");
 
         assert!(injected_race);
@@ -1004,7 +1105,8 @@ mod tests {
         );
         std::fs::write(config.vault_path.join("Home.md"), "local change\n").expect("local edit");
 
-        let error = synchronize_managed_checkout(&config).expect_err("merge conflict");
+        let error =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect_err("merge conflict");
 
         assert!(matches!(error, ManagedSyncError::Conflict { .. }));
         let checkout = Repository::open(&config.repository_path).expect("checkout");
@@ -1021,7 +1123,8 @@ mod tests {
         std::fs::write(&outside, "outside\n").expect("outside edit");
         std::fs::write(config.vault_path.join("Home.md"), "inside\n").expect("inside edit");
 
-        let error = synchronize_managed_checkout(&config).expect_err("outside dirty work");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("outside dirty work");
 
         assert!(matches!(error, ManagedSyncError::DirtyWorkingCopy { .. }));
         assert_eq!(
@@ -1056,7 +1159,8 @@ mod tests {
             .remote_set_url("origin", "https://private-token@example.test/vault.git")
             .expect("tamper origin");
 
-        let error = synchronize_managed_checkout(&config).expect_err("unsafe origin");
+        let error =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect_err("unsafe origin");
 
         assert_eq!(error, ManagedSyncError::Validation);
         assert!(!error.to_string().contains("private-token"));
@@ -1070,7 +1174,8 @@ mod tests {
             .remote("backup", "https://private-token@example.test/vault.git")
             .expect("secondary remote");
 
-        let outcome = synchronize_managed_checkout(&config).expect("configured remote");
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("configured remote");
 
         assert_eq!(outcome, ManagedSyncOutcome::UpToDate);
         assert!(!format!("{config:?}").contains("private-token"));
@@ -1124,7 +1229,8 @@ mod tests {
             .push(&["refs/heads/master:refs/heads/master"], None)
             .expect("push replacement");
 
-        let error = synchronize_managed_checkout(&config).expect_err("invalid Vault root");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("invalid Vault root");
 
         assert_eq!(error, ManagedSyncError::Validation);
     }
@@ -1137,7 +1243,8 @@ mod tests {
             .remote_set_url("origin", "https://example.test/not valid.git")
             .expect("tamper origin");
 
-        let error = synchronize_managed_checkout(&config).expect_err("malformed origin");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("malformed origin");
 
         assert_eq!(error, ManagedSyncError::Validation);
     }
@@ -1154,7 +1261,8 @@ mod tests {
             .expect("operator remote");
         std::fs::write(config.vault_path.join("Home.md"), "selected remote\n").expect("local edit");
 
-        let outcome = synchronize_managed_checkout(&config).expect("two-way sync");
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("two-way sync");
 
         assert_eq!(
             outcome,
@@ -1175,7 +1283,8 @@ mod tests {
             .remote("duplicate", &config.repository_url)
             .expect("duplicate remote");
 
-        let error = synchronize_managed_checkout(&config).expect_err("ambiguous remote");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("ambiguous remote");
 
         assert_eq!(error, ManagedSyncError::Validation);
     }
@@ -1188,7 +1297,8 @@ mod tests {
             .remote_set_pushurl("origin", Some("ssh://git@example.test/operator.git"))
             .expect("push URL");
 
-        let error = synchronize_managed_checkout(&config).expect_err("unsafe push URL");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("unsafe push URL");
 
         assert_eq!(error, ManagedSyncError::Validation);
     }
@@ -1230,7 +1340,8 @@ mod tests {
         std::fs::write(config.vault_path.join("Home.md"), "working tree content\n")
             .expect("working tree edit after staging");
 
-        let outcome = synchronize_managed_checkout(&config).expect("two-way sync");
+        let outcome =
+            synchronize_managed_checkout(&config, &WriteLedger::new()).expect("two-way sync");
 
         assert_eq!(
             outcome,
@@ -1278,7 +1389,8 @@ mod tests {
             "remote outside change",
         );
 
-        let error = synchronize_managed_checkout(&config).expect_err("outside conflict");
+        let error = synchronize_managed_checkout(&config, &WriteLedger::new())
+            .expect_err("outside conflict");
 
         assert!(matches!(error, ManagedSyncError::Conflict { .. }));
         let checkout = Repository::open(&config.repository_path).expect("checkout");

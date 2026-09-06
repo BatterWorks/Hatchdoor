@@ -554,6 +554,84 @@ fn editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status() {
     );
 }
 
+/// Issue #249: an in-place edit rotates the control block, and the pending
+/// write records describe writes that are already on disk and still
+/// uncommitted. Dropping them on the rotation would lose exactly the commit
+/// message lines the ledger exists to deliver, with nothing to say so.
+#[test]
+fn editing_a_non_identity_field_carries_the_vaults_pending_write_records_across() {
+    let directory = tempdir().expect("temporary state directory");
+    let registry = VaultRegistryStore::new(directory.path().join("state/vaults.json"));
+    let empty = match registry.load().expect("load empty registry") {
+        crate::vault_registry::VaultRegistryState::Ready(snapshot) => snapshot,
+        crate::vault_registry::VaultRegistryState::Recovery(_) => panic!("registry recovery"),
+    };
+    let committed = registry
+        .add(
+            empty.revision(),
+            NewVaultDefinition {
+                name: "Remote notes".to_string(),
+                enabled: true,
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: None,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("add managed Vault");
+    let vault_id = vault_id_named(&committed, "Remote notes");
+    let collection = VaultCollectionRuntime::new();
+    collection.reconcile(&registry, &committed);
+    collection
+        .runtime(vault_id)
+        .expect("active runtime")
+        .write_ledger()
+        .record(crate::git::WriteRecord {
+            op: "update".to_string(),
+            target: "Home".to_string(),
+            affected_paths: vec![std::path::PathBuf::from("/v/Home.md")],
+            summary: Some("written before the edit".to_string()),
+        });
+
+    let edited = registry
+        .edit(
+            committed.revision(),
+            vault_id,
+            VaultDefinitionEdit {
+                name: "Renamed notes".to_string(),
+                source: RegistryVaultSource::ManagedGit {
+                    repository_url: "https://example.test/owner/notes.git".to_string(),
+                    branch: None,
+                    vault_subdirectory: None,
+                    mode: VaultGitMode::TwoWay,
+                    poll_interval_secs: DEFAULT_MANAGED_GIT_POLL_INTERVAL_SECS,
+                },
+                exclude_patterns: Vec::new(),
+                https_credentials: HttpsCredentialUpdate::Keep,
+                confirm_identity_change: false,
+                archive_folder: None,
+                commit_identity: None,
+            },
+        )
+        .expect("rename the Vault");
+    collection.reconcile(&registry, &edited);
+
+    let batch = collection
+        .runtime(vault_id)
+        .expect("Vault remains active after a non-identity edit")
+        .write_ledger()
+        .take();
+    assert_eq!(batch.len(), 1, "the pending write survived the rotation");
+    assert_eq!(batch[0].summary.as_deref(), Some("written before the edit"));
+}
+
 /// Complements
 /// `editing_a_non_identity_field_preserves_the_vaults_actual_prior_git_status`:
 /// a Vault that goes disabled then re-enabled again is not an in-place edit
