@@ -182,14 +182,86 @@ pub fn tool_error(message: String) -> Value {
     })
 }
 
+/// The field that states a tool payload's outcome: `false` on the structured
+/// errors [`tool_structured_error`] builds, `true` on the write receipts
+/// `results.rs` serialises. Read payloads carry it on neither, so the rule for
+/// a caller is that the field present and false means the call was refused.
+///
+/// It exists because a client reading `structuredContent` as the tool's typed
+/// answer never sees the enclosing `isError`. Every tool advertises an
+/// `outputSchema` built from its success type, which invites exactly that
+/// reading, and on failure the payload silently became a different shape with
+/// no field in common with the advertised one (#255).
+pub const OUTCOME_FIELD: &str = "ok";
+
 /// A domain failure returned by a tool.  Unlike a JSON-RPC invalid-params
 /// error, this preserves the shared Vault API's stable error object so agents
 /// can branch on `code` rather than matching human text.
-pub fn tool_structured_error(payload: Value) -> Value {
+///
+/// The payload also carries [`OUTCOME_FIELD`] set to `false`, alongside the
+/// error object's own `code`, `message`, `retryable`, and any `vault_id`. This
+/// is the single construction point for the shape, so no individual tool has to
+/// remember to set it, and the field goes in before the text rendering so the
+/// two halves of the result cannot disagree. It is deliberately added here
+/// rather than on the shared Vault error type itself: that type also serialises
+/// into HTTP bodies and into `batch` item `error` values, neither of which
+/// changes shape.
+///
+/// A payload that is not a JSON object keeps whatever it already was, and a
+/// tool error carrying only a plain-text message ([`tool_error`]) has no
+/// structured payload to mark at all.
+pub fn tool_structured_error(mut payload: Value) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(OUTCOME_FIELD.to_string(), json!(false));
+    }
     let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string());
     json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": payload,
         "isError": true
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_structured_error_marks_itself_as_a_failure_in_both_renderings() {
+        let result = tool_structured_error(json!({
+            "code": "write_conflict",
+            "message": "note changed since it was read",
+            "retryable": true,
+        }));
+
+        assert_eq!(result["isError"], true);
+        let payload = &result["structuredContent"];
+        assert_eq!(payload[OUTCOME_FIELD], false);
+        // The error object's own fields survive untouched: an agent still
+        // branches on `code` rather than on human text.
+        assert_eq!(payload["code"], "write_conflict");
+        assert_eq!(payload["retryable"], true);
+
+        let text: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().expect("text"))
+                .expect("the text content is a serialisation of the payload");
+        assert_eq!(&text, payload);
+    }
+
+    #[test]
+    fn a_payload_that_is_not_an_object_is_left_alone() {
+        let result = tool_structured_error(json!("just a string"));
+        assert_eq!(result["structuredContent"], json!("just a string"));
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn a_success_payload_gains_nothing() {
+        let result = tool_success(json!({"ok": true, "slug": "home"}));
+        assert_eq!(result["isError"], false);
+        assert_eq!(
+            result["structuredContent"],
+            json!({"ok": true, "slug": "home"})
+        );
+    }
 }
