@@ -195,7 +195,7 @@ function VaultWorkspace({
     searchError,
     searchInputRef,
     openSearchForTag,
-  } = useSearch(scope);
+  } = useSearch();
   const {
     noteActionDialog,
     noteActionError,

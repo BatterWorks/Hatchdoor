@@ -18,6 +18,13 @@ a text field). Semantic search is the default: use it for ideas and meaning.
 Turn on **Keyword mode** when exact wording matters, such as a hostname, tag,
 filename, command, or ID.
 
+Search always looks in every enabled Vault, whichever one the Vault selector
+is narrowed to. The list down the left of the search panel says how many
+matching notes each Vault holds, and starts on the Vault you were browsing.
+Select another Vault to read its matches, or **All results** to see them
+together. On a phone the same choice is the **Scope** field under the search
+box.
+
 > [!note]
 > Browser search and agent search complement each other. Search in the Web UI when you want to scan results; ask the agent when you want a controlled research or editing workflow.
 

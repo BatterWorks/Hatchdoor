@@ -45,7 +45,7 @@ describe("useSearch", () => {
         },
       ),
     );
-    const { result } = renderHook(() => useSearch("all"));
+    const { result } = renderHook(() => useSearch());
 
     act(() => {
       result.current.setSearchQuery("plan");
@@ -55,7 +55,7 @@ describe("useSearch", () => {
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
-        "/api/v1/vaults/all/search?q=plan&mode=keyword&limit=30&per_note_cap=2",
+        "/api/v1/vaults/all/search?q=plan&mode=keyword&limit=50&per_note_cap=2",
         expect.objectContaining({ signal: expect.any(AbortSignal) }),
       );
     });
@@ -64,6 +64,31 @@ describe("useSearch", () => {
     });
     expect(result.current.searchResults[0]?.note_slug).toBe("plan");
     expect(result.current.searchError).toBeNull();
+  });
+
+  it("asks every Vault, so a narrowed browsing scope cannot pin the search", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          scope: "all",
+          collection_revision: 1,
+          partial: false,
+          participants: [],
+          data: { mode: "semantic", results: [] },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const { result } = renderHook(() => useSearch());
+
+    act(() => {
+      result.current.setSearchQuery("plan");
+      result.current.setSearchOpen(true);
+    });
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const [url] = fetchMock.mock.calls[0] as [string];
+    expect(url.startsWith("/api/v1/vaults/all/search?")).toBe(true);
   });
 });
 
@@ -74,7 +99,7 @@ describe("useSearch — tag-tap Vault preselection (#144)", () => {
   });
 
   it("opens with the query filled in and that Vault preselected", () => {
-    const { result } = renderHook(() => useSearch("all"));
+    const { result } = renderHook(() => useSearch());
 
     act(() => {
       result.current.openSearchForTag("orchard", "vault-work");
@@ -87,7 +112,7 @@ describe("useSearch — tag-tap Vault preselection (#144)", () => {
   });
 
   it("clears the preselection once the dialog closes, so a later plain open starts fresh", () => {
-    const { result } = renderHook(() => useSearch("all"));
+    const { result } = renderHook(() => useSearch());
 
     act(() => {
       result.current.openSearchForTag("orchard", "vault-work");
@@ -121,7 +146,7 @@ describe("useSearch — partiality (#141)", () => {
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
-    const { result } = renderHook(() => useSearch("all"));
+    const { result } = renderHook(() => useSearch());
     act(() => {
       result.current.setSearchQuery("plan");
       result.current.setSearchOpen(true);
