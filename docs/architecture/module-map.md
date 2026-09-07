@@ -2916,10 +2916,15 @@ Feature tests:
 TS/TSX entry point. It exposes `useSearch`, `SearchDialog`, Search wire and
 selection types, and the `/api/search` payload consumed by the hook. Search CSS
 is integrated separately through the `App.css` stylesheet aggregation seam.
+`useSearch` takes no scope: the fetch is always `vaults/all/search`, at the
+50-row ceiling `clamp_search_limit` allows, whatever the browsing scope is.
 `SearchDialog` takes `vaults`/`scope` and shows the shared `VaultPrefix`
-provenance marker (#140) on a result's path line under the same all-scope,
-multi-Vault condition Vault Explorer's lists use; the path itself elides
-head-first (`.result-path-text`) so the never-eliding prefix always reads.
+provenance marker (#140) on a result's path line whenever the visible rows
+can span Vaults — the dialog's own filter on `all`, at more than one Vault —
+the same multi-Vault condition Vault Explorer's lists use, read off the
+filter rather than the browsing scope now that the two can differ. The path
+itself elides head-first (`.result-path-text`) so the never-eliding prefix
+always reads.
 `useSearch` also exposes `searchPartial`/`searchMissingVaultNames` from the
 search envelope (#141), rendered with the same never-a-banner rule
 `ChangesPanel` uses: a trailing warn-ink line naming only the missing Vaults
@@ -2935,14 +2940,27 @@ tag tap via `openSearchForTag(tag, vaultId)`, cleared the moment the dialog
 closes). The filter itself is local `useState` inside `SearchDialog`, not
 lifted to `useSearch` — it dies for free because `App.tsx` only mounts
 `<SearchDialog>` while `searchOpen` is true, so the component remounts
-fresh on every open. Two shapes, one meaning: a `.search-facet-rail` column
-beside the results on desktop (absent when scope is narrowed or at one
-enabled Vault), and a `.search-field-strip` `Scope`-beside-`Mode` pair
-(§18's field grammar) that replaces the desktop Mode checkbox below 920px —
-both rendered unconditionally and toggled by the same CSS breakpoint
-`responsive.css` already uses, so no `isMobile` prop crosses the boundary.
-Filtering is a client-side `Array.filter` over the already-fetched results;
-no re-fetch, no re-ranking.
+fresh on every open. It opens on `scope` and a tag tap overrides that, so
+narrowing the sidebar decides what the reader is shown first without
+deciding what was asked. Both seeds are filtered through the enabled Vaults
+and fall back to `all`, because `useVaultScope` returns the stored browsing
+scope without reconciling it against the collection: a Vault disabled since
+it was last browsed would otherwise open the dialog filtered to a row that
+does not exist. A Vault that was asked and did not answer keeps its seeded
+selection but suppresses the "No results in X" line — the row's own `no
+answer` and #141's partial sentence say what happened, and claiming the
+Vault has no matches would be the exact lie #141 exists to prevent. Two shapes, one meaning: a `.search-facet-rail`
+column beside the results on desktop (absent only at one enabled Vault),
+and a `.search-field-strip` `Scope`-beside-`Mode` pair (§18's field grammar)
+that replaces the desktop Mode checkbox below 920px — both rendered
+unconditionally and toggled by the same CSS breakpoint `responsive.css`
+already uses, so no `isMobile` prop crosses the boundary. Filtering is a
+client-side `Array.filter` over the already-fetched results; no re-fetch, no
+re-ranking. `buildFacetRows` has three row states, not two: a count, the
+inert `no answer` condition for a Vault that was asked and did not answer,
+and an empty slot for every Vault before any search has run, which keeps the
+rail a selector from the moment the dialog opens rather than a column of
+`0`s that means nothing yet.
 
 `SearchDialog` also takes `startupStatus`/`onRetryModelSetup` (#150), the
 shrunk startup gate's own data (`startup/useStartupStatus.ts`): while

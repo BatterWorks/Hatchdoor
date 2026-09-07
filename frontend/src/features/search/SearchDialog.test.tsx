@@ -121,24 +121,32 @@ function resultFor(
 describe("SearchDialog Vault provenance (#140)", () => {
   afterEach(cleanup);
 
-  it("shows the Vault prefix when scope is all and more than one Vault is enabled", () => {
+  /** The prefix on a result row, which a Vault's name in the facet rail or
+   * the Scope select must never be mistaken for. */
+  function resultPrefixes(): string[] {
+    return Array.from(
+      document.querySelectorAll(".search-results .path-vault"),
+    ).map((el) => el.textContent?.replace("·", "") ?? "");
+  }
+
+  it("shows the Vault prefix when the filter is on all results and more than one Vault is enabled", () => {
     renderDialog({
       results: [resultFor(THREE_VAULTS[1].vault_id)],
       vaults: THREE_VAULTS,
       scope: "all",
     });
 
-    expect(screen.getByText("Beta")).toBeInTheDocument();
+    expect(resultPrefixes()).toEqual(["Beta"]);
   });
 
-  it("hides the Vault prefix once scope is narrowed to one Vault", () => {
+  it("hides the Vault prefix while the filter sits on the one Vault the scope named", () => {
     renderDialog({
       results: [resultFor(THREE_VAULTS[1].vault_id)],
       vaults: THREE_VAULTS,
       scope: THREE_VAULTS[1].vault_id,
     });
 
-    expect(screen.queryByText("Beta")).not.toBeInTheDocument();
+    expect(resultPrefixes()).toEqual([]);
   });
 
   it("hides the Vault prefix at one enabled Vault", () => {
@@ -158,7 +166,7 @@ describe("SearchDialog Vault provenance (#140)", () => {
       scope: "all",
     });
 
-    const prefix = screen.getByText("Beta").closest(".path-vault");
+    const prefix = document.querySelector(".search-results .path-vault");
     expect(prefix?.tagName).toBe("SPAN");
     expect(prefix?.closest("button")).not.toBeNull();
     expect(prefix?.querySelector("button, a")).toBeNull();
@@ -379,7 +387,7 @@ describe("SearchDialog's own Vault filter — never the browsing scope (#144)", 
     expect(screen.queryByText("One")).not.toBeInTheDocument();
   });
 
-  it("is absent when scope is narrowed — the Scope zone is already on screen", () => {
+  it("stays on screen when the browsing scope is narrowed, opened on that Vault", () => {
     renderDialog({
       results: FACET_RESULTS,
       participants: FACET_PARTICIPANTS,
@@ -387,7 +395,108 @@ describe("SearchDialog's own Vault filter — never the browsing scope (#144)", 
       scope: ALPHA.vault_id,
     });
 
-    expect(document.querySelector(".search-facet-rail")).toBeNull();
+    expect(document.querySelector(".search-facet-rail")).not.toBeNull();
+    expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveClass(
+      "is-selected",
+    );
+    expect(screen.getByRole("button", { name: /All results/ })).not.toHaveClass(
+      "is-selected",
+    );
+  });
+
+  it("lets a narrowed reader widen back to every Vault without leaving the dialog", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: BETA.vault_id,
+    });
+
+    // Beta answered fresh with nothing, which is exactly the moment the old
+    // hidden rail read as "your query matched nowhere".
+    expect(screen.getByText("No results in Beta.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveTextContent(
+      "2",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /All results/ }));
+
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.getByText("Two")).toBeInTheDocument();
+  });
+
+  it("names every Vault before a search has run, with no counts to claim", () => {
+    renderDialog({
+      query: "p",
+      results: [],
+      participants: [],
+      vaults: THREE_VAULTS,
+      scope: BETA.vault_id,
+    });
+
+    const rail = document.querySelector(".search-facet-rail");
+    const labels = Array.from(
+      rail?.querySelectorAll(".search-facet-label") ?? [],
+    ).map((el) => el.textContent);
+    expect(labels).toEqual(["All results", "Alpha", "Beta", "Gamma"]);
+    expect(rail?.querySelectorAll(".side-count")).toHaveLength(0);
+    expect(screen.getByRole("button", { name: /^Beta/ })).toHaveClass(
+      "is-selected",
+    );
+  });
+
+  it("falls back to All results when the browsing scope names a Vault that is gone", () => {
+    // `useVaultScope` reads the scope straight out of localStorage and never
+    // reconciles it, so a Vault disabled since it was last browsed leaves an
+    // id behind that no row can match.
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: "vault-disabled-last-week",
+    });
+
+    expect(screen.getByRole("button", { name: /All results/ })).toHaveClass(
+      "is-selected",
+    );
+    expect(screen.getByText("One")).toBeInTheDocument();
+    expect(screen.queryByText(/No results in/)).not.toBeInTheDocument();
+  });
+
+  it("does not claim a Vault has no results when it never answered", () => {
+    // Gamma is `unavailable` in FACET_PARTICIPANTS, and the browsing scope
+    // can seed the filter onto it even though the rail refuses the click.
+    // "No results in Gamma" would be exactly #141's lie.
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      partial: true,
+      missingVaultNames: [GAMMA.name],
+      vaults: THREE_VAULTS,
+      scope: GAMMA.vault_id,
+    });
+
+    expect(screen.queryByText("No results in Gamma.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Gamma/ })).toHaveTextContent(
+      "no answer",
+    );
+    expect(
+      screen.getByText(/Gamma/, { selector: ".search-partial" }),
+    ).toBeInTheDocument();
+  });
+
+  it("still lets a tag tap override the scope's own pre-selection", () => {
+    renderDialog({
+      results: FACET_RESULTS,
+      participants: FACET_PARTICIPANTS,
+      vaults: THREE_VAULTS,
+      scope: BETA.vault_id,
+      initialVaultFilter: ALPHA.vault_id,
+    });
+
+    expect(screen.getByRole("button", { name: /^Alpha/ })).toHaveClass(
+      "is-selected",
+    );
   });
 
   it("is absent at one enabled Vault", () => {
