@@ -638,9 +638,7 @@ export function VaultSettingsDetail({
             className="settings-console-strip"
             data-tier={gitFailure ? gitFailure.tier : "ok"}
           >
-            <p>
-              {gitFailure ? gitFailure.sentence : healthySentence}
-            </p>
+            <p>{gitFailure ? gitFailure.sentence : healthySentence}</p>
             {gitFailure?.files ? (
               <ul className="settings-console-files">
                 {gitFailure.files.map((path) => (

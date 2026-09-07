@@ -124,7 +124,8 @@ export function useResolvedWikilinks(
     void (async () => {
       const matches = [...markdown.matchAll(WIKILINK_PATTERN)];
       const isAsset = (match: RegExpMatchArray) =>
-        match[1] === "!" || isPdfAssetTarget(parseWikilinkTarget(match[2]).target);
+        match[1] === "!" ||
+        isPdfAssetTarget(parseWikilinkTarget(match[2]).target);
       const rawTargets = matches
         .filter((m) => !isAsset(m))
         .map((m) => parseWikilinkTarget(m[2]).target)

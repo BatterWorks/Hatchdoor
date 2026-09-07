@@ -154,7 +154,10 @@ describe("fenced code blocks (#284)", () => {
 
   it("skips the opening fence and its language", () => {
     expect(
-      sourceOffsetForRenderedOffset("```javascript\nlet x = 1;\n```", CODE_CLICK),
+      sourceOffsetForRenderedOffset(
+        "```javascript\nlet x = 1;\n```",
+        CODE_CLICK,
+      ),
     ).toBe(18);
   });
 
@@ -172,7 +175,9 @@ describe("fenced code blocks (#284)", () => {
 
   it("counts the newline between two code lines", () => {
     // Rendered "first\nsecond"; offset 6 is the s of second.
-    expect(sourceOffsetForRenderedOffset("```\nfirst\nsecond\n```", 6)).toBe(10);
+    expect(sourceOffsetForRenderedOffset("```\nfirst\nsecond\n```", 6)).toBe(
+      10,
+    );
   });
 
   it("treats a code line's indentation as text, because it is", () => {
@@ -201,9 +206,9 @@ describe("fenced code blocks (#284)", () => {
   it("keeps a code line's own indent, past the container's", () => {
     // Rendered "  deeper"; offset 0 is the first of the two spaces that are
     // part of the code.
-    expect(
-      sourceOffsetForRenderedOffset("  ```js\n    deeper\n  ```", 0),
-    ).toBe(10);
+    expect(sourceOffsetForRenderedOffset("  ```js\n    deeper\n  ```", 0)).toBe(
+      10,
+    );
   });
 
   it("puts the caret between the fences when there is no code yet", () => {
