@@ -67,7 +67,7 @@ A softer variant: `local_content` reports `read_only` rather than `unavailable` 
 
 ## Git sync is failing
 
-Check the Vault's Sync console for the specific failure rather than assuming — these need different fixes:
+Check the Vault's Git console for the specific failure rather than assuming. (It is headed **Sync** on a Vault with a remote and **History** on one without, and its button reads **Sync now** or **Commit now** to match.) These need different fixes:
 
 - **Authentication failed** — the stored HTTPS token was rejected by the remote. Re-enter it under **Sign-in** on the Vault's own page; see [[How to set up a Git-backed Vault]].
 - **Clone/fetch failed, or the remote is unreachable** — a network or DNS problem, or the repository URL itself is wrong. Confirm the URL resolves from wherever the container runs, not just from your own machine.

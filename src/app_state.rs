@@ -26,6 +26,11 @@ pub struct AppState {
     /// commit; manual sync/retry request a Git turn directly.
     pub vault_work: crate::vault_work::VaultWorkCoordinator,
     pub managed_git: Arc<crate::git::ManagedGitScheduler>,
+    /// How long a Vault waits before its next *automatic* commit turn after
+    /// one failed. Shared, rather than owned by either side, because the
+    /// watcher-forwarding path asks it whether a change may request a commit
+    /// and the Vault work executor is what arms and clears it (#267).
+    pub commit_cooldown: Arc<crate::git::CommitCooldown>,
     /// Present when safe automatic import could not prove the legacy
     /// deployment. Collection/setup surfaces remain available for recovery.
     /// Cleared by a confirmed "Start with no Vaults"

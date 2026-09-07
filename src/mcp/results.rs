@@ -599,7 +599,7 @@ mod schema_tests {
                 "search": "ready",
                 "git": "disabled",
                 "watcher": "running",
-                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false}
+                "capabilities": {"browse": true, "search": true, "mutate": false, "pull": false, "push": false, "retry": false, "commit": false, "sync": false}
             },
             "registry_revision": 3,
             "collection_revision": 9

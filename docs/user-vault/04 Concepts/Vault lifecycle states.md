@@ -25,7 +25,7 @@ Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes ra
 | **Git** | `disabled`, `pending`, `ready`, `unavailable` | Is Git sync (if configured) working? |
 | **Watcher** | `running`, `disabled`, `unavailable` | Is the file-change watcher keeping the index current? |
 
-**Git** survives a restart for a Vault Hatchdoor polls on a schedule — one with a remote to check. A Vault that last checked cleanly comes back as `ready`, and one whose last check failed comes back as `unavailable` with the same reason it showed before, so `pending` means a Vault that has genuinely never completed a check rather than one Hatchdoor has simply forgotten about. A Vault with no remote to poll — an `existing_git` Vault in `local_history` mode, which only records your own edits — has no schedule to resume, so it starts as `pending` and settles on its first turn after startup. Alongside these, `GET /api/v1/vaults` reports `last_checked_at` and `next_attempt_at` for any Vault with a remote.
+**Git** survives a restart for a Vault Hatchdoor polls on a schedule, meaning one with a remote to check. A Vault that last checked cleanly comes back as `ready`, and one whose last check failed comes back as `unavailable` with the same reason it showed before, so `pending` means a Vault that has genuinely never completed a check rather than one Hatchdoor has simply forgotten about. A Vault with no remote to poll, an `existing_git` Vault in `local_history` mode which only records your own edits, has no schedule to resume, so it starts as `pending` and settles on its first turn after startup. From then on its Git status reports its commits: it commits a few seconds after each change, and reads `unavailable` if one of those commits fails. Alongside these, `GET /api/v1/vaults` reports `last_checked_at` and `next_attempt_at` for any Vault with a remote.
 
 **Search** deserves the closest look, because its middle values are easy to misread:
 
@@ -36,15 +36,16 @@ Once a Vault is enabled, Hatchdoor tracks its condition on five separate axes ra
 
 ## What capabilities actually come from
 
-`browse`, `search`, `mutate`, `pull`, `push`, and `retry` — the six flags that decide what the UI shows and what an MCP/API write is allowed to do — are derived from combinations of the axes above, not from any single one:
+`browse`, `search`, `mutate`, `pull`, `push`, `retry`, `commit` and `sync`, the eight flags that decide what the UI shows and what an MCP/API write is allowed to do, are derived from the axes above and from the Vault's own definition, not from any single axis:
 
 - **`browse`** — true whenever local content is `read_write` or `read_only`. Notably independent of the search axis: a Vault mid-index (or even stuck at `browsable`) is still fully browsable.
 - **`search`** — true only for `ready` or `stale`. `browsable` and `indexing` both grant `browse` but not `search`.
 - **`mutate`** — true only when local content is `read_write` *and* the Vault isn't a `pull_only` Git Vault. A `pull_only` Vault never allows local edits, regardless of how healthy everything else looks, since edits would just conflict with the next pull.
 - **`pull`** / **`push`** — true only when Git status is `ready`, gated further by the configured Git mode (`pull_only` or `two_way` for pull; `two_way` only for push).
+- **`commit`** / **`sync`**. `commit` is true when the Vault keeps Git history of its own (`local_history` or `two_way`); `sync` is true when it has a remote to talk to (`pull_only` or `two_way`). Unlike `pull` and `push` these come from the Vault's definition, not its current Git status, so they keep their answer while the Vault is failing. That is what lets the Settings console offer **Commit now** rather than **Sync now** on a Vault with no remote without having to guess from the Git mode.
 - **`retry`** — true if *any* of the four per-axis error fields (activation, search, git, watcher) is marked retryable. This is what puts a **Try again** button in front of an operator instead of leaving a Vault silently stuck.
 
-One instance-wide exception: on a public read-only demo (`HATCHDOOR_DEMO_MODE=true`), `GET /api/v1/vaults` reports `mutate`, `pull`, `push` and `retry` as `false` for every Vault, whatever the axes say. Nothing about the Vault changed. The demo refuses every write and every Vault-control request with `403 demo_read_only`, so publishing the derived value would advertise a button that cannot work to a visitor who has no way to tell. `browse` and `search` are still derived normally, because those reads do work, and the axes themselves are untouched: a demo Vault on a writable folder still reports local content `read_write`.
+One instance-wide exception: on a public read-only demo (`HATCHDOOR_DEMO_MODE=true`), `GET /api/v1/vaults` reports `mutate`, `pull`, `push`, `retry`, `commit` and `sync` as `false` for every Vault, whatever the axes or the definition say. Nothing about the Vault changed. The demo refuses every write and every Vault-control request with `403 demo_read_only`, so publishing the derived value would advertise a button that cannot work to a visitor who has no way to tell. `browse` and `search` are still derived normally, because those reads do work, and the axes themselves are untouched: a demo Vault on a writable folder still reports local content `read_write`.
 
 ## Two different things both called "Recovery"
 

@@ -400,6 +400,7 @@ mod tests {
             vaults: crate::vault_runtime::VaultCollectionRuntime::new(),
             vault_work,
             managed_git,
+            commit_cooldown: Arc::new(crate::git::CommitCooldown::new()),
             legacy_migration_recovery: Arc::new(std::sync::RwLock::new(None)),
             startup_sqlite: Arc::new(
                 crate::cache::SqliteCache::in_memory(384).expect("in-memory cache"),

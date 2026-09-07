@@ -66,6 +66,16 @@ export type VaultCapabilities = {
   pull: boolean;
   push: boolean;
   retry: boolean;
+  /** Whether this Vault makes local Git commits of its own: Local history,
+   * or Two-way, whose commit needs no remote. Derived from the Vault's
+   * definition rather than its current status, unlike `pull` and `push`, so
+   * the Git console keeps labelling its action the same way while the Vault
+   * is failing. */
+  commit: boolean;
+  /** Whether this Vault has a remote to synchronise with. What separates a
+   * console offering **Sync now** from one that can only offer **Commit
+   * now**. */
+  sync: boolean;
 };
 
 /** How a git-backed Vault's history is kept: local commits only, or synced

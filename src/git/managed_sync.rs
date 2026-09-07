@@ -130,6 +130,37 @@ pub fn synchronize_managed_checkout(
     }
 }
 
+/// Commit whatever has changed in one previously validated checkout's Vault
+/// subtree, and stop there. No fetch, no merge, no push, no remote of any
+/// kind. See [`VaultWorkKind::Commit`](crate::vault_work::VaultWorkKind).
+///
+/// Shares [`prepare_two_way_worktree`] with the Two-way graph rather than
+/// carrying a second commit implementation, so the two agree on what counts
+/// as the Vault's subtree, on refusing drift outside it, and on how the
+/// commit message is built from `ledger`.
+///
+/// Only a mode that commits reaches this: `PullOnly` refuses writes and has
+/// nothing of its own to commit, and a folder its operator dirtied by hand is
+/// exactly what its turn is supposed to leave alone.
+pub fn commit_managed_checkout(
+    config: &ManagedSyncConfig,
+    ledger: &WriteLedger,
+) -> Result<ManagedSyncOutcome, ManagedSyncError> {
+    if config.mode != ManagedSyncMode::TwoWay {
+        return Err(ManagedSyncError::Validation);
+    }
+    let repository = open_commit_repository(config)?;
+    let committed = prepare_two_way_worktree(&repository, config, ledger)?;
+    Ok(if committed {
+        ManagedSyncOutcome::TwoWaySynchronized {
+            committed: true,
+            integrated: false,
+        }
+    } else {
+        ManagedSyncOutcome::UpToDate
+    })
+}
+
 fn synchronize_pull_only(
     repository: &Repository,
     config: &ManagedSyncConfig,
@@ -214,7 +245,23 @@ where
     Err(ManagedSyncError::PushRace)
 }
 
-fn open_validated_repository(config: &ManagedSyncConfig) -> Result<Repository, ManagedSyncError> {
+/// Open the checkout and prove it is the one this config describes: a
+/// non-bare repository whose working directory *is* `repository_path`, with
+/// `vault_path` a real directory inside it, and with a branch checked out.
+///
+/// The branch matters to a commit and not only to a fetch or a push, because
+/// `commit_vault_drift` commits to `HEAD`: on a detached HEAD that leaves the
+/// commit on no branch at all, and on the wrong branch it puts the Vault's
+/// history somewhere the sync turn will never push from. So a configured
+/// `branch` is required to be the one checked out, exactly as
+/// [`open_validated_repository`] requires. An empty `branch` means the Vault
+/// has none configured, and then any branch will do, which extends
+/// `super::sync::validate_local_repo`'s Local-history policy of following
+/// whatever the operator has checked out (#267).
+///
+/// What this does *not* check is the remote, which only an operation that
+/// talks to one needs. That is [`open_validated_repository`]'s to add.
+fn open_commit_repository(config: &ManagedSyncConfig) -> Result<Repository, ManagedSyncError> {
     let repository_path = config
         .repository_path
         .canonicalize()
@@ -238,16 +285,23 @@ fn open_validated_repository(config: &ManagedSyncConfig) -> Result<Repository, M
     {
         return Err(ManagedSyncError::Validation);
     }
-    {
-        let head = repository
-            .head()
-            .map_err(|_| ManagedSyncError::Validation)?;
-        if !head.is_branch()
-            || head.shorthand().map_err(|_| ManagedSyncError::Validation)? != config.branch
-        {
-            return Err(ManagedSyncError::Validation);
-        }
+    let head = repository
+        .head()
+        .map_err(|_| ManagedSyncError::Validation)?;
+    if !head.is_branch() {
+        return Err(ManagedSyncError::Validation);
     }
+    if !config.branch.is_empty()
+        && head.shorthand().map_err(|_| ManagedSyncError::Validation)? != config.branch
+    {
+        return Err(ManagedSyncError::Validation);
+    }
+    drop(head);
+    Ok(repository)
+}
+
+fn open_validated_repository(config: &ManagedSyncConfig) -> Result<Repository, ManagedSyncError> {
+    let repository = open_commit_repository(config)?;
     managed_remote_name(&repository, config)?;
     Ok(repository)
 }
