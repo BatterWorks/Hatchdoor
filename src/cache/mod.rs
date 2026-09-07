@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, Once};
+use std::sync::{Condvar, Mutex, MutexGuard, Once};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -33,6 +33,19 @@ enum CacheSource {
 /// Upper bound on active file-backed read connections, including checked-out
 /// leases and connections retained idle for reuse.
 const MAX_READ_CONNECTIONS: usize = 4;
+
+/// How long a reader waits for a slot before giving up. [`MAX_READ_CONNECTIONS`]
+/// bounds how many SQLite handles exist at once; it is not a load-shedding
+/// policy, so a caller that would be served as soon as the request ahead of it
+/// finishes waits rather than taking an immediate error. Failing fast there
+/// turned an ordinary burst of UI requests into an outage. Matched to the
+/// `busy_timeout` every connection already carries.
+///
+/// Waiters are woken one at a time and are not queued in arrival order, so a
+/// thread can lose a freed slot to one arriving behind it. Reads hold a slot
+/// for microseconds, which makes the unfairness cheap; a sustained overload
+/// still resolves to this timeout rather than to a fair hand-off.
+const READ_LEASE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub struct SqliteCache {
     /// The single writer connection. All mutations and transactions go through
@@ -53,6 +66,9 @@ pub struct SqliteCache {
     /// Active file-backed reader leases. Reserving before opening keeps bursts
     /// of concurrent reads from creating an unbounded number of SQLite handles.
     read_leases: Mutex<usize>,
+    /// Signalled whenever a reader lease is returned, so a caller queued at the
+    /// ceiling wakes as soon as a slot frees instead of polling.
+    read_lease_available: Condvar,
 }
 
 static SQLITE_VEC_INIT: Once = Once::new();
@@ -210,6 +226,7 @@ impl SqliteCache {
             vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
             snapshot_model_epoch: Mutex::new(()),
             read_leases: Mutex::new(0),
+            read_lease_available: Condvar::new(),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -227,6 +244,7 @@ impl SqliteCache {
             vault_snapshot_attempts: Mutex::new(BTreeMap::new()),
             snapshot_model_epoch: Mutex::new(()),
             read_leases: Mutex::new(0),
+            read_lease_available: Condvar::new(),
         };
         cache.ensure_schema(embedding_dim)?;
         Ok(cache)
@@ -319,11 +337,17 @@ impl SqliteCache {
     }
 
     fn reserve_read_lease(&self) -> Result<(), String> {
-        let mut leases = self
+        let leases = self
             .read_leases
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if *leases >= MAX_READ_CONNECTIONS {
+        let (mut leases, wait) = self
+            .read_lease_available
+            .wait_timeout_while(leases, READ_LEASE_WAIT, |leases| {
+                *leases >= MAX_READ_CONNECTIONS
+            })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if wait.timed_out() {
             return Err(format!(
                 "SQLite read connection limit ({MAX_READ_CONNECTIONS}) reached; retry shortly"
             ));
@@ -332,13 +356,25 @@ impl SqliteCache {
         Ok(())
     }
 
-    fn release_read_lease(&self) {
-        let mut leases = self
+    /// How many file-backed read leases are currently checked out.
+    #[cfg(test)]
+    pub(crate) fn active_read_leases(&self) -> usize {
+        *self
             .read_leases
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        debug_assert!(*leases > 0, "file-backed read lease underflow");
-        *leases = leases.saturating_sub(1);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn release_read_lease(&self) {
+        {
+            let mut leases = self
+                .read_leases
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            debug_assert!(*leases > 0, "file-backed read lease underflow");
+            *leases = leases.saturating_sub(1);
+        }
+        self.read_lease_available.notify_one();
     }
 
     pub fn set_metadata(&self, key: &str, value: &str) -> Result<(), String> {
@@ -432,6 +468,7 @@ fn quarantine_corrupt_cache(path: &Path) -> Result<PathBuf, String> {
 mod metadata_tests {
     use super::*;
     use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -519,13 +556,25 @@ mod metadata_tests {
             assert!(ready_rx.recv().expect("lease result"));
         }
 
-        let overload = match cache.read() {
-            Ok(_) => panic!("active lease ceiling must reject overload"),
-            Err(error) => error,
-        };
+        // A caller arriving at the ceiling queues for the next free slot
+        // rather than taking an immediate error; see READ_LEASE_WAIT.
+        let queued_cache = cache.clone();
+        let (queued_tx, queued_rx) = mpsc::channel();
+        let queued = std::thread::spawn(move || {
+            let lease = queued_cache.read();
+            queued_tx.send(lease.is_ok()).expect("report queued lease");
+        });
         assert!(
-            overload.contains("read connection limit"),
-            "overload should identify the bounded reader pool: {overload}"
+            matches!(
+                queued_rx.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a caller at the ceiling must wait for a slot, not be served or rejected"
+        );
+        assert_eq!(
+            cache.active_read_leases(),
+            MAX_READ_CONNECTIONS,
+            "waiting must not push the handle count past the ceiling"
         );
 
         for release in release_txs {
@@ -534,6 +583,11 @@ mod metadata_tests {
         for worker in workers {
             worker.join().expect("reader worker");
         }
+        assert!(
+            queued_rx.recv().expect("queued lease result"),
+            "a released lease must hand off to the caller queued behind it"
+        );
+        queued.join().expect("queued reader");
 
         cache.read().expect("a released lease must be reusable");
     }
