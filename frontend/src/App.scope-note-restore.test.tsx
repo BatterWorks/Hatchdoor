@@ -125,8 +125,9 @@ describe("switching the browsing scope restores that Vault's own note", () => {
       LAST_NOTE_BY_VAULT_KEY,
       JSON.stringify({ [ALPHA.vault_id]: "alpha-home" }),
     );
-    // The landing redirect would otherwise restore Alpha's note the instant
-    // the switch puts the reader on "/", undoing the switch.
+    // The landing note the redirect reads: it would otherwise restore Alpha's
+    // note the instant the switch puts the reader on "/", and again on the
+    // next reload, undoing the switch both times.
     window.localStorage.setItem(
       LAST_NOTE_KEY,
       JSON.stringify({ vaultId: ALPHA.vault_id, slug: "alpha-home" }),
@@ -148,6 +149,9 @@ describe("switching the browsing scope restores that Vault's own note", () => {
     expect(
       screen.queryByRole("heading", { level: 2, name: "Alpha Home" }),
     ).not.toBeInTheDocument();
+    // And nothing is left for a reload to restore, which would put Alpha's
+    // note back under a selector reading Gamma.
+    expect(window.localStorage.getItem(LAST_NOTE_KEY)).toBeNull();
   });
 
   it("leaves a reader who is not on a note page where they are", async () => {

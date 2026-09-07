@@ -2622,17 +2622,23 @@ Narrowing the scope to one Vault also moves the reader. `App.tsx`'s
 is on a note route, navigates to the note that Vault was last left on, or to
 `"/"` when that Vault has none remembered. `lib/storage.ts` holds that memory
 under `LAST_NOTE_BY_VAULT_KEY` as `vaultId -> slug`, written alongside
-`LAST_NOTE_KEY` whenever the open note changes and pruned to the current
-collection whenever discovery settles, for the reason `clearStoredLastNote`
-exists: a departed Vault's note only resolves to "Vault definition was not
-found". `LAST_NOTE_KEY` stays the single landing note the `"/"` redirect and
-the accordion's landing default read. Four cases move nobody: widening back
-to `all`, picking the Vault whose note is already open, an unchanged pick,
-and a pick made anywhere but a note route (Settings, Graph, Statistics, the
-empty landing), where the scope is a filter rather than a request to go and
-read something. A switch that lands on `"/"` marks the landing redirect's
-one-shot ref as spent, or that redirect would immediately restore the note of
-the Vault just left and undo the switch.
+`LAST_NOTE_KEY` whenever the open note changes and pruned to the browsing
+list whenever discovery settles, for the reason `clearStoredLastNote` exists:
+a Vault that is gone or paused only resolves to "Vault definition was not
+found". An empty browsing list never triggers that prune, since a broken
+registry produces one too and it is not evidence that anything departed.
+`LAST_NOTE_KEY` stays the single landing note the `"/"` redirect and the
+accordion's landing default read. Four cases move nobody: widening back to
+`all`, picking the Vault whose note is already open, an unchanged pick, and a
+pick made anywhere but a note route (Settings, Graph, Statistics, the empty
+landing), where the scope is a filter rather than a request to go and read
+something; the note route is matched with the router's own `useMatch`, not a
+second spelling of the path. A switch that lands on `"/"` clears
+`LAST_NOTE_KEY` as it goes: nothing is open any more, so the landing redirect
+finds nothing to put back, now or after a reload. What it does not do is
+check that a remembered note still exists — a note deleted since is a
+not-found page that heals as soon as any note in that Vault is opened, the
+same bargain the landing redirect already makes.
 
 The Scope zone renders at zero enabled Vaults too, not only above one
 (#150): `All Vaults` holds its place with no rows beneath it, in neutral

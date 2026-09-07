@@ -12,6 +12,7 @@ import {
   Route,
   Routes,
   useLocation,
+  useMatch,
   useNavigate,
 } from "react-router-dom";
 
@@ -70,10 +71,6 @@ import {
 } from "./startup/useStartupStatus";
 import { SearchDialog, useSearch } from "./features/search";
 
-// `/v/:vaultId/n/:slug` — the one route that shows a note, and so the one
-// state a scope switch is allowed to navigate out of.
-const NOTE_ROUTE = /^\/v\/[^/]+\/n\/.+/;
-
 function VaultWorkspace({
   startupStatus,
   onRetryModelSetup,
@@ -105,6 +102,10 @@ function VaultWorkspace({
   const [editRequestId, setEditRequestId] = useState(0);
   const location = useLocation();
   const navigate = useNavigate();
+  // The one route that shows a note, and so the one state a scope switch is
+  // allowed to navigate out of. Matched by the router itself rather than by a
+  // second spelling of the path.
+  const onNoteRoute = useMatch("/v/:vaultId/n/:slug") !== null;
   const isMobile = useIsMobile(920);
   const { theme, cycleTheme } = useTheme();
 
@@ -427,15 +428,18 @@ function VaultWorkspace({
   }, [location.pathname, navigate, vaults, vaultsLoading]);
 
   useEffect(() => {
-    // A disconnected Vault's remembered note is unusable for the same reason
-    // the landing restore forgets one: the note route answers "Vault
-    // definition was not found". Dropping it here also keeps the map from
-    // holding an entry per Vault ever connected.
-    if (vaultsLoading) {
+    // A departed Vault's remembered note is unusable for the same reason the
+    // landing restore forgets one: the note route answers "Vault definition
+    // was not found". Dropping it here also keeps the map from holding an
+    // entry per Vault ever connected. An empty browsing list is never
+    // evidence of that — a broken registry and a paused-everything
+    // collection both produce one — so it forgets nothing at all rather than
+    // everything.
+    if (vaultsLoading || hasRegistryRecovery || vaults.length === 0) {
       return;
     }
     pruneStoredLastNotesByVault(vaults.map((vault) => vault.vault_id));
-  }, [vaults, vaultsLoading]);
+  }, [hasRegistryRecovery, vaults, vaultsLoading]);
 
   // Narrowing the browsing scope to one Vault carries the reader with it: the
   // note that Vault was last left on comes back, the same restore the landing
@@ -452,23 +456,24 @@ function VaultWorkspace({
         next === scope ||
         next === "all" ||
         activeNote?.vaultId === next ||
-        !NOTE_ROUTE.test(location.pathname)
+        !onNoteRoute
       ) {
         return;
       }
       const slug = getStoredLastNoteForVault(next);
       if (!slug) {
-        // Landing on "/" with nothing remembered for this Vault is the point
-        // of the switch, so the landing redirect must not immediately undo it
-        // by restoring the note of the Vault just left. Spending its one shot
-        // here is what keeps the empty state on screen.
-        restoredLastNoteRef.current = true;
+        // Nothing is open any more, so nothing should be restored: forgetting
+        // the landing note keeps the empty state on screen both now (the
+        // landing redirect finds nothing to put back) and after a reload,
+        // which would otherwise return the note of the Vault just left while
+        // the selector still reads the new one.
+        clearStoredLastNote();
         navigate("/");
         return;
       }
       navigate(`/v/${encodeURIComponent(next)}/n/${encodeURIComponent(slug)}`);
     },
-    [activeNote?.vaultId, location.pathname, navigate, scope, setScope],
+    [activeNote?.vaultId, navigate, onNoteRoute, scope, setScope],
   );
 
   const handleScopeZoneCollapsedChange = useCallback((next: boolean) => {
