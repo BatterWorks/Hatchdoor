@@ -3082,6 +3082,7 @@ escalation), Markdown/heading/search/state tests,
 - `frontend/src/hooks/useWriteMode.ts`
 - `frontend/src/lib/blockOps.ts`
 - `frontend/src/lib/caretMap.ts`
+- `frontend/src/lib/caretPoint.ts`
 - `frontend/src/lib/editHistory.ts`
 - `frontend/src/lib/imageUpload.ts`
 - `frontend/src/lib/linePrefix.ts`
@@ -3176,10 +3177,10 @@ is still settling behind a wikilink resolve.
 **Validation:** write API (`writeApi.test.ts`, including the demo_read_only
 code-carrying cases), editor, action dialog, upload, draft, path,
 frontmatter, conflict, and autocomplete tests; `blockOps`, `sourceMap`,
-`caretMap`, `editHistory`, `linePrefix`, `useNoteAutosave`, `attachmentDrop`,
-`inlineEditing`, and `properties` tests; `useNoteActions.test.tsx` (#152);
-plus `App.write-mode.test.tsx`, `App.demo-mode.test.tsx` (#152), and full
-frontend checks.
+`caretMap`, `caretPoint`, `editHistory`, `linePrefix`, `useNoteAutosave`,
+`attachmentDrop`, `inlineEditing`, and `properties` tests;
+`useNoteActions.test.tsx` (#152); plus `App.write-mode.test.tsx`,
+`App.demo-mode.test.tsx` (#152), and full frontend checks.
 
 ### Graph
 

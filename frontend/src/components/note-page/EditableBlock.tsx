@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { sourceOffsetForRenderedOffset } from "../../lib/caretMap";
+import { sourceOffsetForCaretPoint } from "../../lib/caretPoint";
 import { blockRange, type LineRange } from "../../lib/sourceMap";
 import { BlockInput, type UnitType } from "./BlockInput";
 import { useInlineEditor } from "./inlineEditorContext";
@@ -19,39 +19,54 @@ function sameRange(a: LineRange | null, b: LineRange): boolean {
   return a !== null && a.startLine === b.startLine && a.endLine === b.endLine;
 }
 
+/** A caret position as the browser reports it: an offset inside one text node. */
+type CaretPoint = { node: Node | null; offset: number };
+
+/** What the browser makes of a point, in the one shape the two APIs share. */
+function caretPointAt(clientX: number, clientY: number): CaretPoint | null {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (
+      x: number,
+      y: number,
+    ) => { offsetNode: Node | null; offset: number } | null;
+    caretRangeFromPoint?: (
+      x: number,
+      y: number,
+    ) => { startContainer: Node | null; startOffset: number } | null;
+  };
+
+  const position = doc.caretPositionFromPoint?.(clientX, clientY);
+  if (position) {
+    return { node: position.offsetNode, offset: position.offset };
+  }
+  // WebKit spells it differently.
+  const range = doc.caretRangeFromPoint?.(clientX, clientY);
+  return range
+    ? { node: range.startContainer, offset: range.startOffset }
+    : null;
+}
+
 /**
  * The source offset under a pointer, or null when the browser cannot say.
  *
  * Approximate by design (D9): markdown syntax has no rendered counterpart, so
  * landing a few characters out is fine. Landing always at 0, or always at the
  * end, is not.
+ *
+ * The reported node travels with the offset because both APIs measure inside
+ * the text node under the pointer, and `caretMap` measures across the whole
+ * block. `sourceOffsetForCaretPoint` is what reconciles the two.
  */
 function caretOffsetAtPoint(
+  root: Element | null,
   clientX: number,
   clientY: number,
   source: string,
 ): number | null {
-  const doc = document as Document & {
-    caretPositionFromPoint?: (
-      x: number,
-      y: number,
-    ) => { offset: number } | null;
-    caretRangeFromPoint?: (
-      x: number,
-      y: number,
-    ) => { startOffset: number } | null;
-  };
-
-  const position = doc.caretPositionFromPoint?.(clientX, clientY);
-  if (position) {
-    return sourceOffsetForRenderedOffset(source, position.offset);
-  }
-  // WebKit spells it differently.
-  const range = doc.caretRangeFromPoint?.(clientX, clientY);
-  if (range) {
-    return sourceOffsetForRenderedOffset(source, range.startOffset);
-  }
-  return null;
+  const point = caretPointAt(clientX, clientY);
+  return point
+    ? sourceOffsetForCaretPoint(root, point.node, point.offset, source)
+    : null;
 }
 
 /**
@@ -143,7 +158,12 @@ export function EditableBlock({
     }
     editor.enterBlock(
       range,
-      caretOffsetAtPoint(clientX, clientY, editor.sourceOf(range)),
+      caretOffsetAtPoint(
+        elementRef.current,
+        clientX,
+        clientY,
+        editor.sourceOf(range),
+      ),
     );
   };
 
