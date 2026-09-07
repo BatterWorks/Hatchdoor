@@ -5,29 +5,71 @@
 // in the rendered text, so there is no exact answer. Landing a few characters
 // off is acceptable; always landing at offset 0, or always at the end, is not.
 
-/** Line prefixes that produce no rendered text at all. */
-const LINE_PREFIX =
-  /^(\s*)(?:(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?|#{1,6}\s+|>\s?)/;
+import { linePrefix } from "./linePrefix";
+
+/** Opens or closes a fenced code block. The whole line renders as nothing. */
+const FENCE = /^\s*(?:```|~~~)/;
 
 /**
  * The source offset corresponding to `renderedOffset` characters of rendered
- * text in the single source line `source`.
+ * text in the block `source`, which may span more than one line.
+ *
+ * Every line is measured against its own leading syntax. Indentation renders as
+ * nothing wherever it sits, and counting it as text put the caret short of the
+ * clicked character by the width of the indent, worse the deeper a list nests
+ * (#284).
  */
 export function sourceOffsetForRenderedOffset(
   source: string,
   renderedOffset: number,
 ): number {
   const target = Math.max(0, renderedOffset);
+  const lines = source.split("\n");
 
-  let index = 0;
-  const prefix = LINE_PREFIX.exec(source);
-  if (prefix) {
-    index = prefix[0].length;
+  if (FENCE.test(lines[0])) {
+    return codeBlockOffset(lines, target);
   }
 
   let rendered = 0;
-  while (index < source.length) {
-    const rest = source.slice(index);
+  let lineStart = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const walk = walkLine(line, target - rendered);
+    if (walk.hit !== null) {
+      return lineStart + walk.hit;
+    }
+    rendered += walk.rendered;
+    lineStart += line.length + 1;
+
+    if (i === lines.length - 1) {
+      break;
+    }
+    // The soft break between two lines of one block is one character on each
+    // side, so a caret that lands on it belongs at the end of the line it
+    // closes rather than at the front of the next one.
+    if (rendered >= target) {
+      return lineStart - 1;
+    }
+    rendered += 1;
+  }
+
+  return source.length;
+}
+
+type LineWalk = {
+  /** The offset within the line, or null when the target lies past its end. */
+  hit: number | null;
+  /** How many rendered characters the line carries, once `hit` is null. */
+  rendered: number;
+};
+
+/** Where `target` rendered characters land within the single line `line`. */
+function walkLine(line: string, target: number): LineWalk {
+  let index = invisiblePrefix(line).length;
+  let rendered = 0;
+
+  while (index < line.length) {
+    const rest = line.slice(index);
 
     // Emphasis, bold, and inline code carry no rendered characters, and are
     // consumed before the position check so a caret that lands exactly on a
@@ -54,7 +96,7 @@ export function sourceOffsetForRenderedOffset(
       const shown = pipe >= 0 ? body.slice(pipe + 1) : body;
       const shownStart = pipe >= 0 ? 2 + pipe + 1 : 2;
       if (target - rendered < shown.length) {
-        return index + shownStart + (target - rendered);
+        return { hit: index + shownStart + (target - rendered), rendered };
       }
       rendered += shown.length;
       index += wikilink[0].length;
@@ -65,13 +107,13 @@ export function sourceOffsetForRenderedOffset(
     const link = /^!?\[([^\]]*)\]\([^)]*\)/.exec(rest);
 
     if (rendered >= target) {
-      return link ? index + 1 : index;
+      return { hit: link ? index + 1 : index, rendered };
     }
 
     if (link) {
       const label = link[1];
       if (target - rendered < label.length) {
-        return index + 1 + (target - rendered);
+        return { hit: index + 1 + (target - rendered), rendered };
       }
       rendered += label.length;
       index += link[0].length;
@@ -82,5 +124,73 @@ export function sourceOffsetForRenderedOffset(
     index += 1;
   }
 
-  return source.length;
+  return { hit: null, rendered };
+}
+
+/**
+ * The leading source characters on `line` that render as nothing: its
+ * indentation, then any list marker, task box, heading hashes, or quote arrows
+ * behind it.
+ *
+ * Indentation counts on any line, not only the first one of a block. A wrapped
+ * list item is addressed one source line at a time (D25a), so its continuation
+ * line arrives here as a block of its own: indent at the front, no marker to
+ * hang it on, and none of it on screen.
+ *
+ * The indent is measured here rather than folded into `linePrefix`, which
+ * matches an indent only ahead of a list marker. `linePrefix` also decides what
+ * `BlockInput` hangs into the gutter, and widening it there would move the
+ * visible text of every indented line on entry, which is a different question
+ * from where a caret goes. The two therefore disagree on an indented heading or
+ * quote: this reads `  # h` as three invisible characters, the gutter reads it
+ * as none.
+ */
+function invisiblePrefix(line: string): string {
+  const indent = indentWidth(line);
+  return line.slice(0, indent) + linePrefix(line.slice(indent));
+}
+
+/**
+ * The source offset in a fenced block for `target` characters of code.
+ *
+ * The fences carry the delimiter and the language name and render nothing at
+ * all, so each is skipped whole, its newline with it. What is left is the code,
+ * which renders literally: its own backticks and brackets are not markdown and
+ * none of the line rules apply to it.
+ *
+ * The one thing stripped from a code line is the block's own indentation, up to
+ * the width the opening fence sits at. That is how the fence is written inside
+ * a list item or a callout, and those spaces belong to the container rather
+ * than to the code, so they never reach the screen.
+ */
+function codeBlockOffset(lines: string[], target: number): number {
+  const closing =
+    lines.length > 1 && FENCE.test(lines[lines.length - 1])
+      ? lines.length - 1
+      : lines.length;
+  const container = indentWidth(lines[0]);
+
+  let start = lines[0].length + 1;
+  // With no code at all, the spot between the two fences.
+  let end = start;
+  let rendered = 0;
+  for (let i = 1; i < closing; i += 1) {
+    const line = lines[i];
+    const stripped = Math.min(container, indentWidth(line));
+    const shown = line.length - stripped;
+    if (target - rendered <= shown) {
+      return start + stripped + (target - rendered);
+    }
+    rendered += shown + 1;
+    end = start + line.length;
+    start += line.length + 1;
+  }
+
+  // Past the last character of the code: the end of its final line.
+  return end;
+}
+
+/** How many characters of leading indentation `line` opens with. */
+function indentWidth(line: string): number {
+  return /^[ \t]*/.exec(line)?.[0].length ?? 0;
 }

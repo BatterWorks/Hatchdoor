@@ -174,3 +174,74 @@ describe("sourceOffsetForCaretPoint", () => {
     expect(sourceOffsetForCaretPoint(root, null, 0, "See alias")).toBeNull();
   });
 });
+
+/**
+ * The DOM a fenced code block renders as: the block editor's wrapper, the
+ * renderer's language label and Copy button, then the code itself.
+ */
+function codeBlock(
+  language: string,
+  code: string,
+): { root: HTMLElement; codeText: Text } {
+  const root = document.createElement("div");
+  const block = document.createElement("div");
+  block.className = "code-block";
+  const head = document.createElement("div");
+  head.className = "code-block-head";
+  const label = document.createElement("span");
+  label.className = "code-lang";
+  label.append(document.createTextNode(language));
+  const copy = document.createElement("button");
+  copy.append(document.createTextNode("Copy"));
+  head.append(label, copy);
+  const pre = document.createElement("pre");
+  const codeEl = document.createElement("code");
+  const codeText = document.createTextNode(code);
+  codeEl.append(codeText);
+  pre.append(codeEl);
+  block.append(head, pre);
+  root.append(block);
+  return { root, codeText };
+}
+
+describe("a fenced code block's chrome (#284)", () => {
+  // Offset 4 in `let x = 1;` is the x.
+  const CODE_CLICK = 4;
+
+  it("counts neither the language label nor the Copy button", () => {
+    const { root, codeText } = codeBlock("javascript", "let x = 1;");
+    expect(
+      sourceOffsetForCaretPoint(
+        root,
+        codeText,
+        CODE_CLICK,
+        "```javascript\nlet x = 1;\n```",
+      ),
+    ).toBe(18);
+  });
+
+  it("is unmoved by a language name of a different length", () => {
+    const { root, codeText } = codeBlock("rust", "let x = 1;");
+    expect(
+      sourceOffsetForCaretPoint(
+        root,
+        codeText,
+        CODE_CLICK,
+        "```rust\nlet x = 1;\n```",
+      ),
+    ).toBe(12);
+  });
+
+  it("still measures a list item's own text when the item holds a code block", () => {
+    // Narrowing to the `pre` under the block rather than from the caret's own
+    // node up would answer for the code here, or refuse outright.
+    const root = document.createElement("li");
+    const own = document.createTextNode("see this");
+    const pre = document.createElement("pre");
+    const codeEl = document.createElement("code");
+    codeEl.append(document.createTextNode("x"));
+    pre.append(codeEl);
+    root.append(own, pre);
+    expect(sourceOffsetForCaretPoint(root, own, 4, "- see this")).toBe(6);
+  });
+});
