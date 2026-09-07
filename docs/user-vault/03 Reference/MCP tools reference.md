@@ -215,6 +215,8 @@ A query Hatchdoor cannot answer — no conditions, a comparison with no value, a
 
 Every tool below requires `HATCHDOOR_MCP_WRITE_ENABLED=true` and takes `vault_id` in addition to the parameters listed. Every mutating tool that targets an existing note also requires `expected_content_hash` — the hash most recently read from `get_note`, or from `get_frontmatter` when the body is not needed — for optimistic concurrency: a stale hash means someone else changed the note since you read it, and the write is rejected rather than silently overwriting.
 
+A write is refused before it touches the file, so a rejected write has changed nothing and can be retried against a fresh hash. The exception is `write_recovery_required`, which means the opposite: the new content was saved and then could not be checked or undone, because something outside Hatchdoor changed the Vault directory mid-write. Do not retry it. The message names the note and the leftover file holding the previous content, and a person has to decide what the note should say.
+
 | Tool | Required parameters (beyond `vault_id`) | Purpose |
 | --- | --- | --- |
 | `create_note` | `relative_path`, `content` | Create a Markdown note. Parent folders are created automatically. Fails if the note exists unless `overwrite: true`. |

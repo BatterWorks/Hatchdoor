@@ -434,11 +434,15 @@ pub fn ensure_mutable(
 /// calls a `vault/write` function without being a mutation, and must not
 /// grow a second copy of this mapping to do it.
 ///
-/// A partially-applied multi-phase mutation needs operator action, so its
-/// message survives under its own code rather than collapsing into the
-/// generic `write_failed` every other `Io` failure gets. What each surface
-/// then shows the caller — a sanitized 500 over HTTP, the message over MCP —
-/// is the adapter's mapping, not this core's business.
+/// A mutation that left the Vault in a state only a human can settle needs
+/// operator action, so its message survives under its own code rather than
+/// collapsing into the generic `write_failed` every other `Io` failure gets.
+/// Two things raise it: a multi-phase mutation whose rollback was incomplete,
+/// and a conditional write whose commit exchange could not be undone. What
+/// each surface then shows the caller — a sanitized 500 over HTTP, the message
+/// over MCP — is the adapter's mapping, not this core's business. Because the
+/// message survives, its producer is the one that has to keep host paths out
+/// of it.
 pub fn write_operation_error(vault_id: VaultId, error: WriteError) -> VaultOperationError {
     if let Some(message) = error.recovery_message() {
         return VaultOperationError::new(

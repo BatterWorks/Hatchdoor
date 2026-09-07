@@ -911,6 +911,14 @@ write API/types, and configuration for archive or upload limits.
 
 - All HTTP and MCP mutations use this shared layer (ADR-03).
 - Optimistic concurrency uses the expected content hash.
+- A conditional write commits by exchanging its temporary sidecar with the
+  destination, so past that exchange the outcome a caller is told depends on
+  whether the undo put the old bytes back. An undo that succeeds reports the
+  original failure; one that cannot run leaves the write committed and
+  unverified, and reports `recovery_required` rather than a plain failure, so
+  no caller is told a write did not land when it did. A `recovery_required`
+  message is the one write failure that reaches an API client unsanitized, so
+  it names the note and its sidecar without the directories above them.
 - A write that names part of a note edits that part and leaves every other byte
   alone (ADR-22). `update_note_frontmatter` rewrites only the lines its named
   keys own, so key order, one-line versus block lists, indentation, quoting,
